@@ -1,0 +1,39 @@
+[package]
+name = "capturecard_viewer"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.26"
+egui = "0.26"
+nokhwa = { version = "0.10", features = ["input-msmf", "output-threaded", "decoding"] }
+cpal = "0.15"
+confy = "0.6"
+global-hotkey = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+image = "0.24"
+chrono = { version = "0.4", features = ["serde"] }
+rodio = "0.17"
+dirs = "5.0"
+rfd = "0.11"
+ringbuf = "0.3"
+
+[build-dependencies]
+embed-resource = "2.4"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "windef"] }
+
+[[bin]]
+name = "capturecard_viewer"
+path = "src/main.rs"
+
+# 最適化設定
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
