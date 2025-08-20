@@ -5,6 +5,10 @@ fn default_passthrough_enabled() -> bool {
     true // デフォルトで音声パススルーは有効
 }
 
+fn default_enable_drag_move() -> bool {
+    true // デフォルトで画面ドラッグ移動は有効
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppSettings {
     pub video: VideoSettings,
@@ -46,6 +50,8 @@ pub struct UiSettings {
     pub last_window_size: Option<(f32, f32)>,
     pub last_window_pos: Option<(f32, f32)>,
     pub always_on_top: bool,
+    #[serde(default = "default_enable_drag_move")]
+    pub enable_drag_move: bool,
 }
 
 
@@ -91,6 +97,7 @@ impl Default for UiSettings {
             last_window_size: None,
             last_window_pos: None,
             always_on_top: false,
+            enable_drag_move: true,
         }
     }
 }

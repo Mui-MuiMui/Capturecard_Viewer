@@ -405,9 +405,13 @@ impl CaptureCardViewer {
                 let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
                 ui.painter().image(texture.id(), rect, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)), egui::Color32::WHITE);
                 
-                // ウィンドウドラッグを処理
+                // ウィンドウドラッグを処理（設定が有効な場合のみ）
                 if response.dragged() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    if let Ok(settings) = self.settings.lock() {
+                        if settings.ui.enable_drag_move {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        }
+                    }
                 }
                 
                 // インタラクションを処理
@@ -446,9 +450,13 @@ impl CaptureCardViewer {
                     ui.label("映像信号がありません");
                 });
                 
-                // 空エリアでのウィンドウドラッグを処理
+                // 空エリアでのウィンドウドラッグを処理（設定が有効な場合のみ）
                 if response.dragged() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    if let Ok(settings) = self.settings.lock() {
+                        if settings.ui.enable_drag_move {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        }
+                    }
                 }
                 
                 // 空エリアでの右クリックを処理
@@ -483,10 +491,8 @@ impl CaptureCardViewer {
                     let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
                     ui.painter().image(texture.id(), rect, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)), egui::Color32::WHITE);
                     
-                    // ウィンドウドラッグ機能（フルスクリーンでは無効だが一貫性のため実装）
-                    if response.dragged() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                    }
+                    // フルスクリーンではドラッグ移動を完全に無効化
+                    // （フルスクリーンでは画面の移動自体が意味をなさないため）
                     
                     // ダブルクリックでウィンドウモードに戻る
                     if response.double_clicked() { self.toggle_fullscreen(ctx, false); }
@@ -524,10 +530,8 @@ impl CaptureCardViewer {
                         ui.label("映像信号がありません");
                     });
                     
-                    // ウィンドウドラッグ機能（フルスクリーンでは無効だが一貫性のため実装）
-                    if response.dragged() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                    }
+                    // フルスクリーンではドラッグ移動を完全に無効化
+                    // （フルスクリーンでは画面の移動自体が意味をなさないため）
                     
                     // ダブルクリックでウィンドウモードに戻る
                     if response.double_clicked() { self.toggle_fullscreen(ctx, false); }
@@ -604,9 +608,26 @@ impl CaptureCardViewer {
                     if fullscreen_response.changed() {
                         self.toggle_fullscreen(ctx, self.is_fullscreen);
                     }
+                    
+                    // 画面ドラッグ移動のチェックボックス
+                    let enable_drag_move = if let Ok(settings) = self.settings.lock() {
+                        settings.ui.enable_drag_move
+                    } else {
+                        true
+                    };
+                    let mut temp_enable_drag_move = enable_drag_move;
+                    let drag_move_response = ui.checkbox(&mut temp_enable_drag_move, "画面ドラッグ移動");
+                    
+                    // 画面ドラッグ移動設定が変更された場合
+                    if drag_move_response.changed() {
+                        if let Ok(mut settings) = self.settings.lock() {
+                            settings.ui.enable_drag_move = temp_enable_drag_move;
+                            settings.save();
+                        }
+                    }
 
                     ui.separator();
-                    if ui.button("リフレッシュ").clicked() {
+                    if ui.button("デバイス再接続").clicked() {
                         // 強制的にデバイス再接続（last_*をクリアして強制再接続）
                         self.last_video_device = None;
                         self.last_audio_device = None;

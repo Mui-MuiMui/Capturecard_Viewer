@@ -2,8 +2,15 @@ use eframe::egui;
 use std::sync::{Arc, Mutex};
 use crate::settings::AppSettings;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
 
 static TEST_SOUND_FLAG: AtomicBool = AtomicBool::new(false);
+
+// デバイス能力のキャッシュ
+static DEVICE_CAPABILITIES_CACHE: std::sync::OnceLock<Mutex<HashMap<String, Vec<(String, Vec<(u32, u32, u32)>)>>>> = std::sync::OnceLock::new();
+
+// 一時保存用の設定
+static TEMP_SETTINGS: std::sync::OnceLock<Mutex<Option<AppSettings>>> = std::sync::OnceLock::new();
 
 pub fn should_play_test_sound() -> bool {
     TEST_SOUND_FLAG.swap(false, Ordering::SeqCst)
@@ -23,7 +30,20 @@ pub fn show_settings_dialog(
     static SELECTED_TAB: OnceLock<Mutex<i32>> = OnceLock::new();
     let selected_tab = SELECTED_TAB.get_or_init(|| Mutex::new(0));
     
-    let mut close_settings = false;
+    // 一時設定の初期化（設定画面を開いたとき）
+    let temp_settings = TEMP_SETTINGS.get_or_init(|| Mutex::new(None));
+    if let Ok(mut temp) = temp_settings.lock() {
+        if temp.is_none() {
+            if let Ok(current_settings) = settings.lock() {
+                *temp = Some(current_settings.clone());
+            }
+        }
+    }
+    
+    let close_settings = false;
+    let mut apply_settings = false;
+    let mut ok_pressed = false;
+    let mut cancel_pressed = false;
     
     egui::Window::new("設定")
         .open(show_settings)
@@ -53,26 +73,65 @@ pub fn show_settings_dialog(
                 
                 ui.separator();
                 
-                // 単一の閉じるボタンのみ（設定は変更時に自動保存）
+                // OK、キャンセル、適用ボタン
                 ui.horizontal(|ui| {
-                    if ui.button("閉じる").clicked() {
-                        close_settings = true;
+                    if ui.button("OK").clicked() {
+                        ok_pressed = true;
                     }
                     
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.colored_label(egui::Color32::GRAY, "※ 設定は変更時に自動的に保存されます");
-                    });
+                    if ui.button("キャンセル").clicked() {
+                        cancel_pressed = true;
+                    }
+                    
+                    if ui.button("適用").clicked() {
+                        apply_settings = true;
+                    }
                 });
             }
         });
     
+    // ボタン処理
+    if ok_pressed {
+        // OKボタン: 設定をファイルに保存して閉じる
+        if let Ok(current_settings) = settings.lock() {
+            current_settings.save();
+        }
+        if let Ok(mut temp) = temp_settings.lock() {
+            *temp = None; // 一時設定をクリア
+        }
+        *show_settings = false;
+        return true; // デバイス再接続を要求
+    }
+    
+    if cancel_pressed {
+        // キャンセルボタン: 元の設定に戻して閉じる
+        if let Ok(mut temp) = temp_settings.lock() {
+            if let Some(original_settings) = temp.take() {
+                if let Ok(mut current_settings) = settings.lock() {
+                    *current_settings = original_settings;
+                }
+            }
+        }
+        *show_settings = false;
+        return false; // デバイス再接続なし
+    }
+    
+    if apply_settings {
+        // 適用ボタン: メモリ上のみで適用（ファイル保存なし）
+        // 画面は閉じない
+        return true; // デバイス再接続を要求
+    }
+    
     if close_settings { *show_settings = false; }
-    true // 常にtrueを返す（設定変更時に自動保存されるため）
+    false
 }
 
 fn show_device_settings_tab(ui: &mut egui::Ui, settings: &mut AppSettings, input_devices: &[String], output_devices: &[String]) {
     ui.heading("デバイス設定");
     ui.add_space(10.0);
+    
+    // キャッシュの初期化
+    let capabilities_cache = DEVICE_CAPABILITIES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     
     // ビデオ設定
     ui.group(|ui| {
@@ -81,11 +140,11 @@ fn show_device_settings_tab(ui: &mut egui::Ui, settings: &mut AppSettings, input
         
         // ビデオデバイス選択
         let video_devices = crate::video::VideoCapture::list_devices();
-        let current_device = settings.video.device_name.clone().unwrap_or_default();
+        let selected_device = settings.video.device_name.clone().unwrap_or_default();
         
         let mut device_changed = false;
         egui::ComboBox::from_label("ビデオデバイス")
-            .selected_text(if current_device.is_empty() { "デバイスを選択..." } else { &current_device })
+            .selected_text(if selected_device.is_empty() { "デバイスを選択..." } else { &selected_device })
             .show_ui(ui, |ui| {
                 for (name, description) in &video_devices {
                     let display_text = if description.is_empty() { 
@@ -101,56 +160,190 @@ fn show_device_settings_tab(ui: &mut egui::Ui, settings: &mut AppSettings, input
                 }
             });
 
+        // デバイス変更時の処理
         if device_changed {
-            // デバイス変更時に解像度/フォーマットをリセット
-            settings.video.resolution = Some((1920,1080));
-            settings.video.format = Some("MJPEG".to_string());
+            // 新しく選択されたデバイス名を取得
+            let new_device = settings.video.device_name.clone().unwrap_or_default();
+            
+            // デバイス能力を取得（キャッシュ確認）
+            if let Ok(mut cache) = capabilities_cache.lock() {
+                if !cache.contains_key(&new_device) && !new_device.is_empty() {
+                    // キャッシュにない場合は取得
+                    ui.spinner(); // 読み込み中表示
+                    if let Ok(caps) = crate::video::VideoCapture::get_device_capabilities(Some(&new_device)) {
+                        cache.insert(new_device.clone(), caps);
+                    }
+                }
+            }
+            
+            // デフォルトのフォーマットを設定
+            if let Ok(cache) = capabilities_cache.lock() {
+                if let Some(caps) = cache.get(&new_device) {
+                    // 最初のフォーマットを選択
+                    if let Some((format, _)) = caps.first() {
+                        settings.video.format = Some(format.clone());
+                    }
+                }
+            }
         }
         
-    // 解像度選択（静的プレースホルダー; デバイス毎に更新可能）
-        ui.horizontal(|ui| {
-            ui.label("解像度:");
-            if let Some((width, height)) = settings.video.resolution {
-                egui::ComboBox::from_id_source("resolution_combo")
-                    .selected_text(format!("{}x{}", width, height))
-                    .show_ui(ui, |ui| {
-                        let resolutions = vec![
-                            (1920, 1080),
-                            (1280, 720),
-                            (640, 480),
-                            (320, 240),
-                        ];
-                        for (w, h) in resolutions {
-                            ui.selectable_value(&mut settings.video.resolution, Some((w, h)), format!("{}x{}", w, h));
-                        }
-                    });
-            } else {
-                settings.video.resolution = Some((1920, 1080));
-            }
-        });
-        
-    // フォーマット選択
+        // フォーマット選択（フォーマットが起点）
+        let mut format_changed = false;
         ui.horizontal(|ui| {
             ui.label("フォーマット:");
-            let current_format = settings.video.format.clone().unwrap_or_else(|| "MJPEG".to_string());
+            let current_format = settings.video.format.clone().unwrap_or_else(|| "YUY2".to_string());
+            
             egui::ComboBox::from_id_source("format_combo")
                 .selected_text(&current_format)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut settings.video.format, Some("MJPEG".to_string()), "MJPEG");
-                    ui.selectable_value(&mut settings.video.format, Some("YUY2".to_string()), "YUY2");
-                    ui.selectable_value(&mut settings.video.format, Some("RGB24".to_string()), "RGB24");
+                    // キャッシュからフォーマット一覧を取得
+                    if let Ok(cache) = capabilities_cache.lock() {
+                        if let Some(caps) = cache.get(&selected_device) {
+                            for (format, _) in caps {
+                                if ui.selectable_value(&mut settings.video.format, Some(format.clone()), format).clicked() {
+                                    format_changed = true;
+                                }
+                            }
+                        } else {
+                            // キャッシュがない場合はデフォルト
+                            ui.selectable_value(&mut settings.video.format, Some("YUY2".to_string()), "YUY2");
+                            ui.selectable_value(&mut settings.video.format, Some("MJPEG".to_string()), "MJPEG");
+                            ui.selectable_value(&mut settings.video.format, Some("RGB24".to_string()), "RGB24");
+                        }
+                    }
                 });
         });
-
-    // FPS選択
+        
+        // フォーマット変更時に解像度をリセット
+        if format_changed {
+            if let Ok(cache) = capabilities_cache.lock() {
+                if let Some(caps) = cache.get(&selected_device) {
+                    if let Some(current_format) = &settings.video.format {
+                        // 現在のフォーマットに対応する最初の解像度を選択
+                        for (format, resolutions) in caps {
+                            if format == current_format {
+                                if let Some((w, h, fps)) = resolutions.first() {
+                                    settings.video.resolution = Some((*w, *h));
+                                    settings.video.fps = Some(*fps);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 解像度選択（フォーマットに応じて動的に変更）
+        let mut resolution_changed = false;
+        ui.horizontal(|ui| {
+            ui.label("解像度:");
+            let current_resolution = settings.video.resolution.unwrap_or((1280, 720));
+            
+            egui::ComboBox::from_id_source("resolution_combo")
+                .selected_text(format!("{}x{}", current_resolution.0, current_resolution.1))
+                .show_ui(ui, |ui| {
+                    if let Ok(cache) = capabilities_cache.lock() {
+                        if let Some(caps) = cache.get(&selected_device) {
+                            if let Some(current_format) = &settings.video.format {
+                                // 現在のフォーマットに対応する解像度一覧
+                                let mut unique_resolutions = std::collections::HashSet::<(u32, u32)>::new();
+                                for (format, resolutions) in caps {
+                                    if format == current_format {
+                                        for (w, h, _) in resolutions {
+                                            unique_resolutions.insert((*w, *h));
+                                        }
+                                    }
+                                }
+                                
+                                // ソートして表示
+                                let mut sorted_resolutions: Vec<_> = unique_resolutions.into_iter().collect();
+                                sorted_resolutions.sort_by(|a, b| {
+                                    let size_a = a.0 * a.1;
+                                    let size_b = b.0 * b.1;
+                                    size_b.cmp(&size_a)
+                                });
+                                
+                                for (w, h) in sorted_resolutions {
+                                    if ui.selectable_value(&mut settings.video.resolution, Some((w, h)), format!("{}x{}", w, h)).clicked() {
+                                        resolution_changed = true;
+                                    }
+                                }
+                            }
+                        } else {
+                            // デフォルトの解像度
+                            ui.selectable_value(&mut settings.video.resolution, Some((1920, 1080)), "1920x1080");
+                            ui.selectable_value(&mut settings.video.resolution, Some((1280, 720)), "1280x720");
+                            ui.selectable_value(&mut settings.video.resolution, Some((640, 480)), "640x480");
+                        }
+                    }
+                });
+        });
+        
+        // 解像度変更時にFPSをリセット
+        if resolution_changed {
+            if let Ok(cache) = capabilities_cache.lock() {
+                if let Some(caps) = cache.get(&selected_device) {
+                    if let Some(current_format) = &settings.video.format {
+                        if let Some((w, h)) = settings.video.resolution {
+                            // 現在のフォーマットと解像度に対応する最初のFPSを選択
+                            for (format, resolutions) in caps {
+                                if format == current_format {
+                                    for (res_w, res_h, fps) in resolutions {
+                                        if *res_w == w && *res_h == h {
+                                            settings.video.fps = Some(*fps);
+                                            break;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // FPS選択（フォーマットと解像度に応じて動的に変更）
         ui.horizontal(|ui| {
             ui.label("フレームレート:");
             let current_fps = settings.video.fps.unwrap_or(30);
+            
             egui::ComboBox::from_id_source("fps_combo")
                 .selected_text(format!("{} fps", current_fps))
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut settings.video.fps, Some(30), "30 fps");
-                    ui.selectable_value(&mut settings.video.fps, Some(60), "60 fps");
+                    if let Ok(cache) = capabilities_cache.lock() {
+                        if let Some(caps) = cache.get(&selected_device) {
+                            if let Some(current_format) = &settings.video.format {
+                                if let Some((w, h)) = settings.video.resolution {
+                                    // 現在のフォーマットと解像度に対応するFPS一覧
+                                    let mut available_fps = Vec::new();
+                                    for (format, resolutions) in caps {
+                                        if format == current_format {
+                                            for (res_w, res_h, fps) in resolutions {
+                                                if *res_w == w && *res_h == h {
+                                                    available_fps.push(*fps);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    // 重複を削除してソート
+                                    available_fps.sort();
+                                    available_fps.dedup();
+                                    available_fps.reverse(); // 大きい順
+                                    
+                                    for fps in available_fps {
+                                        ui.selectable_value(&mut settings.video.fps, Some(fps), format!("{} fps", fps));
+                                    }
+                                }
+                            }
+                        } else {
+                            // デフォルトのFPS
+                            ui.selectable_value(&mut settings.video.fps, Some(30), "30 fps");
+                            ui.selectable_value(&mut settings.video.fps, Some(60), "60 fps");
+                        }
+                    }
                 });
         });
     });

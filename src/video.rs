@@ -267,6 +267,99 @@ impl VideoCapture {
             ("RGB24".to_string(), vec![(1280,720),(640,480)]),
         ]
     }
+    
+    // デバイスの能力を取得するメソッド
+    pub fn get_device_capabilities(device_name: Option<&str>) -> Result<Vec<(String, Vec<(u32, u32, u32)>)>, String> {
+        use nokhwa::Camera;
+        
+        // デバイス情報を取得
+        let devices = nokhwa::query(ApiBackend::MediaFoundation)
+            .map_err(|e| format!("Failed to query devices: {}", e))?;
+            
+        let device_info = if let Some(name) = device_name {
+            devices.into_iter()
+                .find(|d| d.human_name() == name)
+                .ok_or_else(|| format!("Device '{}' not found", name))?
+        } else {
+            devices.into_iter()
+                .next()
+                .ok_or("No video devices found")?
+        };
+        
+        // カメラを一時的に開いて能力を取得
+        let requested_format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
+            Resolution::new(640, 480),
+            FrameFormat::YUYV,
+            30,
+        )));
+        
+        let mut camera = Camera::new(device_info.index().clone(), requested_format)
+            .map_err(|e| format!("Failed to create camera for capability query: {}", e))?;
+        
+        let mut result: Vec<(String, Vec<(u32, u32, u32)>)> = Vec::new();
+        
+        // 各フォーマットで対応解像度・FPSを取得
+        let formats = vec![
+            ("YUY2", FrameFormat::YUYV),
+            ("MJPEG", FrameFormat::MJPEG),
+            ("RGB24", FrameFormat::RAWRGB),
+        ];
+        
+        for (format_name, frame_format) in formats {
+            match camera.compatible_list_by_resolution(frame_format) {
+                Ok(resolution_map) => {
+                    let mut resolutions_with_fps: Vec<(u32, u32, u32)> = Vec::new();
+                    
+                    for (resolution, fps_list) in resolution_map.iter() {
+                        // 各解像度に対して利用可能な全FPSを記録
+                        for fps in fps_list.iter() {
+                            resolutions_with_fps.push((resolution.width_x, resolution.height_y, *fps));
+                        }
+                    }
+                    
+                    // 重複を削除してユニークな組み合わせのみ保持
+                    resolutions_with_fps.sort();
+                    resolutions_with_fps.dedup();
+                    
+                    // 解像度でソート（大きい順）、同じ解像度ならFPSでソート（大きい順）
+                    resolutions_with_fps.sort_by(|a, b| {
+                        let size_a = a.0 * a.1;
+                        let size_b = b.0 * b.1;
+                        match size_b.cmp(&size_a) {
+                            std::cmp::Ordering::Equal => b.2.cmp(&a.2),
+                            other => other,
+                        }
+                    });
+                    
+                    if !resolutions_with_fps.is_empty() {
+                        result.push((format_name.to_string(), resolutions_with_fps));
+                    }
+                }
+                Err(_) => {
+                    // エラーの場合、デフォルト値を設定
+                    let default_resolutions = match format_name {
+                        "YUY2" => vec![(1280, 720, 60), (640, 480, 30)],
+                        "MJPEG" => vec![(1920, 1080, 30), (1280, 720, 60), (640, 480, 30)],
+                        "RGB24" => vec![(1280, 720, 30), (640, 480, 30)],
+                        _ => vec![],
+                    };
+                    if !default_resolutions.is_empty() {
+                        result.push((format_name.to_string(), default_resolutions));
+                    }
+                }
+            }
+        }
+        
+        // 結果が空の場合はデフォルト値を返す
+        if result.is_empty() {
+            result = vec![
+                ("YUY2".to_string(), vec![(1280, 720, 60), (640, 480, 30)]),
+                ("MJPEG".to_string(), vec![(1920, 1080, 30), (1280, 720, 60), (640, 480, 30)]),
+            ];
+        }
+        
+        Ok(result)
+    }
 }
 
 impl Drop for VideoCapture {
