@@ -1,6 +1,6 @@
 [package]
 name = "capturecard_viewer"
-version = "1.0.5"
+version = "1.0.6"
 edition = "2021"
 
 [dependencies]

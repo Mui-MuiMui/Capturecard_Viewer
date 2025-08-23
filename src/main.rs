@@ -197,6 +197,35 @@ impl eframe::App for CaptureCardViewer {
             }
             self.last_volume_sent = self.volume;
         }
+        
+        // ウィンドウサイズと位置を監視して設定に保存
+        let viewport = ctx.input(|i| i.viewport().clone());
+        let current_size = viewport.inner_rect.map(|r| (r.width(), r.height()));
+        let current_pos = viewport.outer_rect.map(|r| (r.left(), r.top()));
+        
+        // サイズまたは位置が変更された場合、設定を更新
+        if let Ok(mut settings) = self.settings.lock() {
+            let mut changed = false;
+            
+            if let Some((width, height)) = current_size {
+                if settings.ui.last_window_size != Some((width, height)) {
+                    settings.ui.last_window_size = Some((width, height));
+                    changed = true;
+                }
+            }
+            
+            if let Some((x, y)) = current_pos {
+                if settings.ui.last_window_pos != Some((x, y)) {
+                    settings.ui.last_window_pos = Some((x, y));
+                    changed = true;
+                }
+            }
+            
+            // 変更があった場合は設定を保存
+            if changed {
+                settings.save();
+            }
+        }
 
         // メインUI
         // F11によるフルスクリーン切り替えを削除（スクリーンショット用に解放）
@@ -282,8 +311,9 @@ impl eframe::App for CaptureCardViewer {
     }
     
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // 終了時に設定を保存
+        // 終了時に最新のウィンドウサイズと位置を取得して保存
         if let Ok(settings) = self.settings.lock() {
+            // 最新の設定が反映されていることを確認してから保存
             settings.save();
         }
     }
@@ -676,12 +706,28 @@ impl CaptureCardViewer {
 }
 
 fn main() -> Result<(), eframe::Error> {
+    // 設定から保存されたウィンドウサイズと位置を読み込む
+    let settings = AppSettings::load();
+    let mut viewport_builder = egui::ViewportBuilder::default()
+        .with_icon(load_icon());
+    
+    // 保存されたウィンドウサイズがあれば適用
+    if let Some((width, height)) = settings.ui.last_window_size {
+        viewport_builder = viewport_builder.with_inner_size([width, height]);
+    } else {
+        viewport_builder = viewport_builder.with_inner_size([1280.0, 720.0]);
+    }
+    
+    // 保存されたウィンドウ位置があれば適用
+    if let Some((x, y)) = settings.ui.last_window_pos {
+        viewport_builder = viewport_builder.with_position([x, y]);
+    }
+    
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 720.0])
-            .with_icon(load_icon()),
+        viewport: viewport_builder,
         ..Default::default()
     };
+    
     eframe::run_native(
         "Capturecard Viewer",
         options,

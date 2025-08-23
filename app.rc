@@ -1,8 +1,8 @@
 1 ICON "icon.ico"
 
 1 VERSIONINFO
-FILEVERSION 0,1,0,5
-PRODUCTVERSION 0,1,0,5
+FILEVERSION 0,1,0,6
+PRODUCTVERSION 0,1,0,6
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -15,12 +15,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Mui"
             VALUE "FileDescription", "Capturecard Viewer"
-            VALUE "FileVersion", "1.0.5"
+            VALUE "FileVersion", "1.0.6"
             VALUE "InternalName", "capturecard_viewer"
             VALUE "LegalCopyright", "Copyright (C) 2025 Mui"
             VALUE "OriginalFilename", "capturecard_viewer.exe"
             VALUE "ProductName", "Capturecard Viewer"
-            VALUE "ProductVersion", "1.0.5"
+            VALUE "ProductVersion", "1.0.6"
         END
     END
     BLOCK "VarFileInfo"
