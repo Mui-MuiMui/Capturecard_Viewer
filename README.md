@@ -1,3 +1,5 @@
+**日本語** | [English](README.en.md)
+
 # Capturecard Viewer
 キャプチャーボードの映像と音声を表示するためのアプリです。  
 Windows10/11向け
