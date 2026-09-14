@@ -3,7 +3,8 @@ target
 **/*.rs.bk
 *.pdb
 **/mutants.out*/
-Cargo.lock
+
+# Cargo.lock は配布バイナリのプロジェクトなのでコミットする（Cargo 公式の推奨）
 
 # Claude Code が作成する作業用 worktree（.claude/skills はコミットする）
 .claude/worktrees/
