@@ -84,6 +84,8 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 - 既存の命名（snake_case、モジュール構成）に合わせる
 - 実装とコメントが食い違っている箇所が複数あるので、コメントを鵜呑みにせず実コードを確認すること
 
+ブランチ名・コミットメッセージ・PR の書き方は `.claude/skills/naming-conventions/SKILL.md` にまとめてある。ブランチを切る前、コミットする前、PR を作る前に参照すること。
+
 ## タスク管理
 
 改善バックログは Asana プロジェクト「Capturecard_Viewer」で管理している。
