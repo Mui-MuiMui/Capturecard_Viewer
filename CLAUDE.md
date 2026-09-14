@@ -86,6 +86,12 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 
 ブランチ名・コミットメッセージ・PR の書き方は `.claude/skills/naming-conventions/SKILL.md` にまとめてある。ブランチを切る前、コミットする前、PR を作る前に参照すること。
 
+## テスト
+
+テストの方針は `.claude/skills/testing-conventions/SKILL.md` にまとめてある。デバイス依存が強いため、一般的な 3 層ではなく「CI で自動実行できるか」で区分している。
+
+実機でしか確認できない項目は `docs/MANUAL-TEST.md` のチェックリストで担保する。既知の不具合で現在失敗する項目も同ファイルに明記してあるので、不具合を直したらチェックリスト側も更新すること。
+
 ## タスク管理
 
 改善バックログは Asana プロジェクト「Capturecard_Viewer」で管理している。
