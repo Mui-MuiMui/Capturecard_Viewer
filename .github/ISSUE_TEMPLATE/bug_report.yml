@@ -9,7 +9,7 @@ body:
 
         **このアプリはキャプチャーボードとオーディオデバイスに強く依存します。** 手元にあるデバイスが限られているため、環境情報がないと再現も原因の特定もできません。分かる範囲で埋めてください。
 
-        報告の前に [トラブルシューティング](../blob/main/docs/TROUBLESHOOTING.md) をご確認ください。既知の不具合と回避策が載っています。
+        報告の前に [トラブルシューティング](https://github.com/Mui-MuiMui/Capturecard_Viewer/blob/main/docs/TROUBLESHOOTING.md) をご確認ください。既知の不具合と回避策が載っています。
 
   - type: textarea
     id: what-happened

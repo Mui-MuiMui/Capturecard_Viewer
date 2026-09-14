@@ -3,6 +3,3 @@ contact_links:
   - name: トラブルシューティング
     url: https://github.com/Mui-MuiMui/Capturecard_Viewer/blob/main/docs/TROUBLESHOOTING.md
     about: 既知の不具合と回避策はこちら。報告の前に一度ご確認ください。
-  - name: 開発に参加する
-    url: https://github.com/Mui-MuiMui/Capturecard_Viewer/blob/main/CONTRIBUTING.md
-    about: Pull Request を送る前の確認事項はこちら。
