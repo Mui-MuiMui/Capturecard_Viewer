@@ -4,3 +4,6 @@ target
 *.pdb
 **/mutants.out*/
 Cargo.lock
+
+# Claude Code が作成する作業用 worktree（.claude/skills はコミットする）
+.claude/worktrees/
