@@ -1,0 +1,103 @@
+# ビルド手順
+
+Windows 10/11 専用。他の OS では Media Foundation と WASAPI が使えないためビルドも実行もできない。
+
+## 必要なもの
+
+| | 用途 |
+|---|---|
+| Rust ツールチェイン（MSVC ターゲット） | 本体のビルド |
+| Visual Studio Build Tools + Windows SDK | `build.rs` が `embed_resource` で `app.rc` をコンパイルするために `rc.exe` を使う |
+
+`rustup` の既定ターゲットが `x86_64-pc-windows-msvc` であることを確認する。
+
+```bash
+rustup show
+```
+
+GNU ツールチェインでは `embed_resource` のリソース埋め込みが期待どおりに動かない。MSVC を使う。
+
+## ビルド
+
+```bash
+cargo build --release
+```
+
+成果物は `target/release/capturecard_viewer.exe`。
+
+開発中は以下でよい。`[profile.dev]` に `opt-level = 1` を指定してあるので、最適化なしよりは映像が滑らかに動く。
+
+```bash
+cargo build
+```
+
+## 検証
+
+```bash
+cargo fmt --check
+```
+
+```bash
+cargo clippy --all-targets
+```
+
+```bash
+cargo test
+```
+
+```bash
+cargo test -- --ignored
+```
+
+- `cargo fmt --check` は現状リポジトリ全体で差分が出る。整形は独立した変更として行う
+- `cargo clippy` には既知の警告が残っている
+- `--ignored` 付きのテストはキャプチャーデバイスを接続した状態で実行する
+
+開発フローに沿って進める場合は `/cv:review` がこれらをまとめて実行する。
+
+## 配布時に同梱するもの
+
+実行ファイル単体では動作が欠ける。以下を同じ構成で配置する。
+
+```
+capturecard_viewer.exe
+icon.ico
+sound/
+  SS.mp3
+```
+
+- `icon.ico` — ウィンドウアイコンの読み込みに使う。無い場合は赤い四角が表示される
+- `sound/SS.mp3` — スクリーンショットの既定の効果音
+
+どちらもカレントディレクトリ基準の相対パスで解決されるため、**作業ディレクトリが実行ファイルの場所と異なると読み込みに失敗する。** これは既知の不具合として登録済み。
+
+## プロファイル設定
+
+`Cargo.toml` の `[profile.release]`。
+
+| 設定 | 値 | 影響 |
+|---|---|---|
+| `opt-level` | `3` | 速度優先 |
+| `lto` | `true` | リンク時最適化。ビルドは遅くなるがバイナリが小さく速くなる |
+| `codegen-units` | `1` | 最適化の質を上げる。ビルドは遅くなる |
+| `panic` | `"abort"` | 巻き戻しコードを省く。**`catch_unwind` が機能しなくなる** |
+
+release ビルドは `lto` と `codegen-units = 1` の影響で時間がかかる。反復作業には dev ビルドを使う。
+
+## デバッグ時の注意
+
+`src/main.rs` 冒頭の `#![windows_subsystem = "windows"]` によってコンソールが割り当てられないため、**標準出力と標準エラーはどこにも表示されない。**
+
+一時的に出力を見たい場合は、この属性をコメントアウトしてビルドするとコンソールが付く。ただしコミットしないこと。
+
+恒久的な対処としてファイルへのログ出力を入れる作業がバックログにある。
+
+## Cargo.lock
+
+現在 `Cargo.lock` は `.gitignore` に含まれており、リポジトリに存在しない。そのため**ビルドのたびに依存の解決結果が変わりうる**。
+
+配布バイナリを持つプロジェクトでは `Cargo.lock` をコミットするのが Cargo の推奨であり、これは既知の課題として登録済み。
+
+## 実機確認
+
+コードの検証だけでは足りない変更（映像、音声、デバイス接続、ホットキー、ウィンドウ操作）は、`docs/MANUAL-TEST.md` のチェックリストで確認する。
