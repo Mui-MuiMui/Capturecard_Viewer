@@ -1,0 +1,107 @@
+name: 不具合の報告
+description: 動作しない、期待と違う挙動をする場合はこちら
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        報告ありがとうございます。
+
+        **このアプリはキャプチャーボードとオーディオデバイスに強く依存します。** 手元にあるデバイスが限られているため、環境情報がないと再現も原因の特定もできません。分かる範囲で埋めてください。
+
+        報告の前に [トラブルシューティング](https://github.com/Mui-MuiMui/Capturecard_Viewer/blob/main/docs/TROUBLESHOOTING.md) をご確認ください。既知の不具合と回避策が載っています。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 何が起きたか
+      description: 期待した動作と、実際の動作を書いてください。
+      placeholder: |
+        期待: 起動すると映像が表示される
+        実際: 「映像信号がありません」と表示されたまま変わらない
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順
+      description: |
+        できるだけ具体的に書いてください。**現在このアプリはログを出力しないため、再現手順が原因究明の頼りになります。**
+      placeholder: |
+        1. アプリを起動する
+        2. 右クリック → 詳細設定 を開く
+        3. デバイス設定タブでフォーマットを MJPEG に変更する
+        4. OK を押す
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: アプリのバージョン
+      description: 実行ファイルのプロパティ、または入手元のリリース名から確認できます。
+      placeholder: "1.0.6"
+    validations:
+      required: true
+
+  - type: input
+    id: capture-device
+    attributes:
+      label: キャプチャーボードの製品名
+      description: 型番まで分かると助かります。
+      placeholder: "Live Gamer EXTREME 3"
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: Windows のバージョン
+      description: 設定 → システム → バージョン情報、または winver で確認できます。
+      placeholder: "Windows 11 Pro 24H2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: 設定ファイルの内容
+      description: |
+        `%AppData%\capturecard_viewer\config\default-config.toml` の内容を貼り付けてください。
+        フォーマット・解像度・フレームレート・オーディオデバイス名が含まれており、原因の絞り込みに直結します。
+
+        保存先のパスにユーザー名が含まれます。気になる場合は伏せてください。
+      render: toml
+    validations:
+      required: false
+
+  - type: textarea
+    id: input-source
+    attributes:
+      label: 入力機器
+      description: キャプチャーボードに何を繋いでいるか。映像が出ない場合は特に重要です。
+      placeholder: "PlayStation 5 を HDMI で接続。1080p60 出力。"
+    validations:
+      required: false
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: 試したこと
+      description: |
+        以下を試した結果を書いてください。
+        - 右クリック → デバイス再接続
+        - アプリの再起動
+        - キャプチャーボードの抜き差し
+        - 他のアプリ（OBS など）がデバイスを使っていないかの確認
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: その他
+      description: スクリーンショットなど、参考になりそうなものがあれば。
+    validations:
+      required: false

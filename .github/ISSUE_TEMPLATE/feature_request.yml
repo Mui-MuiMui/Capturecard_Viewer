@@ -1,0 +1,48 @@
+name: 機能の提案
+description: あったら嬉しい機能や改善の提案はこちら
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提案ありがとうございます。
+
+        判断の軸は [アーキテクチャ文書](https://github.com/Mui-MuiMui/Capturecard_Viewer/blob/main/docs/ARCHITECTURE.md) の「設計の前提」にあります。優先順位は **低遅延 > 単体で動く > 原因が追える > 画質** です。遅延を増やす変更や外部ランタイムを必要とする変更は、慎重に検討します。
+
+        いただいた提案は検討しますが、実装をお約束するものではありません。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 何に困っているか
+      description: |
+        解決したい問題を書いてください。**どう実装するかより、何ができるようになりたいかが分かると判断しやすくなります。**
+      placeholder: "キャプチャー中に音量を確認したいが、右クリックメニューを開かないと現在の値が分からない"
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: こうなったら嬉しい
+      description: 思いつく解決案があれば。なくても構いません。
+      placeholder: "音量を変えたときに、フルスクリーン切り替えと同じように画面上に数秒だけ表示される"
+    validations:
+      required: false
+
+  - type: textarea
+    id: usecase
+    attributes:
+      label: 使い方
+      description: どんな場面で使うか。用途が分かると優先度を判断しやすくなります。
+      placeholder: "ゲームをしながらフルスクリーンで使っているため、メニューを開かずに確認したい"
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 今はどうしているか
+      description: 代替手段や回避策があれば。
+    validations:
+      required: false

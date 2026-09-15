@@ -100,19 +100,23 @@ Some options can be changed in the settings window but have no effect yet. These
 - Audio sample rate and channel count
 - Selecting MJPEG or RGB24 as the video format (YUY2 is always used internally)
 
-## Contributing
+## Reporting problems
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and pull requests are welcome in either English or Japanese.
+Bug reports are welcome via [Issues](https://github.com/Mui-MuiMui/Capturecard_Viewer/issues), in either English or Japanese. Please check [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) first — it lists known issues along with workarounds.
 
-Documentation for developers:
+This application depends heavily on the capture card and audio devices you are using, and the author has access to only a limited set of hardware. Please fill in as much of the issue template as you can; without that information, reproducing the problem is usually not possible.
+
+This project is not currently looking for contributors.
+
+## Documentation
+
+The documents below are written in Japanese.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the architecture this project is working toward, and how the current code differs from it
 - [docs/BUILD.md](docs/BUILD.md) — build instructions and required tooling
 - [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) — dependency status and upgrade plan
 - [docs/MANUAL-TEST.md](docs/MANUAL-TEST.md) — manual test checklist
 - [CHANGELOG.md](CHANGELOG.md) — release history
-
-Note that the documentation above is written in Japanese.
 
 ## Buy me a coffee
 
