@@ -62,9 +62,11 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 
 `Cargo.toml` の `[profile.release]` に `panic = "abort"` があるため、`main.rs` 内の `std::panic::catch_unwind` は release ビルドで一切機能しない。
 
-### 設定ファイルの読み込みは全か無か
+### 設定構造体の `#[serde(default)]` を外さない
 
-`AppSettings::load()` は `confy::load(..).unwrap_or_default()` なので、**構造体にフィールドを 1 つ足すと既存ユーザーの設定が丸ごと初期化される**。設定構造体を変更する場合は `#[serde(default)]` を必ず付けること。
+`AppSettings` と配下の 4 構造体には、構造体レベルで `#[serde(default)]` が付いている。これが無いと、項目を 1 つ足すだけで既存ユーザーの設定が失われる。`Option` 以外の項目はパース自体が失敗して全項目が初期化され、`Option` の項目は `None` になって `Default` に書いた既定値が効かなくなる。**設定の構造体を新しく足すときも必ず付けること。**
+
+読み込みに失敗した場合、`AppSettings::load()` は壊れたファイルを `.bak` へ退避してから既定値で起動する。失敗の理由はまだどこにも残らない（ログ基盤が未導入のため）。
 
 ### UI にあるが動作していない設定がある
 
