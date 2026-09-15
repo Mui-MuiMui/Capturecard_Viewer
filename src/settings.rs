@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+// confy が設定ファイルの置き場所を決めるのに使う名前。
+// ここがずれると既存の設定ファイルを見失うため、1 箇所にまとめてある。
+const APP_NAME: &str = "capturecard_viewer";
 
 // 各構造体の #[serde(default)] は、項目を追加したあとも古い設定ファイルを
 // 読めるようにするためのもの。これが無いと、
@@ -103,13 +107,56 @@ impl Default for UiSettings {
     }
 }
 
+// 読み込めなかった設定ファイルを退避する。
+// 退避できた場合は退避先のパスを返す。元のファイルが無い場合は None を返す。
+//
+// コピーではなく rename にしているのは、退避したあとに既定値が書き戻されて
+// 元のファイルが上書きされ、内容が失われるのを避けるため。
+fn backup_broken_config(path: &Path) -> std::io::Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let backup_path = next_backup_path(path);
+    std::fs::rename(path, &backup_path)?;
+    Ok(Some(backup_path))
+}
+
+// 退避先のパスを決める。<元のファイル名>.bak を基本とし、
+// 既に存在する場合は .bak.1、.bak.2 と連番を足して過去の退避を上書きしない。
+fn next_backup_path(path: &Path) -> PathBuf {
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+
+    let mut candidate = path.with_file_name(format!("{}.bak", file_name));
+    let mut counter = 1;
+    while candidate.exists() {
+        candidate = path.with_file_name(format!("{}.bak.{}", file_name, counter));
+        counter += 1;
+    }
+
+    candidate
+}
+
 impl AppSettings {
     pub fn load() -> Self {
-        confy::load("capturecard_viewer", None).unwrap_or_default()
+        match confy::load(APP_NAME, None) {
+            Ok(settings) => settings,
+            Err(_) => {
+                // 読み込みに失敗した設定ファイルは退避してから既定値で起動する。
+                // 黙って上書きすると、ユーザーが自分の設定を取り戻す手段が無くなる。
+                // 現状コンソールもログ基盤も無いため、退避したファイルの存在が
+                // 原因を追う唯一の手がかりになる。ログ基盤が入ったら失敗の理由を
+                // ここで出力すること。
+                if let Ok(path) = confy::get_configuration_file_path(APP_NAME, None) {
+                    let _ = backup_broken_config(&path);
+                }
+                Self::default()
+            }
+        }
     }
-    
+
     pub fn save(&self) {
-        if let Err(e) = confy::store("capturecard_viewer", None, self) {
+        if let Err(e) = confy::store(APP_NAME, None, self) {
             eprintln!("Failed to save settings: {}", e);
         }
     }
@@ -133,6 +180,8 @@ impl AppSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::tempdir;
 
     // 全項目を明示した設定ファイル。値はすべて既定値と異なるものにしてある。
     // 各テストはここから一部を削り、「古い版が書いた設定ファイル」を再現する。
@@ -299,5 +348,56 @@ enable_drag_move = false
         assert_eq!(restored.ui.last_window_pos, Some((10.0, 20.0)));
         assert!(restored.ui.always_on_top);
         assert!(!restored.ui.enable_drag_move);
+    }
+
+    #[test]
+    fn backup_broken_config_moves_file_and_returns_path() {
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("default-config.toml");
+        fs::write(&path, "[video] 壊れている").expect("テスト用の設定を書けること");
+
+        let backup = backup_broken_config(&path)
+            .expect("退避に成功すること")
+            .expect("退避先のパスが返ること");
+
+        assert_eq!(backup, dir.path().join("default-config.toml.bak"));
+        assert!(!path.exists(), "退避後に元のファイルが残っている");
+        assert_eq!(
+            fs::read_to_string(&backup).expect("退避先を読めること"),
+            "[video] 壊れている"
+        );
+    }
+
+    #[test]
+    fn backup_broken_config_existing_backup_gets_numbered_suffix() {
+        // 続けて壊れた場合に、前回退避した内容を上書きしないこと。
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("default-config.toml");
+
+        fs::write(&path, "1 回目").expect("テスト用の設定を書けること");
+        let first = backup_broken_config(&path).unwrap().unwrap();
+        fs::write(&path, "2 回目").expect("テスト用の設定を書けること");
+        let second = backup_broken_config(&path).unwrap().unwrap();
+        fs::write(&path, "3 回目").expect("テスト用の設定を書けること");
+        let third = backup_broken_config(&path).unwrap().unwrap();
+
+        assert_eq!(first, dir.path().join("default-config.toml.bak"));
+        assert_eq!(second, dir.path().join("default-config.toml.bak.1"));
+        assert_eq!(third, dir.path().join("default-config.toml.bak.2"));
+        assert_eq!(fs::read_to_string(&first).unwrap(), "1 回目");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "2 回目");
+        assert_eq!(fs::read_to_string(&third).unwrap(), "3 回目");
+    }
+
+    #[test]
+    fn backup_broken_config_missing_file_returns_none() {
+        // 初回起動のように設定ファイルがまだ無い場合。退避するものが無いだけで、
+        // エラーとして扱わない。
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("default-config.toml");
+
+        let backup = backup_broken_config(&path).expect("失敗しないこと");
+
+        assert!(backup.is_none());
     }
 }
