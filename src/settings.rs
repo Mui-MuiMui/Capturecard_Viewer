@@ -125,7 +125,11 @@ fn backup_broken_config(path: &Path) -> std::io::Result<Option<PathBuf>> {
 // 退避先のパスを決める。<元のファイル名>.bak を基本とし、
 // 既に存在する場合は .bak.1、.bak.2 と連番を足して過去の退避を上書きしない。
 fn next_backup_path(path: &Path) -> PathBuf {
-    let file_name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let file_name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
 
     let mut candidate = path.with_file_name(format!("{}.bak", file_name));
     let mut counter = 1;
@@ -230,13 +234,19 @@ enable_drag_move = false
         // 項目を 1 つ足してリリースした直後に起きる状況。
         // 欠けたキーだけが既定値になり、他の値は保持されなければならない。
         let config = without_key(FULL_CONFIG, "fps");
-        assert!(!config.contains("fps ="), "テスト用の設定から fps が消えていない");
+        assert!(
+            !config.contains("fps ="),
+            "テスト用の設定から fps が消えていない"
+        );
 
         let settings: AppSettings =
             toml::from_str(&config).expect("fps が欠けていても読めなければならない");
 
         assert_eq!(settings.video.fps, Some(60)); // 欠けた項目だけ既定値
-        assert_eq!(settings.video.device_name, Some("Capture Device".to_string()));
+        assert_eq!(
+            settings.video.device_name,
+            Some("Capture Device".to_string())
+        );
         assert_eq!(settings.video.resolution, Some((1920, 1080)));
         assert_eq!(settings.video.format, Some("MJPEG".to_string()));
         assert_eq!(settings.audio.sample_rate, Some(44100));
@@ -272,7 +282,10 @@ enable_drag_move = false
             .next()
             .expect("FULL_CONFIG に [ui] セクションがある")
             .to_string();
-        assert!(!config.contains("[ui]"), "テスト用の設定から [ui] が消えていない");
+        assert!(
+            !config.contains("[ui]"),
+            "テスト用の設定から [ui] が消えていない"
+        );
 
         let settings: AppSettings =
             toml::from_str(&config).expect("[ui] セクションが欠けていても読めなければならない");
@@ -280,7 +293,10 @@ enable_drag_move = false
         assert_eq!(settings.ui.volume, 100.0); // UiSettings ごと既定値
         assert!(settings.ui.maintain_aspect_ratio);
         assert_eq!(settings.ui.last_window_size, None);
-        assert_eq!(settings.video.device_name, Some("Capture Device".to_string()));
+        assert_eq!(
+            settings.video.device_name,
+            Some("Capture Device".to_string())
+        );
         assert_eq!(settings.audio.channels, Some(1));
     }
 
@@ -326,12 +342,21 @@ enable_drag_move = false
         let restored: AppSettings =
             toml::from_str(&serialized).expect("書き出した設定を読み直せなければならない");
 
-        assert_eq!(restored.video.device_name, Some("Capture Device".to_string()));
+        assert_eq!(
+            restored.video.device_name,
+            Some("Capture Device".to_string())
+        );
         assert_eq!(restored.video.resolution, Some((1920, 1080)));
         assert_eq!(restored.video.format, Some("MJPEG".to_string()));
         assert_eq!(restored.video.fps, Some(30));
-        assert_eq!(restored.audio.input_device_name, Some("Line In".to_string()));
-        assert_eq!(restored.audio.output_device_name, Some("Speakers".to_string()));
+        assert_eq!(
+            restored.audio.input_device_name,
+            Some("Line In".to_string())
+        );
+        assert_eq!(
+            restored.audio.output_device_name,
+            Some("Speakers".to_string())
+        );
         assert_eq!(restored.audio.sample_rate, Some(44100));
         assert_eq!(restored.audio.channels, Some(1));
         assert!(!restored.audio.passthrough_enabled);
