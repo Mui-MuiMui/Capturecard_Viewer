@@ -26,8 +26,8 @@ mod video;
 
 use audio::AudioCapture;
 use screenshot::ScreenshotManager;
-use settings::AppSettings;
-use video::VideoCapture;
+use settings::{AppSettings, ScreenshotEncoding};
+use video::{FrameStats, VideoCapture};
 
 /// デバイスリストのキャッシュを更新する間隔
 const DEVICE_LIST_CACHE_INTERVAL: Duration = Duration::from_secs(5);
@@ -263,6 +263,8 @@ pub struct CaptureCardViewer {
     context_menu_pos: egui::Pos2,
     is_fullscreen: bool,
     maintain_aspect_ratio: bool,
+    // 映像に統計を重ねて表示するか。設定の ui.show_stats_overlay と対応する
+    show_stats_overlay: bool,
     volume: f32,
     last_volume_sent: f32,
     last_settings_applied: Instant,
@@ -309,13 +311,17 @@ pub struct CaptureCardViewer {
     always_on_top: bool,
 
     // 進行中のスクリーンショット保存スレッド。
-    // 終了時に join して、書き出し途中の JPEG が残らないようにする
+    // 終了時に join して、書き出し途中の画像ファイルが残らないようにする
     screenshot_save_threads: Vec<JoinHandle<()>>,
 }
 
 impl Default for CaptureCardViewer {
     fn default() -> Self {
         let (loaded_settings, load_outcome) = AppSettings::load();
+        // 表示状態は apply_settings を待たずに反映する。
+        // apply_settings は起動から 2 秒後が最初なので、待つと
+        // オンで終了したのに起動直後だけ出ていない、という見え方になる
+        let show_stats_overlay = loaded_settings.ui.show_stats_overlay;
         let settings = Arc::new(Mutex::new(loaded_settings));
         let video_capture = Arc::new(Mutex::new(VideoCapture::new()));
         #[allow(clippy::arc_with_non_send_sync)] // 音声キャプチャは非同期処理で必要
@@ -337,6 +343,7 @@ impl Default for CaptureCardViewer {
             context_menu_pos: egui::Pos2::ZERO,
             is_fullscreen: false,
             maintain_aspect_ratio: true,
+            show_stats_overlay,
             volume: 100.0,
             last_volume_sent: -1.0,
             last_settings_applied: Instant::now(),
@@ -531,6 +538,12 @@ impl eframe::App for CaptureCardViewer {
             self.show_windowed_ui(ctx);
         }
 
+        // 統計オーバーレイ。ウィンドウ表示とフルスクリーンで同じものを出すため、
+        // どちらの描画のあとでもここで 1 回だけ描く
+        if self.show_stats_overlay {
+            self.show_stats_overlay(ctx);
+        }
+
         // 設定ダイアログ
         if self.show_settings {
             // 開いた最初のフレームで、実行中の設定からドラフトを作る
@@ -676,7 +689,7 @@ impl eframe::App for CaptureCardViewer {
 
         // 撮った直後に閉じても最後の 1 枚が残るように、保存の完了を待ってから抜ける。
         // ここで待たないと、main が返った時点でプロセスごと落ちて
-        // 書きかけの JPEG がディスクに残る
+        // 書きかけの画像ファイルがディスクに残る
         self.join_screenshot_save_threads();
     }
 }
@@ -737,11 +750,12 @@ impl CaptureCardViewer {
         }
     }
 
-    /// いま表示しているフレームを JPEG で保存する。
+    /// いま表示しているフレームを、設定した形式（JPEG / PNG）で保存する。
     ///
     /// ロックは settings → video → screenshot の順に 1 つずつ取り、重ねない。
-    /// エンコードと書き出しは別スレッドへ逃がす。1080p の JPEG エンコードは
-    /// 数十 ms かかり、UI スレッドで行うと映像が一瞬止まるため
+    /// エンコードと書き出しは別スレッドへ逃がす。1080p のエンコードは
+    /// JPEG でも数十 ms かかり、UI スレッドで行うと映像が一瞬止まるため
+    /// （PNG は可逆圧縮のぶんさらに時間がかかる）
     fn take_screenshot(&mut self) {
         debug!("スクリーンショットの保存を開始する");
 
@@ -749,13 +763,14 @@ impl CaptureCardViewer {
         // get_screenshot_path は連番を決めるためにファイルの有無を見るが、
         // ファイルを作るのは保存スレッドなので、ここでは何も書かない
         let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S-%3f").to_string();
-        let path_and_volume = self.settings.lock().ok().map(|settings| {
+        let save_params = self.settings.lock().ok().map(|settings| {
             (
                 settings.get_screenshot_path(&timestamp),
+                settings.screenshot.encoding(),
                 settings.screenshot.sound_volume,
             )
         });
-        let Some((path, sound_volume)) = path_and_volume else {
+        let Some((path, encoding, sound_volume)) = save_params else {
             warn!("スクリーンショットの保存で settings のロックを取得できない");
             return;
         };
@@ -794,13 +809,13 @@ impl CaptureCardViewer {
         // ホットキーを連打するとスレッドが並ぶが、撮るたびに 1 枚残るほうを優先して
         // 進行中の保存があっても捨てない。ファイル名は撮影時刻をミリ秒まで含むので、
         // 人が連打できる間隔なら衝突しない（同一ミリ秒の衝突は元からある別の問題）
-        let handle = std::thread::spawn(move || match save_frame_as_jpeg(&frame, &path) {
+        let handle = std::thread::spawn(move || match save_frame(&frame, &path, encoding) {
             Ok(()) => info!("スクリーンショットを {} へ保存した", path.display()),
             Err(e) => error!("スクリーンショットを保存できない: {}", e),
         });
 
         // ハンドルを持っておく。捨てるとスレッドが切り離され、終了時に
-        // 書き出しの完了を待てなくなる（壊れた JPEG が残りうる）。
+        // 書き出しの完了を待てなくなる（壊れた画像ファイルが残りうる）。
         // 溜め込まないよう、積む前に終わった分を落とす
         drop_finished_threads(&mut self.screenshot_save_threads);
         self.screenshot_save_threads.push(handle);
@@ -808,8 +823,8 @@ impl CaptureCardViewer {
 
     /// 進行中のスクリーンショット保存がすべて終わるまで待つ。
     ///
-    /// 待ち時間は JPEG のエンコードとディスクへの書き出しが終わるまでで、
-    /// 1080p なら通常は数十 ms。終了時に呼ぶ
+    /// 待ち時間はエンコードとディスクへの書き出しが終わるまでで、
+    /// 1080p の JPEG なら通常は数十 ms。終了時に呼ぶ
     fn join_screenshot_save_threads(&mut self) {
         let handles = std::mem::take(&mut self.screenshot_save_threads);
         if handles.is_empty() {
@@ -1025,6 +1040,41 @@ impl CaptureCardViewer {
             });
     }
 
+    /// 映像の統計を左上へ半透明で重ねて描く。
+    ///
+    /// 統計の取り出しは 1 フレームにつきこの 1 回だけ。ロックの中では
+    /// 値のコピーと最大 120 要素の集計しか起きないため、毎フレーム呼んでよい。
+    fn show_stats_overlay(&self, ctx: &egui::Context) {
+        let Ok(video) = self.video_capture.lock() else {
+            // ロックを取れないのは他所が長く掴んでいるときだけ。
+            // 表示のために待たず、このフレームは描かない
+            return;
+        };
+        let stats = video.stats();
+        drop(video);
+
+        egui::Area::new("stats_overlay")
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(8.0, 8.0))
+            // 映像のドラッグや右クリックを吸わないようにする
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(egui::Color32::from_black_alpha(160))
+                    .rounding(4.0)
+                    .inner_margin(egui::Margin::same(6.0))
+                    .show(ui, |ui| {
+                        for line in format_stats_lines(&stats) {
+                            ui.label(
+                                egui::RichText::new(line)
+                                    .monospace()
+                                    .color(egui::Color32::WHITE),
+                            );
+                        }
+                    });
+            });
+    }
+
     fn show_context_menu(&mut self, ctx: &egui::Context) {
         let mut close_menu = false;
         let mut final_rect: Option<egui::Rect> = None;
@@ -1110,6 +1160,17 @@ impl CaptureCardViewer {
                         self.mark_settings_dirty();
                     }
 
+                    // 情報表示（統計オーバーレイ）のチェックボックス
+                    let stats_response = ui.checkbox(&mut self.show_stats_overlay, "情報表示");
+
+                    // 情報表示の設定が変更された場合（書き出しはデバウンス）
+                    if stats_response.changed() {
+                        if let Ok(mut settings) = self.settings.lock() {
+                            settings.ui.show_stats_overlay = self.show_stats_overlay;
+                        }
+                        self.mark_settings_dirty();
+                    }
+
                     ui.separator();
                     if ui.button("デバイス再接続").clicked() {
                         // 強制的にデバイス再接続（last_*をクリアして強制再接続）
@@ -1158,6 +1219,51 @@ impl CaptureCardViewer {
     }
 }
 
+/// 統計オーバーレイに出す行を組み立てる。
+///
+/// 値が取れていない項目は数値を出さずに「-」や「なし」にする。
+/// フレームが 1 枚も来ていない状態で平均を出そうとすると NaN や
+/// 無限大になり、それがそのまま画面に出てしまうため。
+fn format_stats_lines(stats: &FrameStats) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    match stats.intervals {
+        Some(intervals) => {
+            lines.push(format!(
+                "FPS {:.1} (平均間隔 {:.1}ms / {} 件)",
+                intervals.fps, intervals.average_ms, intervals.samples
+            ));
+            lines.push(format!(
+                "ばらつき ±{:.2}ms (最小 {:.1} / 最大 {:.1})",
+                intervals.stddev_ms, intervals.min_ms, intervals.max_ms
+            ));
+        }
+        None => lines.push("FPS - (フレーム間隔の計測待ち)".to_string()),
+    }
+
+    match (stats.resolution, stats.source_format) {
+        (Some((width, height)), Some(format)) => {
+            // フレームが 1 枚でも届いていれば、変換の計測値は実測値
+            lines.push(format!(
+                "デコード {:.2}ms (高速 {} / 汎用 {})",
+                stats.last_decode_ms, stats.fast_count, stats.fallback_count
+            ));
+            lines.push(format!("{}x{} {}", width, height, format));
+        }
+        _ => {
+            // 計測前の 0 を実測値と読み違えられないようにする
+            lines.push("デコード -".to_string());
+            lines.push("映像フレームなし".to_string());
+        }
+    }
+
+    if let Some(elapsed_ms) = stats.since_last_frame_ms {
+        lines.push(format!("最終フレーム {:.0}ms 前", elapsed_ms));
+    }
+
+    lines
+}
+
 /// 完了済みのスレッドハンドルを取り除く。
 ///
 /// `JoinHandle` を持ち続けるのは終了時に `join` するためだけなので、
@@ -1166,12 +1272,16 @@ fn drop_finished_threads<T>(handles: &mut Vec<JoinHandle<T>>) {
     handles.retain(|handle| !handle.is_finished());
 }
 
-/// 映像フレームを JPEG として `path` へ書き出す。
+/// 映像フレームを `encoding` の形式で `path` へ書き出す。
 ///
 /// アプリの状態にも共有ロックにも触れないので、そのまま別スレッドで実行でき、
 /// テストからも呼べる。保存スレッドはこの関数だけを呼ぶ。
-fn save_frame_as_jpeg(frame: &video::VideoFrame, path: &Path) -> Result<(), String> {
-    // 大きさのないフレームは JPEG として書き出せてしまうが、開けない
+fn save_frame(
+    frame: &video::VideoFrame,
+    path: &Path,
+    encoding: ScreenshotEncoding,
+) -> Result<(), String> {
+    // 大きさのないフレームは画像として書き出せてしまうが、開けない
     // ファイルが残るだけなので、ディレクトリを作る前に弾く
     if frame.width == 0 || frame.height == 0 {
         return Err(format!(
@@ -1208,8 +1318,48 @@ fn save_frame_as_jpeg(frame: &video::VideoFrame, path: &Path) -> Result<(), Stri
         )
     })?;
 
-    img.save(path)
+    // image の save() は拡張子から形式を決めるうえ、JPEG は品質 75 固定に
+    // なるため使わない。形式は encoding で決め、書き出し先は自分で開く
+    let file = std::fs::File::create(path)
+        .map_err(|e| format!("{} を作成できない: {}", path.display(), e))?;
+    let mut writer = std::io::BufWriter::new(file);
+
+    let encoded = match encoding {
+        ScreenshotEncoding::Jpeg { quality } => img.write_with_encoder(
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, quality),
+        ),
+        ScreenshotEncoding::Png => {
+            img.write_with_encoder(image::codecs::png::PngEncoder::new(&mut writer))
+        }
+    };
+
+    // BufWriter は drop のときにも書き出すが、そこで起きた失敗は捨てられる。
+    // 取りこぼすと、書き切れていないファイルを保存できたものとして扱ってしまう
+    let result = encoded
         .map_err(|e| format!("{} へ書き出せない: {}", path.display(), e))
+        .and_then(|()| {
+            writer
+                .into_inner()
+                .map_err(|e| format!("{} へ書き出せない: {}", path.display(), e))
+        })
+        .and_then(|file| {
+            file.sync_all()
+                .map_err(|e| format!("{} を書き切れない: {}", path.display(), e))
+        });
+
+    if result.is_err() {
+        // 途中まで書けたファイルを残さない。残すと開けない画像が
+        // 保存先に紛れ込み、次の撮影では連番の相手にもなる
+        if let Err(e) = std::fs::remove_file(path) {
+            warn!(
+                "書き出しに失敗した {} を削除できない: {}",
+                path.display(),
+                e
+            );
+        }
+    }
+
+    result
 }
 
 // 映像の縦横比を保ったまま、表示領域に収まる大きさを求める。
@@ -1688,6 +1838,7 @@ impl CaptureCardViewer {
             // UI設定
             self.maintain_aspect_ratio = settings.ui.maintain_aspect_ratio;
             self.always_on_top = settings.ui.always_on_top;
+            self.show_stats_overlay = settings.ui.show_stats_overlay;
 
             // スクリーンショット設定
             if let Ok(mut ss) = self.screenshot_manager.lock() {
@@ -1960,6 +2111,77 @@ mod tests {
     use super::*;
     use egui::Vec2;
     use tempfile::tempdir;
+    use video::IntervalStats;
+
+    #[test]
+    fn format_stats_lines_without_frames_shows_no_numbers() {
+        // デバイスに接続できていない状態。0 除算の結果や NaN を
+        // そのまま画面へ出さないことを確かめる
+        let lines = format_stats_lines(&FrameStats::default());
+        let joined = lines.join(
+            "
+",
+        );
+
+        assert!(joined.contains("FPS -"), "FPS が出ていない: {}", joined);
+        assert!(
+            joined.contains("デコード -"),
+            "計測前の 0 を数値で出している: {}",
+            joined
+        );
+        assert!(joined.contains("映像フレームなし"), "{}", joined);
+        assert!(
+            !joined.contains("NaN"),
+            "NaN が表示に混ざっている: {}",
+            joined
+        );
+        assert!(
+            !joined.contains("inf"),
+            "inf が表示に混ざっている: {}",
+            joined
+        );
+        assert!(
+            !joined.contains("最終フレーム"),
+            "フレームが無いのに経過時間が出ている: {}",
+            joined
+        );
+    }
+
+    #[test]
+    fn format_stats_lines_with_frames_shows_all_items() {
+        // 60fps 相当で動いている状態
+        let stats = FrameStats {
+            intervals: Some(IntervalStats {
+                fps: 60.0,
+                average_ms: 16.6667,
+                min_ms: 15.0,
+                max_ms: 18.0,
+                stddev_ms: 1.25,
+                samples: 120,
+            }),
+            last_decode_ms: 2.5,
+            fast_count: 1200,
+            fallback_count: 3,
+            resolution: Some((1920, 1080)),
+            source_format: Some("YUY2"),
+            since_last_frame_ms: Some(12.4),
+        };
+
+        let lines = format_stats_lines(&stats);
+        let joined = lines.join(
+            "
+",
+        );
+
+        assert!(joined.contains("FPS 60.0"), "{}", joined);
+        assert!(joined.contains("120 件"), "{}", joined);
+        assert!(joined.contains("±1.25ms"), "{}", joined);
+        assert!(joined.contains("最小 15.0 / 最大 18.0"), "{}", joined);
+        assert!(joined.contains("デコード 2.50ms"), "{}", joined);
+        assert!(joined.contains("高速 1200 / 汎用 3"), "{}", joined);
+        assert!(joined.contains("1920x1080 YUY2"), "{}", joined);
+        assert!(joined.contains("最終フレーム 12ms 前"), "{}", joined);
+    }
 
     #[test]
     fn backoff_delay_first_failure_waits_base_interval() {
@@ -2681,6 +2903,16 @@ mod tests {
             "アイコンが赤一色になっている"
         );
     }
+    // 書き出したファイルの中身から画像形式を判定する。
+    // 拡張子ではなく実際のバイト列を見る
+    fn detect_format(path: &Path) -> image::ImageFormat {
+        let reader = image::io::Reader::open(path)
+            .expect("保存したファイルを開けること")
+            .with_guessed_format()
+            .expect("形式を判定できること");
+        reader.format().expect("形式が分かること")
+    }
+
     // 2x2 の RGB フレーム。赤・緑・青・白を 1 画素ずつ並べてある
     fn test_frame_2x2() -> video::VideoFrame {
         video::VideoFrame {
@@ -2695,31 +2927,111 @@ mod tests {
         }
     }
 
+    // 品質の差がファイルサイズに出るように、細かく変化する模様を敷いた画像。
+    // 一様な色だとどの品質でもほぼ同じ大きさに圧縮され、差を見られない
+    fn detailed_frame_64x64() -> video::VideoFrame {
+        let mut data = Vec::with_capacity(64 * 64 * 3);
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                data.push((x * 37 + y * 11) as u8);
+                data.push((x * 7 + y * 53) as u8);
+                data.push((x * 91 + y * 29) as u8);
+            }
+        }
+        video::VideoFrame {
+            width: 64,
+            height: 64,
+            data,
+        }
+    }
+
+    const JPEG_Q90: ScreenshotEncoding = ScreenshotEncoding::Jpeg { quality: 90 };
+
     #[test]
-    fn save_frame_as_jpeg_writes_decodable_file() {
+    fn save_frame_jpeg_writes_decodable_file() {
         // JPEG は非可逆なので画素値は比較せず、読み戻せることと大きさだけを見る
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("shot.jpg");
 
-        save_frame_as_jpeg(&test_frame_2x2(), &path).expect("保存できること");
+        save_frame(&test_frame_2x2(), &path, JPEG_Q90).expect("保存できること");
 
         let decoded = image::open(&path).expect("保存した JPEG を読み戻せること");
         assert_eq!(decoded.dimensions(), (2, 2));
+        // 拡張子ではなく指定した形式で書けていること
+        assert_eq!(image::ImageFormat::Jpeg, detect_format(&path));
     }
 
     #[test]
-    fn save_frame_as_jpeg_creates_missing_parent_directory() {
+    fn save_frame_png_writes_pixels_without_loss() {
+        // PNG は可逆なので、元の画素がそのまま戻ることまで確かめる
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("shot.png");
+        let frame = test_frame_2x2();
+
+        save_frame(&frame, &path, ScreenshotEncoding::Png).expect("保存できること");
+
+        let decoded = image::open(&path).expect("保存した PNG を読み戻せること");
+        assert_eq!(decoded.dimensions(), (2, 2));
+        assert_eq!(image::ImageFormat::Png, detect_format(&path));
+        assert_eq!(decoded.to_rgb8().into_raw(), frame.data);
+    }
+
+    #[test]
+    fn save_frame_png_ignores_jpg_extension() {
+        // 拡張子は get_screenshot_path が形式に合わせるので普段は一致するが、
+        // 書き出す形式を決めるのは encoding だけであることを固定しておく
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("shot.jpg");
+
+        save_frame(&test_frame_2x2(), &path, ScreenshotEncoding::Png).expect("保存できること");
+
+        assert_eq!(image::ImageFormat::Png, detect_format(&path));
+    }
+
+    #[test]
+    fn save_frame_lower_jpeg_quality_produces_smaller_file() {
+        // 品質の指定がエンコーダまで届いていること
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let low_path = dir.path().join("low.jpg");
+        let high_path = dir.path().join("high.jpg");
+        let frame = detailed_frame_64x64();
+
+        save_frame(&frame, &low_path, ScreenshotEncoding::Jpeg { quality: 10 })
+            .expect("保存できること");
+        save_frame(
+            &frame,
+            &high_path,
+            ScreenshotEncoding::Jpeg { quality: 100 },
+        )
+        .expect("保存できること");
+
+        let low = std::fs::metadata(&low_path)
+            .expect("大きさを取れること")
+            .len();
+        let high = std::fs::metadata(&high_path)
+            .expect("大きさを取れること")
+            .len();
+        assert!(
+            low < high,
+            "品質 10 が品質 100 より小さくない: {} >= {}",
+            low,
+            high
+        );
+    }
+
+    #[test]
+    fn save_frame_creates_missing_parent_directory() {
         // 保存先フォルダが無い状態で撮影されることがあるため、親ごと作る
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("shots").join("2026").join("shot.jpg");
 
-        save_frame_as_jpeg(&test_frame_2x2(), &path).expect("保存できること");
+        save_frame(&test_frame_2x2(), &path, JPEG_Q90).expect("保存できること");
 
         assert!(path.exists());
     }
 
     #[test]
-    fn save_frame_as_jpeg_short_data_returns_error_without_creating_file() {
+    fn save_frame_short_data_returns_error_without_creating_file() {
         // 画素数に対してデータが足りないフレーム。壊れたファイルを残さないこと
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("shot.jpg");
@@ -2729,14 +3041,14 @@ mod tests {
             data: vec![0; 11],
         };
 
-        let err = save_frame_as_jpeg(&frame, &path).expect_err("エラーになること");
+        let err = save_frame(&frame, &path, JPEG_Q90).expect_err("エラーになること");
 
         assert!(err.contains("組み立てられない"), "想定外のエラー: {}", err);
         assert!(!path.exists());
     }
 
     #[test]
-    fn save_frame_as_jpeg_zero_sized_frame_returns_error() {
+    fn save_frame_zero_sized_frame_returns_error() {
         // フレームが来ていない状態を取り違えて保存しようとした場合
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("shot.jpg");
@@ -2746,7 +3058,7 @@ mod tests {
             data: Vec::new(),
         };
 
-        let err = save_frame_as_jpeg(&frame, &path).expect_err("エラーになること");
+        let err = save_frame(&frame, &path, JPEG_Q90).expect_err("エラーになること");
 
         assert!(err.contains("大きさのない"), "想定外のエラー: {}", err);
         assert!(!path.exists());

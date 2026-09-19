@@ -21,7 +21,7 @@ Delete the folder.
 
 To also remove the settings file, delete the following directory:
 
-> %AppData%\Capturecard_Viewer
+> %AppData%\capturecard_viewer
 
 ## Usage
 
@@ -35,16 +35,29 @@ To also remove the settings file, delete the following directory:
   - Toggle always-on-top
   - Toggle fullscreen
   - Toggle window dragging
+  - Toggle the stats overlay (shows FPS and more over the video)
   - Reconnect device
   - Advanced settings
 - **Mouse wheel**: Adjust volume (±10%)
+
+### Stats overlay
+
+Turning on "情報表示" (Show stats) in the context menu overlays the following on the top-left of the video. The on/off state is saved to the configuration file and restored on the next launch.
+
+| Item | Description |
+|---|---|
+| FPS | Effective frame rate derived from the average of the last 120 frame intervals. It is calculated from the frames that actually arrived, not queried from the device |
+| ばらつき (Jitter) | Standard deviation, minimum and maximum of the frame intervals. Dropped frames or capture stalls make this grow |
+| デコード (Decode) | Time spent on the RGB conversion of the most recent frame, plus how many frames took the fast path versus the generic path |
+| Resolution / format | Pixel size and input format of the frames actually arriving |
+| 最終フレーム (Last frame) | Time elapsed since the last frame arrived |
 
 ### Settings
 
 1. Right-click → "詳細設定..." (Advanced settings) to open the settings window.
 2. Select video and audio devices in the **device settings** tab.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
-3. Configure the save location, sound effect, and hotkey in the **screenshot settings** tab.
+3. Configure the save location, file format, sound effect, and hotkey in the **screenshot settings** tab.
 
 Edits in the settings window are kept as a draft and do not affect the running application until you press a button.
 
@@ -64,14 +77,17 @@ Edits in the settings window are kept as a draft and do not affect the running a
 
 - **Default key**: F5 (configurable)
 - **Save location**: Desktop (configurable)
-- **File name**: `YYYY-MM-DD_HH-MM-SS-mmm.jpg`
+- **File format**: JPEG (default, quality 1-100 selectable, 90 by default) or PNG
+- **File name**: `YYYY-MM-DD_HH-MM-SS-mmm.jpg` (`.png` when PNG is selected)
 - **Sound effect**: Custom audio files are supported, with adjustable volume
+
+JPEG keeps files small but blurs text and thin lines. Choose PNG when you want to keep game UI or subtitles exactly as rendered; PNG is lossless but produces files several times larger.
 
 ## Where settings are stored
 
 Settings are saved in the following directory:
 
-> %AppData%\Capturecard_Viewer
+> %AppData%\capturecard_viewer
 
 Deleting it will recreate the settings with default values on the next launch.
 
