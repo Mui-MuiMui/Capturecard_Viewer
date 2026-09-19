@@ -6,7 +6,7 @@ use image::GenericImageView;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 mod audio;
 mod screenshot;
@@ -18,6 +18,9 @@ use audio::AudioCapture;
 use screenshot::ScreenshotManager;
 use settings::AppSettings;
 use video::VideoCapture;
+
+/// デバイスリストのキャッシュを更新する間隔
+const DEVICE_LIST_CACHE_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct CaptureCardViewer {
     settings: Arc<Mutex<AppSettings>>,
@@ -38,6 +41,8 @@ pub struct CaptureCardViewer {
 
     // 映像表示関連
     video_texture: Option<egui::TextureHandle>,
+    // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
+    last_frame_generation: u64,
     pending_hotkey: Option<String>,
     temp_hotkey: String, // ホットキーダイアログ用の一時保存
     // 最後に適用した実行時パラメータ（差分ベースの再起動回避用）
@@ -61,6 +66,8 @@ pub struct CaptureCardViewer {
     delayed_connection_triggered: bool,
 
     // UI性能向上のためのデバイスリストキャッシュ
+    // ビデオは (デバイス名, 説明) の組
+    cached_video_devices: Vec<(String, String)>,
     cached_input_devices: Vec<String>,
     cached_output_devices: Vec<String>,
     last_device_list_update: Option<Instant>,
@@ -93,6 +100,7 @@ impl Default for CaptureCardViewer {
             last_volume_sent: -1.0,
             last_settings_applied: Instant::now(),
             video_texture: None,
+            last_frame_generation: 0,
             pending_hotkey: None,
             temp_hotkey: String::new(),
             last_video_device: None,
@@ -112,6 +120,7 @@ impl Default for CaptureCardViewer {
             delayed_connection_triggered: false,
 
             // UI性能向上のためのデバイスリストキャッシュ
+            cached_video_devices: Vec::new(),
             cached_input_devices: Vec::new(),
             cached_output_devices: Vec::new(),
             last_device_list_update: None,
@@ -254,6 +263,7 @@ impl eframe::App for CaptureCardViewer {
 
         // 設定ダイアログ
         if self.show_settings {
+            let video_devices = self.get_cached_video_devices().clone();
             let input_devices = self.get_cached_input_devices().clone();
             let output_devices = self.get_cached_output_devices().clone();
             let applied = ui::show_settings_dialog(
@@ -261,6 +271,7 @@ impl eframe::App for CaptureCardViewer {
                 &mut self.show_settings,
                 &self.settings,
                 &mut self.show_hotkey_dialog,
+                &video_devices,
                 &input_devices,
                 &output_devices,
             );
@@ -367,26 +378,32 @@ impl eframe::App for CaptureCardViewer {
 
 impl CaptureCardViewer {
     fn update_video_texture(&mut self, ctx: &egui::Context) {
-        if let Ok(video) = self.video_capture.lock() {
-            if let Some(frame) = video.get_latest_frame() {
-                // 最適化: テクスチャオプションをNearest（補間なし）に設定し、性能向上
-                let texture_options = egui::TextureOptions {
-                    magnification: egui::TextureFilter::Nearest,
-                    minification: egui::TextureFilter::Linear,
-                    wrap_mode: egui::TextureWrapMode::ClampToEdge,
-                };
+        // 新着フレームが無ければ何もしない。既存のテクスチャをそのまま使い回す
+        let new_frame = self
+            .video_capture
+            .lock()
+            .ok()
+            .and_then(|video| video.get_frame_if_newer(self.last_frame_generation));
 
-                let image = egui::ColorImage::from_rgb([frame.width, frame.height], &frame.data);
-                if let Some(texture) = &mut self.video_texture {
-                    texture.set(image, texture_options);
-                } else {
-                    self.video_texture =
-                        Some(ctx.load_texture("video_frame", image, texture_options));
-                }
+        if let Some((frame, generation)) = new_frame {
+            self.last_frame_generation = generation;
 
-                // より積極的な再描画要求
-                ctx.request_repaint();
+            // 最適化: テクスチャオプションをNearest（補間なし）に設定し、性能向上
+            let texture_options = egui::TextureOptions {
+                magnification: egui::TextureFilter::Nearest,
+                minification: egui::TextureFilter::Linear,
+                wrap_mode: egui::TextureWrapMode::ClampToEdge,
+            };
+
+            let image = egui::ColorImage::from_rgb([frame.width, frame.height], &frame.data);
+            if let Some(texture) = &mut self.video_texture {
+                texture.set(image, texture_options);
+            } else {
+                self.video_texture = Some(ctx.load_texture("video_frame", image, texture_options));
             }
+
+            // より積極的な再描画要求
+            ctx.request_repaint();
         }
         // フレームがない場合でも定期的に再チェック
         ctx.request_repaint_after(std::time::Duration::from_millis(16)); // ~60fps
@@ -415,7 +432,8 @@ impl CaptureCardViewer {
     fn take_screenshot(&mut self) {
         println!("take_screenshot: Starting screenshot process");
 
-        // 最新フレームの生データを抽出
+        // 最新フレームの生データを抽出。
+        // スクリーンショットはいま画面に出ている画を保存するので、新着でなくてよい
         if let Ok(video) = self.video_capture.lock() {
             if let Some(frame) = video.get_latest_frame() {
                 println!(
@@ -437,6 +455,7 @@ impl CaptureCardViewer {
                     }
 
                     // RGBデータを画像に変換して保存
+                    // image クレートが Vec の所有権を要求するため、ここだけは複製が要る
                     if let Some(img_buf) = image::RgbImage::from_raw(
                         frame.width as u32,
                         frame.height as u32,
@@ -1077,20 +1096,39 @@ impl CaptureCardViewer {
         }
     }
 
-    fn update_cached_device_lists(&mut self) {
-        // パフォーマンス影響を避けるため5秒ごとにのみデバイスリストを更新
-        let should_update = self
-            .last_device_list_update
-            .map(|last| last.elapsed().as_secs() >= 5)
-            .unwrap_or(true);
-
-        if should_update {
-            if let Ok(audio) = self.audio_capture.lock() {
-                self.cached_input_devices = audio.list_input_devices();
-                self.cached_output_devices = audio.list_output_devices();
-                self.last_device_list_update = Some(Instant::now());
-            }
+    /// デバイスリストのキャッシュを更新すべきかを判定する。
+    /// `elapsed` は前回更新からの経過時間で、`None` は「一度も取得していない」を表す。
+    fn should_refresh_device_list(elapsed: Option<Duration>) -> bool {
+        match elapsed {
+            None => true,
+            Some(elapsed) => elapsed >= DEVICE_LIST_CACHE_INTERVAL,
         }
+    }
+
+    fn update_cached_device_lists(&mut self) {
+        // パフォーマンス影響を避けるため一定間隔でのみデバイスリストを更新
+        let elapsed = self.last_device_list_update.map(|last| last.elapsed());
+        if !Self::should_refresh_device_list(elapsed) {
+            return;
+        }
+
+        // ビデオデバイスの列挙は MediaFoundation への問い合わせで重いため、
+        // オーディオデバイスと同じ間隔でキャッシュする
+        self.cached_video_devices = VideoCapture::list_devices();
+
+        if let Ok(audio) = self.audio_capture.lock() {
+            self.cached_input_devices = audio.list_input_devices();
+            self.cached_output_devices = audio.list_output_devices();
+        }
+
+        // ロック取得に失敗した場合も時刻は更新する。
+        // 更新しないと次のフレームでビデオデバイスの列挙が再び走ってしまう
+        self.last_device_list_update = Some(Instant::now());
+    }
+
+    fn get_cached_video_devices(&mut self) -> &Vec<(String, String)> {
+        self.update_cached_device_lists();
+        &self.cached_video_devices
     }
 
     fn get_cached_input_devices(&mut self) -> &Vec<String> {
@@ -1121,6 +1159,42 @@ impl CaptureCardViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_refresh_device_list_never_updated_returns_true() {
+        // 一度も列挙していない状態では必ず取得する
+        assert!(CaptureCardViewer::should_refresh_device_list(None));
+    }
+
+    #[test]
+    fn should_refresh_device_list_just_updated_returns_false() {
+        assert!(!CaptureCardViewer::should_refresh_device_list(Some(
+            Duration::from_secs(0)
+        )));
+    }
+
+    #[test]
+    fn should_refresh_device_list_just_before_interval_returns_false() {
+        // 境界の手前。4999ms では更新しない
+        assert!(!CaptureCardViewer::should_refresh_device_list(Some(
+            Duration::from_millis(4999)
+        )));
+    }
+
+    #[test]
+    fn should_refresh_device_list_at_interval_returns_true() {
+        // 境界。ちょうど 5000ms で更新する
+        assert!(CaptureCardViewer::should_refresh_device_list(Some(
+            Duration::from_millis(5000)
+        )));
+    }
+
+    #[test]
+    fn should_refresh_device_list_long_after_interval_returns_true() {
+        assert!(CaptureCardViewer::should_refresh_device_list(Some(
+            Duration::from_secs(3600)
+        )));
+    }
 
     #[test]
     fn needs_reapply_not_applied_yet_returns_true() {
