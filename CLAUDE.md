@@ -25,6 +25,7 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 - `cargo clippy --all-targets` は警告ゼロが前提。警告を増やしたままコミットしない
 - `cargo fmt --check` は差分ゼロが前提。落ちたら自分の変更を `cargo fmt` で整形してからコミットする
 - 整形の基準はリポジトリ直下の `rustfmt.toml`。`edition` だけ指定し、他は rustfmt の既定値に従う
+- 検証をひととおり回す手順は `.claude/skills/verify/SKILL.md` にまとめてある
 
 ## モジュール構成
 
@@ -126,6 +127,8 @@ https://app.asana.com/1/1218412078016612/project/1218457296782693/list
 `cv:` の名前空間を付けているのは、`/plan` や `/review` が組み込みコマンドや他のプラグインと衝突するのを避けるため。
 
 コマンドは「やること」だけを持ち、書式や基準は skill を参照する。**同じ内容を両方に書かない。** 片方を直したときにもう片方が古くなるため。
+
+リリースはこの 4 段階の外側にある。手順は `docs/RELEASE.md`、Claude がなぞる場合は `.claude/skills/release/SKILL.md` を使う。
 
 ### ブランチとコミット
 
