@@ -176,6 +176,8 @@ pub struct UiSettings {
     pub last_window_pos: Option<(f32, f32)>,
     pub always_on_top: bool,
     pub enable_drag_move: bool,
+    // 映像の上に FPS などの統計を重ねて出すか
+    pub show_stats_overlay: bool,
 }
 
 impl Default for VideoSettings {
@@ -235,6 +237,8 @@ impl Default for UiSettings {
             last_window_pos: None,
             always_on_top: false,
             enable_drag_move: true,
+            // 常時出しているものではないので、既定は非表示にする
+            show_stats_overlay: false,
         }
     }
 }
@@ -425,6 +429,7 @@ last_window_size = [800.0, 600.0]
 last_window_pos = [10.0, 20.0]
 always_on_top = true
 enable_drag_move = false
+show_stats_overlay = true
 "#;
 
     // 指定したキーの行を取り除く。項目を 1 つ追加した直後の、
@@ -480,6 +485,25 @@ enable_drag_move = false
         assert!(settings.ui.always_on_top);
         assert!(!settings.ui.maintain_aspect_ratio);
         assert_eq!(settings.ui.last_window_size, Some((800.0, 600.0)));
+    }
+
+    #[test]
+    fn app_settings_missing_show_stats_overlay_defaults_to_hidden() {
+        // 情報表示の項目を足した版へ上げた直後、既存ユーザーの設定ファイルには
+        // このキーが無い。欠けていても他の項目が保持され、既定の非表示になること。
+        let config = without_key(FULL_CONFIG, "show_stats_overlay");
+        assert!(
+            !config.contains("show_stats_overlay ="),
+            "テスト用の設定から show_stats_overlay が消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("show_stats_overlay が欠けていても読めなければならない");
+
+        assert!(!settings.ui.show_stats_overlay); // 既定値は false
+        assert_eq!(settings.ui.volume, 80.0);
+        assert!(settings.ui.always_on_top);
+        assert!(!settings.ui.enable_drag_move);
     }
 
     #[test]

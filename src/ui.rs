@@ -1279,6 +1279,7 @@ mod tests {
                 last_window_pos: Some((10.0, 20.0)),
                 always_on_top: true,
                 enable_drag_move: false,
+                show_stats_overlay: true,
             },
         }
     }

@@ -27,7 +27,7 @@ mod video;
 use audio::AudioCapture;
 use screenshot::ScreenshotManager;
 use settings::{AppSettings, ScreenshotEncoding};
-use video::VideoCapture;
+use video::{FrameStats, VideoCapture};
 
 /// デバイスリストのキャッシュを更新する間隔
 const DEVICE_LIST_CACHE_INTERVAL: Duration = Duration::from_secs(5);
@@ -71,6 +71,8 @@ pub struct CaptureCardViewer {
     context_menu_pos: egui::Pos2,
     is_fullscreen: bool,
     maintain_aspect_ratio: bool,
+    // 映像に統計を重ねて表示するか。設定の ui.show_stats_overlay と対応する
+    show_stats_overlay: bool,
     volume: f32,
     last_volume_sent: f32,
     last_settings_applied: Instant,
@@ -122,6 +124,10 @@ pub struct CaptureCardViewer {
 impl Default for CaptureCardViewer {
     fn default() -> Self {
         let (loaded_settings, load_outcome) = AppSettings::load();
+        // 表示状態は apply_settings を待たずに反映する。
+        // apply_settings は起動から 2 秒後が最初なので、待つと
+        // オンで終了したのに起動直後だけ出ていない、という見え方になる
+        let show_stats_overlay = loaded_settings.ui.show_stats_overlay;
         let settings = Arc::new(Mutex::new(loaded_settings));
         let video_capture = Arc::new(Mutex::new(VideoCapture::new()));
         #[allow(clippy::arc_with_non_send_sync)] // 音声キャプチャは非同期処理で必要
@@ -143,6 +149,7 @@ impl Default for CaptureCardViewer {
             context_menu_pos: egui::Pos2::ZERO,
             is_fullscreen: false,
             maintain_aspect_ratio: true,
+            show_stats_overlay,
             volume: 100.0,
             last_volume_sent: -1.0,
             last_settings_applied: Instant::now(),
@@ -339,6 +346,12 @@ impl eframe::App for CaptureCardViewer {
             self.show_fullscreen_ui(ctx);
         } else {
             self.show_windowed_ui(ctx);
+        }
+
+        // 統計オーバーレイ。ウィンドウ表示とフルスクリーンで同じものを出すため、
+        // どちらの描画のあとでもここで 1 回だけ描く
+        if self.show_stats_overlay {
+            self.show_stats_overlay(ctx);
         }
 
         // 設定ダイアログ
@@ -837,6 +850,41 @@ impl CaptureCardViewer {
             });
     }
 
+    /// 映像の統計を左上へ半透明で重ねて描く。
+    ///
+    /// 統計の取り出しは 1 フレームにつきこの 1 回だけ。ロックの中では
+    /// 値のコピーと最大 120 要素の集計しか起きないため、毎フレーム呼んでよい。
+    fn show_stats_overlay(&self, ctx: &egui::Context) {
+        let Ok(video) = self.video_capture.lock() else {
+            // ロックを取れないのは他所が長く掴んでいるときだけ。
+            // 表示のために待たず、このフレームは描かない
+            return;
+        };
+        let stats = video.stats();
+        drop(video);
+
+        egui::Area::new("stats_overlay")
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(8.0, 8.0))
+            // 映像のドラッグや右クリックを吸わないようにする
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(egui::Color32::from_black_alpha(160))
+                    .rounding(4.0)
+                    .inner_margin(egui::Margin::same(6.0))
+                    .show(ui, |ui| {
+                        for line in format_stats_lines(&stats) {
+                            ui.label(
+                                egui::RichText::new(line)
+                                    .monospace()
+                                    .color(egui::Color32::WHITE),
+                            );
+                        }
+                    });
+            });
+    }
+
     fn show_context_menu(&mut self, ctx: &egui::Context) {
         let mut close_menu = false;
         let mut final_rect: Option<egui::Rect> = None;
@@ -922,6 +970,17 @@ impl CaptureCardViewer {
                         self.mark_settings_dirty();
                     }
 
+                    // 情報表示（統計オーバーレイ）のチェックボックス
+                    let stats_response = ui.checkbox(&mut self.show_stats_overlay, "情報表示");
+
+                    // 情報表示の設定が変更された場合（書き出しはデバウンス）
+                    if stats_response.changed() {
+                        if let Ok(mut settings) = self.settings.lock() {
+                            settings.ui.show_stats_overlay = self.show_stats_overlay;
+                        }
+                        self.mark_settings_dirty();
+                    }
+
                     ui.separator();
                     if ui.button("デバイス再接続").clicked() {
                         // 強制的にデバイス再接続（last_*をクリアして強制再接続）
@@ -962,6 +1021,51 @@ impl CaptureCardViewer {
             self.show_context_menu = false;
         }
     }
+}
+
+/// 統計オーバーレイに出す行を組み立てる。
+///
+/// 値が取れていない項目は数値を出さずに「-」や「なし」にする。
+/// フレームが 1 枚も来ていない状態で平均を出そうとすると NaN や
+/// 無限大になり、それがそのまま画面に出てしまうため。
+fn format_stats_lines(stats: &FrameStats) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    match stats.intervals {
+        Some(intervals) => {
+            lines.push(format!(
+                "FPS {:.1} (平均間隔 {:.1}ms / {} 件)",
+                intervals.fps, intervals.average_ms, intervals.samples
+            ));
+            lines.push(format!(
+                "ばらつき ±{:.2}ms (最小 {:.1} / 最大 {:.1})",
+                intervals.stddev_ms, intervals.min_ms, intervals.max_ms
+            ));
+        }
+        None => lines.push("FPS - (フレーム間隔の計測待ち)".to_string()),
+    }
+
+    match (stats.resolution, stats.source_format) {
+        (Some((width, height)), Some(format)) => {
+            // フレームが 1 枚でも届いていれば、変換の計測値は実測値
+            lines.push(format!(
+                "デコード {:.2}ms (高速 {} / 汎用 {})",
+                stats.last_decode_ms, stats.fast_count, stats.fallback_count
+            ));
+            lines.push(format!("{}x{} {}", width, height, format));
+        }
+        _ => {
+            // 計測前の 0 を実測値と読み違えられないようにする
+            lines.push("デコード -".to_string());
+            lines.push("映像フレームなし".to_string());
+        }
+    }
+
+    if let Some(elapsed_ms) = stats.since_last_frame_ms {
+        lines.push(format!("最終フレーム {:.0}ms 前", elapsed_ms));
+    }
+
+    lines
 }
 
 /// 完了済みのスレッドハンドルを取り除く。
@@ -1482,6 +1586,7 @@ impl CaptureCardViewer {
             // UI設定
             self.maintain_aspect_ratio = settings.ui.maintain_aspect_ratio;
             self.always_on_top = settings.ui.always_on_top;
+            self.show_stats_overlay = settings.ui.show_stats_overlay;
 
             // スクリーンショット設定
             if let Ok(mut ss) = self.screenshot_manager.lock() {
@@ -1754,6 +1859,77 @@ mod tests {
     use super::*;
     use egui::Vec2;
     use tempfile::tempdir;
+    use video::IntervalStats;
+
+    #[test]
+    fn format_stats_lines_without_frames_shows_no_numbers() {
+        // デバイスに接続できていない状態。0 除算の結果や NaN を
+        // そのまま画面へ出さないことを確かめる
+        let lines = format_stats_lines(&FrameStats::default());
+        let joined = lines.join(
+            "
+",
+        );
+
+        assert!(joined.contains("FPS -"), "FPS が出ていない: {}", joined);
+        assert!(
+            joined.contains("デコード -"),
+            "計測前の 0 を数値で出している: {}",
+            joined
+        );
+        assert!(joined.contains("映像フレームなし"), "{}", joined);
+        assert!(
+            !joined.contains("NaN"),
+            "NaN が表示に混ざっている: {}",
+            joined
+        );
+        assert!(
+            !joined.contains("inf"),
+            "inf が表示に混ざっている: {}",
+            joined
+        );
+        assert!(
+            !joined.contains("最終フレーム"),
+            "フレームが無いのに経過時間が出ている: {}",
+            joined
+        );
+    }
+
+    #[test]
+    fn format_stats_lines_with_frames_shows_all_items() {
+        // 60fps 相当で動いている状態
+        let stats = FrameStats {
+            intervals: Some(IntervalStats {
+                fps: 60.0,
+                average_ms: 16.6667,
+                min_ms: 15.0,
+                max_ms: 18.0,
+                stddev_ms: 1.25,
+                samples: 120,
+            }),
+            last_decode_ms: 2.5,
+            fast_count: 1200,
+            fallback_count: 3,
+            resolution: Some((1920, 1080)),
+            source_format: Some("YUY2"),
+            since_last_frame_ms: Some(12.4),
+        };
+
+        let lines = format_stats_lines(&stats);
+        let joined = lines.join(
+            "
+",
+        );
+
+        assert!(joined.contains("FPS 60.0"), "{}", joined);
+        assert!(joined.contains("120 件"), "{}", joined);
+        assert!(joined.contains("±1.25ms"), "{}", joined);
+        assert!(joined.contains("最小 15.0 / 最大 18.0"), "{}", joined);
+        assert!(joined.contains("デコード 2.50ms"), "{}", joined);
+        assert!(joined.contains("高速 1200 / 汎用 3"), "{}", joined);
+        assert!(joined.contains("1920x1080 YUY2"), "{}", joined);
+        assert!(joined.contains("最終フレーム 12ms 前"), "{}", joined);
+    }
 
     #[test]
     fn should_refresh_device_list_never_updated_returns_true() {

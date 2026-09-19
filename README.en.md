@@ -35,9 +35,22 @@ To also remove the settings file, delete the following directory:
   - Toggle always-on-top
   - Toggle fullscreen
   - Toggle window dragging
+  - Toggle the stats overlay (shows FPS and more over the video)
   - Reconnect device
   - Advanced settings
 - **Mouse wheel**: Adjust volume (±10%)
+
+### Stats overlay
+
+Turning on "情報表示" (Show stats) in the context menu overlays the following on the top-left of the video. The on/off state is saved to the configuration file and restored on the next launch.
+
+| Item | Description |
+|---|---|
+| FPS | Effective frame rate derived from the average of the last 120 frame intervals. It is calculated from the frames that actually arrived, not queried from the device |
+| ばらつき (Jitter) | Standard deviation, minimum and maximum of the frame intervals. Dropped frames or capture stalls make this grow |
+| デコード (Decode) | Time spent on the RGB conversion of the most recent frame, plus how many frames took the fast path versus the generic path |
+| Resolution / format | Pixel size and input format of the frames actually arriving |
+| 最終フレーム (Last frame) | Time elapsed since the last frame arrived |
 
 ### Settings
 
