@@ -12,6 +12,7 @@ use image::GenericImageView;
 use log::{debug, error, info, trace, warn};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -45,11 +46,21 @@ const MIN_VISIBLE_WINDOW_HEIGHT: f32 = 32.0;
 /// 最後の変更からこの時間が空くまで書き出しをまとめる
 const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
 
+/// デバイス能力の取得結果。`(問い合わせたデバイス名, 結果)`。
+/// 取得スレッドから UI スレッドへ、この形でチャネル越しに返す
+type CapabilityResult = (String, Result<video::DeviceCapabilities, String>);
+
 pub struct CaptureCardViewer {
     settings: Arc<Mutex<AppSettings>>,
     video_capture: Arc<Mutex<VideoCapture>>,
     audio_capture: Arc<Mutex<AudioCapture>>,
     screenshot_manager: Arc<Mutex<ScreenshotManager>>,
+
+    // デバイス能力の取得結果を受け取るチャネル。
+    // 取得はデバイスを開く重い処理なので使い捨てのスレッドへ投げ、
+    // UI スレッドは update() で try_recv するだけにする
+    capability_tx: Sender<CapabilityResult>,
+    capability_rx: Receiver<CapabilityResult>,
 
     // UI状態管理
     show_settings: bool,
@@ -116,12 +127,15 @@ impl Default for CaptureCardViewer {
         #[allow(clippy::arc_with_non_send_sync)] // 音声キャプチャは非同期処理で必要
         let audio_capture = Arc::new(Mutex::new(AudioCapture::new()));
         let screenshot_manager = Arc::new(Mutex::new(ScreenshotManager::new()));
+        let (capability_tx, capability_rx) = std::sync::mpsc::channel();
 
-        let app = Self {
+        let mut app = Self {
             settings,
             video_capture,
             audio_capture,
             screenshot_manager,
+            capability_tx,
+            capability_rx,
             show_settings: false,
             settings_dialog: ui::SettingsDialogState::default(),
             show_context_menu: false,
@@ -196,6 +210,23 @@ impl Default for CaptureCardViewer {
                 }
             }
         }
+
+        // 保存済みのビデオデバイスの能力を先に取りに行く。
+        // 設定画面を開いた時点で選択肢が揃っているようにするためで、
+        // 以前はデバイスを切り替えたときしか取得していなかったため、
+        // 起動後に設定画面を開いても解像度や FPS の選択肢が出なかった。
+        // 遅延接続（起動から 2 秒）より前に投げるので、多くの場合は
+        // キャプチャーを開き始めるまでに取得が終わる
+        let saved_video_device = app
+            .settings
+            .lock()
+            .ok()
+            .and_then(|s| s.video.device_name.clone());
+        if let Some(device) = saved_video_device {
+            app.settings_dialog.capabilities_mut().request(&device);
+            app.dispatch_capability_requests();
+        }
+
         // 注: デバイス接続は起動から2秒後に遅延実行される
         app
     }
@@ -203,6 +234,10 @@ impl Default for CaptureCardViewer {
 
 impl eframe::App for CaptureCardViewer {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 別スレッドで取得したデバイス能力を取り込む。
+        // 設定ダイアログを開いていなくても受け取る（起動時の先読み分があるため）
+        self.drain_capability_results();
+
         // 遅延デバイス接続（起動から3秒後に実行し、画面投影問題を解決）
         if !self.delayed_connection_triggered {
             if let Some(startup_time) = self.startup_time {
@@ -328,6 +363,9 @@ impl eframe::App for CaptureCardViewer {
                 &output_devices,
             );
             self.handle_settings_dialog_action(action);
+
+            // ダイアログが積んだ取得要求を別スレッドへ渡す
+            self.dispatch_capability_requests();
         }
 
         // ホットキーキャプチャダイアログ
@@ -1582,6 +1620,57 @@ impl CaptureCardViewer {
         // ロック取得に失敗した場合も時刻は更新する。
         // 更新しないと次のフレームでビデオデバイスの列挙が再び走ってしまう
         self.last_device_list_update = Some(Instant::now());
+    }
+
+    /// 別スレッドから届いたデバイス能力の取得結果を設定ダイアログへ反映する。
+    /// キャッシュを触るのは UI スレッドだけなのでロックは要らない。
+    fn drain_capability_results(&mut self) {
+        while let Ok((device, result)) = self.capability_rx.try_recv() {
+            self.settings_dialog
+                .capabilities_mut()
+                .apply_result(device, result);
+        }
+    }
+
+    /// 溜まったデバイス能力の取得要求を、使い捨てのスレッドへ渡す。
+    ///
+    /// `get_device_capabilities` は `Camera::new` でデバイスを開いたうえで
+    /// 3 フォーマット分の対応表を引くため数百 ms 以上かかる。以前は設定ダイアログの
+    /// 描画中に直接呼んでいたため、デバイスを切り替えるたびにアプリ全体が固まっていた。
+    fn dispatch_capability_requests(&mut self) {
+        for device in self.settings_dialog.capabilities_mut().take_requests() {
+            let tx = self.capability_tx.clone();
+            let name = device.clone();
+            let spawned = std::thread::Builder::new()
+                .name("capability-query".to_string())
+                .spawn(move || {
+                    let started = Instant::now();
+                    let result = VideoCapture::get_device_capabilities(Some(&name));
+                    match &result {
+                        Ok(caps) => info!(
+                            "デバイス能力を取得した: {}（{} フォーマット, {} ms）",
+                            name,
+                            caps.len(),
+                            started.elapsed().as_millis()
+                        ),
+                        Err(e) => warn!("デバイス能力を取得できない: {}: {}", name, e),
+                    }
+                    if tx.send((name, result)).is_err() {
+                        // 受信側が無いのはアプリが終了したときだけ。結果は捨ててよい
+                        debug!("デバイス能力の送り先が既に無いので結果を捨てる");
+                    }
+                });
+
+            if let Err(e) = spawned {
+                warn!("デバイス能力を取得するスレッドを起動できない: {}", e);
+                // 投げられなかった要求を Pending のまま残すと、再取得もできずに
+                // 「取得中...」が出続ける
+                self.settings_dialog.capabilities_mut().apply_result(
+                    device,
+                    Err(format!("取得用のスレッドを起動できませんでした: {}", e)),
+                );
+            }
+        }
     }
 
     fn get_cached_video_devices(&mut self) -> &Vec<(String, String)> {

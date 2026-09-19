@@ -49,8 +49,11 @@ cargo build --release
 - ホットキーリスナースレッド（`set_hotkey` のたびに再生成される）
 - 効果音再生スレッド（再生ごとに spawn）
 - スクリーンショットの保存スレッド（撮影ごとに spawn。JPEG エンコードとファイル書き出しを行う）
+- デバイス能力取得スレッド（要求ごとに spawn。結果は mpsc チャネルで UI スレッドへ返す）
 
 保存スレッドの `JoinHandle` は `CaptureCardViewer::screenshot_save_threads` が持ち、`on_exit` で全て join する。**ここを捨てるとスレッドが切り離され、撮影直後に閉じたときプロセスの終了が書き出しを追い越して壊れた JPEG が残る。** 溜め込まないよう、撮影のたびに `drop_finished_threads` で完了済みのハンドルを落としている。
+
+デバイス能力の取得状態（`ui::CapabilityCache`）は `SettingsDialogState` の中にあり、**UI スレッドだけが触る。** 取得スレッドは結果をチャネルへ送るだけで、キャッシュには触れない。`update()` の先頭の `drain_capability_results()` が受け取って反映する。
 
 ### ロック順序
 
