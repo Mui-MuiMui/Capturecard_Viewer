@@ -12,10 +12,11 @@ fn yuy2_to_rgb_naive(width: usize, height: usize, src: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; width * height * 3];
 
     // 安全確保: 偶数幅前提 (YUYV ペア)
-    let src_chunks = src.chunks_exact(4);
-    let out_chunks = out.chunks_exact_mut(6);
+    // 4 バイト / 6 バイトに満たない端数は変換せず、出力は 0 のまま残す
+    let (src_chunks, _) = src.as_chunks::<4>();
+    let (out_chunks, _) = out.as_chunks_mut::<6>();
 
-    for (src_chunk, out_chunk) in src_chunks.zip(out_chunks) {
+    for (src_chunk, out_chunk) in src_chunks.iter().zip(out_chunks.iter_mut()) {
         let y0 = src_chunk[0] as i32;
         let u = src_chunk[1] as i32;
         let y1 = src_chunk[2] as i32;
@@ -210,7 +211,7 @@ impl VideoCapture {
                 let source_format = frame.source_frame_format();
 
                 match source_format {
-                    FrameFormat::YUYV if width % 2 == 0 => {
+                    FrameFormat::YUYV if width.is_multiple_of(2) => {
                         // YUY2の高速パス
                         let raw_data = frame.buffer_bytes();
                         if raw_data.len() >= width * height * 2 {
