@@ -22,7 +22,7 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 
 - ビルドには MSVC ツールチェインと Windows SDK が必要（`build.rs` が `embed_resource` で `app.rc` をコンパイルするため）
 - バージョン番号の出どころは `Cargo.toml` の `version` だけ。`build.rs` が `app.rc` 用のヘッダーを生成するので、他の場所に数値を書かない（`docs/BUILD.md` の「バージョン番号」）
-- `cargo clippy --all-targets` はクリーンではなく、既知の警告が残っている（詳細は Asana のタスク参照）
+- `cargo clippy --all-targets` は警告ゼロが前提。警告を増やしたままコミットしない
 - `cargo fmt --check` は差分ゼロが前提。落ちたら自分の変更を `cargo fmt` で整形してからコミットする
 - 整形の基準はリポジトリ直下の `rustfmt.toml`。`edition` だけ指定し、他は rustfmt の既定値に従う
 
@@ -31,7 +31,7 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 | ファイル | 役割 |
 |---|---|
 | `src/main.rs` | アプリ状態 `CaptureCardViewer`、`eframe::App` 実装、映像描画、コンテキストメニュー、デバイス接続の適用とリトライ、スクリーンショット処理、エントリポイント |
-| `src/video.rs` | nokhwa `CallbackCamera` によるキャプチャ、YUY2→RGB 変換、`FrameBuffer`（ダブルバッファ）、デバイス能力の取得 |
+| `src/video.rs` | nokhwa `CallbackCamera` によるキャプチャ、YUY2→RGB 変換、`FrameBuffer`（`Arc` によるフレーム共有と世代番号）、デバイス能力の取得 |
 | `src/audio.rs` | cpal による入力→リングバッファ→出力のパススルー、音量制御 |
 | `src/screenshot.rs` | global-hotkey によるグローバルホットキー登録とリスナースレッド、rodio による効果音再生 |
 | `src/settings.rs` | `AppSettings` とその serde 定義、confy による読み書き、保存パスの決定 |
@@ -40,6 +40,10 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 ### 映像パイプライン
 
 キャプチャーデバイス → nokhwa `Buffer` → フレームコールバックで YUY2→RGB 変換 → `FrameBuffer` → `update_video_texture` で egui テクスチャ化 → 描画
+
+`FrameBuffer` はフレームを `Arc<VideoFrame>` で保持し、取り出し側へは `Arc` の複製を渡す。**画素データを複製しないので、取り出しても 1080p で 6MB の memcpy は発生しない。**
+
+`FrameBuffer` は push のたびに進む世代番号を持つ。`update_video_texture` は `get_frame_if_newer` で前回反映した世代と比較し、新着が無ければテクスチャを更新しない。**新着の有無を問わず最後のフレームが要る用途（スクリーンショット）は `get_latest_frame` を使う。** 世代番号はキャプチャ停止時も巻き戻さない。巻き戻すと再接続後の最初のフレームが呼び出し側の記録と一致し、新着と判別できなくなる。
 
 ### スレッド構成
 
@@ -76,7 +80,6 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 
 以下は設定画面から変更できるが実装が追いついていない。README の記述もこれらを前提に書かれているため、修正時は README も合わせて更新すること。
 
-- 音声パススルーの有効/無効（フラグがストリーム側から参照されていない）
 - オーディオのサンプリングレート／チャンネル数（`start_passthrough_with_settings` の引数が未使用）
 - ビデオフォーマットの MJPEG / RGB24（内部で YUYV に強制される）
 

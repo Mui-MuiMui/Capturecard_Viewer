@@ -6,16 +6,24 @@ use nokhwa::CallbackCamera;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-// YUY2 -> RGB24 高速変換 (最適化版)
 
+/// 1 つのビデオフォーマットが対応する能力。
+/// `(フォーマット名, [(幅, 高さ, fps)])` の組で、フォーマット名は "YUY2" / "MJPEG" / "RGB24"。
+pub type FormatCapability = (String, Vec<(u32, u32, u32)>);
+
+/// デバイスが対応する全フォーマットの能力一覧。
+pub type DeviceCapabilities = Vec<FormatCapability>;
+
+// YUY2 -> RGB24 高速変換 (最適化版)
 fn yuy2_to_rgb_naive(width: usize, height: usize, src: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; width * height * 3];
 
     // 安全確保: 偶数幅前提 (YUYV ペア)
-    let src_chunks = src.chunks_exact(4);
-    let out_chunks = out.chunks_exact_mut(6);
+    // 4 バイト / 6 バイトに満たない端数は変換せず、出力は 0 のまま残す
+    let (src_chunks, _) = src.as_chunks::<4>();
+    let (out_chunks, _) = out.as_chunks_mut::<6>();
 
-    for (src_chunk, out_chunk) in src_chunks.zip(out_chunks) {
+    for (src_chunk, out_chunk) in src_chunks.iter().zip(out_chunks.iter_mut()) {
         let y0 = src_chunk[0] as i32;
         let u = src_chunk[1] as i32;
         let y1 = src_chunk[2] as i32;
@@ -52,10 +60,13 @@ pub struct VideoFrame {
     pub data: Vec<u8>,
 }
 
+/// フレームコールバックスレッドと UI スレッドの間でフレームを受け渡す。
+///
+/// 画素データは `Arc` で共有するため、取り出しても複製は発生しない。
+/// `generation` は push のたびに進み、取り出し側が新着の有無を判別するために使う。
 struct FrameBuffer {
-    front: Option<VideoFrame>,
-    back: Option<VideoFrame>,
-    dirty: bool,
+    latest: Option<Arc<VideoFrame>>,
+    generation: u64,
     last_frame_instant: Option<Instant>,
     frame_intervals: VecDeque<f32>, // ミリ秒
     last_decode_ms: f32,
@@ -66,9 +77,8 @@ struct FrameBuffer {
 impl FrameBuffer {
     fn new() -> Self {
         Self {
-            front: None,
-            back: None,
-            dirty: false,
+            latest: None,
+            generation: 0,
             last_frame_instant: None,
             frame_intervals: VecDeque::with_capacity(120),
             last_decode_ms: 0.0,
@@ -77,8 +87,8 @@ impl FrameBuffer {
         }
     }
     fn push_back(&mut self, frame: VideoFrame, decode_ms: f32, fast: bool) {
-        self.back = Some(frame);
-        self.dirty = true;
+        self.latest = Some(Arc::new(frame));
+        self.generation += 1;
         self.last_decode_ms = decode_ms;
         if fast {
             self.fast_count += 1;
@@ -94,25 +104,27 @@ impl FrameBuffer {
             self.frame_intervals.push_back(dt);
         }
     }
-    fn take_front(&mut self) -> Option<VideoFrame> {
-        if self.dirty {
-            std::mem::swap(&mut self.front, &mut self.back);
-            self.dirty = false;
-        }
-        // メモリリーク修正: cloneの代わりに参照を返すように変更
-        self.front.as_ref().map(|frame| VideoFrame {
-            width: frame.width,
-            height: frame.height,
-            data: frame.data.clone(),
-        })
+    /// 直近のフレームとその世代番号を返す。新着かどうかは問わない。
+    ///
+    /// 返すのは `Arc` の複製なので、画素データはコピーされない。
+    fn latest_frame(&self) -> Option<(Arc<VideoFrame>, u64)> {
+        self.latest
+            .as_ref()
+            .map(|frame| (Arc::clone(frame), self.generation))
     }
 
-    // メモリリーク防止: 古いフレームをクリア
-    fn clear_old_frames(&mut self) {
-        // 前回のフレームを破棄
-        if self.back.is_some() && !self.dirty {
-            self.back = None;
-        }
+    /// 保持しているフレームと統計を捨てる。キャプチャの停止時に呼ぶ。
+    ///
+    /// 世代番号は巻き戻さない。巻き戻すと、再接続後の最初のフレームが
+    /// 取り出し側の記録している世代と一致して、新着と見なされなくなる。
+    fn reset(&mut self) {
+        self.latest = None;
+        self.generation += 1;
+        self.last_frame_instant = None;
+        self.frame_intervals.clear();
+        self.last_decode_ms = 0.0;
+        self.fast_count = 0;
+        self.fallback_count = 0;
     }
 }
 
@@ -210,7 +222,7 @@ impl VideoCapture {
                 let source_format = frame.source_frame_format();
 
                 match source_format {
-                    FrameFormat::YUYV if width % 2 == 0 => {
+                    FrameFormat::YUYV if width.is_multiple_of(2) => {
                         // YUY2の高速パス
                         let raw_data = frame.buffer_bytes();
                         if raw_data.len() >= width * height * 2 {
@@ -265,17 +277,35 @@ impl VideoCapture {
         self.is_active = false;
 
         if let Ok(mut buf) = self.frames.lock() {
-            *buf = FrameBuffer::new();
+            buf.reset();
         }
     }
 
-    pub fn get_latest_frame(&self) -> Option<VideoFrame> {
-        self.frames.lock().ok().and_then(|mut fb| {
-            let frame = fb.take_front();
-            // メモリリーク防止: 定期的に古いフレームをクリア
-            fb.clear_old_frames();
-            frame
-        })
+    /// 直近のフレームを新着かどうかに関わらず返す。
+    ///
+    /// スクリーンショットは「いま画面に出ている画」を保存するものなので、
+    /// 新着でなくても最後に届いたフレームを返す必要がある。
+    pub fn get_latest_frame(&self) -> Option<Arc<VideoFrame>> {
+        self.frames
+            .lock()
+            .ok()
+            .and_then(|fb| fb.latest_frame().map(|(frame, _)| frame))
+    }
+
+    /// 世代番号が `last_generation` と異なるフレームがある場合だけ、
+    /// フレームと世代番号を返す。
+    ///
+    /// 新着がなければ `None` を返すので、呼び出し側は前回の結果を使い回せる。
+    pub fn get_frame_if_newer(&self, last_generation: u64) -> Option<(Arc<VideoFrame>, u64)> {
+        self.frames
+            .lock()
+            .ok()
+            .and_then(|fb| match fb.latest_frame() {
+                Some((frame, generation)) if generation != last_generation => {
+                    Some((frame, generation))
+                }
+                _ => None,
+            })
     }
 
     #[allow(dead_code)]
@@ -311,7 +341,7 @@ impl VideoCapture {
     // デバイスの能力を取得するメソッド
     pub fn get_device_capabilities(
         device_name: Option<&str>,
-    ) -> Result<Vec<(String, Vec<(u32, u32, u32)>)>, String> {
+    ) -> Result<DeviceCapabilities, String> {
         use nokhwa::Camera;
 
         // デバイス情報を取得
@@ -335,7 +365,7 @@ impl VideoCapture {
         let mut camera = Camera::new(device_info.index().clone(), requested_format)
             .map_err(|e| format!("Failed to create camera for capability query: {}", e))?;
 
-        let mut result: Vec<(String, Vec<(u32, u32, u32)>)> = Vec::new();
+        let mut result: DeviceCapabilities = Vec::new();
 
         // 各フォーマットで対応解像度・FPSを取得
         let formats = vec![
@@ -414,12 +444,181 @@ impl Drop for VideoCapture {
     }
 }
 
-impl Clone for VideoFrame {
-    fn clone(&self) -> Self {
-        Self {
-            width: self.width,
-            height: self.height,
-            data: self.data.clone(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_WIDTH: usize = 2;
+    const TEST_HEIGHT: usize = 2;
+    const TEST_FRAME_LEN: usize = TEST_WIDTH * TEST_HEIGHT * 3;
+
+    /// 識別しやすいように全画素を marker で埋めたフレームを作る
+    fn test_frame(marker: u8) -> VideoFrame {
+        VideoFrame {
+            width: TEST_WIDTH,
+            height: TEST_HEIGHT,
+            data: vec![marker; TEST_FRAME_LEN],
         }
+    }
+
+    #[test]
+    fn frame_buffer_latest_frame_after_push_returns_newest_frame() {
+        let mut buffer = FrameBuffer::new();
+        buffer.push_back(test_frame(1), 1.0, true);
+        buffer.push_back(test_frame(2), 1.0, true);
+
+        let (frame, generation) = buffer
+            .latest_frame()
+            .expect("push 済みなのでフレームが取れる");
+        assert_eq!(frame.width, TEST_WIDTH);
+        assert_eq!(frame.height, TEST_HEIGHT);
+        assert_eq!(frame.data, vec![2u8; TEST_FRAME_LEN]);
+        assert_eq!(generation, 2);
+    }
+
+    #[test]
+    fn frame_buffer_latest_frame_without_push_returns_none() {
+        let buffer = FrameBuffer::new();
+        assert!(buffer.latest_frame().is_none());
+    }
+
+    #[test]
+    fn frame_buffer_latest_frame_without_new_push_keeps_generation() {
+        let mut buffer = FrameBuffer::new();
+        buffer.push_back(test_frame(1), 1.0, true);
+
+        let (_, first) = buffer.latest_frame().expect("1 枚目が取れる");
+        let (_, second) = buffer.latest_frame().expect("取り出しても消えない");
+        assert_eq!(first, second, "push が無ければ世代は進まない");
+
+        buffer.push_back(test_frame(2), 1.0, true);
+        let (_, third) = buffer.latest_frame().expect("2 枚目が取れる");
+        assert_eq!(third, second + 1, "push すれば世代が 1 つ進む");
+    }
+
+    #[test]
+    fn frame_buffer_latest_frame_twice_shares_same_allocation() {
+        // 取り出しで画素データが複製されないこと（このタスクの本題）
+        let mut buffer = FrameBuffer::new();
+        buffer.push_back(test_frame(1), 1.0, true);
+
+        let (first, _) = buffer.latest_frame().expect("1 回目");
+        let (second, _) = buffer.latest_frame().expect("2 回目");
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn frame_buffer_reset_drops_frame_and_advances_generation() {
+        let mut buffer = FrameBuffer::new();
+        buffer.push_back(test_frame(1), 1.0, true);
+        let (_, before) = buffer.latest_frame().expect("push 済み");
+
+        buffer.reset();
+        assert!(buffer.latest_frame().is_none());
+
+        // 再接続後の最初のフレームが「新着」と判別できること
+        buffer.push_back(test_frame(2), 1.0, true);
+        let (_, after) = buffer.latest_frame().expect("再接続後の 1 枚目");
+        assert!(after > before);
+    }
+
+    #[test]
+    fn frame_buffer_concurrent_push_returns_latest_frame_without_panic() {
+        // コールバックスレッドが push し続ける裏で UI スレッドが取り出す状況を模す
+        const PUSH_COUNT: usize = 500;
+        let buffer = Arc::new(Mutex::new(FrameBuffer::new()));
+
+        let writer = {
+            let buffer = Arc::clone(&buffer);
+            std::thread::spawn(move || {
+                for i in 0..PUSH_COUNT {
+                    buffer.lock().expect("書き込み側のロックに失敗").push_back(
+                        test_frame(i as u8),
+                        1.0,
+                        true,
+                    );
+                }
+            })
+        };
+
+        let mut last_generation = 0;
+        while !writer.is_finished() {
+            if let Some((_, generation)) = buffer
+                .lock()
+                .expect("読み出し側のロックに失敗")
+                .latest_frame()
+            {
+                assert!(generation >= last_generation, "世代は巻き戻らない");
+                last_generation = generation;
+            }
+        }
+        writer.join().expect("書き込みスレッドがパニックした");
+
+        let (frame, generation) = buffer
+            .lock()
+            .expect("読み出し側のロックに失敗")
+            .latest_frame()
+            .expect("最後に push したフレームが残っている");
+        assert_eq!(frame.data, vec![(PUSH_COUNT - 1) as u8; TEST_FRAME_LEN]);
+        assert_eq!(generation, PUSH_COUNT as u64);
+    }
+    // 期待値は BT.601 の整数近似式を手計算した結果をベタ書きする。
+    // 実装と同じ式で計算すると、実装が誤っていてもテストが通ってしまうため。
+
+    #[test]
+    fn yuy2_to_rgb_naive_known_pattern_converts_two_pixels() {
+        // Y0=81, U=90, Y1=145, V=240 (赤寄りの YUYV ペア)
+        let src = [81u8, 90, 145, 240];
+        let out = yuy2_to_rgb_naive(2, 1, &src);
+        assert_eq!(out, vec![254, 0, 0, 255, 73, 73]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_output_length_is_width_times_height_times_three() {
+        let src = [235u8, 128, 235, 128, 235, 128, 235, 128];
+        let out = yuy2_to_rgb_naive(2, 2, &src);
+        assert_eq!(out.len(), 2 * 2 * 3);
+        assert_eq!(
+            out,
+            vec![254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254]
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_odd_width_leaves_last_pixel_black() {
+        // 幅が奇数だと出力が 6 バイト単位で割り切れず、最後の 1 画素は変換されず 0 のまま残る
+        let src = [235u8, 128, 235, 128, 0, 0];
+        let out = yuy2_to_rgb_naive(3, 1, &src);
+        assert_eq!(out, vec![254, 254, 254, 254, 254, 254, 0, 0, 0]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_short_source_leaves_remaining_pixels_black() {
+        // 入力が 1 ペア分しかない場合、残りの画素は 0 のまま (パニックしない)
+        let src = [235u8, 128, 235, 128];
+        let out = yuy2_to_rgb_naive(4, 1, &src);
+        assert_eq!(out, vec![254, 254, 254, 254, 254, 254, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_max_input_saturates_at_255() {
+        // Y=255, U=255, V=255 では R と B が 255 を超えるため飽和する
+        let src = [255u8, 255, 255, 255];
+        let out = yuy2_to_rgb_naive(2, 1, &src);
+        assert_eq!(out, vec![255, 125, 255, 255, 125, 255]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_min_input_saturates_at_0() {
+        // Y=0, U=0, V=0 では R と B が負になるため 0 に飽和する
+        let src = [0u8, 0, 0, 0];
+        let out = yuy2_to_rgb_naive(2, 1, &src);
+        assert_eq!(out, vec![0, 135, 0, 0, 135, 0]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_zero_size_returns_empty() {
+        let out = yuy2_to_rgb_naive(0, 0, &[]);
+        assert!(out.is_empty());
     }
 }
