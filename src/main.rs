@@ -22,6 +22,11 @@ use video::VideoCapture;
 /// デバイスリストのキャッシュを更新する間隔
 const DEVICE_LIST_CACHE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// 設定をディスクへ書き出すまでに待つ時間。
+/// ウィンドウのドラッグ中や音量スクロール中は設定が毎フレーム変わるため、
+/// 最後の変更からこの時間が空くまで書き出しをまとめる
+const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
+
 pub struct CaptureCardViewer {
     settings: Arc<Mutex<AppSettings>>,
     video_capture: Arc<Mutex<VideoCapture>>,
@@ -38,6 +43,9 @@ pub struct CaptureCardViewer {
     volume: f32,
     last_volume_sent: f32,
     last_settings_applied: Instant,
+    // 設定に未保存の変更があるときの、最後に変更された時刻。
+    // None は保留中の変更が無いことを表す
+    settings_dirty_since: Option<Instant>,
 
     // 映像表示関連
     video_texture: Option<egui::TextureHandle>,
@@ -99,6 +107,7 @@ impl Default for CaptureCardViewer {
             volume: 100.0,
             last_volume_sent: -1.0,
             last_settings_applied: Instant::now(),
+            settings_dirty_since: None,
             video_texture: None,
             last_frame_generation: 0,
             pending_hotkey: None,
@@ -229,6 +238,7 @@ impl eframe::App for CaptureCardViewer {
         let current_pos = viewport.outer_rect.map(|r| (r.left(), r.top()));
 
         // サイズまたは位置が変更された場合、設定を更新
+        let mut window_geometry_changed = false;
         if let Ok(mut settings) = self.settings.lock() {
             let mut changed = false;
 
@@ -246,10 +256,13 @@ impl eframe::App for CaptureCardViewer {
                 }
             }
 
-            // 変更があった場合は設定を保存
-            if changed {
-                settings.save();
-            }
+            window_geometry_changed = changed;
+        }
+
+        // ここでは書き出さない。ウィンドウのドラッグ中は毎フレーム値が変わるため、
+        // 変わるたびに保存すると最大 60 回/秒のディスク書き込みになる
+        if window_geometry_changed {
+            self.mark_settings_dirty();
         }
 
         // メインUI
@@ -299,8 +312,8 @@ impl eframe::App for CaptureCardViewer {
             if hotkey_captured && !self.temp_hotkey.is_empty() {
                 if let Ok(mut settings) = self.settings.lock() {
                     settings.screenshot.hotkey = Some(self.temp_hotkey.clone());
-                    settings.save(); // 即座に保存
                 }
+                self.mark_settings_dirty();
                 self.pending_hotkey = Some(self.temp_hotkey.clone());
             }
 
@@ -365,14 +378,15 @@ impl eframe::App for CaptureCardViewer {
                 }
             }
         }
+
+        // 保留中の設定変更を、操作が落ち着いたところでまとめて書き出す
+        self.flush_settings_if_due(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // 終了時に最新のウィンドウサイズと位置を取得して保存
-        if let Ok(settings) = self.settings.lock() {
-            // 最新の設定が反映されていることを確認してから保存
-            settings.save();
-        }
+        // 終了時は必ず書き出す。デバウンスの待ち時間中に終了しても、
+        // ウィンドウのサイズ・位置や音量の変更を取りこぼさないようにする
+        self.save_settings_now();
     }
 }
 
@@ -548,18 +562,18 @@ impl CaptureCardViewer {
                         ctx.input(|i| {
                             if i.raw_scroll_delta.y > 0.0 {
                                 self.volume = (self.volume + 10.0).min(200.0);
-                                // 設定に保存してリセットを防ぐ
+                                // 設定に反映してリセットを防ぐ。書き出しはデバウンスする
                                 if let Ok(mut settings) = self.settings.lock() {
                                     settings.ui.volume = self.volume;
-                                    settings.save();
                                 }
+                                self.mark_settings_dirty();
                             } else if i.raw_scroll_delta.y < 0.0 {
                                 self.volume = (self.volume - 10.0).max(0.0);
-                                // 設定に保存してリセットを防ぐ
+                                // 設定に反映してリセットを防ぐ。書き出しはデバウンスする
                                 if let Ok(mut settings) = self.settings.lock() {
                                     settings.ui.volume = self.volume;
-                                    settings.save();
                                 }
+                                self.mark_settings_dirty();
                             }
                         });
                     }
@@ -644,18 +658,18 @@ impl CaptureCardViewer {
                         ctx.input(|i| {
                             if i.raw_scroll_delta.y > 0.0 {
                                 self.volume = (self.volume + 10.0).min(200.0);
-                                // 設定に保存してリセットを防ぐ
+                                // 設定に反映してリセットを防ぐ。書き出しはデバウンスする
                                 if let Ok(mut settings) = self.settings.lock() {
                                     settings.ui.volume = self.volume;
-                                    settings.save();
                                 }
+                                self.mark_settings_dirty();
                             } else if i.raw_scroll_delta.y < 0.0 {
                                 self.volume = (self.volume - 10.0).max(0.0);
-                                // 設定に保存してリセットを防ぐ
+                                // 設定に反映してリセットを防ぐ。書き出しはデバウンスする
                                 if let Ok(mut settings) = self.settings.lock() {
                                     settings.ui.volume = self.volume;
-                                    settings.save();
                                 }
+                                self.mark_settings_dirty();
                             }
                         });
                     }
@@ -703,24 +717,24 @@ impl CaptureCardViewer {
                     let volume_response =
                         ui.add(egui::Slider::new(&mut self.volume, 0.0..=200.0).suffix("%"));
 
-                    // 音量が変更された場合、設定に反映し保存
+                    // 音量が変更された場合、設定に反映する（書き出しはデバウンス）
                     if volume_response.changed() {
                         if let Ok(mut settings) = self.settings.lock() {
                             settings.ui.volume = self.volume;
-                            settings.save(); // 即座に保存
                         }
+                        self.mark_settings_dirty();
                     }
 
                     ui.separator();
                     let aspect_response =
                         ui.checkbox(&mut self.maintain_aspect_ratio, "アスペクト比を維持");
 
-                    // アスペクト比設定が変更された場合、設定に反映し保存
+                    // アスペクト比設定が変更された場合、設定に反映する（書き出しはデバウンス）
                     if aspect_response.changed() {
                         if let Ok(mut settings) = self.settings.lock() {
                             settings.ui.maintain_aspect_ratio = self.maintain_aspect_ratio;
-                            settings.save(); // 即座に保存
                         }
+                        self.mark_settings_dirty();
                     }
 
                     // 最前面表示のチェックボックス
@@ -736,11 +750,11 @@ impl CaptureCardViewer {
                             },
                         ));
 
-                        // 設定に保存
+                        // 設定に反映する（書き出しはデバウンス）
                         if let Ok(mut settings) = self.settings.lock() {
                             settings.ui.always_on_top = self.always_on_top;
-                            settings.save();
                         }
+                        self.mark_settings_dirty();
                     }
 
                     // フルスクリーン表示のチェックボックス
@@ -762,12 +776,12 @@ impl CaptureCardViewer {
                     let drag_move_response =
                         ui.checkbox(&mut temp_enable_drag_move, "画面ドラッグ移動");
 
-                    // 画面ドラッグ移動設定が変更された場合
+                    // 画面ドラッグ移動設定が変更された場合（書き出しはデバウンス）
                     if drag_move_response.changed() {
                         if let Ok(mut settings) = self.settings.lock() {
                             settings.ui.enable_drag_move = temp_enable_drag_move;
-                            settings.save();
                         }
+                        self.mark_settings_dirty();
                     }
 
                     ui.separator();
@@ -1133,6 +1147,58 @@ impl CaptureCardViewer {
         }
     }
 
+    /// 設定に未保存の変更があることを記録する。
+    /// 実際の書き出しは `flush_settings_if_due` がまとめて行う。
+    fn mark_settings_dirty(&mut self) {
+        self.settings_dirty_since = Some(Instant::now());
+    }
+
+    /// 保留の有無にかかわらず、いま設定をディスクへ書き出す。
+    fn save_settings_now(&mut self) {
+        // ロックが取れなかった場合は保留のままにして、次の機会に書き出す
+        let Ok(settings) = self.settings.lock() else {
+            return;
+        };
+
+        if settings.save() {
+            self.settings_dirty_since = None;
+        } else {
+            // 書き出せなかった変更を保存済みとして捨てず、保留のまま残す。
+            // 時刻を入れ直しているのは、失敗が続いたときに毎フレーム
+            // 書き込みを試みる状態へ戻さないため
+            self.settings_dirty_since = Some(Instant::now());
+        }
+    }
+
+    /// 保留中の設定変更を書き出すべきかを判定する。
+    /// `since_last_change` は最後の変更からの経過時間で、
+    /// `None` は「保留中の変更が無い」を表す。
+    fn should_flush_settings(since_last_change: Option<Duration>) -> bool {
+        match since_last_change {
+            None => false,
+            Some(elapsed) => elapsed >= SETTINGS_SAVE_DEBOUNCE,
+        }
+    }
+
+    /// 保留中の設定変更を、最後の変更から一定時間が空いていれば書き出す。
+    ///
+    /// 書き出しはディスク I/O だが、デバウンスにより数秒に 1 回までしか走らない
+    /// ため UI スレッドで行っている。ウィンドウのドラッグや音量の連続操作のように
+    /// 毎フレーム値が変わる間は、変更が止まるまで 1 度も書き出さない。
+    fn flush_settings_if_due(&mut self, ctx: &egui::Context) {
+        let elapsed = self.settings_dirty_since.map(|since| since.elapsed());
+        if !Self::should_flush_settings(elapsed) {
+            // 書き出す時刻に再描画を予約する。映像が来ていないときは再描画が
+            // 止まりうるため、これが無いと update() が呼ばれず書き出しが遅れる
+            if self.settings_dirty_since.is_some() {
+                ctx.request_repaint_after(SETTINGS_SAVE_DEBOUNCE);
+            }
+            return;
+        }
+
+        self.save_settings_now();
+    }
+
     /// デバイスリストのキャッシュを更新すべきかを判定する。
     /// `elapsed` は前回更新からの経過時間で、`None` は「一度も取得していない」を表す。
     fn should_refresh_device_list(elapsed: Option<Duration>) -> bool {
@@ -1230,6 +1296,43 @@ mod tests {
     #[test]
     fn should_refresh_device_list_long_after_interval_returns_true() {
         assert!(CaptureCardViewer::should_refresh_device_list(Some(
+            Duration::from_secs(3600)
+        )));
+    }
+
+    #[test]
+    fn should_flush_settings_no_pending_change_returns_false() {
+        // 保留中の変更が無ければ書き出さない
+        assert!(!CaptureCardViewer::should_flush_settings(None));
+    }
+
+    #[test]
+    fn should_flush_settings_just_changed_returns_false() {
+        // 変更した直後は書き出さない（ドラッグ中の毎フレーム書き込みを防ぐ肝）
+        assert!(!CaptureCardViewer::should_flush_settings(Some(
+            Duration::from_secs(0)
+        )));
+    }
+
+    #[test]
+    fn should_flush_settings_just_before_interval_returns_false() {
+        // 境界の手前。1999ms では書き出さない
+        assert!(!CaptureCardViewer::should_flush_settings(Some(
+            Duration::from_millis(1999)
+        )));
+    }
+
+    #[test]
+    fn should_flush_settings_at_interval_returns_true() {
+        // 境界。ちょうど 2000ms で書き出す
+        assert!(CaptureCardViewer::should_flush_settings(Some(
+            Duration::from_millis(2000)
+        )));
+    }
+
+    #[test]
+    fn should_flush_settings_long_after_interval_returns_true() {
+        assert!(CaptureCardViewer::should_flush_settings(Some(
             Duration::from_secs(3600)
         )));
     }
