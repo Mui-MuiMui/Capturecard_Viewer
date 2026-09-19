@@ -43,9 +43,20 @@ To also remove the settings file, delete the following directory:
 
 1. Right-click → "詳細設定..." (Advanced settings) to open the settings window.
 2. Select video and audio devices in the **device settings** tab.
-    - Changes take effect when you press 適用 (Apply) or OK. Settings are saved to disk only when you press OK.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
 3. Configure the save location, sound effect, and hotkey in the **screenshot settings** tab.
+
+Edits in the settings window are kept as a draft and do not affect the running application until you press a button.
+
+| Button | Behavior |
+|---|---|
+| 適用 (Apply) | Applies the edits to the running application and saves them to the settings file. Keeps the window open |
+| OK | Does the same as 適用, and then closes the window |
+| キャンセル (Cancel) | Discards edits that have not been applied yet, and closes the window. **Anything already applied with 適用 is NOT reverted** |
+| × (title bar) | Same as Cancel |
+
+- The only difference between 適用 and OK is whether the window closes. Both save to the settings file, so the values survive a restart.
+- Hotkey and sound file changes also take effect only after you press 適用 or OK. The sound "テスト再生" (test playback) button plays the current sound effect at the volume you are editing.
 
 > **Note:** The application interface is currently Japanese only.
 

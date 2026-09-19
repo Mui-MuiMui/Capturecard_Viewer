@@ -44,6 +44,8 @@ pub struct CaptureCardViewer {
 
     // UI状態管理
     show_settings: bool,
+    // 設定ダイアログのドラフト。共有設定を直接書き換えないための置き場所
+    settings_dialog: ui::SettingsDialogState,
     show_context_menu: bool,
     show_hotkey_dialog: bool,
     context_menu_pos: egui::Pos2,
@@ -108,6 +110,7 @@ impl Default for CaptureCardViewer {
             audio_capture,
             screenshot_manager,
             show_settings: false,
+            settings_dialog: ui::SettingsDialogState::default(),
             show_context_menu: false,
             show_hotkey_dialog: false,
             context_menu_pos: egui::Pos2::ZERO,
@@ -290,30 +293,42 @@ impl eframe::App for CaptureCardViewer {
 
         // 設定ダイアログ
         if self.show_settings {
+            // 開いた最初のフレームで、実行中の設定からドラフトを作る
+            if !self.settings_dialog.has_draft() {
+                if let Ok(settings) = self.settings.lock() {
+                    self.settings_dialog.begin_edit(&settings);
+                }
+            }
+
             let video_devices = self.get_cached_video_devices().clone();
             let input_devices = self.get_cached_input_devices().clone();
             let output_devices = self.get_cached_output_devices().clone();
-            let applied = ui::show_settings_dialog(
+            let action = ui::show_settings_dialog(
                 ctx,
                 &mut self.show_settings,
-                &self.settings,
+                &mut self.settings_dialog,
                 &mut self.show_hotkey_dialog,
                 &video_devices,
                 &input_devices,
                 &output_devices,
             );
-            if applied {
-                self.apply_settings(false);
-            }
+            self.handle_settings_dialog_action(action);
         }
 
         // ホットキーキャプチャダイアログ
         if self.show_hotkey_dialog {
-            // ダイアログが開かれた時に現在の設定値をtemp_hotkeyに設定
+            // ダイアログが開かれた時に現在の設定値をtemp_hotkeyに設定。
+            // 設定ダイアログから開かれた場合は、編集中のドラフトの値を見せる
             if self.temp_hotkey.is_empty() {
-                if let Ok(settings) = self.settings.lock() {
-                    self.temp_hotkey = settings.screenshot.hotkey.clone().unwrap_or_default();
-                }
+                let current = match self.settings_dialog.draft() {
+                    Some(draft) => draft.screenshot.hotkey.clone(),
+                    None => self
+                        .settings
+                        .lock()
+                        .ok()
+                        .and_then(|settings| settings.screenshot.hotkey.clone()),
+                };
+                self.temp_hotkey = current.unwrap_or_default();
             }
 
             let hotkey_captured = ui::show_hotkey_capture_dialog(
@@ -324,11 +339,30 @@ impl eframe::App for CaptureCardViewer {
 
             // ホットキーがキャプチャされた場合、設定を更新
             if hotkey_captured && !self.temp_hotkey.is_empty() {
-                if let Ok(mut settings) = self.settings.lock() {
-                    settings.screenshot.hotkey = Some(self.temp_hotkey.clone());
+                // 設定ダイアログから開かれている場合はドラフトへ書く。
+                // 共有設定へ直接書くと、ダイアログの OK がドラフトの古い値で
+                // 上書きして、設定したホットキーが消える
+                let wrote_to_draft = match self.settings_dialog.draft_mut() {
+                    Some(draft) => {
+                        draft.screenshot.hotkey = Some(self.temp_hotkey.clone());
+                        true
+                    }
+                    None => false,
+                };
+
+                if !wrote_to_draft {
+                    // 設定ダイアログが閉じられた状態でホットキーだけ確定した場合。
+                    // ドラフトが無いので共有設定へ直接書き、その場で登録する
+                    if let Ok(mut settings) = self.settings.lock() {
+                        settings.screenshot.hotkey = Some(self.temp_hotkey.clone());
+                    }
+                    self.mark_settings_dirty();
+                    self.pending_hotkey = Some(self.temp_hotkey.clone());
                 }
-                self.mark_settings_dirty();
-                self.pending_hotkey = Some(self.temp_hotkey.clone());
+                // ドラフトへ書いた場合はここで登録しない。
+                // 登録すると、2 秒ごとの apply_settings が共有設定側の古い
+                // ホットキーを見て登録し直し、「適用」も押していないのに
+                // 効いたり戻ったりする。実際の登録は「適用」か「OK」で行う
             }
 
             // ダイアログが閉じられた時にtemp_hotkeyをクリア
@@ -385,8 +419,19 @@ impl eframe::App for CaptureCardViewer {
         }
         // テストサウンドリクエストを処理
         if crate::ui::should_play_test_sound() {
-            if let Ok(settings) = self.settings.lock() {
-                let volume = settings.screenshot.sound_volume;
+            // 設定ダイアログを開いている間はドラフトの音量で鳴らす。
+            // スライダーを動かした結果をその場で確かめられるようにするため。
+            // 効果音のファイル自体は「適用」か「OK」まで差し替わらない
+            let volume = match self.settings_dialog.draft() {
+                Some(draft) => Some(draft.screenshot.sound_volume),
+                None => self
+                    .settings
+                    .lock()
+                    .ok()
+                    .map(|settings| settings.screenshot.sound_volume),
+            };
+
+            if let Some(volume) = volume {
                 if let Ok(ss) = self.screenshot_manager.lock() {
                     ss.play_screenshot_sound(volume);
                 }
@@ -1272,6 +1317,33 @@ impl CaptureCardViewer {
 
         if !initial {
             self.last_settings_applied = Instant::now();
+        }
+    }
+
+    /// 設定ダイアログの操作を処理する。
+    ///
+    /// ドラフトの反映・保存・クローズをここで行うのは、UI 側に状態と副作用を
+    /// 持たせないため（`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
+    fn handle_settings_dialog_action(&mut self, action: ui::SettingsDialogAction) {
+        let transition = ui::SettingsDialogState::transition_for(action);
+
+        if transition.commit_draft {
+            if let Ok(mut settings) = self.settings.lock() {
+                self.settings_dialog.commit_into(&mut settings);
+            }
+            // 反映した内容でデバイスを開き直す
+            self.apply_settings(false);
+        }
+
+        if transition.save_to_file {
+            // 「適用」と「OK」はユーザーの明示的な保存操作なので、
+            // デバウンスを待たずに書き出す
+            self.save_settings_now();
+        }
+
+        if transition.close {
+            self.settings_dialog.end_edit();
+            self.show_settings = false;
         }
     }
 

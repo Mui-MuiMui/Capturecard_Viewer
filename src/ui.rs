@@ -3,7 +3,7 @@ use crate::video::DeviceCapabilities;
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 static TEST_SOUND_FLAG: AtomicBool = AtomicBool::new(false);
 
@@ -11,131 +11,242 @@ static TEST_SOUND_FLAG: AtomicBool = AtomicBool::new(false);
 static DEVICE_CAPABILITIES_CACHE: std::sync::OnceLock<Mutex<HashMap<String, DeviceCapabilities>>> =
     std::sync::OnceLock::new();
 
-// 一時保存用の設定
-static TEMP_SETTINGS: std::sync::OnceLock<Mutex<Option<AppSettings>>> = std::sync::OnceLock::new();
-
 pub fn should_play_test_sound() -> bool {
     TEST_SOUND_FLAG.swap(false, Ordering::SeqCst)
 }
 
-// 設定が適用された場合にtrueを返す（適用またはOKボタンが押された）
+/// 設定ダイアログで行われた操作。
+///
+/// 各ボタンの意味は `README.md` の「設定」と
+/// `docs/ARCHITECTURE.md` の「適用の境界を明確にする」に合わせている。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsDialogAction {
+    /// まだ何も押されていない（編集中）
+    None,
+    /// 適用: ドラフトを実行中の設定へ反映してファイルへ保存する。ダイアログは閉じない
+    Apply,
+    /// OK: 適用と同じことをしたうえで閉じる
+    Ok,
+    /// キャンセル: ドラフトを捨てて閉じる。タイトルバーの × も同じ扱い。
+    /// 「適用」で既に反映したぶんは元に戻さない
+    Cancel,
+}
+
+/// 操作に対して、ダイアログの外側（`CaptureCardViewer`）が行うこと。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsDialogTransition {
+    /// ドラフトを実行中の設定へ反映するか
+    pub commit_draft: bool,
+    /// 設定ファイルへ保存するか
+    pub save_to_file: bool,
+    /// ダイアログを閉じるか
+    pub close: bool,
+}
+
+/// 設定ダイアログの状態。
+///
+/// ダイアログは共有の `AppSettings` を直接書き換えず、開いたときに複製した
+/// ドラフトを編集する。ドラフトが実行中の設定へ移るのは「適用」と「OK」の
+/// ときだけで、閉じるときは必ず捨てる。
+///
+/// こうしないと、未確定の編集が共有設定へ混ざり、ウィンドウ操作や音量変更を
+/// きっかけにした保存に巻き込まれてファイルへ書き出されてしまう。
+#[derive(Default)]
+pub struct SettingsDialogState {
+    draft: Option<AppSettings>,
+    // 開いた時点の設定。ドラフトのどの項目が実際に編集されたかを判別するために持つ
+    original: Option<AppSettings>,
+}
+
+impl SettingsDialogState {
+    /// 編集中のドラフトを持っているか。
+    pub fn has_draft(&self) -> bool {
+        self.draft.is_some()
+    }
+
+    /// 現在の設定を複製して編集を始める。
+    ///
+    /// 呼ぶたびに作り直す。以前は `TEMP_SETTINGS` が None のときだけ退避し、
+    /// × で閉じたときに消していなかったため、次に開いたときへ古い値が
+    /// 持ち越されていた。
+    pub fn begin_edit(&mut self, current: &AppSettings) {
+        self.draft = Some(current.clone());
+        self.original = Some(current.clone());
+    }
+
+    /// 編集を終える。ドラフトは捨てる。
+    pub fn end_edit(&mut self) {
+        self.draft = None;
+        self.original = None;
+    }
+
+    pub fn draft(&self) -> Option<&AppSettings> {
+        self.draft.as_ref()
+    }
+
+    pub fn draft_mut(&mut self) -> Option<&mut AppSettings> {
+        self.draft.as_mut()
+    }
+
+    /// ドラフトを実行中の設定へ反映する。ドラフトを持っていなければ何もしない。
+    pub fn commit_into(&self, target: &mut AppSettings) {
+        if let (Some(draft), Some(original)) = (&self.draft, &self.original) {
+            commit_draft(target, draft, original);
+        }
+    }
+
+    /// 操作に対して、ダイアログの外側が行うことを決める。
+    pub fn transition_for(action: SettingsDialogAction) -> SettingsDialogTransition {
+        match action {
+            SettingsDialogAction::None => SettingsDialogTransition {
+                commit_draft: false,
+                save_to_file: false,
+                close: false,
+            },
+            SettingsDialogAction::Apply => SettingsDialogTransition {
+                commit_draft: true,
+                save_to_file: true,
+                close: false,
+            },
+            SettingsDialogAction::Ok => SettingsDialogTransition {
+                commit_draft: true,
+                save_to_file: true,
+                close: true,
+            },
+            SettingsDialogAction::Cancel => SettingsDialogTransition {
+                commit_draft: false,
+                save_to_file: false,
+                close: true,
+            },
+        }
+    }
+}
+
+/// 描画後の状態から、実際に行われた操作を決める。
+///
+/// `window_still_open` は `egui::Window::open()` に渡した値の描画後の状態。
+/// タイトルバーの × で閉じられるとボタンを押さずに false になるため、
+/// キャンセルと同じ扱いにする。これを拾わないと、ドラフトを捨てる処理が
+/// 走らずに次へ持ち越される。
+pub fn resolve_action(
+    button: SettingsDialogAction,
+    window_still_open: bool,
+) -> SettingsDialogAction {
+    if !window_still_open && button == SettingsDialogAction::None {
+        SettingsDialogAction::Cancel
+    } else {
+        button
+    }
+}
+
+/// ドラフトのうち、設定ダイアログが編集する範囲だけを実行中の設定へ反映する。
+/// `original` はダイアログを開いた時点の設定。
+///
+/// `ui` セクションを丸ごと上書きしないのは、ウィンドウのサイズ・位置、
+/// 最前面表示、画面ドラッグ移動がダイアログの外で変わるため。丸ごと入れると、
+/// ダイアログを開いている間に動かしたウィンドウの位置が、開いた時点の
+/// スナップショットで巻き戻る。
+///
+/// ダイアログでも外でも変えられる `maintain_aspect_ratio` と `volume` は、
+/// **ダイアログで実際に編集されたときだけ**反映する。開いた時点の値と同じなら
+/// 外側の変更（映像上でのホイール操作、コンテキストメニュー）を残す。無条件に
+/// 入れると、ダイアログを開いたままホイールで音量を変えて「適用」を押したときに
+/// 音量が巻き戻る。
+///
+/// `video` / `audio` / `screenshot` にこの比較が要らないのは、ダイアログの外から
+/// 書き換わらないため。ホットキー入力ダイアログもドラフトへ書く。
+///
+/// **ダイアログに `ui` セクションの項目を足すときは、ここにも足すこと。**
+pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &AppSettings) {
+    target.video = draft.video.clone();
+    target.audio = draft.audio.clone();
+    target.screenshot = draft.screenshot.clone();
+
+    // ダイアログの「ユーザーインターフェース」グループが編集する 2 項目
+    if draft.ui.maintain_aspect_ratio != original.ui.maintain_aspect_ratio {
+        target.ui.maintain_aspect_ratio = draft.ui.maintain_aspect_ratio;
+    }
+    if draft.ui.volume != original.ui.volume {
+        target.ui.volume = draft.ui.volume;
+    }
+}
+
+/// 設定ダイアログを描画し、行われた操作を返す。
+///
+/// 編集対象は `dialog` が持つドラフトで、実行中の設定はここでは触らない。
+/// ドラフトの反映・保存・クローズは呼び出し側が `transition_for` の結果に
+/// 従って行う。
 pub fn show_settings_dialog(
     ctx: &egui::Context,
     show_settings: &mut bool,
-    settings: &Arc<Mutex<AppSettings>>,
+    dialog: &mut SettingsDialogState,
     show_hotkey_dialog: &mut bool,
     video_devices: &[(String, String)],
     input_devices: &[String],
     output_devices: &[String],
-) -> bool {
+) -> SettingsDialogAction {
     use std::sync::OnceLock;
     static SELECTED_TAB: OnceLock<Mutex<i32>> = OnceLock::new();
     let selected_tab = SELECTED_TAB.get_or_init(|| Mutex::new(0));
 
-    // 一時設定の初期化（設定画面を開いたとき）
-    let temp_settings = TEMP_SETTINGS.get_or_init(|| Mutex::new(None));
-    if let Ok(mut temp) = temp_settings.lock() {
-        if temp.is_none() {
-            if let Ok(current_settings) = settings.lock() {
-                *temp = Some(current_settings.clone());
-            }
-        }
-    }
+    // ドラフトが用意できていなければ描画しない。呼び出し側が begin_edit を
+    // 呼ぶまで待つ
+    let Some(draft) = dialog.draft_mut() else {
+        return SettingsDialogAction::None;
+    };
 
-    let close_settings = false;
-    let mut apply_settings = false;
-    let mut ok_pressed = false;
-    let mut cancel_pressed = false;
+    let mut button = SettingsDialogAction::None;
 
     egui::Window::new("設定")
         .open(show_settings)
         .default_size([650.0, 500.0])
         .resizable(true)
         .show(ctx, |ui| {
-            if let Ok(mut settings) = settings.lock() {
-                // タブ選択
-                ui.horizontal(|ui| {
-                    if let Ok(mut tab) = selected_tab.lock() {
-                        ui.selectable_value(&mut *tab, 0, "デバイス設定");
-                        ui.selectable_value(&mut *tab, 1, "スクリーンショット設定");
+            // タブ選択
+            ui.horizontal(|ui| {
+                if let Ok(mut tab) = selected_tab.lock() {
+                    ui.selectable_value(&mut *tab, 0, "デバイス設定");
+                    ui.selectable_value(&mut *tab, 1, "スクリーンショット設定");
+                }
+            });
+
+            ui.separator();
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if let Ok(tab) = selected_tab.lock() {
+                    match *tab {
+                        0 => show_device_settings_tab(
+                            ui,
+                            draft,
+                            video_devices,
+                            input_devices,
+                            output_devices,
+                        ),
+                        1 => show_screenshot_settings_tab(ui, draft, show_hotkey_dialog),
+                        _ => {}
                     }
-                });
+                }
+            });
 
-                ui.separator();
+            ui.separator();
 
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    if let Ok(tab) = selected_tab.lock() {
-                        match *tab {
-                            0 => show_device_settings_tab(
-                                ui,
-                                &mut settings,
-                                video_devices,
-                                input_devices,
-                                output_devices,
-                            ),
-                            1 => {
-                                show_screenshot_settings_tab(ui, &mut settings, show_hotkey_dialog)
-                            }
-                            _ => {}
-                        }
-                    }
-                });
+            // OK、キャンセル、適用ボタン
+            ui.horizontal(|ui| {
+                if ui.button("OK").clicked() {
+                    button = SettingsDialogAction::Ok;
+                }
 
-                ui.separator();
+                if ui.button("キャンセル").clicked() {
+                    button = SettingsDialogAction::Cancel;
+                }
 
-                // OK、キャンセル、適用ボタン
-                ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
-                        ok_pressed = true;
-                    }
-
-                    if ui.button("キャンセル").clicked() {
-                        cancel_pressed = true;
-                    }
-
-                    if ui.button("適用").clicked() {
-                        apply_settings = true;
-                    }
-                });
-            }
+                if ui.button("適用").clicked() {
+                    button = SettingsDialogAction::Apply;
+                }
+            });
         });
 
-    // ボタン処理
-    if ok_pressed {
-        // OKボタン: 設定をファイルに保存して閉じる
-        if let Ok(current_settings) = settings.lock() {
-            current_settings.save();
-        }
-        if let Ok(mut temp) = temp_settings.lock() {
-            *temp = None; // 一時設定をクリア
-        }
-        *show_settings = false;
-        return true; // デバイス再接続を要求
-    }
-
-    if cancel_pressed {
-        // キャンセルボタン: 元の設定に戻して閉じる
-        if let Ok(mut temp) = temp_settings.lock() {
-            if let Some(original_settings) = temp.take() {
-                if let Ok(mut current_settings) = settings.lock() {
-                    *current_settings = original_settings;
-                }
-            }
-        }
-        *show_settings = false;
-        return false; // デバイス再接続なし
-    }
-
-    if apply_settings {
-        // 適用ボタン: メモリ上のみで適用（ファイル保存なし）
-        // 画面は閉じない
-        return true; // デバイス再接続を要求
-    }
-
-    if close_settings {
-        *show_settings = false;
-    }
-    false
+    resolve_action(button, *show_settings)
 }
 
 fn show_device_settings_tab(
@@ -879,6 +990,305 @@ pub fn show_hotkey_capture_dialog(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::{AudioSettings, ScreenshotSettings, UiSettings, VideoSettings};
+    use std::path::PathBuf;
+
+    /// 既定値と全項目が異なる設定。どの項目が反映され、どの項目が
+    /// 据え置かれるかを区別できるようにするためのもの。
+    fn sample_settings() -> AppSettings {
+        AppSettings {
+            video: VideoSettings {
+                device_name: Some("Capture Device".to_string()),
+                resolution: Some((1920, 1080)),
+                format: Some("MJPEG".to_string()),
+                fps: Some(30),
+            },
+            audio: AudioSettings {
+                input_device_name: Some("Line In".to_string()),
+                output_device_name: Some("Speakers".to_string()),
+                sample_rate: Some(44100),
+                channels: Some(1),
+                passthrough_enabled: false,
+            },
+            screenshot: ScreenshotSettings {
+                save_folder: PathBuf::from("C:/shots"),
+                sound_file: Some(PathBuf::from("sound/custom.mp3")),
+                sound_volume: 50.0,
+                hotkey: Some("Ctrl+S".to_string()),
+            },
+            ui: UiSettings {
+                volume: 80.0,
+                maintain_aspect_ratio: false,
+                last_window_size: Some((800.0, 600.0)),
+                last_window_pos: Some((10.0, 20.0)),
+                always_on_top: true,
+                enable_drag_move: false,
+            },
+        }
+    }
+
+    #[test]
+    fn transition_for_none_does_nothing() {
+        let transition = SettingsDialogState::transition_for(SettingsDialogAction::None);
+        assert!(!transition.commit_draft);
+        assert!(!transition.save_to_file);
+        assert!(!transition.close);
+    }
+
+    #[test]
+    fn transition_for_apply_commits_and_saves_without_closing() {
+        // 適用 = 反映してファイルへ保存する。閉じないところだけが OK と違う
+        let transition = SettingsDialogState::transition_for(SettingsDialogAction::Apply);
+        assert!(transition.commit_draft);
+        assert!(transition.save_to_file);
+        assert!(!transition.close);
+    }
+
+    #[test]
+    fn transition_for_apply_and_ok_differ_only_in_closing() {
+        // 「適用」と「OK」の違いは閉じるかどうかだけにする。
+        // 保存の有無で分けると「適用したのに再起動で戻る」が起きる
+        let apply = SettingsDialogState::transition_for(SettingsDialogAction::Apply);
+        let ok = SettingsDialogState::transition_for(SettingsDialogAction::Ok);
+        assert_eq!(apply.commit_draft, ok.commit_draft);
+        assert_eq!(apply.save_to_file, ok.save_to_file);
+        assert!(!apply.close);
+        assert!(ok.close);
+    }
+
+    #[test]
+    fn transition_for_ok_commits_saves_and_closes() {
+        let transition = SettingsDialogState::transition_for(SettingsDialogAction::Ok);
+        assert!(transition.commit_draft);
+        assert!(transition.save_to_file);
+        assert!(transition.close);
+    }
+
+    #[test]
+    fn transition_for_cancel_discards_without_committing() {
+        // キャンセル = ドラフトを捨てて閉じるだけ。適用済みの分は戻さない
+        let transition = SettingsDialogState::transition_for(SettingsDialogAction::Cancel);
+        assert!(!transition.commit_draft);
+        assert!(!transition.save_to_file);
+        assert!(transition.close);
+    }
+
+    #[test]
+    fn resolve_action_window_closed_without_button_returns_cancel() {
+        // タイトルバーの × で閉じた場合。ボタンは押されていないが、
+        // ドラフトを捨てるためにキャンセルとして扱う
+        assert_eq!(
+            resolve_action(SettingsDialogAction::None, false),
+            SettingsDialogAction::Cancel
+        );
+    }
+
+    #[test]
+    fn resolve_action_window_open_without_button_returns_none() {
+        assert_eq!(
+            resolve_action(SettingsDialogAction::None, true),
+            SettingsDialogAction::None
+        );
+    }
+
+    #[test]
+    fn resolve_action_keeps_pressed_button() {
+        for action in [
+            SettingsDialogAction::Ok,
+            SettingsDialogAction::Cancel,
+            SettingsDialogAction::Apply,
+        ] {
+            assert_eq!(resolve_action(action, true), action);
+            assert_eq!(resolve_action(action, false), action);
+        }
+    }
+
+    #[test]
+    fn commit_draft_replaces_device_and_screenshot_sections() {
+        let mut shared = AppSettings::default();
+        let original = AppSettings::default();
+        let draft = sample_settings();
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.video.format, Some("MJPEG".to_string()));
+        assert_eq!(shared.video.resolution, Some((1920, 1080)));
+        assert_eq!(shared.video.fps, Some(30));
+        assert_eq!(shared.audio.sample_rate, Some(44100));
+        assert_eq!(shared.audio.channels, Some(1));
+        assert!(!shared.audio.passthrough_enabled);
+        assert_eq!(shared.screenshot.hotkey, Some("Ctrl+S".to_string()));
+        assert_eq!(shared.screenshot.sound_volume, 50.0);
+    }
+
+    #[test]
+    fn commit_draft_applies_ui_items_the_dialog_edits() {
+        // 「ユーザーインターフェース」グループの 2 項目は、ダイアログで
+        // 編集されていれば反映する
+        let mut shared = AppSettings::default();
+        let original = AppSettings::default();
+        let draft = sample_settings();
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.ui.volume, 80.0);
+        assert!(!shared.ui.maintain_aspect_ratio);
+    }
+
+    #[test]
+    fn commit_draft_keeps_window_state_changed_while_dialog_is_open() {
+        // ダイアログを開いている間にウィンドウを動かす・最前面表示を切り替える
+        // といった操作をしても、OK でその変更が巻き戻ってはいけない。
+        // ドラフトは開いた時点のスナップショットなので、これらを丸ごと
+        // 書き戻すと位置が飛ぶ
+        let mut shared = sample_settings();
+        let draft = shared.clone();
+        let original = shared.clone();
+
+        shared.ui.last_window_size = Some((1280.0, 720.0));
+        shared.ui.last_window_pos = Some((100.0, 200.0));
+        shared.ui.always_on_top = false;
+        shared.ui.enable_drag_move = true;
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.ui.last_window_size, Some((1280.0, 720.0)));
+        assert_eq!(shared.ui.last_window_pos, Some((100.0, 200.0)));
+        assert!(!shared.ui.always_on_top);
+        assert!(shared.ui.enable_drag_move);
+    }
+
+    #[test]
+    fn commit_draft_keeps_ui_items_changed_outside_dialog() {
+        // ダイアログを開いたまま映像上でホイール操作をして音量を変え、
+        // コンテキストメニューでアスペクト比を切り替えたあとに「適用」を
+        // 押しても、それらが巻き戻ってはいけない
+        let original = sample_settings();
+        let draft = original.clone(); // ダイアログでは何も編集していない
+        let mut shared = original.clone();
+
+        shared.ui.volume = 150.0;
+        shared.ui.maintain_aspect_ratio = true;
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.ui.volume, 150.0);
+        assert!(shared.ui.maintain_aspect_ratio);
+    }
+
+    #[test]
+    fn commit_draft_applies_ui_items_edited_in_dialog_over_outside_changes() {
+        // ダイアログ側で編集していれば、外側の変更より優先する
+        let original = sample_settings();
+        let mut draft = original.clone();
+        let mut shared = original.clone();
+
+        draft.ui.volume = 120.0;
+        draft.ui.maintain_aspect_ratio = true;
+        shared.ui.volume = 150.0;
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.ui.volume, 120.0);
+        assert!(shared.ui.maintain_aspect_ratio);
+    }
+
+    #[test]
+    fn settings_dialog_state_commit_into_without_draft_does_nothing() {
+        // ドラフトを持っていない状態で反映しても何も起きない
+        let state = SettingsDialogState::default();
+        let mut shared = sample_settings();
+        let before = shared.clone();
+
+        state.commit_into(&mut shared);
+
+        assert_eq!(shared.video.fps, before.video.fps);
+        assert_eq!(shared.ui.volume, before.ui.volume);
+    }
+
+    #[test]
+    fn settings_dialog_state_begin_edit_snapshots_current_settings() {
+        let settings = sample_settings();
+        let mut state = SettingsDialogState::default();
+        assert!(!state.has_draft());
+
+        state.begin_edit(&settings);
+
+        assert!(state.has_draft());
+        assert_eq!(state.draft().expect("ドラフトがある").video.fps, Some(30));
+    }
+
+    #[test]
+    fn settings_dialog_state_draft_edit_does_not_reach_source() {
+        // ドラフトの編集が共有設定へ漏れないこと。
+        // 漏れると、未確定の編集がウィンドウ操作などをきっかけに保存される
+        let settings = sample_settings();
+        let mut state = SettingsDialogState::default();
+        state.begin_edit(&settings);
+
+        state.draft_mut().expect("ドラフトがある").video.fps = Some(24);
+
+        assert_eq!(settings.video.fps, Some(30));
+    }
+
+    #[test]
+    fn settings_dialog_state_end_edit_drops_draft() {
+        let mut state = SettingsDialogState::default();
+        state.begin_edit(&sample_settings());
+
+        state.end_edit();
+
+        assert!(!state.has_draft());
+        assert!(state.draft().is_none());
+    }
+
+    #[test]
+    fn settings_dialog_state_reopen_after_close_by_window_button_uses_latest_settings() {
+        // × で閉じたあと、別の手段で設定を変えてから開き直したとき、
+        // 閉じる前のスナップショットが復活してはいけない
+        let mut settings = sample_settings();
+        let mut state = SettingsDialogState::default();
+
+        state.begin_edit(&settings);
+        state.draft_mut().expect("ドラフトがある").video.fps = Some(24);
+
+        // タイトルバーの × で閉じる
+        let closed =
+            SettingsDialogState::transition_for(resolve_action(SettingsDialogAction::None, false));
+        assert!(closed.close);
+        assert!(!closed.commit_draft);
+        state.end_edit();
+
+        // 別の手段で設定が変わる
+        settings.video.fps = Some(60);
+
+        state.begin_edit(&settings);
+
+        assert_eq!(state.draft().expect("ドラフトがある").video.fps, Some(60));
+    }
+
+    #[test]
+    fn apply_then_cancel_keeps_applied_values() {
+        // 「適用」で反映した内容は、そのあと「キャンセル」しても戻さない
+        let mut shared = sample_settings();
+        let mut state = SettingsDialogState::default();
+        state.begin_edit(&shared);
+        state.draft_mut().expect("ドラフトがある").video.fps = Some(24);
+
+        let applied = SettingsDialogState::transition_for(SettingsDialogAction::Apply);
+        assert!(applied.commit_draft);
+        assert!(applied.save_to_file);
+        assert!(!applied.close);
+        state.commit_into(&mut shared);
+
+        let cancelled = SettingsDialogState::transition_for(SettingsDialogAction::Cancel);
+        assert!(!cancelled.commit_draft);
+        assert!(cancelled.close);
+        state.end_edit();
+
+        assert_eq!(shared.video.fps, Some(24));
+        assert!(!state.has_draft());
+    }
 
     fn modifiers(ctrl: bool, shift: bool, alt: bool) -> egui::Modifiers {
         egui::Modifiers {
