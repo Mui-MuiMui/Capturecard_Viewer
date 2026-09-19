@@ -31,16 +31,26 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      # 第三者の Action はタグやブランチではなく不変のコミット SHA で固定する。
+      # タグは後から付け替えられるため、上流が乗っ取られるとランナーで任意の
+      # コードが動く。更新するときは行末のコメントのバージョンを手掛かりにする。
       - name: リポジトリをチェックアウト
-        uses: actions/checkout@v7
-
-      - name: Rust ツールチェインを用意する
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # ビルドするだけで git への書き込みをしないため、
+          # 認証情報を .git/config に残さない
+          persist-credentials: false
+
+      # SHA で固定すると ref からツールチェインを推測できなくなるので、
+      # master を指して toolchain を明示する（この Action の README が案内する方法）
+      - name: Rust ツールチェインを用意する
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master (2026-09-12)
+        with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: cargo のキャッシュを復元する
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: 整形を確認する
         run: cargo fmt --check
