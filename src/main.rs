@@ -498,7 +498,7 @@ impl CaptureCardViewer {
                 if let Some(texture) = &self.video_texture {
                     let image_size = texture.size_vec2();
                     let display_size = if self.maintain_aspect_ratio {
-                        self.calculate_aspect_ratio_size(image_size, available_size)
+                        calculate_aspect_ratio_size(image_size, available_size)
                     } else {
                         available_size
                     };
@@ -592,7 +592,7 @@ impl CaptureCardViewer {
                 if let Some(texture) = &self.video_texture {
                     let image_size = texture.size_vec2();
                     let display_size = if self.maintain_aspect_ratio {
-                        self.calculate_aspect_ratio_size(image_size, available_size)
+                        calculate_aspect_ratio_size(image_size, available_size)
                     } else {
                         available_size
                     };
@@ -796,22 +796,22 @@ impl CaptureCardViewer {
             self.show_context_menu = false;
         }
     }
+}
 
-    fn calculate_aspect_ratio_size(
-        &self,
-        image_size: egui::Vec2,
-        available_size: egui::Vec2,
-    ) -> egui::Vec2 {
-        let image_aspect = image_size.x / image_size.y;
-        let available_aspect = available_size.x / available_size.y;
+// 映像の縦横比を保ったまま、表示領域に収まる大きさを求める。
+//
+// self を使わない純粋な計算なので、ユニットテストできるよう
+// impl の外へ出してある。
+fn calculate_aspect_ratio_size(image_size: egui::Vec2, available_size: egui::Vec2) -> egui::Vec2 {
+    let image_aspect = image_size.x / image_size.y;
+    let available_aspect = available_size.x / available_size.y;
 
-        if image_aspect > available_aspect {
-            // 画像が横長 - 横幅に合わせる
-            egui::Vec2::new(available_size.x, available_size.x / image_aspect)
-        } else {
-            // 画像が縦長 - 高さに合わせる
-            egui::Vec2::new(available_size.y * image_aspect, available_size.y)
-        }
+    if image_aspect > available_aspect {
+        // 画像が横長 - 横幅に合わせる
+        egui::Vec2::new(available_size.x, available_size.x / image_aspect)
+    } else {
+        // 画像が縦長 - 高さに合わせる
+        egui::Vec2::new(available_size.y * image_aspect, available_size.y)
     }
 }
 
@@ -1169,6 +1169,7 @@ impl CaptureCardViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::Vec2;
 
     #[test]
     fn should_refresh_device_list_never_updated_returns_true() {
@@ -1264,6 +1265,49 @@ mod tests {
         assert_eq!(icon.width, 256);
         assert_eq!(icon.height, 256);
         assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+    }
+
+    // calculate_aspect_ratio_size のテストで使う値は、期待値が 2 進小数で
+    // 割り切れるように選んである。誤差を許容する比較にすると、桁落ちが
+    // 起きても気付けないため。
+    #[test]
+    fn calculate_aspect_ratio_size_wide_image_fits_to_width() {
+        // 2:1 の映像を正方形の領域へ。横幅いっぱいに広げて上下を余らせる
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(400.0, 400.0));
+
+        assert_eq!(size, Vec2::new(400.0, 200.0));
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_tall_image_fits_to_height() {
+        // 1:2 の映像を正方形の領域へ。高さいっぱいに広げて左右を余らせる
+        let size = calculate_aspect_ratio_size(Vec2::new(800.0, 1600.0), Vec2::new(400.0, 400.0));
+
+        assert_eq!(size, Vec2::new(200.0, 400.0));
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_same_aspect_fills_area() {
+        // 縦横比が一致するときは領域をそのまま埋める
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(400.0, 200.0));
+
+        assert_eq!(size, Vec2::new(400.0, 200.0));
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_area_wider_than_image_fits_to_height() {
+        // 領域のほうが横長。高さに合わせ、横幅は余らせる
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(1000.0, 200.0));
+
+        assert_eq!(size, Vec2::new(400.0, 200.0));
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_upscales_to_fill_area() {
+        // 映像より領域が大きいときは拡大する。縮小専用ではない
+        let size = calculate_aspect_ratio_size(Vec2::new(400.0, 200.0), Vec2::new(1600.0, 1600.0));
+
+        assert_eq!(size, Vec2::new(1600.0, 800.0));
     }
 
     #[test]
