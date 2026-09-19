@@ -539,7 +539,8 @@ impl CaptureCardViewer {
 
     fn handle_hotkeys(&mut self) {
         let should_screenshot = {
-            if let Ok(screenshot_manager) = self.screenshot_manager.lock() {
+            // デバウンスの判定で最終実行時刻を書き換えるため、可変で借りる
+            if let Ok(mut screenshot_manager) = self.screenshot_manager.lock() {
                 let pressed = screenshot_manager.is_hotkey_pressed();
                 if pressed {
                     // 押下の検出自体は screenshot 側が debug で残している

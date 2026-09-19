@@ -6,7 +6,21 @@ use log::{debug, error, info, trace, warn};
 use rodio::{Decoder, OutputStream, Sink};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+/// リスナースレッドがホットキーのイベントを待つ時間。
+///
+/// タイムアウトするたびに終了要求を確認するため、終了を要求してから
+/// スレッドが実際に止まるまで最大でこの時間かかる。待つのはウィンドウを
+/// 閉じたあとなので、画面上は見えない。
+const LISTENER_RECV_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// 同じホットキーの連続入力を無視する時間。
+/// キーリピートで何枚も撮れてしまうのを防ぐ。
+const HOTKEY_DEBOUNCE: Duration = Duration::from_millis(200);
 
 // 既定の効果音。実行ファイルに埋め込む。
 // 既定値が "sound/SS.mp3" というカレントディレクトリ基準の相対パスだったため、
@@ -77,12 +91,24 @@ fn exe_dir() -> Option<PathBuf> {
 pub struct ScreenshotManager {
     hotkey_manager: Option<GlobalHotKeyManager>,
     registered_hotkey: Option<HotKey>,
-    registered_hotkey_id: Option<u32>, // ホットキーIDを保存（u32型）
-    is_hotkey_pressed: Arc<Mutex<bool>>,
+    /// いま登録しているホットキーの ID。リスナースレッドと共有する。
+    ///
+    /// 未登録を `None` で表す。global-hotkey の ID は修飾キーとキー名から作る
+    /// ハッシュなので 0 も正規の値になりうる。番兵の数値で未登録を表すと、
+    /// たまたまその値になったホットキーだけが効かなくなる。
+    /// ロックを取るのはイベントを受け取ったときと登録を切り替えたときだけで、
+    /// 待っている間は触らない
+    registered_id: Arc<Mutex<Option<u32>>>,
+    /// リスナースレッドが押下を検出したことを UI スレッドへ伝えるフラグ
+    pressed: Arc<AtomicBool>,
     sound_data: Option<Vec<u8>>,
-    last_trigger_time: Arc<Mutex<std::time::Instant>>,
-    // メモリリーク修正: スレッド管理用の終了フラグ
-    listener_shutdown: Arc<Mutex<bool>>,
+    /// 最後にスクリーンショットを実行した時刻。デバウンスの基準。
+    /// UI スレッドからしか触らないので共有しない
+    last_trigger_time: Instant,
+    /// リスナースレッドへの終了要求
+    listener_shutdown: Arc<AtomicBool>,
+    /// リスナースレッドのハンドル。`Drop` で join するために持つ
+    listener: Option<JoinHandle<()>>,
 }
 
 // ホットキー文字列の解析。`ScreenshotManager` の状態に依存しないためフリー関数にしてある
@@ -179,19 +205,152 @@ fn parse_key_code(key: &str) -> Result<Code, String> {
     }
 }
 
+/// 受け取ったイベントを、登録中のホットキーの押下として扱うか。
+///
+/// リスナースレッドはアプリ全体で 1 本だけ動いており、まだ何も登録していない
+/// 間もイベントチャネルを待っている。判定に必要なものを引数で受け取る
+/// 純粋関数にしてあるのは、実機のキー入力なしでテストするため。
+///
+/// - 登録中のホットキーが無ければ無視する
+/// - 解放（`Released`）は無視する。押下だけを 1 回として数える
+/// - ID が違えば無視する。ホットキーを切り替えた直後は、解除した古いキーの
+///   イベントがチャネルに残っていることがある
+fn accepts_event(registered_id: Option<u32>, event_id: u32, state: HotKeyState) -> bool {
+    registered_id == Some(event_id) && state == HotKeyState::Pressed
+}
+
+/// 押下フラグを受け取ったときの判断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TriggerDecision {
+    /// 押されていない
+    NotPressed,
+    /// 実行する。最終実行時刻を更新する
+    Fire,
+    /// デバウンス期間内なので抑止する。最終実行時刻は更新しない
+    Debounced,
+}
+
+/// 押下フラグと前回実行からの経過時間から、実際に実行するかを決める。
+///
+/// 抑止した場合に最終実行時刻を更新しないのは、押しっぱなしのキーリピートで
+/// 抑止が延々と続き、いつまでも撮れない状態にしないため。
+fn decide_trigger(
+    pressed: bool,
+    since_last_trigger: Duration,
+    debounce: Duration,
+) -> TriggerDecision {
+    if !pressed {
+        return TriggerDecision::NotPressed;
+    }
+    if since_last_trigger > debounce {
+        TriggerDecision::Fire
+    } else {
+        TriggerDecision::Debounced
+    }
+}
+
+/// ホットキーのイベントを待つスレッドを 1 本起動する。
+///
+/// `GlobalHotKeyEvent::receiver()` が返すのはプロセスに 1 つしかないチャネルなので、
+/// リスナーもアプリ全体で 1 本だけにする。`recv_timeout` でブロックして待ち、
+/// タイムアウトしたときにだけ終了要求を確認する。
+fn spawn_listener(
+    registered_id: Arc<Mutex<Option<u32>>>,
+    pressed: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        debug!("ホットキーのリスナースレッドを開始した");
+        let channel = GlobalHotKeyEvent::receiver();
+
+        loop {
+            if shutdown.load(Ordering::Acquire) {
+                break;
+            }
+
+            match channel.recv_timeout(LISTENER_RECV_TIMEOUT) {
+                Ok(event) => {
+                    // 押下・解放のたびに流れるので trace に落とす
+                    trace!(
+                        "ホットキーのイベントを受信した: ID={}、State={:?}",
+                        event.id(),
+                        event.state()
+                    );
+
+                    let registered = match registered_id.lock() {
+                        Ok(registered) => *registered,
+                        Err(_) => {
+                            // release ビルドは panic = "abort" なので毒されない
+                            warn!(
+                                "登録中のホットキー ID のロックを取得できないのでイベントを捨てる"
+                            );
+                            continue;
+                        }
+                    };
+
+                    if accepts_event(registered, event.id(), event.state()) {
+                        pressed.store(true, Ordering::Release);
+                        trace!("ホットキーの押下フラグを立てた");
+                    } else {
+                        trace!(
+                            "対象外のイベントなので無視する（登録中の ID: {:?}）",
+                            registered
+                        );
+                    }
+                }
+                Err(e) if e.is_disconnected() => {
+                    // 送信側は global-hotkey の static なので通常は起きない。
+                    // 切断された状態で recv_timeout を呼ぶと待たずに返り続けるため、
+                    // 全力で回り続けないようここで抜ける
+                    warn!("ホットキーのイベントチャネルが切断されたのでリスナーを終了する");
+                    break;
+                }
+                Err(_) => {
+                    // タイムアウト。ループの先頭で終了要求を確認する
+                }
+            }
+        }
+
+        debug!("ホットキーのリスナースレッドを終了した");
+    })
+}
+
 impl ScreenshotManager {
+    /// ホットキーのリスナースレッドを起動して `ScreenshotManager` を作る。
+    ///
+    /// この時点ではまだホットキーを登録していないので、リスナーは受け取った
+    /// イベントをすべて捨てる。登録は `set_hotkey` が行う。
+    /// スレッドを止めるのは `Drop` だけなので、**アプリ全体で 1 つだけ作ること。**
     pub fn new() -> Self {
+        let registered_id = Arc::new(Mutex::new(None));
+        let pressed = Arc::new(AtomicBool::new(false));
+        let listener_shutdown = Arc::new(AtomicBool::new(false));
+
+        // リスナーはここで 1 本だけ起動し、set_hotkey では作り直さない。
+        // イベントチャネルはプロセスに 1 つしかないので、複数のスレッドで
+        // 待つとどちらがイベントを取るか決まらない
+        let listener = spawn_listener(
+            Arc::clone(&registered_id),
+            Arc::clone(&pressed),
+            Arc::clone(&listener_shutdown),
+        );
+
         Self {
             hotkey_manager: None,
             registered_hotkey: None,
-            registered_hotkey_id: None,
-            is_hotkey_pressed: Arc::new(Mutex::new(false)),
+            registered_id,
+            pressed,
             sound_data: None,
-            last_trigger_time: Arc::new(Mutex::new(std::time::Instant::now())),
-            listener_shutdown: Arc::new(Mutex::new(false)),
+            last_trigger_time: Instant::now(),
+            listener_shutdown,
+            listener: Some(listener),
         }
     }
 
+    /// ホットキーを登録し直す。
+    ///
+    /// リスナースレッドは作り直さない。登録中の ID をリスナーと共有しているので、
+    /// ここで差し替えれば以降は新しいホットキーのイベントだけが通る。
     pub fn set_hotkey(&mut self, hotkey_str: &str) -> Result<(), String> {
         info!("ホットキーを設定する: {}", hotkey_str);
 
@@ -208,63 +367,83 @@ impl ScreenshotManager {
             );
         }
 
-        // 古いホットキーが存在する場合は登録解除
-        if let (Some(manager), Some(old_hotkey)) = (&self.hotkey_manager, &self.registered_hotkey) {
-            debug!(
-                "古いホットキーを登録解除する: {:?}（ID: {}）",
-                old_hotkey,
-                old_hotkey.id()
+        // 古いホットキーを解除する。共有している ID も空になるので、
+        // 解除から新しい登録までの間に届いたイベントは押下として扱われない
+        self.unregister_current();
+
+        let Some(manager) = &self.hotkey_manager else {
+            // 直前に作っているので通常は来ない
+            return Err("ホットキーマネージャーを用意できませんでした".to_string());
+        };
+
+        debug!(
+            "新しいホットキーを登録する: {:?}（ID: {}）",
+            hotkey,
+            hotkey.id()
+        );
+
+        // F11/F12 は他のアプリと取り合いになりやすい。登録自体は成功しても
+        // 効かないことがあるので、不具合報告から切り分けられるよう残す
+        if hotkey_str.to_lowercase() == "f11" || hotkey_str.to_lowercase() == "f12" {
+            info!(
+                "{} をグローバルホットキーとして登録する。他のアプリが使っていないか確認すること",
+                hotkey_str
             );
-            let _ = manager.unregister(*old_hotkey);
-            self.registered_hotkey = None;
-            self.registered_hotkey_id = None;
         }
 
-        // 新しいホットキーを登録
-        if let Some(manager) = &self.hotkey_manager {
-            debug!(
-                "新しいホットキーを登録する: {:?}（ID: {}）",
-                hotkey,
-                hotkey.id()
+        if let Err(e) = manager.register(hotkey) {
+            let message = format!(
+                "ホットキー {} の登録に失敗しました: {}。他のキーを試してください。",
+                hotkey_str, e
             );
-
-            // F11/F12 は他のアプリと取り合いになりやすい。登録自体は成功しても
-            // 効かないことがあるので、不具合報告から切り分けられるよう残す
-            if hotkey_str.to_lowercase() == "f11" || hotkey_str.to_lowercase() == "f12" {
-                info!(
-                    "{} をグローバルホットキーとして登録する。他のアプリが使っていないか確認すること",
-                    hotkey_str
-                );
-            }
-
-            let result = manager.register(hotkey).map_err(|e| {
-                format!(
-                    "ホットキー {} の登録に失敗しました: {}。他のキーを試してください。",
-                    hotkey_str, e
-                )
-            });
-
-            match result {
-                Ok(()) => {
-                    self.registered_hotkey = Some(hotkey);
-                    self.registered_hotkey_id = Some(hotkey.id()); // ホットキーIDを保存
-                    info!(
-                        "ホットキー {} を登録した（ID: {}）",
-                        hotkey_str,
-                        hotkey.id()
-                    );
-                }
-                Err(e) => {
-                    error!("ホットキーの登録に失敗した: {}", e);
-                    return Err(e);
-                }
-            }
+            error!("ホットキーの登録に失敗した: {}", message);
+            return Err(message);
         }
 
-        // ホットキーイベントのリスニングを開始
-        self.start_hotkey_listener();
+        self.registered_hotkey = Some(hotkey);
+        // リスナーが照合に使う ID を差し替える
+        self.store_registered_id(Some(hotkey.id()));
+        info!(
+            "ホットキー {} を登録した（ID: {}）",
+            hotkey_str,
+            hotkey.id()
+        );
 
         Ok(())
+    }
+
+    /// 登録中のホットキーを解除する。登録していなければ何もしない。
+    fn unregister_current(&mut self) {
+        // 先に共有している ID を空にする。解除が終わるまでの間に届いた
+        // イベントを押下として扱わないため
+        self.store_registered_id(None);
+
+        let Some(old_hotkey) = self.registered_hotkey.take() else {
+            return;
+        };
+        let Some(manager) = &self.hotkey_manager else {
+            return;
+        };
+
+        debug!(
+            "古いホットキーを登録解除する: {:?}（ID: {}）",
+            old_hotkey,
+            old_hotkey.id()
+        );
+        if let Err(e) = manager.unregister(old_hotkey) {
+            // 解除できなくても新しいホットキーの登録は続けられるので、
+            // 失敗しても止めない。原因が追えるようログには残す
+            warn!("古いホットキーを登録解除できない: {}", e);
+        }
+    }
+
+    /// リスナースレッドと共有している「登録中のホットキー ID」を差し替える。
+    fn store_registered_id(&self, id: Option<u32>) {
+        match self.registered_id.lock() {
+            Ok(mut registered) => *registered = id,
+            // release ビルドは panic = "abort" なので毒されること自体が起きない
+            Err(_) => warn!("登録中のホットキー ID のロックを取得できない"),
+        }
     }
 
     // 効果音を読み込む。
@@ -296,114 +475,36 @@ impl ScreenshotManager {
         }
     }
 
-    pub fn is_hotkey_pressed(&self) -> bool {
-        const DEBOUNCE_MS: u64 = 200; // デバウンス時間を200msに短縮
+    /// ホットキーが押されたかを確認し、押されていればフラグを消費する。
+    ///
+    /// 毎フレーム UI スレッドから呼ばれる。デバウンス期間内の再入力は
+    /// フラグだけ消して `false` を返す。
+    pub fn is_hotkey_pressed(&mut self) -> bool {
+        // 押下フラグは見た時点で消す。押しっぱなしの間ずっと撮り続けないため、
+        // デバウンスで抑止する場合も消すのは従来と同じ
+        let pressed = self.pressed.swap(false, Ordering::AcqRel);
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_trigger_time);
 
-        if let Ok(mut pressed) = self.is_hotkey_pressed.lock() {
-            if *pressed {
-                debug!("スクリーンショットのホットキーを検出した");
-
-                // 最後のトリガー時刻をチェック
-                if let Ok(mut last_time) = self.last_trigger_time.lock() {
-                    let now = std::time::Instant::now();
-                    let elapsed = now.duration_since(*last_time).as_millis();
-
-                    trace!("前回の実行からの経過: {}ms", elapsed);
-
-                    if elapsed > DEBOUNCE_MS as u128 {
-                        *pressed = false; // フラグをリセット
-                        *last_time = now; // 最後のトリガー時刻を更新
-                        debug!("スクリーンショットを実行する");
-                        return true;
-                    } else {
-                        *pressed = false; // フラグをリセット（ただし false を返す）
-                        debug!(
-                            "デバウンスによりスクリーンショットを抑止した（{}ms < {}ms）",
-                            elapsed, DEBOUNCE_MS
-                        );
-                        return false;
-                    }
-                } else {
-                    warn!("最終実行時刻のロックを取得できない");
-                }
+        match decide_trigger(pressed, elapsed, HOTKEY_DEBOUNCE) {
+            TriggerDecision::NotPressed => false,
+            TriggerDecision::Fire => {
+                self.last_trigger_time = now;
+                debug!(
+                    "スクリーンショットを実行する（前回の実行から {}ms）",
+                    elapsed.as_millis()
+                );
+                true
             }
-        } else {
-            warn!("ホットキーの押下フラグのロックを取得できない");
-        }
-        false
-    }
-
-    fn start_hotkey_listener(&mut self) {
-        // 既存のリスナーを停止
-        if let Ok(mut shutdown) = self.listener_shutdown.lock() {
-            *shutdown = true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10)); // 既存スレッドの終了を待機
-
-        // 新しいリスナー用の終了フラグをリセット
-        self.listener_shutdown = Arc::new(Mutex::new(false));
-
-        let pressed_flag = self.is_hotkey_pressed.clone();
-        let shutdown_flag = self.listener_shutdown.clone();
-        let registered_id = self.registered_hotkey_id; // 登録されたホットキーIDをキャプチャ
-
-        std::thread::spawn(move || {
-            debug!(
-                "ホットキーのリスナースレッドを開始した（ID: {:?}）",
-                registered_id
-            );
-            let global_hotkey_channel = GlobalHotKeyEvent::receiver();
-            loop {
-                // 終了フラグをチェック
-                if let Ok(should_shutdown) = shutdown_flag.lock() {
-                    if *should_shutdown {
-                        debug!("ホットキーのリスナースレッドを終了する");
-                        break;
-                    }
-                }
-
-                match global_hotkey_channel.try_recv() {
-                    Ok(event) => {
-                        // 押下・解放のたびに流れるので trace に落とす
-                        trace!(
-                            "ホットキーのイベントを受信した: ID={}、State={:?}（対象の ID={}）",
-                            event.id(),
-                            event.state(),
-                            registered_id.unwrap_or(0)
-                        );
-                        // イベントが登録されたホットキーと一致するかチェック
-                        if let Some(expected_id) = registered_id {
-                            if event.id() == expected_id {
-                                trace!("ホットキーの ID が一致した。State: {:?}", event.state());
-                                // Pressedイベントのみに反応（Releasedは無視）
-                                if event.state() == HotKeyState::Pressed {
-                                    if let Ok(mut pressed) = pressed_flag.lock() {
-                                        *pressed = true;
-                                        trace!("ホットキーの押下フラグを立てた");
-                                    } else {
-                                        warn!("ホットキーの押下フラグを立てられない（ロックの取得に失敗）");
-                                    }
-                                } else {
-                                    trace!("解放イベントは無視する");
-                                }
-                            } else {
-                                trace!(
-                                    "ホットキーの ID が一致しないので無視する（{} != {}）",
-                                    event.id(),
-                                    expected_id
-                                );
-                            }
-                        } else {
-                            trace!("登録済みのホットキー ID が無いのでイベントを無視する");
-                        }
-                    }
-                    Err(_) => {
-                        // イベントが受信されないため、リスニングを継続
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10)); // CPU使用量を抑制
+            TriggerDecision::Debounced => {
+                debug!(
+                    "デバウンスによりスクリーンショットを抑止した（{}ms <= {}ms）",
+                    elapsed.as_millis(),
+                    HOTKEY_DEBOUNCE.as_millis()
+                );
+                false
             }
-        });
+        }
     }
 
     pub fn play_screenshot_sound(&self, volume: f32) {
@@ -428,18 +529,21 @@ impl ScreenshotManager {
 
 impl Drop for ScreenshotManager {
     fn drop(&mut self) {
-        // スレッドを適切に終了
-        if let Ok(mut shutdown) = self.listener_shutdown.lock() {
-            *shutdown = true;
-        }
+        // 先にホットキーを解除してからリスナーを止める
+        self.unregister_current();
 
-        // ホットキーの登録解除
-        if let (Some(manager), Some(hotkey)) = (&self.hotkey_manager, &self.registered_hotkey) {
-            let _ = manager.unregister(*hotkey);
-        }
+        self.listener_shutdown.store(true, Ordering::Release);
+        let Some(handle) = self.listener.take() else {
+            return;
+        };
 
-        // 終了確認のため少し待機
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        // 終了要求は recv_timeout のタイムアウトで拾うため、待ち時間は
+        // 最大で LISTENER_RECV_TIMEOUT。ウィンドウを閉じたあとの待ちなので
+        // 画面上は見えない。切り離すとプロセスが終わるまでスレッドが残る
+        if handle.join().is_err() {
+            // release ビルドは panic = "abort" なのでここには来ない
+            warn!("ホットキーのリスナースレッドがパニックした");
+        }
     }
 }
 
@@ -685,5 +789,116 @@ mod tests {
         assert!(parse_key_code("f13").is_err());
         assert!(parse_key_code("").is_err());
         assert!(parse_key_code("ctrl").is_err());
+    }
+    // ---- リスナースレッドのイベント照合とデバウンス ----
+
+    // ID は modifiers とキー名のハッシュなので、テストでは適当な値で足りる
+    const REGISTERED_ID: u32 = 1234;
+
+    #[test]
+    fn accepts_event_matching_id_and_pressed_returns_true() {
+        assert!(accepts_event(
+            Some(REGISTERED_ID),
+            REGISTERED_ID,
+            HotKeyState::Pressed
+        ));
+    }
+
+    #[test]
+    fn accepts_event_released_returns_false() {
+        // 押下と解放で 2 回流れる。解放で撮ると 1 回の操作で 2 枚になる
+        assert!(!accepts_event(
+            Some(REGISTERED_ID),
+            REGISTERED_ID,
+            HotKeyState::Released
+        ));
+    }
+
+    #[test]
+    fn accepts_event_other_id_returns_false() {
+        // ホットキーを切り替えた直後、解除済みのキーのイベントが残っていることがある
+        assert!(!accepts_event(
+            Some(REGISTERED_ID),
+            REGISTERED_ID + 1,
+            HotKeyState::Pressed
+        ));
+    }
+
+    #[test]
+    fn accepts_event_without_registration_returns_false() {
+        // リスナーは登録前から動いている。何も登録していない間は反応しない
+        assert!(!accepts_event(None, REGISTERED_ID, HotKeyState::Pressed));
+        assert!(!accepts_event(None, 0, HotKeyState::Pressed));
+    }
+
+    #[test]
+    fn accepts_event_id_zero_is_a_valid_registration() {
+        // ID はハッシュなので 0 も正規の値。未登録を 0 で表していると
+        // そのホットキーだけが効かなくなる
+        assert!(accepts_event(Some(0), 0, HotKeyState::Pressed));
+    }
+
+    #[test]
+    fn decide_trigger_not_pressed_returns_not_pressed() {
+        // 押されていなければ、どれだけ時間が空いていても実行しない
+        assert_eq!(
+            decide_trigger(false, Duration::from_secs(60), HOTKEY_DEBOUNCE),
+            TriggerDecision::NotPressed
+        );
+    }
+
+    #[test]
+    fn decide_trigger_after_debounce_fires() {
+        assert_eq!(
+            decide_trigger(true, Duration::from_millis(201), Duration::from_millis(200)),
+            TriggerDecision::Fire
+        );
+    }
+
+    #[test]
+    fn decide_trigger_at_debounce_boundary_is_debounced() {
+        // 経過がちょうど デバウンス時間 のときは抑止する（判定は「超えたら実行」）
+        assert_eq!(
+            decide_trigger(true, Duration::from_millis(200), Duration::from_millis(200)),
+            TriggerDecision::Debounced
+        );
+    }
+
+    #[test]
+    fn decide_trigger_within_debounce_is_debounced() {
+        // キーリピートで連続して届いた場合
+        assert_eq!(
+            decide_trigger(true, Duration::ZERO, Duration::from_millis(200)),
+            TriggerDecision::Debounced
+        );
+    }
+
+    #[test]
+    fn spawn_listener_stops_after_shutdown_request() {
+        // 終了要求を recv_timeout のタイムアウトで拾えること。拾えないと
+        // join が返らず、アプリが終了できなくなる
+        let registered_id = Arc::new(Mutex::new(None));
+        let pressed = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let handle = spawn_listener(
+            Arc::clone(&registered_id),
+            Arc::clone(&pressed),
+            Arc::clone(&shutdown),
+        );
+
+        shutdown.store(true, Ordering::Release);
+        let started = Instant::now();
+        handle.join().expect("リスナースレッドが正常に終わること");
+
+        // 待ち時間はタイムアウト 1 回ぶんが上限。CI の遅さを見込んで
+        // 4 倍を上限にしている
+        assert!(
+            started.elapsed() < LISTENER_RECV_TIMEOUT * 4,
+            "終了までに {:?} かかった",
+            started.elapsed()
+        );
+        // イベントを受け取っていないので押下フラグは立たない
+        assert!(!pressed.load(Ordering::Acquire));
     }
 }
