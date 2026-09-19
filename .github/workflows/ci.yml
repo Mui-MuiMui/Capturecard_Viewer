@@ -55,12 +55,9 @@ jobs:
       - name: 整形を確認する
         run: cargo fmt --check
 
-      # clippy には既知の警告が 6 件残っているため、今は -D warnings を付けない。
-      # 付けると常に落ちて CI が機能しなくなる。
-      # 警告を解消したら `-- -D warnings` を足して、新たな警告を落とすようにする。
-      # Asana: https://app.asana.com/1/1218412078016612/project/1218457296782693/task/1218459414234217
+      # 警告はエラー扱いにする。警告ゼロが前提なので、混入したらここで落とす
       - name: clippy をかける
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: release ビルドする
         run: cargo build --release
