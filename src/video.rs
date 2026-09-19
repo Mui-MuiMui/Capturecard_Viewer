@@ -6,8 +6,15 @@ use nokhwa::CallbackCamera;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-// YUY2 -> RGB24 高速変換 (最適化版)
 
+/// 1 つのビデオフォーマットが対応する能力。
+/// `(フォーマット名, [(幅, 高さ, fps)])` の組で、フォーマット名は "YUY2" / "MJPEG" / "RGB24"。
+pub type FormatCapability = (String, Vec<(u32, u32, u32)>);
+
+/// デバイスが対応する全フォーマットの能力一覧。
+pub type DeviceCapabilities = Vec<FormatCapability>;
+
+// YUY2 -> RGB24 高速変換 (最適化版)
 fn yuy2_to_rgb_naive(width: usize, height: usize, src: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; width * height * 3];
 
@@ -312,7 +319,7 @@ impl VideoCapture {
     // デバイスの能力を取得するメソッド
     pub fn get_device_capabilities(
         device_name: Option<&str>,
-    ) -> Result<Vec<(String, Vec<(u32, u32, u32)>)>, String> {
+    ) -> Result<DeviceCapabilities, String> {
         use nokhwa::Camera;
 
         // デバイス情報を取得
@@ -336,7 +343,7 @@ impl VideoCapture {
         let mut camera = Camera::new(device_info.index().clone(), requested_format)
             .map_err(|e| format!("Failed to create camera for capability query: {}", e))?;
 
-        let mut result: Vec<(String, Vec<(u32, u32, u32)>)> = Vec::new();
+        let mut result: DeviceCapabilities = Vec::new();
 
         // 各フォーマットで対応解像度・FPSを取得
         let formats = vec![
