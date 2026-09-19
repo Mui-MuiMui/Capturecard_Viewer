@@ -44,7 +44,7 @@ To also remove the settings file, delete the following directory:
 1. Right-click → "詳細設定..." (Advanced settings) to open the settings window.
 2. Select video and audio devices in the **device settings** tab.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
-3. Configure the save location, sound effect, and hotkey in the **screenshot settings** tab.
+3. Configure the save location, file format, sound effect, and hotkey in the **screenshot settings** tab.
 
 Edits in the settings window are kept as a draft and do not affect the running application until you press a button.
 
@@ -64,8 +64,11 @@ Edits in the settings window are kept as a draft and do not affect the running a
 
 - **Default key**: F5 (configurable)
 - **Save location**: Desktop (configurable)
-- **File name**: `YYYY-MM-DD_HH-MM-SS-mmm.jpg`
+- **File format**: JPEG (default, quality 1-100 selectable, 90 by default) or PNG
+- **File name**: `YYYY-MM-DD_HH-MM-SS-mmm.jpg` (`.png` when PNG is selected)
 - **Sound effect**: Custom audio files are supported, with adjustable volume
+
+JPEG keeps files small but blurs text and thin lines. Choose PNG when you want to keep game UI or subtitles exactly as rendered; PNG is lossless but produces files several times larger.
 
 ## Where settings are stored
 

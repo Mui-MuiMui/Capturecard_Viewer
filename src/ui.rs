@@ -1,4 +1,4 @@
-use crate::settings::AppSettings;
+use crate::settings::{AppSettings, ScreenshotFormat, MAX_JPEG_QUALITY, MIN_JPEG_QUALITY};
 use crate::video::DeviceCapabilities;
 use eframe::egui;
 use log::debug;
@@ -918,6 +918,47 @@ fn show_screenshot_settings_tab(
 
     ui.add_space(15.0);
 
+    // 保存形式
+    ui.group(|ui| {
+        ui.strong("保存形式");
+        ui.add_space(5.0);
+
+        ui.horizontal(|ui| {
+            ui.radio_value(
+                &mut settings.screenshot.format,
+                ScreenshotFormat::Jpeg,
+                "JPEG (.jpg)",
+            );
+            ui.radio_value(
+                &mut settings.screenshot.format,
+                ScreenshotFormat::Png,
+                "PNG (.png)",
+            );
+        });
+
+        // 品質は JPEG のときだけ効く。PNG では触れないようにして、
+        // 変えても何も起きない項目を操作させない
+        let jpeg_selected = settings.screenshot.format == ScreenshotFormat::Jpeg;
+        ui.horizontal(|ui| {
+            ui.label("JPEG 品質:");
+            ui.add_enabled(
+                jpeg_selected,
+                egui::Slider::new(
+                    &mut settings.screenshot.jpeg_quality,
+                    MIN_JPEG_QUALITY..=MAX_JPEG_QUALITY,
+                ),
+            );
+        });
+
+        ui.add_space(5.0);
+        ui.small(
+            "JPEG はファイルが小さくなりますが、文字や細い線ににじみが出ます。
+             PNG は元の画をそのまま保存できるかわりに、ファイルが数倍の大きさになります。",
+        );
+    });
+
+    ui.add_space(15.0);
+
     // サウンド設定
     ui.group(|ui| {
         ui.strong("効果音");
@@ -1225,6 +1266,8 @@ mod tests {
             },
             screenshot: ScreenshotSettings {
                 save_folder: PathBuf::from("C:/shots"),
+                format: ScreenshotFormat::Png,
+                jpeg_quality: 60,
                 sound_file: Some(PathBuf::from("sound/custom.mp3")),
                 sound_volume: 50.0,
                 hotkey: Some("Ctrl+S".to_string()),
@@ -1342,6 +1385,9 @@ mod tests {
         assert!(!shared.audio.passthrough_enabled);
         assert_eq!(shared.screenshot.hotkey, Some("Ctrl+S".to_string()));
         assert_eq!(shared.screenshot.sound_volume, 50.0);
+        // 保存形式と品質も screenshot セクションごと差し替わる
+        assert_eq!(shared.screenshot.format, ScreenshotFormat::Png);
+        assert_eq!(shared.screenshot.jpeg_quality, 60);
     }
 
     #[test]
