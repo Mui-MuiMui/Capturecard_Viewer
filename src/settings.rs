@@ -59,14 +59,13 @@ pub struct UiSettings {
     pub enable_drag_move: bool,
 }
 
-
 impl Default for VideoSettings {
     fn default() -> Self {
         Self {
             device_name: None,
-            resolution: Some((1280, 720)), // 720pで安定性を優先
+            resolution: Some((1280, 720)),    // 720pで安定性を優先
             format: Some("YUY2".to_string()), // YUY2フォーマット
-            fps: Some(60), // 60fps目標
+            fps: Some(60),                    // 60fps目標
         }
     }
 }
@@ -209,11 +208,11 @@ impl AppSettings {
             eprintln!("Failed to save settings: {}", e);
         }
     }
-    
+
     pub fn get_screenshot_path(&self, timestamp: &str) -> PathBuf {
         let mut path = self.screenshot.save_folder.clone();
         path.push(format!("{}.jpg", timestamp));
-        
+
         // ファイル名の競合を処理
         let mut counter = 1;
         while path.exists() {
