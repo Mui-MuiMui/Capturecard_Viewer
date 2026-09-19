@@ -512,6 +512,116 @@ enable_drag_move = false
         assert!(LoadOutcome::Loaded.may_write_defaults_on_startup());
     }
 
+    // get_screenshot_path は save_folder しか見ないため、
+    // 一時ディレクトリを指した設定を組み立てれば %AppData% にもデスクトップにも触れない。
+    fn settings_saving_into(dir: &Path) -> AppSettings {
+        let mut settings = AppSettings::default();
+        settings.screenshot.save_folder = dir.to_path_buf();
+        settings
+    }
+
+    #[test]
+    fn get_screenshot_path_no_conflict_uses_timestamp_as_is() {
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let settings = settings_saving_into(dir.path());
+
+        let path = settings.get_screenshot_path("2026-09-19_12-00-00-000");
+
+        assert_eq!(path, dir.path().join("2026-09-19_12-00-00-000.jpg"));
+    }
+
+    #[test]
+    fn get_screenshot_path_one_conflict_appends_1() {
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        fs::write(dir.path().join("2026-09-19_12-00-00-000.jpg"), b"")
+            .expect("先客のファイルを置けること");
+        let settings = settings_saving_into(dir.path());
+
+        let path = settings.get_screenshot_path("2026-09-19_12-00-00-000");
+
+        assert_eq!(path, dir.path().join("2026-09-19_12-00-00-000(1).jpg"));
+    }
+
+    #[test]
+    fn get_screenshot_path_two_conflicts_appends_2() {
+        // 連番付きのファイルも競合の判定に含めること。
+        // 「(1) を作ったら (1) を上書きした」を防ぐための確認
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        for name in [
+            "2026-09-19_12-00-00-000.jpg",
+            "2026-09-19_12-00-00-000(1).jpg",
+        ] {
+            fs::write(dir.path().join(name), b"").expect("先客のファイルを置けること");
+        }
+        let settings = settings_saving_into(dir.path());
+
+        let path = settings.get_screenshot_path("2026-09-19_12-00-00-000");
+
+        assert_eq!(path, dir.path().join("2026-09-19_12-00-00-000(2).jpg"));
+    }
+
+    #[test]
+    fn get_screenshot_path_three_conflicts_appends_3() {
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        for name in [
+            "2026-09-19_12-00-00-000.jpg",
+            "2026-09-19_12-00-00-000(1).jpg",
+            "2026-09-19_12-00-00-000(2).jpg",
+        ] {
+            fs::write(dir.path().join(name), b"").expect("先客のファイルを置けること");
+        }
+        let settings = settings_saving_into(dir.path());
+
+        let path = settings.get_screenshot_path("2026-09-19_12-00-00-000");
+
+        assert_eq!(path, dir.path().join("2026-09-19_12-00-00-000(3).jpg"));
+    }
+
+    #[test]
+    fn get_screenshot_path_gap_in_numbering_fills_the_gap() {
+        // (1) だけ消された状態。連番は「空いている最小の番号」であり、
+        // 既存の最大値 + 1 ではない
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        for name in [
+            "2026-09-19_12-00-00-000.jpg",
+            "2026-09-19_12-00-00-000(2).jpg",
+        ] {
+            fs::write(dir.path().join(name), b"").expect("先客のファイルを置けること");
+        }
+        let settings = settings_saving_into(dir.path());
+
+        let path = settings.get_screenshot_path("2026-09-19_12-00-00-000");
+
+        assert_eq!(path, dir.path().join("2026-09-19_12-00-00-000(1).jpg"));
+    }
+
+    #[test]
+    fn get_screenshot_path_timestamp_with_dots_keeps_jpg_extension() {
+        // タイムスタンプ自体にドットが含まれる場合。連番を付けるときに
+        // ドット以降を拡張子と見なして削ってしまうと ".jpg" を失う
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        fs::write(dir.path().join("2026.09.19_12.00.00.jpg"), b"")
+            .expect("先客のファイルを置けること");
+        let settings = settings_saving_into(dir.path());
+
+        let path = settings.get_screenshot_path("2026.09.19_12.00.00");
+
+        assert_eq!(path, dir.path().join("2026.09.19_12.00.00(1).jpg"));
+    }
+
+    #[test]
+    fn get_screenshot_path_only_numbered_file_exists_uses_timestamp_as_is() {
+        // 連番だけがあって本体が無い場合は、連番を付けずに本体の名前を使う
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        fs::write(dir.path().join("2026-09-19_12-00-00-000(1).jpg"), b"")
+            .expect("先客のファイルを置けること");
+        let settings = settings_saving_into(dir.path());
+
+        let path = settings.get_screenshot_path("2026-09-19_12-00-00-000");
+
+        assert_eq!(path, dir.path().join("2026-09-19_12-00-00-000.jpg"));
+    }
+
     #[test]
     fn backup_broken_config_missing_file_returns_none() {
         // 初回起動のように設定ファイルがまだ無い場合。退避するものが無いだけで、
