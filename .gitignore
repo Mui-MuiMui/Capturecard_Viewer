@@ -8,3 +8,8 @@ target
 
 # Claude Code が作成する作業用 worktree（.claude/skills はコミットする）
 .claude/worktrees/
+
+# 手動でリリースを出すときに作業ディレクトリへ作るもの（docs/RELEASE.md）。
+# release.yml も同じ名前でリリースノートを書き出す
+release-notes.md
+*.zip

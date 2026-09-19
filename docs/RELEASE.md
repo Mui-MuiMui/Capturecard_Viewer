@@ -163,10 +163,10 @@ cargo build --locked --release
 Compress-Archive -Path target/release/capturecard_viewer.exe -DestinationPath capturecard_viewer-v1.0.7-windows-x64.zip
 ```
 
-`CHANGELOG.md` の該当する節を `notes.md` に書き出してから Release を作る。
+`CHANGELOG.md` の該当する節を `release-notes.md` に書き出してから Release を作る。
 
 ```bash
-gh release create v1.0.7 capturecard_viewer-v1.0.7-windows-x64.zip --title v1.0.7 --notes-file notes.md --verify-tag
+gh release create v1.0.7 capturecard_viewer-v1.0.7-windows-x64.zip --title v1.0.7 --notes-file release-notes.md --verify-tag
 ```
 
 既に Release がある状態で zip だけ差し替える場合は以下。
@@ -175,4 +175,4 @@ gh release create v1.0.7 capturecard_viewer-v1.0.7-windows-x64.zip --title v1.0.
 gh release upload v1.0.7 capturecard_viewer-v1.0.7-windows-x64.zip --clobber
 ```
 
-手動で出したあとは `notes.md` と zip を消して、作業ディレクトリに残さない。
+手動で出したあとは `release-notes.md` と zip を消して、作業ディレクトリに残さない。
