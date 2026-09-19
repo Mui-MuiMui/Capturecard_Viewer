@@ -2,6 +2,10 @@
 name = "capturecard_viewer"
 version = "1.0.6"
 edition = "2021"
+# 配布するアプリであってライブラリではない。crates.io へ公開しないことを明示する。
+# cargo-about の private.ignore がこの指定を見て、本体を
+# THIRD-PARTY-LICENSES.txt の一覧から除外する。
+publish = false
 
 [dependencies]
 eframe = "0.26"
@@ -29,7 +33,8 @@ toml = "1.1"
 embed-resource = "2.4"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["winuser", "windef"] }
+# ウィンドウ位置の復元時にモニタの作業領域を列挙する（src/main.rs の monitor_work_areas）
+winapi = { version = "0.3", features = ["minwindef", "winuser", "windef"] }
 
 [[bin]]
 name = "capturecard_viewer"
