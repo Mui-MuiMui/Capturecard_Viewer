@@ -89,6 +89,9 @@ Windows10/11向け
  - 起動時にうまくデバイスへ接続できない場合があります。
    - 右クリックメニュー > デバイス再接続 を行うことで再接続するのでこちらにて回避をお願いします。
 
+**設定画面にあるが未実装の項目**
+ - フォーマットで MJPEG や RGB24 を選んでも、内部では常に YUY2 で開かれます。(既知の問題として対応予定)
+
 ## コーヒーおごってください
 使い勝手が良ければコーヒーおごってください。  
 <a href='https://ko-fi.com/G2G71JGGSM' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi1.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
