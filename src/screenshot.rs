@@ -316,6 +316,11 @@ fn spawn_listener(
 }
 
 impl ScreenshotManager {
+    /// ホットキーのリスナースレッドを起動して `ScreenshotManager` を作る。
+    ///
+    /// この時点ではまだホットキーを登録していないので、リスナーは受け取った
+    /// イベントをすべて捨てる。登録は `set_hotkey` が行う。
+    /// スレッドを止めるのは `Drop` だけなので、**アプリ全体で 1 つだけ作ること。**
     pub fn new() -> Self {
         let registered_id = Arc::new(Mutex::new(None));
         let pressed = Arc::new(AtomicBool::new(false));
