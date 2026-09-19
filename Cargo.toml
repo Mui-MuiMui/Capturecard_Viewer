@@ -27,7 +27,8 @@ toml = "1.1"
 embed-resource = "2.4"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["winuser", "windef"] }
+# ウィンドウ位置の復元時にモニタの作業領域を列挙する（src/main.rs の monitor_work_areas）
+winapi = { version = "0.3", features = ["minwindef", "winuser", "windef"] }
 
 [[bin]]
 name = "capturecard_viewer"
