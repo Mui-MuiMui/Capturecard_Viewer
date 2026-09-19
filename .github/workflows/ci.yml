@@ -1,0 +1,60 @@
+# Rust の検証を GitHub Actions で回す。
+#
+# ランナーは windows-latest 固定。build.rs が embed_resource で app.rc を
+# コンパイルするため rc.exe（Windows SDK）が要り、Linux/macOS ではビルドできない。
+# 依存の nokhwa（Media Foundation）と cpal（WASAPI）も Windows 専用。
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - main
+  push:
+    branches:
+      - dev
+      - main
+
+# 同一ブランチ・同一 PR で新しい push があったら、実行中の古いジョブを打ち切る。
+# release ビルドが重いため、無駄な実行を残さない。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# チェックアウトするだけなので読み取りのみ
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: fmt / clippy / build / test
+    runs-on: windows-latest
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v7
+
+      - name: Rust ツールチェインを用意する
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: cargo のキャッシュを復元する
+        uses: Swatinem/rust-cache@v2
+
+      - name: 整形を確認する
+        run: cargo fmt --check
+
+      # clippy には既知の警告が 6 件残っているため、今は -D warnings を付けない。
+      # 付けると常に落ちて CI が機能しなくなる。
+      # 警告を解消したら `-- -D warnings` を足して、新たな警告を落とすようにする。
+      # Asana: https://app.asana.com/1/1218412078016612/project/1218457296782693/task/1218459414234217
+      - name: clippy をかける
+        run: cargo clippy --all-targets
+
+      - name: release ビルドする
+        run: cargo build --release
+
+      # #[ignore] を付けた実機テスト（キャプチャーデバイスが要る）は走らせない
+      - name: テストを実行する
+        run: cargo test
