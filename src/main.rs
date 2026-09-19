@@ -1149,7 +1149,20 @@ impl CaptureCardViewer {
     }
 
     fn apply_settings(&mut self, initial: bool) {
-        if let Ok(settings) = self.settings.lock() {
+        // 設定はここで 1 度だけ複製し、以降はこの複製だけを見る。
+        // デバイスの開き直しはリトライの sleep を含めて秒単位かかるため、
+        // その間 settings のロックを握っていると他の経路が止まる。
+        // 複製しておけば video / audio / screenshot のロックをネストせずに済み、
+        // 複数のロックを重ねて取る箇所がこの関数から無くなる
+        let snapshot = match self.settings.lock() {
+            Ok(settings) => Some(settings.clone()),
+            Err(_) => {
+                warn!("設定の適用で settings のロックを取得できない");
+                None
+            }
+        };
+
+        if let Some(settings) = snapshot {
             // Video - リトライ機能付き
             if let Ok(mut video) = self.video_capture.lock() {
                 let need_video_restart = settings.video.device_name != self.last_video_device
