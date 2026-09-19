@@ -84,6 +84,7 @@ cargo test -- --ignored
 
 これらは GitHub Actions でも回る（`.github/workflows/ci.yml`）。`dev` / `main` への PR と push が対象で、ランナーは windows-latest。
 CI が実行するのは `cargo fmt --check` → `cargo clippy --locked --all-targets -- -D warnings` → `cargo build --locked --release` → `cargo test --locked` の 4 つで、`--ignored` 付きの実機テストは走らせない。
+加えて `THIRD-PARTY-LICENSES.txt` を生成し直し、コミット済みのものと一致するかを確認する。再生成の手順は `docs/DEPENDENCIES.md` の「ライセンス」にある。
 clippy は `-D warnings` 付きで回すため、警告が 1 件でも増えると CI が落ちる。
 `--locked` はコミット済みの `Cargo.lock` をそのまま使わせるため。付けないと `Cargo.toml` と食い違っていても勝手に再解決され、手元と違う依存で CI が通ってしまう。
 
