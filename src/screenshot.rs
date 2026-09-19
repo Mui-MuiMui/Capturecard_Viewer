@@ -2,6 +2,7 @@ use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
+use log::{debug, error, info, trace, warn};
 use rodio::{Decoder, OutputStream, Sink};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -192,15 +193,15 @@ impl ScreenshotManager {
     }
 
     pub fn set_hotkey(&mut self, hotkey_str: &str) -> Result<(), String> {
-        println!("Setting hotkey: {}", hotkey_str);
+        info!("ホットキーを設定する: {}", hotkey_str);
 
         // "F12", "Ctrl+S" などのホットキー文字列をパース
         let hotkey = parse_hotkey(hotkey_str)?;
-        println!("Parsed hotkey: {:?}", hotkey);
+        debug!("ホットキーを解釈した: {:?}", hotkey);
 
         // ホットキーマネージャーが存在しない場合は作成
         if self.hotkey_manager.is_none() {
-            println!("Creating new hotkey manager");
+            debug!("ホットキーマネージャーを作成する");
             self.hotkey_manager = Some(
                 GlobalHotKeyManager::new()
                     .map_err(|e| format!("Failed to create hotkey manager: {}", e))?,
@@ -209,8 +210,8 @@ impl ScreenshotManager {
 
         // 古いホットキーが存在する場合は登録解除
         if let (Some(manager), Some(old_hotkey)) = (&self.hotkey_manager, &self.registered_hotkey) {
-            println!(
-                "Unregistering old hotkey: {:?} (ID: {})",
+            debug!(
+                "古いホットキーを登録解除する: {:?}（ID: {}）",
                 old_hotkey,
                 old_hotkey.id()
             );
@@ -221,12 +222,17 @@ impl ScreenshotManager {
 
         // 新しいホットキーを登録
         if let Some(manager) = &self.hotkey_manager {
-            println!("Registering new hotkey: {:?} (ID: {})", hotkey, hotkey.id());
+            debug!(
+                "新しいホットキーを登録する: {:?}（ID: {}）",
+                hotkey,
+                hotkey.id()
+            );
 
-            // F11/F12キーの場合、特別な注意事項をログ出力
+            // F11/F12 は他のアプリと取り合いになりやすい。登録自体は成功しても
+            // 効かないことがあるので、不具合報告から切り分けられるよう残す
             if hotkey_str.to_lowercase() == "f11" || hotkey_str.to_lowercase() == "f12" {
-                println!(
-                    "Note: Registering {} as global hotkey. Make sure no other app is using it.",
+                info!(
+                    "{} をグローバルホットキーとして登録する。他のアプリが使っていないか確認すること",
                     hotkey_str
                 );
             }
@@ -242,14 +248,14 @@ impl ScreenshotManager {
                 Ok(()) => {
                     self.registered_hotkey = Some(hotkey);
                     self.registered_hotkey_id = Some(hotkey.id()); // ホットキーIDを保存
-                    println!(
-                        "Hotkey {} registered successfully with ID: {}",
+                    info!(
+                        "ホットキー {} を登録した（ID: {}）",
                         hotkey_str,
                         hotkey.id()
                     );
                 }
                 Err(e) => {
-                    println!("Hotkey registration error: {}", e);
+                    error!("ホットキーの登録に失敗した: {}", e);
                     return Err(e);
                 }
             }
@@ -295,34 +301,34 @@ impl ScreenshotManager {
 
         if let Ok(mut pressed) = self.is_hotkey_pressed.lock() {
             if *pressed {
-                println!("Screenshot hotkey detected!"); // デバッグログ追加
+                debug!("スクリーンショットのホットキーを検出した");
 
                 // 最後のトリガー時刻をチェック
                 if let Ok(mut last_time) = self.last_trigger_time.lock() {
                     let now = std::time::Instant::now();
                     let elapsed = now.duration_since(*last_time).as_millis();
 
-                    println!("Time since last trigger: {}ms", elapsed); // デバッグログ
+                    trace!("前回の実行からの経過: {}ms", elapsed);
 
                     if elapsed > DEBOUNCE_MS as u128 {
                         *pressed = false; // フラグをリセット
                         *last_time = now; // 最後のトリガー時刻を更新
-                        println!("Screenshot triggered!"); // デバッグログ
+                        debug!("スクリーンショットを実行する");
                         return true;
                     } else {
                         *pressed = false; // フラグをリセット（ただし false を返す）
-                        println!(
-                            "Screenshot blocked by debounce ({}ms < {}ms)",
+                        debug!(
+                            "デバウンスによりスクリーンショットを抑止した（{}ms < {}ms）",
                             elapsed, DEBOUNCE_MS
                         );
                         return false;
                     }
                 } else {
-                    println!("Failed to lock last_trigger_time");
+                    warn!("最終実行時刻のロックを取得できない");
                 }
             }
         } else {
-            println!("Failed to lock is_hotkey_pressed");
+            warn!("ホットキーの押下フラグのロックを取得できない");
         }
         false
     }
@@ -342,8 +348,8 @@ impl ScreenshotManager {
         let registered_id = self.registered_hotkey_id; // 登録されたホットキーIDをキャプチャ
 
         std::thread::spawn(move || {
-            println!(
-                "Screenshot hotkey listener started for ID: {:?}",
+            debug!(
+                "ホットキーのリスナースレッドを開始した（ID: {:?}）",
                 registered_id
             );
             let global_hotkey_channel = GlobalHotKeyEvent::receiver();
@@ -351,15 +357,16 @@ impl ScreenshotManager {
                 // 終了フラグをチェック
                 if let Ok(should_shutdown) = shutdown_flag.lock() {
                     if *should_shutdown {
-                        println!("Screenshot hotkey listener shutting down");
+                        debug!("ホットキーのリスナースレッドを終了する");
                         break;
                     }
                 }
 
                 match global_hotkey_channel.try_recv() {
                     Ok(event) => {
-                        println!(
-                            "Received hotkey event: ID={}, State={:?} (looking for ID={})",
+                        // 押下・解放のたびに流れるので trace に落とす
+                        trace!(
+                            "ホットキーのイベントを受信した: ID={}、State={:?}（対象の ID={}）",
                             event.id(),
                             event.state(),
                             registered_id.unwrap_or(0)
@@ -367,27 +374,27 @@ impl ScreenshotManager {
                         // イベントが登録されたホットキーと一致するかチェック
                         if let Some(expected_id) = registered_id {
                             if event.id() == expected_id {
-                                println!("✓ Hotkey ID matches! State: {:?}", event.state());
+                                trace!("ホットキーの ID が一致した。State: {:?}", event.state());
                                 // Pressedイベントのみに反応（Releasedは無視）
                                 if event.state() == HotKeyState::Pressed {
                                     if let Ok(mut pressed) = pressed_flag.lock() {
                                         *pressed = true;
-                                        println!("✓ Screenshot hotkey flag set to true");
+                                        trace!("ホットキーの押下フラグを立てた");
                                     } else {
-                                        println!("✗ Failed to set hotkey flag - mutex lock failed");
+                                        warn!("ホットキーの押下フラグを立てられない（ロックの取得に失敗）");
                                     }
                                 } else {
-                                    println!("- Ignoring Released event");
+                                    trace!("解放イベントは無視する");
                                 }
                             } else {
-                                println!(
-                                    "✗ Hotkey ID does not match ({} != {}), ignoring event",
+                                trace!(
+                                    "ホットキーの ID が一致しないので無視する（{} != {}）",
                                     event.id(),
                                     expected_id
                                 );
                             }
                         } else {
-                            println!("✗ No registered hotkey ID, ignoring event");
+                            trace!("登録済みのホットキー ID が無いのでイベントを無視する");
                         }
                     }
                     Err(_) => {
