@@ -18,6 +18,100 @@ pub struct ScreenshotManager {
     listener_shutdown: Arc<Mutex<bool>>,
 }
 
+// ホットキー文字列の解析。`ScreenshotManager` の状態に依存しないためフリー関数にしてある
+// （ユニットテストから直接呼べるようにするため）。
+
+/// `"F5"` や `"Ctrl+Shift+A"` のような文字列を `HotKey` に変換する。
+///
+/// 修飾キーだけの指定（`"Ctrl+Shift"` など）と、通常キーを 2 つ以上含む指定
+/// （`"Ctrl+A+B"` など）は登録できないため、エラーにする。
+fn parse_hotkey(hotkey_str: &str) -> Result<HotKey, String> {
+    let parts: Vec<&str> = hotkey_str.split('+').collect();
+    let mut modifiers = Modifiers::empty();
+    let mut key_code = None;
+
+    for part in parts {
+        let part = part.trim().to_lowercase();
+        match part.as_str() {
+            "ctrl" | "control" => modifiers |= Modifiers::CONTROL,
+            "alt" => modifiers |= Modifiers::ALT,
+            "shift" => modifiers |= Modifiers::SHIFT,
+            "win" | "windows" | "super" => modifiers |= Modifiers::SUPER,
+            key => {
+                // HotKey が持てる通常キーは 1 つだけ。黙って上書きすると
+                // "Ctrl+A+B" が "Ctrl+B" として登録され、設定した覚えのない
+                // キーが効いてしまうため、2 つ目を見つけた時点で弾く
+                if key_code.is_some() {
+                    return Err("Multiple key codes specified".to_string());
+                }
+                key_code = Some(parse_key_code(key)?);
+            }
+        }
+    }
+
+    let code = key_code.ok_or_else(|| "No key code specified".to_string())?;
+    Ok(HotKey::new(Some(modifiers), code))
+}
+
+/// 単一のキー名を `Code` に変換する。大文字小文字と前後の空白は無視する。
+fn parse_key_code(key: &str) -> Result<Code, String> {
+    let normalized = key.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "f1" => Ok(Code::F1),
+        "f2" => Ok(Code::F2),
+        "f3" => Ok(Code::F3),
+        "f4" => Ok(Code::F4),
+        "f5" => Ok(Code::F5),
+        "f6" => Ok(Code::F6),
+        "f7" => Ok(Code::F7),
+        "f8" => Ok(Code::F8),
+        "f9" => Ok(Code::F9),
+        "f10" => Ok(Code::F10),
+        "f11" => Ok(Code::F11),
+        "f12" => Ok(Code::F12),
+        "a" => Ok(Code::KeyA),
+        "b" => Ok(Code::KeyB),
+        "c" => Ok(Code::KeyC),
+        "d" => Ok(Code::KeyD),
+        "e" => Ok(Code::KeyE),
+        "f" => Ok(Code::KeyF),
+        "g" => Ok(Code::KeyG),
+        "h" => Ok(Code::KeyH),
+        "i" => Ok(Code::KeyI),
+        "j" => Ok(Code::KeyJ),
+        "k" => Ok(Code::KeyK),
+        "l" => Ok(Code::KeyL),
+        "m" => Ok(Code::KeyM),
+        "n" => Ok(Code::KeyN),
+        "o" => Ok(Code::KeyO),
+        "p" => Ok(Code::KeyP),
+        "q" => Ok(Code::KeyQ),
+        "r" => Ok(Code::KeyR),
+        "s" => Ok(Code::KeyS),
+        "t" => Ok(Code::KeyT),
+        "u" => Ok(Code::KeyU),
+        "v" => Ok(Code::KeyV),
+        "w" => Ok(Code::KeyW),
+        "x" => Ok(Code::KeyX),
+        "y" => Ok(Code::KeyY),
+        "z" => Ok(Code::KeyZ),
+        "0" => Ok(Code::Digit0),
+        "1" => Ok(Code::Digit1),
+        "2" => Ok(Code::Digit2),
+        "3" => Ok(Code::Digit3),
+        "4" => Ok(Code::Digit4),
+        "5" => Ok(Code::Digit5),
+        "6" => Ok(Code::Digit6),
+        "7" => Ok(Code::Digit7),
+        "8" => Ok(Code::Digit8),
+        "9" => Ok(Code::Digit9),
+        "space" => Ok(Code::Space),
+        "enter" => Ok(Code::Enter),
+        "escape" => Ok(Code::Escape),
+        _ => Err(format!("Unknown key: {}", key)),
+    }
+}
+
 impl ScreenshotManager {
     pub fn new() -> Self {
         Self {
@@ -35,7 +129,7 @@ impl ScreenshotManager {
         println!("Setting hotkey: {}", hotkey_str);
 
         // "F12", "Ctrl+S" などのホットキー文字列をパース
-        let hotkey = self.parse_hotkey(hotkey_str)?;
+        let hotkey = parse_hotkey(hotkey_str)?;
         println!("Parsed hotkey: {:?}", hotkey);
 
         // ホットキーマネージャーが存在しない場合は作成
@@ -148,80 +242,6 @@ impl ScreenshotManager {
         false
     }
 
-    // 後方互換性のために保持される非推奨プレースホルダー（何もしない）
-
-    fn parse_hotkey(&self, hotkey_str: &str) -> Result<HotKey, String> {
-        let parts: Vec<&str> = hotkey_str.split('+').collect();
-        let mut modifiers = Modifiers::empty();
-        let mut key_code = None;
-
-        for part in parts {
-            let part = part.trim().to_lowercase();
-            match part.as_str() {
-                "ctrl" | "control" => modifiers |= Modifiers::CONTROL,
-                "alt" => modifiers |= Modifiers::ALT,
-                "shift" => modifiers |= Modifiers::SHIFT,
-                "win" | "windows" | "super" => modifiers |= Modifiers::SUPER,
-                key => {
-                    key_code = Some(self.parse_key_code(key)?);
-                }
-            }
-        }
-
-        let code = key_code.ok_or_else(|| "No key code specified".to_string())?;
-        Ok(HotKey::new(Some(modifiers), code))
-    }
-
-    fn parse_key_code(&self, key: &str) -> Result<Code, String> {
-        println!("Parsing key code: '{}'", key);
-        let result = match key {
-            "f1" => Ok(Code::F1),
-            "f2" => Ok(Code::F2),
-            "f3" => Ok(Code::F3),
-            "f4" => Ok(Code::F4),
-            "f5" => Ok(Code::F5),
-            "f6" => Ok(Code::F6),
-            "f7" => Ok(Code::F7),
-            "f8" => Ok(Code::F8),
-            "f9" => Ok(Code::F9),
-            "f10" => Ok(Code::F10),
-            "f11" => Ok(Code::F11),
-            "f12" => Ok(Code::F12),
-            "a" => Ok(Code::KeyA),
-            "b" => Ok(Code::KeyB),
-            "c" => Ok(Code::KeyC),
-            "d" => Ok(Code::KeyD),
-            "e" => Ok(Code::KeyE),
-            "f" => Ok(Code::KeyF),
-            "g" => Ok(Code::KeyG),
-            "h" => Ok(Code::KeyH),
-            "i" => Ok(Code::KeyI),
-            "j" => Ok(Code::KeyJ),
-            "k" => Ok(Code::KeyK),
-            "l" => Ok(Code::KeyL),
-            "m" => Ok(Code::KeyM),
-            "n" => Ok(Code::KeyN),
-            "o" => Ok(Code::KeyO),
-            "p" => Ok(Code::KeyP),
-            "q" => Ok(Code::KeyQ),
-            "r" => Ok(Code::KeyR),
-            "s" => Ok(Code::KeyS),
-            "t" => Ok(Code::KeyT),
-            "u" => Ok(Code::KeyU),
-            "v" => Ok(Code::KeyV),
-            "w" => Ok(Code::KeyW),
-            "x" => Ok(Code::KeyX),
-            "y" => Ok(Code::KeyY),
-            "z" => Ok(Code::KeyZ),
-            "space" => Ok(Code::Space),
-            "enter" => Ok(Code::Enter),
-            "escape" => Ok(Code::Escape),
-            _ => Err(format!("Unknown key: {}", key)),
-        };
-        println!("Key code parsing result for '{}': {:?}", key, result);
-        result
-    }
-
     fn start_hotkey_listener(&mut self) {
         // 既存のリスナーを停止
         if let Ok(mut shutdown) = self.listener_shutdown.lock() {
@@ -328,5 +348,141 @@ impl Drop for ScreenshotManager {
 
         // 終了確認のため少し待機
         std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // HotKey の `mods` / `key` は pub(crate) で外から読めないため、期待する組み合わせで
+    // 作った HotKey と比較する。id は修飾キーとキーコードから決まるので等価判定で足りる。
+    fn assert_hotkey(actual: &HotKey, expected_mods: Modifiers, expected_code: Code) {
+        assert_eq!(*actual, HotKey::new(Some(expected_mods), expected_code));
+    }
+
+    #[test]
+    fn parse_hotkey_modifier_only_returns_error() {
+        // 修飾キーだけでは登録できないため、パース時点で弾く
+        assert!(parse_hotkey("Ctrl").is_err());
+        assert!(parse_hotkey("Ctrl+Shift").is_err());
+        assert!(parse_hotkey("Ctrl+Shift+Alt").is_err());
+    }
+
+    #[test]
+    fn parse_hotkey_empty_returns_error() {
+        assert!(parse_hotkey("").is_err());
+    }
+
+    #[test]
+    fn parse_hotkey_unknown_key_returns_error() {
+        assert!(parse_hotkey("Ctrl+Nonexistent").is_err());
+        assert!(parse_hotkey("F13").is_err());
+    }
+
+    #[test]
+    fn parse_hotkey_multiple_key_codes_returns_error() {
+        // 黙って最後のキーで上書きせず、エラーにする
+        assert!(parse_hotkey("Ctrl+A+B").is_err());
+        assert!(parse_hotkey("A+B").is_err());
+        assert!(parse_hotkey("F5+F6").is_err());
+    }
+
+    #[test]
+    fn parse_hotkey_single_key_has_no_modifiers() {
+        let hotkey = parse_hotkey("F5").expect("F5 は解析できる");
+        assert_hotkey(&hotkey, Modifiers::empty(), Code::F5);
+    }
+
+    #[test]
+    fn parse_hotkey_with_one_modifier_sets_that_modifier() {
+        let hotkey = parse_hotkey("Ctrl+S").expect("Ctrl+S は解析できる");
+        assert_hotkey(&hotkey, Modifiers::CONTROL, Code::KeyS);
+    }
+
+    #[test]
+    fn parse_hotkey_with_two_modifiers_sets_both() {
+        let hotkey = parse_hotkey("Ctrl+Shift+A").expect("Ctrl+Shift+A は解析できる");
+        assert_hotkey(&hotkey, Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyA);
+    }
+
+    #[test]
+    fn parse_hotkey_accepts_modifier_aliases() {
+        let control = parse_hotkey("Control+A").expect("Control は Ctrl の別名");
+        assert_hotkey(&control, Modifiers::CONTROL, Code::KeyA);
+
+        let win = parse_hotkey("Win+A").expect("Win は Super の別名");
+        assert_hotkey(&win, Modifiers::SUPER, Code::KeyA);
+
+        let windows = parse_hotkey("Windows+A").expect("Windows は Super の別名");
+        assert_hotkey(&windows, Modifiers::SUPER, Code::KeyA);
+
+        let superkey = parse_hotkey("Super+A").expect("Super はそのまま使える");
+        assert_hotkey(&superkey, Modifiers::SUPER, Code::KeyA);
+    }
+
+    #[test]
+    fn parse_hotkey_is_case_insensitive() {
+        let upper = parse_hotkey("CTRL+SHIFT+A").expect("大文字でも解析できる");
+        assert_hotkey(&upper, Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyA);
+
+        let lower = parse_hotkey("ctrl+shift+a").expect("小文字でも解析できる");
+        assert_hotkey(&lower, Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyA);
+    }
+
+    #[test]
+    fn parse_hotkey_ignores_spaces_around_parts() {
+        let hotkey = parse_hotkey(" Ctrl + S ").expect("前後の空白は無視する");
+        assert_hotkey(&hotkey, Modifiers::CONTROL, Code::KeyS);
+    }
+
+    #[test]
+    fn parse_key_code_letters_are_mapped() {
+        assert_eq!(parse_key_code("a"), Ok(Code::KeyA));
+        assert_eq!(parse_key_code("m"), Ok(Code::KeyM));
+        assert_eq!(parse_key_code("z"), Ok(Code::KeyZ));
+    }
+
+    #[test]
+    fn parse_key_code_function_keys_are_mapped() {
+        assert_eq!(parse_key_code("f1"), Ok(Code::F1));
+        assert_eq!(parse_key_code("f9"), Ok(Code::F9));
+        assert_eq!(parse_key_code("f10"), Ok(Code::F10));
+        assert_eq!(parse_key_code("f12"), Ok(Code::F12));
+    }
+
+    #[test]
+    fn parse_key_code_digits_are_mapped() {
+        assert_eq!(parse_key_code("0"), Ok(Code::Digit0));
+        assert_eq!(parse_key_code("5"), Ok(Code::Digit5));
+        assert_eq!(parse_key_code("9"), Ok(Code::Digit9));
+    }
+
+    #[test]
+    fn parse_hotkey_digit_with_modifiers_is_accepted() {
+        let hotkey = parse_hotkey("Ctrl+Shift+9").expect("Ctrl+Shift+9 は解析できる");
+        assert_hotkey(&hotkey, Modifiers::CONTROL | Modifiers::SHIFT, Code::Digit9);
+    }
+
+    #[test]
+    fn parse_key_code_named_keys_are_mapped() {
+        assert_eq!(parse_key_code("space"), Ok(Code::Space));
+        assert_eq!(parse_key_code("enter"), Ok(Code::Enter));
+        assert_eq!(parse_key_code("escape"), Ok(Code::Escape));
+    }
+
+    #[test]
+    fn parse_key_code_uppercase_is_accepted() {
+        // parse_hotkey は小文字化してから渡すが、直接呼ばれても同じ結果になること
+        assert_eq!(parse_key_code("A"), Ok(Code::KeyA));
+        assert_eq!(parse_key_code("F5"), Ok(Code::F5));
+        assert_eq!(parse_key_code("Space"), Ok(Code::Space));
+    }
+
+    #[test]
+    fn parse_key_code_unknown_key_returns_error() {
+        assert!(parse_key_code("f13").is_err());
+        assert!(parse_key_code("").is_err());
+        assert!(parse_key_code("ctrl").is_err());
     }
 }
