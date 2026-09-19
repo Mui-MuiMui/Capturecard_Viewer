@@ -79,6 +79,8 @@ Video settings are read from the device, so some options may not appear.
 - Channels: 2
 - Audio passthrough: enabled
 
+The audio options are listed regardless of the device, so you can pick a value your device does not support. In that case the closest value the device does support is used. (Channel count is often limited to the device default.)
+
 ## Known issues
 
 Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for a fuller list along with workarounds.
@@ -96,7 +98,6 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 
 Some options can be changed in the settings window but have no effect yet. These are tracked as known issues.
 
-- Audio sample rate and channel count
 - Selecting MJPEG or RGB24 as the video format (YUY2 is always used internally)
 
 ## Reporting problems
