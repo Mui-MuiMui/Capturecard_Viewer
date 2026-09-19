@@ -1,4 +1,10 @@
 #![windows_subsystem = "windows"]
+// テストの中だけ println! を許す。Cargo.toml の [lints.clippy] で
+// print_stdout / print_stderr を warn にしてアプリ本体への再混入を止めているが、
+// テストバイナリの標準出力は cargo が受け取るため cargo test -- --nocapture で読める。
+// 計測結果の出力（src/video.rs）はそれを利用している。
+// クレートルートに置いているのは、テスト対象のモジュール側を触らずに済ませるため
+#![cfg_attr(test, allow(clippy::print_stdout))]
 
 use chrono::Local;
 use eframe::egui;

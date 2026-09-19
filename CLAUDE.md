@@ -81,9 +81,9 @@ cargo build --release
 | `debug` | 経過の詳細。デバイスの探索、スレッドの起動と終了 |
 | `trace` | 毎フレーム・毎イベント流れるもの。ホットキーイベントの受信、2 秒ごとの再適用 |
 
-**例外はテストコードの中。** テストバイナリの標準出力は `cargo test -- --nocapture` で読めるため、`println!` を使ってよい（`src/video.rs` の計測用テストがその例）。
+**アプリ本体に `println!` / `eprintln!` は 1 つも残っていない。** 足し直すと CI で落ちる。`Cargo.toml` の `[lints.clippy]` で `print_stdout` / `print_stderr` を `warn` にしてあり、CI は `-D warnings` で clippy を回すため。
 
-**`src/main.rs`（42 箇所）と `src/ui.rs`（1 箇所）の `println!` はまだ残っている。** 並行して進んでいる PR との衝突を避けるため、これらの置き換えは別の PR で行う。新しく足さないこと。
+**例外はテストコードの中。** テストバイナリの標準出力は `cargo test -- --nocapture` で読めるため、`println!` を使ってよい（`src/video.rs` の計測用テストがその例）。`src/main.rs` 冒頭の `#![cfg_attr(test, allow(clippy::print_stdout))]` がこれを許している。**クレートルートに置いてあるのは、テストを持つモジュール側に `#[allow]` を散らかさないため。**
 
 ### catch_unwind は機能しない
 

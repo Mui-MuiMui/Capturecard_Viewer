@@ -134,7 +134,9 @@ capturecard_viewer.exe
 
 受け付ける値は `error` / `warn` / `info` / `debug` / `trace`。解釈できない値を渡した場合は `info` に戻る。
 
-テストコードの中は例外で、テストバイナリの標準出力は `cargo test -- --nocapture` で読めるため `println!` を使ってよい（`src/video.rs` の計測用テストがその例）。
+**`println!` / `eprintln!` を足すと CI で落ちる。** `Cargo.toml` の `[lints.clippy]` で `print_stdout` / `print_stderr` を `warn` にしてあり、clippy を `-D warnings` で回しているため。
+
+テストコードの中は例外で、テストバイナリの標準出力は `cargo test -- --nocapture` で読めるため `println!` を使ってよい（`src/video.rs` の計測用テストがその例）。`src/main.rs` 冒頭の `#![cfg_attr(test, allow(clippy::print_stdout))]` が許している。
 
 ## Cargo.lock
 
