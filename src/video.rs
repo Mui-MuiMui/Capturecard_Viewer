@@ -301,6 +301,7 @@ impl FrameBuffer {
     fn push_back(
         &mut self,
         frame: VideoFrame,
+        received_at: Instant,
         decode_ms: f32,
         fast: bool,
         source_format: &'static str,
@@ -314,7 +315,10 @@ impl FrameBuffer {
         } else {
             self.fallback_count += 1;
         }
-        let now = Instant::now();
+        // 間隔は RGB 変換が終わった時刻ではなく、フレームを受け取った時刻で測る。
+        // 変換時間が揺れると、その差が間隔へそのまま乗ってばらつきが実態より
+        // 大きく出る
+        let now = received_at;
         if let Some(prev) = self.last_frame_instant.replace(now) {
             let dt = now.duration_since(prev).as_secs_f32() * 1000.0;
             if self.frame_intervals.len() == 120 {
@@ -452,6 +456,7 @@ impl VideoCapture {
             // UI スレッドがテクスチャ化のために掴んでいることが多いため。
             let mut recyclable: Option<Arc<VideoFrame>> = None;
             move |frame: nokhwa::Buffer| {
+                // 変換時間の計測と、フレーム間隔の基準を兼ねる受信時刻
                 let start = Instant::now();
                 let res = frame.resolution();
                 let width = res.width_x as usize;
@@ -498,7 +503,7 @@ impl VideoCapture {
                         data,
                     };
                     if let Ok(mut guard) = fb.lock() {
-                        recyclable = guard.push_back(vf, decode_ms, used_fast, format_name);
+                        recyclable = guard.push_back(vf, start, decode_ms, used_fast, format_name);
                     }
                 }
             }
@@ -679,6 +684,7 @@ impl Drop for VideoCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     const TEST_WIDTH: usize = 2;
     const TEST_HEIGHT: usize = 2;
@@ -704,8 +710,8 @@ mod tests {
     #[test]
     fn frame_buffer_latest_frame_after_push_returns_newest_frame() {
         let mut buffer = FrameBuffer::new();
-        buffer.push_back(test_frame(1), 1.0, true, "YUY2");
-        buffer.push_back(test_frame(2), 1.0, true, "YUY2");
+        buffer.push_back(test_frame(1), Instant::now(), 1.0, true, "YUY2");
+        buffer.push_back(test_frame(2), Instant::now(), 1.0, true, "YUY2");
 
         let (frame, generation) = buffer
             .latest_frame()
@@ -725,13 +731,13 @@ mod tests {
     #[test]
     fn frame_buffer_latest_frame_without_new_push_keeps_generation() {
         let mut buffer = FrameBuffer::new();
-        buffer.push_back(test_frame(1), 1.0, true, "YUY2");
+        buffer.push_back(test_frame(1), Instant::now(), 1.0, true, "YUY2");
 
         let (_, first) = buffer.latest_frame().expect("1 枚目が取れる");
         let (_, second) = buffer.latest_frame().expect("取り出しても消えない");
         assert_eq!(first, second, "push が無ければ世代は進まない");
 
-        buffer.push_back(test_frame(2), 1.0, true, "YUY2");
+        buffer.push_back(test_frame(2), Instant::now(), 1.0, true, "YUY2");
         let (_, third) = buffer.latest_frame().expect("2 枚目が取れる");
         assert_eq!(third, second + 1, "push すれば世代が 1 つ進む");
     }
@@ -740,7 +746,7 @@ mod tests {
     fn frame_buffer_latest_frame_twice_shares_same_allocation() {
         // 取り出しで画素データが複製されないこと（このタスクの本題）
         let mut buffer = FrameBuffer::new();
-        buffer.push_back(test_frame(1), 1.0, true, "YUY2");
+        buffer.push_back(test_frame(1), Instant::now(), 1.0, true, "YUY2");
 
         let (first, _) = buffer.latest_frame().expect("1 回目");
         let (second, _) = buffer.latest_frame().expect("2 回目");
@@ -750,14 +756,14 @@ mod tests {
     #[test]
     fn frame_buffer_reset_drops_frame_and_advances_generation() {
         let mut buffer = FrameBuffer::new();
-        buffer.push_back(test_frame(1), 1.0, true, "YUY2");
+        buffer.push_back(test_frame(1), Instant::now(), 1.0, true, "YUY2");
         let (_, before) = buffer.latest_frame().expect("push 済み");
 
         buffer.reset();
         assert!(buffer.latest_frame().is_none());
 
         // 再接続後の最初のフレームが「新着」と判別できること
-        buffer.push_back(test_frame(2), 1.0, true, "YUY2");
+        buffer.push_back(test_frame(2), Instant::now(), 1.0, true, "YUY2");
         let (_, after) = buffer.latest_frame().expect("再接続後の 1 枚目");
         assert!(after > before);
     }
@@ -774,6 +780,7 @@ mod tests {
                 for i in 0..PUSH_COUNT {
                     buffer.lock().expect("書き込み側のロックに失敗").push_back(
                         test_frame(i as u8),
+                        Instant::now(),
                         1.0,
                         true,
                         "YUY2",
@@ -971,16 +978,34 @@ mod tests {
         // 高速パスと汎用パスの回数、解像度、フォーマット名が
         // 押し込んだとおりに読み出せること
         let mut buffer = FrameBuffer::new();
-        buffer.push_back(test_frame(1), 2.5, true, "YUY2");
-        buffer.push_back(test_frame(2), 3.5, false, "MJPEG");
+        // 受信時刻を 16ms 離して渡す。間隔は変換にかかった時間ではなく、
+        // この差から計算されなければならない
+        let now = Instant::now();
+        buffer.push_back(
+            test_frame(1),
+            now - Duration::from_millis(32),
+            2.5,
+            true,
+            "YUY2",
+        );
+        buffer.push_back(
+            test_frame(2),
+            now - Duration::from_millis(16),
+            3.5,
+            false,
+            "MJPEG",
+        );
 
         let stats = buffer.stats();
+        let intervals = stats.intervals.expect("2 枚押し込めば間隔が 1 つ取れる");
+        assert_eq!(intervals.samples, 1);
+        assert_close(intervals.average_ms, 16.0, "average_ms");
+        assert_close(intervals.fps, 62.5, "fps");
         assert_eq!(stats.fast_count, 1);
         assert_eq!(stats.fallback_count, 1);
         assert_close(stats.last_decode_ms, 3.5, "last_decode_ms");
         assert_eq!(stats.resolution, Some((TEST_WIDTH, TEST_HEIGHT)));
         assert_eq!(stats.source_format, Some("MJPEG"));
-        assert!(stats.intervals.is_some(), "2 枚押し込めば間隔が 1 つ取れる");
         assert!(stats.since_last_frame_ms.is_some());
     }
 
@@ -988,8 +1013,8 @@ mod tests {
     fn frame_buffer_stats_after_reset_has_no_frame() {
         // キャプチャを止めたあとに前回の統計が残らないこと
         let mut buffer = FrameBuffer::new();
-        buffer.push_back(test_frame(1), 2.5, true, "YUY2");
-        buffer.push_back(test_frame(2), 3.5, true, "YUY2");
+        buffer.push_back(test_frame(1), Instant::now(), 2.5, true, "YUY2");
+        buffer.push_back(test_frame(2), Instant::now(), 3.5, true, "YUY2");
         buffer.reset();
 
         let stats = buffer.stats();
@@ -1008,12 +1033,14 @@ mod tests {
         // コールバック側はこれを回収して変換先に使い回す
         let mut buffer = FrameBuffer::new();
         assert!(
-            buffer.push_back(test_frame(1), 1.0, true, "YUY2").is_none(),
+            buffer
+                .push_back(test_frame(1), Instant::now(), 1.0, true, "YUY2")
+                .is_none(),
             "1 枚目は置き換える対象が無い"
         );
 
         let replaced = buffer
-            .push_back(test_frame(2), 1.0, true, "YUY2")
+            .push_back(test_frame(2), Instant::now(), 1.0, true, "YUY2")
             .expect("2 枚目は 1 枚目を置き換える");
         assert_eq!(replaced.data, vec![1u8; TEST_FRAME_LEN]);
         assert!(

@@ -1043,16 +1043,20 @@ fn format_stats_lines(stats: &FrameStats) -> Vec<String> {
         None => lines.push("FPS - (フレーム間隔の計測待ち)".to_string()),
     }
 
-    lines.push(format!(
-        "デコード {:.2}ms (高速 {} / 汎用 {})",
-        stats.last_decode_ms, stats.fast_count, stats.fallback_count
-    ));
-
     match (stats.resolution, stats.source_format) {
         (Some((width, height)), Some(format)) => {
-            lines.push(format!("{}x{} {}", width, height, format))
+            // フレームが 1 枚でも届いていれば、変換の計測値は実測値
+            lines.push(format!(
+                "デコード {:.2}ms (高速 {} / 汎用 {})",
+                stats.last_decode_ms, stats.fast_count, stats.fallback_count
+            ));
+            lines.push(format!("{}x{} {}", width, height, format));
         }
-        _ => lines.push("映像フレームなし".to_string()),
+        _ => {
+            // 計測前の 0 を実測値と読み違えられないようにする
+            lines.push("デコード -".to_string());
+            lines.push("映像フレームなし".to_string());
+        }
     }
 
     if let Some(elapsed_ms) = stats.since_last_frame_ms {
@@ -1822,6 +1826,11 @@ mod tests {
         );
 
         assert!(joined.contains("FPS -"), "FPS が出ていない: {}", joined);
+        assert!(
+            joined.contains("デコード -"),
+            "計測前の 0 を数値で出している: {}",
+            joined
+        );
         assert!(joined.contains("映像フレームなし"), "{}", joined);
         assert!(
             !joined.contains("NaN"),
