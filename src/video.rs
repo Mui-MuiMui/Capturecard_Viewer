@@ -156,7 +156,6 @@ impl FrameBuffer {
 pub struct VideoCapture {
     camera: Option<CallbackCamera>,
     frames: Arc<Mutex<FrameBuffer>>,
-    is_active: bool,
 }
 
 impl VideoCapture {
@@ -164,7 +163,6 @@ impl VideoCapture {
         Self {
             camera: None,
             frames: Arc::new(Mutex::new(FrameBuffer::new())),
-            is_active: false,
         }
     }
 
@@ -301,7 +299,6 @@ impl VideoCapture {
             .map_err(|e| format!("Failed to open camera stream: {}", e))?;
 
         self.camera = Some(camera);
-        self.is_active = true;
 
         Ok(())
     }
@@ -310,7 +307,6 @@ impl VideoCapture {
         if let Some(mut camera) = self.camera.take() {
             let _ = camera.stop_stream();
         }
-        self.is_active = false;
 
         if let Ok(mut buf) = self.frames.lock() {
             buf.reset();
@@ -342,36 +338,6 @@ impl VideoCapture {
                 }
                 _ => None,
             })
-    }
-
-    #[allow(dead_code)]
-    pub fn is_active(&self) -> bool {
-        self.is_active
-    }
-
-    #[allow(dead_code)]
-    pub fn get_supported_formats(&self) -> Vec<(String, Vec<(u32, u32)>)> {
-        // 簡略化された実装 - 実際のフォーマットには、より複雑なロジックが必要
-        vec![
-            (
-                "MJPEG".to_string(),
-                vec![(1920, 1080), (1280, 720), (640, 480)],
-            ),
-            ("YUY2".to_string(), vec![(1280, 720), (640, 480)]),
-        ]
-    }
-
-    #[allow(dead_code)]
-    pub fn get_supported_formats_for(_device: &str) -> Vec<(String, Vec<(u32, u32)>)> {
-        // デバイス毎のプレースホルダー; 実際の実装ではデバイス機能を照会
-        vec![
-            (
-                "MJPEG".to_string(),
-                vec![(1920, 1080), (1280, 720), (640, 480)],
-            ),
-            ("YUY2".to_string(), vec![(1280, 720), (640, 480)]),
-            ("RGB24".to_string(), vec![(1280, 720), (640, 480)]),
-        ]
     }
 
     // デバイスの能力を取得するメソッド
