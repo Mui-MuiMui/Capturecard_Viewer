@@ -44,13 +44,14 @@ accepted = [
     "MPL-2.0",
     # epaint が同梱する絵文字フォント
     "OFL-1.1",
-    # epaint が同梱する Ubuntu フォント。SPDX の識別子ではないため
-    # cargo-about 0.9.2 は本文を出力できず、生成時に
+    # epaint が同梱する Ubuntu フォント。SPDX の構文としては正しい
+    # ユーザー定義参照（LicenseRef-）だが SPDX License List には無く、
+    # 差し込める既定の本文が存在しないため cargo-about 0.9.2 は
+    # 本文を出力できず、生成時に
     # 「LicenseRef-UFL-1.0 has no license file」と警告が出る。
-    # 本文は epaint crate の fonts/UFL.txt にある。
-    # about.toml の clarify で対応付けようとすると、0.9.2 では
-    # LicenseRef の本文選択の条件が反転しており別ライセンスの本文が
-    # 割り当てられてしまうため、対応付けは行っていない。
+    # clarify で対応付ける方法は 0.9.2 では本文選択の条件が反転しており
+    # 別ライセンスの本文が割り当たるため使えない。代わりに
+    # about.hbs の末尾に本文を固定の付録として置いている。
     "LicenseRef-UFL-1.0",
     # icu / zerovec / tinystr / unicode-ident など
     "Unicode-3.0",

@@ -205,7 +205,7 @@ cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES.txt
 
 `epaint` は既定フォントとして Ubuntu Light を exe に埋め込んでいる。Ubuntu Font Licence 1.0 は **Font Software の各コピーに著作権表示とライセンス本文を含めること**を条件にしているため、`THIRD-PARTY-LICENSES.txt` に本文を載せる必要がある。
 
-ところがこの識別子 `LicenseRef-UFL-1.0` は SPDX のものではないため、cargo-about 0.9.2 は本文を出力できず、生成のたびに次の警告が出る（生成自体は成功する）。
+ところが `LicenseRef-UFL-1.0` は、SPDX の構文としては正しいユーザー定義参照（`LicenseRef-`）であるものの、SPDX License List には載っていない。載っていない以上 cargo-about が差し込める既定の本文が無く、crate 内のどのファイルが本文かも自動では決まらないため、0.9.2 は本文を出力できない。生成のたびに次の警告が出る（生成自体は成功する）。
 
 ```
 WARN LicenseRef-UFL-1.0 has no license file for crate 'epaint 0.26.2'
@@ -213,4 +213,4 @@ WARN LicenseRef-UFL-1.0 has no license file for crate 'epaint 0.26.2'
 
 そのため **`about.hbs` の末尾に本文を直接書いた付録**を置いている。出典は `epaint` crate の `fonts/UFL.txt` と `Ubuntu-Light.ttf` のメタデータ。ここだけ自動生成の対象外なので、**egui を更新したときは同梱フォントが変わっていないか確認すること。**
 
-`about.toml` の clarify で対応付ける方法は使えない。0.9.2 では LicenseRef 向けの本文選択の条件が反転していて、別のライセンス本文が UFL の見出しで出力されてしまう。上流が直れば付録は外せる。
+本来は `about.toml` の clarify で「このファイルがこのライセンスの本文」と教えれば済むはずだが、0.9.2 では LicenseRef 向けの本文選択の条件が反転していて、別のライセンス本文が UFL の見出しで出力されてしまう。上流が直れば付録は外せる。

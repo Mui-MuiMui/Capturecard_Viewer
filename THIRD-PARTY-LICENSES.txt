@@ -6,9 +6,10 @@ Capturecard Viewer links the Rust crates listed in section 2 into its
 executable. The full text of every license that applies to them is reproduced
 in section 3.
 
-Licenses that have no SPDX identifier (shown as LicenseRef-* in section 2)
-cannot be emitted by cargo-about. Their text is appended at the end of
-section 3 and is not counted in section 1.
+Licenses referenced as LicenseRef-* in section 2 are valid SPDX syntax but are
+not on the SPDX License List, so cargo-about has no canonical text to fall back
+to. Their text is appended at the end of section 3 and is not counted in
+section 1.
 
 Capturecard Viewer itself is distributed under the MIT License; see the LICENSE
 file at the root of the repository.
