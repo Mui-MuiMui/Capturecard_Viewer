@@ -21,7 +21,7 @@ Delete the folder.
 
 To also remove the settings file, delete the following directory:
 
-> %AppData%\Capturecard_Viewer
+> %AppData%\capturecard_viewer
 
 ## Usage
 
@@ -74,7 +74,7 @@ JPEG keeps files small but blurs text and thin lines. Choose PNG when you want t
 
 Settings are saved in the following directory:
 
-> %AppData%\Capturecard_Viewer
+> %AppData%\capturecard_viewer
 
 Deleting it will recreate the settings with default values on the next launch.
 
