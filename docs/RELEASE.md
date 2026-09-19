@@ -92,6 +92,13 @@ git push origin v1.0.7
 - **タグは `dev` ではなく `main` で打つ**
 - Release が作られる前に間違いに気付いたら、タグを消して打ち直してよい。公開後は打ち直さず、次の版で直す
 
+**打ち直す前に、そのタグで動き出したワークフローが終わっているか止まっているかを確認する。** ワークフローは `cancel-in-progress: false` なので、タグを消しても走っている run は止まらない。走らせたまま打ち直すと、古いコミットからビルドした zip が、新しいコミットを指すタグの Release に添付されることがある。
+
+```bash
+gh run list --workflow release.yml --limit 3
+gh run cancel <run-id>
+```
+
 ```bash
 git push origin :refs/tags/v1.0.7 && git tag -d v1.0.7
 ```
@@ -143,6 +150,8 @@ git push origin dev
 | タグ名と version の不一致で落ちる | `Cargo.toml` の version を上げ忘れた、またはタグを打ち間違えた | タグを消し、`Cargo.toml` を直してから打ち直す |
 | CHANGELOG に節が無いと言われて落ちる | 「未リリース」を版に切り忘れた | CHANGELOG を直してタグを打ち直す |
 | `--locked` で lock の更新が必要と言われる | `Cargo.lock` を更新せずにコミットした | `cargo check` で更新してコミットし、タグを打ち直す |
+
+タグを打ち直すときは、手順 4 の注意（走っているワークフローを先に止める）に従う。
 
 Release がまだ作られていなければ、原因を直してタグを打ち直すのが一番簡単。**Release が作られたあとや、Actions 側の障害で通らない場合は手動で出す。**
 
