@@ -55,6 +55,7 @@ pub struct ScreenshotSettings {
     // 「PNG なのに品質が付いている」組み合わせを作れないようにする
     #[serde(deserialize_with = "deserialize_screenshot_format")]
     pub format: ScreenshotFormat,
+    #[serde(deserialize_with = "deserialize_jpeg_quality")]
     pub jpeg_quality: u8,
     pub sound_file: Option<PathBuf>,
     pub sound_volume: f32,
@@ -131,6 +132,29 @@ where
         );
         ScreenshotFormat::default()
     }))
+}
+
+// 範囲外の品質が書かれていても、設定全体を失わせない。u8 のまま読むと
+// jpeg_quality = 256 のような値でパースがファイル単位で失敗し、品質と
+// 無関係な項目まで既定値へ戻ってしまう。TOML の整数は i64 なので、
+// 広いほうで受けてから 1〜100 に丸める。
+//
+// 値が整数ですらない場合（jpeg_quality = 90.5 など）はここでも落ちる。
+// format と同じく、手で書き換えたときに起きやすいところだけを拾う。
+fn deserialize_jpeg_quality<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = i64::deserialize(deserializer)?;
+    let clamped = raw.clamp(i64::from(MIN_JPEG_QUALITY), i64::from(MAX_JPEG_QUALITY));
+    if clamped != raw {
+        warn!(
+            "設定の JPEG 品質 {} は範囲外なので {} として扱う",
+            raw, clamped
+        );
+    }
+    // clamp 済みなので u8 に収まる
+    Ok(clamped as u8)
 }
 
 // 設定ファイルに書かれた文字列から保存形式を決める。
@@ -902,6 +926,33 @@ enable_drag_move = false
         assert_eq!(settings.screenshot.format, ScreenshotFormat::Jpeg);
         assert_eq!(settings.screenshot.jpeg_quality, 60);
         assert_eq!(settings.screenshot.hotkey, Some("Ctrl+S".to_string()));
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_out_of_range_jpeg_quality_is_clamped_without_losing_settings() {
+        // 手で書き換えて u8 に収まらない値を入れた場合。品質だけが範囲に
+        // 収まり、無関係な項目は保持されなければならない
+        let config = FULL_CONFIG.replace("jpeg_quality = 60", "jpeg_quality = 256");
+        assert!(config.contains("jpeg_quality = 256"));
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("範囲外の品質でも読めなければならない");
+
+        assert_eq!(settings.screenshot.jpeg_quality, 100);
+        assert_eq!(settings.screenshot.format, ScreenshotFormat::Png);
+        assert_eq!(settings.screenshot.hotkey, Some("Ctrl+S".to_string()));
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_negative_jpeg_quality_is_clamped_to_minimum() {
+        let config = FULL_CONFIG.replace("jpeg_quality = 60", "jpeg_quality = -5");
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("負の品質でも読めなければならない");
+
+        assert_eq!(settings.screenshot.jpeg_quality, 1);
         assert_eq!(settings.ui.volume, 80.0);
     }
 
