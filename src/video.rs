@@ -6,16 +6,24 @@ use nokhwa::CallbackCamera;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-// YUY2 -> RGB24 高速変換 (最適化版)
 
+/// 1 つのビデオフォーマットが対応する能力。
+/// `(フォーマット名, [(幅, 高さ, fps)])` の組で、フォーマット名は "YUY2" / "MJPEG" / "RGB24"。
+pub type FormatCapability = (String, Vec<(u32, u32, u32)>);
+
+/// デバイスが対応する全フォーマットの能力一覧。
+pub type DeviceCapabilities = Vec<FormatCapability>;
+
+// YUY2 -> RGB24 高速変換 (最適化版)
 fn yuy2_to_rgb_naive(width: usize, height: usize, src: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; width * height * 3];
 
     // 安全確保: 偶数幅前提 (YUYV ペア)
-    let src_chunks = src.chunks_exact(4);
-    let out_chunks = out.chunks_exact_mut(6);
+    // 4 バイト / 6 バイトに満たない端数は変換せず、出力は 0 のまま残す
+    let (src_chunks, _) = src.as_chunks::<4>();
+    let (out_chunks, _) = out.as_chunks_mut::<6>();
 
-    for (src_chunk, out_chunk) in src_chunks.zip(out_chunks) {
+    for (src_chunk, out_chunk) in src_chunks.iter().zip(out_chunks.iter_mut()) {
         let y0 = src_chunk[0] as i32;
         let u = src_chunk[1] as i32;
         let y1 = src_chunk[2] as i32;
@@ -210,7 +218,7 @@ impl VideoCapture {
                 let source_format = frame.source_frame_format();
 
                 match source_format {
-                    FrameFormat::YUYV if width % 2 == 0 => {
+                    FrameFormat::YUYV if width.is_multiple_of(2) => {
                         // YUY2の高速パス
                         let raw_data = frame.buffer_bytes();
                         if raw_data.len() >= width * height * 2 {
@@ -311,7 +319,7 @@ impl VideoCapture {
     // デバイスの能力を取得するメソッド
     pub fn get_device_capabilities(
         device_name: Option<&str>,
-    ) -> Result<Vec<(String, Vec<(u32, u32, u32)>)>, String> {
+    ) -> Result<DeviceCapabilities, String> {
         use nokhwa::Camera;
 
         // デバイス情報を取得
@@ -335,7 +343,7 @@ impl VideoCapture {
         let mut camera = Camera::new(device_info.index().clone(), requested_format)
             .map_err(|e| format!("Failed to create camera for capability query: {}", e))?;
 
-        let mut result: Vec<(String, Vec<(u32, u32, u32)>)> = Vec::new();
+        let mut result: DeviceCapabilities = Vec::new();
 
         // 各フォーマットで対応解像度・FPSを取得
         let formats = vec![
@@ -421,5 +429,70 @@ impl Clone for VideoFrame {
             height: self.height,
             data: self.data.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 期待値は BT.601 の整数近似式を手計算した結果をベタ書きする。
+    // 実装と同じ式で計算すると、実装が誤っていてもテストが通ってしまうため。
+
+    #[test]
+    fn yuy2_to_rgb_naive_known_pattern_converts_two_pixels() {
+        // Y0=81, U=90, Y1=145, V=240 (赤寄りの YUYV ペア)
+        let src = [81u8, 90, 145, 240];
+        let out = yuy2_to_rgb_naive(2, 1, &src);
+        assert_eq!(out, vec![254, 0, 0, 255, 73, 73]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_output_length_is_width_times_height_times_three() {
+        let src = [235u8, 128, 235, 128, 235, 128, 235, 128];
+        let out = yuy2_to_rgb_naive(2, 2, &src);
+        assert_eq!(out.len(), 2 * 2 * 3);
+        assert_eq!(
+            out,
+            vec![254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254]
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_odd_width_leaves_last_pixel_black() {
+        // 幅が奇数だと出力が 6 バイト単位で割り切れず、最後の 1 画素は変換されず 0 のまま残る
+        let src = [235u8, 128, 235, 128, 0, 0];
+        let out = yuy2_to_rgb_naive(3, 1, &src);
+        assert_eq!(out, vec![254, 254, 254, 254, 254, 254, 0, 0, 0]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_short_source_leaves_remaining_pixels_black() {
+        // 入力が 1 ペア分しかない場合、残りの画素は 0 のまま (パニックしない)
+        let src = [235u8, 128, 235, 128];
+        let out = yuy2_to_rgb_naive(4, 1, &src);
+        assert_eq!(out, vec![254, 254, 254, 254, 254, 254, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_max_input_saturates_at_255() {
+        // Y=255, U=255, V=255 では R と B が 255 を超えるため飽和する
+        let src = [255u8, 255, 255, 255];
+        let out = yuy2_to_rgb_naive(2, 1, &src);
+        assert_eq!(out, vec![255, 125, 255, 255, 125, 255]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_min_input_saturates_at_0() {
+        // Y=0, U=0, V=0 では R と B が負になるため 0 に飽和する
+        let src = [0u8, 0, 0, 0];
+        let out = yuy2_to_rgb_naive(2, 1, &src);
+        assert_eq!(out, vec![0, 135, 0, 0, 135, 0]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_zero_size_returns_empty() {
+        let out = yuy2_to_rgb_naive(0, 0, &[]);
+        assert!(out.is_empty());
     }
 }

@@ -1,4 +1,5 @@
 use crate::settings::AppSettings;
+use crate::video::DeviceCapabilities;
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,9 +8,8 @@ use std::sync::{Arc, Mutex};
 static TEST_SOUND_FLAG: AtomicBool = AtomicBool::new(false);
 
 // デバイス能力のキャッシュ
-static DEVICE_CAPABILITIES_CACHE: std::sync::OnceLock<
-    Mutex<HashMap<String, Vec<(String, Vec<(u32, u32, u32)>)>>>,
-> = std::sync::OnceLock::new();
+static DEVICE_CAPABILITIES_CACHE: std::sync::OnceLock<Mutex<HashMap<String, DeviceCapabilities>>> =
+    std::sync::OnceLock::new();
 
 // 一時保存用の設定
 static TEMP_SETTINGS: std::sync::OnceLock<Mutex<Option<AppSettings>>> = std::sync::OnceLock::new();
