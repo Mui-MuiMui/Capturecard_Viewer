@@ -498,10 +498,17 @@ impl CaptureCardViewer {
                 if let Some(texture) = &self.video_texture {
                     let image_size = texture.size_vec2();
                     let display_size = if self.maintain_aspect_ratio {
-                        self.calculate_aspect_ratio_size(image_size, available_size)
+                        calculate_aspect_ratio_size(image_size, available_size)
                     } else {
                         available_size
                     };
+
+                    // 表示領域が潰れている間は描画も当たり判定も行わない。
+                    // 大きさ 0 や負の矩形を割り当てても映像は見えず、
+                    // ドラッグや右クリックの判定だけが残ると誤作動の元になる。
+                    if display_size.x <= 0.0 || display_size.y <= 0.0 {
+                        return;
+                    }
 
                     let rect = egui::Rect::from_center_size(
                         ui.available_rect_before_wrap().center(),
@@ -592,10 +599,17 @@ impl CaptureCardViewer {
                 if let Some(texture) = &self.video_texture {
                     let image_size = texture.size_vec2();
                     let display_size = if self.maintain_aspect_ratio {
-                        self.calculate_aspect_ratio_size(image_size, available_size)
+                        calculate_aspect_ratio_size(image_size, available_size)
                     } else {
                         available_size
                     };
+
+                    // 表示領域が潰れている間は描画も当たり判定も行わない。
+                    // 大きさ 0 や負の矩形を割り当てても映像は見えず、
+                    // ドラッグや右クリックの判定だけが残ると誤作動の元になる。
+                    if display_size.x <= 0.0 || display_size.y <= 0.0 {
+                        return;
+                    }
 
                     let rect = egui::Rect::from_center_size(
                         ui.available_rect_before_wrap().center(),
@@ -796,22 +810,35 @@ impl CaptureCardViewer {
             self.show_context_menu = false;
         }
     }
+}
 
-    fn calculate_aspect_ratio_size(
-        &self,
-        image_size: egui::Vec2,
-        available_size: egui::Vec2,
-    ) -> egui::Vec2 {
-        let image_aspect = image_size.x / image_size.y;
-        let available_aspect = available_size.x / available_size.y;
+// 映像の縦横比を保ったまま、表示領域に収まる大きさを求める。
+//
+// self を使わない純粋な計算なので、ユニットテストできるよう
+// impl の外へ出してある。
+//
+// 幅か高さが 0 以下の入力に対しては egui::Vec2::ZERO を返す。最小化や
+// ウィンドウの極端な縮小で available_size が潰れると 0 除算で縦横比が
+// inf / NaN になり、そのまま Rect へ渡すと描画が壊れるため。
+// 呼び出し側は ZERO を「描画するものがない」と解釈して描画を飛ばす。
+fn calculate_aspect_ratio_size(image_size: egui::Vec2, available_size: egui::Vec2) -> egui::Vec2 {
+    if image_size.x <= 0.0
+        || image_size.y <= 0.0
+        || available_size.x <= 0.0
+        || available_size.y <= 0.0
+    {
+        return egui::Vec2::ZERO;
+    }
 
-        if image_aspect > available_aspect {
-            // 画像が横長 - 横幅に合わせる
-            egui::Vec2::new(available_size.x, available_size.x / image_aspect)
-        } else {
-            // 画像が縦長 - 高さに合わせる
-            egui::Vec2::new(available_size.y * image_aspect, available_size.y)
-        }
+    let image_aspect = image_size.x / image_size.y;
+    let available_aspect = available_size.x / available_size.y;
+
+    if image_aspect > available_aspect {
+        // 画像が横長 - 横幅に合わせる
+        egui::Vec2::new(available_size.x, available_size.x / image_aspect)
+    } else {
+        // 画像が縦長 - 高さに合わせる
+        egui::Vec2::new(available_size.y * image_aspect, available_size.y)
     }
 }
 
@@ -1169,6 +1196,7 @@ impl CaptureCardViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::Vec2;
 
     #[test]
     fn should_refresh_device_list_never_updated_returns_true() {
@@ -1264,6 +1292,131 @@ mod tests {
         assert_eq!(icon.width, 256);
         assert_eq!(icon.height, 256);
         assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+    }
+
+    // calculate_aspect_ratio_size のテストで使う値は、期待値が 2 進小数で
+    // 割り切れるように選んである。誤差を許容する比較にすると、桁落ちが
+    // 起きても気付けないため。
+    #[test]
+    fn calculate_aspect_ratio_size_wide_image_fits_to_width() {
+        // 2:1 の映像を正方形の領域へ。横幅いっぱいに広げて上下を余らせる
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(400.0, 400.0));
+
+        assert_eq!(size, Vec2::new(400.0, 200.0));
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_tall_image_fits_to_height() {
+        // 1:2 の映像を正方形の領域へ。高さいっぱいに広げて左右を余らせる
+        let size = calculate_aspect_ratio_size(Vec2::new(800.0, 1600.0), Vec2::new(400.0, 400.0));
+
+        assert_eq!(size, Vec2::new(200.0, 400.0));
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_same_aspect_fills_area() {
+        // 縦横比が一致するときは領域をそのまま埋める
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(400.0, 200.0));
+
+        assert_eq!(size, Vec2::new(400.0, 200.0));
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_area_wider_than_image_fits_to_height() {
+        // 領域のほうが横長。高さに合わせ、横幅は余らせる
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(1000.0, 200.0));
+
+        assert_eq!(size, Vec2::new(400.0, 200.0));
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_upscales_to_fill_area() {
+        // 映像より領域が大きいときは拡大する。縮小専用ではない
+        let size = calculate_aspect_ratio_size(Vec2::new(400.0, 200.0), Vec2::new(1600.0, 1600.0));
+
+        assert_eq!(size, Vec2::new(1600.0, 800.0));
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_zero_height_area_returns_zero() {
+        // 最小化やウィンドウの極端な縮小で高さが 0 になる。
+        // available_size.x / available_size.y が inf になるケース
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(400.0, 0.0));
+
+        assert_eq!(size, Vec2::ZERO);
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_zero_width_area_returns_zero() {
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(0.0, 400.0));
+
+        assert_eq!(size, Vec2::ZERO);
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_zero_area_returns_zero() {
+        // 幅も高さも 0。0.0 / 0.0 が NaN になるケース
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::ZERO);
+
+        assert_eq!(size, Vec2::ZERO);
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_negative_area_returns_zero() {
+        // egui のレイアウトは余白が足りないと負の available_size を返すことがある。
+        // 負の大きさの矩形を描画に渡さないよう、ここで潰す
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(-10.0, 400.0));
+
+        assert_eq!(size, Vec2::ZERO);
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_zero_height_image_returns_zero() {
+        // テクスチャ側が潰れている場合。image_size.x / image_size.y が inf になる
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 0.0), Vec2::new(400.0, 400.0));
+
+        assert_eq!(size, Vec2::ZERO);
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_zero_image_returns_zero() {
+        // 0.0 / 0.0 で image_aspect が NaN になり、
+        // 掛け算の結果として NaN が呼び出し側へ漏れるケース
+        let size = calculate_aspect_ratio_size(Vec2::ZERO, Vec2::new(400.0, 400.0));
+
+        assert_eq!(size, Vec2::ZERO);
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_degenerate_input_never_returns_nan_or_inf() {
+        // 描画へ渡る値が NaN / inf にならないことを、退化した入力の組で一括して確かめる
+        let degenerate = [
+            (Vec2::ZERO, Vec2::ZERO),
+            (Vec2::new(1600.0, 800.0), Vec2::new(400.0, 0.0)),
+            (Vec2::new(1600.0, 800.0), Vec2::new(0.0, 400.0)),
+            (Vec2::new(1600.0, 0.0), Vec2::new(400.0, 400.0)),
+            (Vec2::new(0.0, 800.0), Vec2::new(400.0, 400.0)),
+            (Vec2::new(1600.0, 800.0), Vec2::new(-10.0, -10.0)),
+        ];
+
+        for (image_size, available_size) in degenerate {
+            let size = calculate_aspect_ratio_size(image_size, available_size);
+
+            assert!(
+                size.x.is_finite() && size.y.is_finite(),
+                "image={:?} available={:?} で {:?} を返した",
+                image_size,
+                available_size,
+                size
+            );
+            assert!(
+                size.x >= 0.0 && size.y >= 0.0,
+                "image={:?} available={:?} で負の大きさ {:?} を返した",
+                image_size,
+                available_size,
+                size
+            );
+        }
     }
 
     #[test]
