@@ -82,7 +82,9 @@ cargo test -- --ignored
 
 開発フローに沿って進める場合は `/cv:review` がこれらをまとめて実行する。
 
-同じ 4 つは GitHub Actions でも回る（`.github/workflows/ci.yml`）。`dev` / `main` への PR と push が対象で、ランナーは windows-latest。clippy は既知の警告があるため `-D warnings` を付けていない。
+これらは GitHub Actions でも回る（`.github/workflows/ci.yml`）。`dev` / `main` への PR と push が対象で、ランナーは windows-latest。
+CI が実行するのは `cargo fmt --check` → `cargo clippy --all-targets` → `cargo build --release` → `cargo test` の 4 つで、`--ignored` 付きの実機テストは走らせない。
+clippy は既知の警告があるため `-D warnings` を付けていない。
 
 ## 配布時に同梱するもの
 
