@@ -3,6 +3,7 @@
 use chrono::Local;
 use eframe::egui;
 use image::GenericImageView;
+use log::{debug, error, info, trace, warn};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -163,16 +164,16 @@ impl Default for CaptureCardViewer {
                 if s.audio.input_device_name.is_none() {
                     let ac = AudioCapture::new();
                     let list = ac.list_input_devices();
-                    println!("Debug: Available input devices: {:?}", list);
+                    debug!("利用できる入力デバイス: {:?}", list);
                     if let Some(name) = list.first() {
                         s.audio.input_device_name = Some(name.clone());
-                        println!("Debug: Set default input device: {}", name);
+                        info!("入力デバイスの既定を {} にした", name);
                     }
                 }
                 if s.audio.output_device_name.is_none() {
                     // 出力デバイスはデフォルト（None）で自動選択させる
                     s.audio.output_device_name = None;
-                    println!("Debug: Using default output device");
+                    debug!("出力デバイスは既定（自動選択）にする");
                 }
                 // 読めなかった設定ファイルを退避できなかった場合は書き戻さない。
                 // ここで上書きすると、ディスクに残っている壊れたファイルが既定値で
@@ -193,12 +194,12 @@ impl eframe::App for CaptureCardViewer {
         if !self.delayed_connection_triggered {
             if let Some(startup_time) = self.startup_time {
                 if startup_time.elapsed().as_secs_f32() >= 2.0 {
-                    println!("Starting delayed device connection and auto-refresh (2 seconds after startup)");
+                    info!("起動から 2 秒経過したのでデバイスの接続を開始する");
                     // 強制リフレッシュのため、last_*をクリアしてからapply_settings
-                    println!("Debug: Clearing last device states for forced refresh");
+                    debug!("強制リフレッシュのため直前のデバイス状態を消す");
                     self.last_video_device = None;
                     self.last_audio_device = None;
-                    println!("Debug: Calling apply_settings(initial=true)");
+                    debug!("apply_settings(initial=true) を呼ぶ");
                     self.apply_settings(true);
 
                     // 初期設定後にエラーハンドリング付きでウィンドウレベル設定を適用
@@ -211,11 +212,11 @@ impl eframe::App for CaptureCardViewer {
                             },
                         ));
                     })) {
-                        eprintln!("Warning: Failed to set window level: {:?}", e);
+                        warn!("ウィンドウレベルの設定でパニックが起きた: {:?}", e);
                     }
 
                     self.delayed_connection_triggered = true;
-                    println!("Debug: Delayed connection sequence completed");
+                    debug!("遅延接続の一連の処理が終わった");
                 }
             }
         }
@@ -231,7 +232,7 @@ impl eframe::App for CaptureCardViewer {
             if let Err(e) = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 self.apply_settings(false);
             })) {
-                eprintln!("Warning: Failed to apply settings: {:?}", e);
+                warn!("設定の適用でパニックが起きた: {:?}", e);
                 // タイマーをリセットして連続的なエラー出力を防止
                 self.last_settings_applied = Instant::now();
             }
@@ -400,22 +401,25 @@ impl eframe::App for CaptureCardViewer {
 
         // 新しくキャプチャされたホットキーを即座に登録
         if let Some(hk) = self.pending_hotkey.take() {
-            println!("Registering new hotkey: {}", hk);
+            debug!("捕捉したホットキーを登録する: {}", hk);
             if let Ok(mut ss) = self.screenshot_manager.lock() {
                 match ss.set_hotkey(&hk) {
                     Ok(()) => {
-                        println!("Hotkey registered successfully: {}", hk);
+                        debug!("ホットキー {} の登録に成功した", hk);
                         // apply_settings が同じホットキーを登録し直さないよう記録する
                         self.last_hotkey = Some(hk.clone());
                     }
                     Err(e) => {
-                        println!("Failed to register hotkey {}: {}", hk, e);
+                        warn!(
+                            "ホットキー {} を登録できないので次の適用で再試行する: {}",
+                            hk, e
+                        );
                         // 登録できていないので apply_settings 側で再試行させる
                         self.last_hotkey = None;
                     }
                 }
             } else {
-                println!("Failed to lock screenshot_manager for hotkey registration");
+                warn!("ホットキーの登録で screenshot_manager のロックを取得できない");
             }
         }
         // テストサウンドリクエストを処理
@@ -488,30 +492,33 @@ impl CaptureCardViewer {
             if let Ok(screenshot_manager) = self.screenshot_manager.lock() {
                 let pressed = screenshot_manager.is_hotkey_pressed();
                 if pressed {
-                    println!("Main: Screenshot should be taken");
+                    // 押下の検出自体は screenshot 側が debug で残している
+                    trace!("ホットキーの押下を受け取った");
                 }
                 pressed
             } else {
-                println!("Main: Failed to lock screenshot_manager");
+                // ここが失敗するのはロックが毒されたときだけで、毎フレーム呼ばれる。
+                // release ビルドは panic = "abort" なので毒されること自体が起きない
+                warn!("ホットキーの確認で screenshot_manager のロックを取得できない");
                 false
             }
         };
 
         if should_screenshot {
-            println!("Main: Taking screenshot now");
+            debug!("スクリーンショットの処理に入る");
             self.take_screenshot();
         }
     }
 
     fn take_screenshot(&mut self) {
-        println!("take_screenshot: Starting screenshot process");
+        debug!("スクリーンショットの保存を開始する");
 
         // 最新フレームの生データを抽出。
         // スクリーンショットはいま画面に出ている画を保存するので、新着でなくてよい
         if let Ok(video) = self.video_capture.lock() {
             if let Some(frame) = video.get_latest_frame() {
-                println!(
-                    "take_screenshot: Got video frame {}x{}",
+                debug!(
+                    "保存対象の映像フレームを取得した: {}x{}",
                     frame.width, frame.height
                 );
 
@@ -519,12 +526,12 @@ impl CaptureCardViewer {
                 let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S-%3f").to_string();
                 if let Ok(settings) = self.settings.lock() {
                     let path = settings.get_screenshot_path(&timestamp);
-                    println!("take_screenshot: Saving to {:?}", path);
+                    debug!("保存先: {}", path.display());
 
                     // 親ディレクトリを作成
                     if let Some(parent) = path.parent() {
                         if let Err(e) = std::fs::create_dir_all(parent) {
-                            println!("take_screenshot: Failed to create directories: {}", e);
+                            error!("保存先のディレクトリを作成できない: {}", e);
                         }
                     }
 
@@ -537,28 +544,25 @@ impl CaptureCardViewer {
                     ) {
                         match img_buf.save(&path) {
                             Ok(()) => {
-                                println!(
-                                    "take_screenshot: Screenshot saved successfully to {:?}",
-                                    path
-                                );
+                                info!("スクリーンショットを {} へ保存した", path.display());
                                 let volume = settings.screenshot.sound_volume;
                                 if let Ok(ss) = self.screenshot_manager.lock() {
                                     ss.play_screenshot_sound(volume);
                                 }
                             }
-                            Err(e) => println!("take_screenshot: Failed to save image: {}", e),
+                            Err(e) => error!("スクリーンショットを保存できない: {}", e),
                         }
                     } else {
-                        println!("take_screenshot: Failed to create RgbImage from raw data");
+                        error!("映像フレームから画像を組み立てられない");
                     }
                 } else {
-                    println!("take_screenshot: Failed to lock settings");
+                    warn!("スクリーンショットの保存で settings のロックを取得できない");
                 }
             } else {
-                println!("take_screenshot: No video frame available");
+                warn!("映像フレームが無いのでスクリーンショットを撮れない");
             }
         } else {
-            println!("take_screenshot: Failed to lock video_capture");
+            warn!("スクリーンショットの保存で video_capture のロックを取得できない");
         }
     }
 
@@ -1148,8 +1152,8 @@ impl CaptureCardViewer {
                     || settings.video.fps != self.last_video_fps;
 
                 if settings.video.device_name.is_some() && (need_video_restart || initial) {
-                    println!(
-                        "Debug: Starting video device connection: {:?}",
+                    info!(
+                        "映像デバイスへの接続を開始する: {:?}",
                         settings.video.device_name
                     );
                     let mut video_success = false;
@@ -1157,8 +1161,8 @@ impl CaptureCardViewer {
 
                     for attempt in 0..max_retries {
                         if attempt > 0 {
-                            println!(
-                                "Video device connection attempt {} of {}",
+                            info!(
+                                "映像デバイスへの接続を再試行する（{} / {} 回目）",
                                 attempt + 1,
                                 max_retries
                             );
@@ -1172,12 +1176,16 @@ impl CaptureCardViewer {
                             settings.video.fps,
                         ) {
                             Ok(_) => {
-                                println!("Debug: Video device connected successfully");
+                                info!("映像デバイスに接続した");
                                 video_success = true;
                                 break;
                             }
                             Err(e) => {
-                                println!("Video capture failed (attempt {}): {}", attempt + 1, e);
+                                warn!(
+                                    "映像デバイスへの接続に失敗した（{} 回目）: {}",
+                                    attempt + 1,
+                                    e
+                                );
                                 if attempt < max_retries - 1 {
                                     continue;
                                 }
@@ -1206,29 +1214,24 @@ impl CaptureCardViewer {
                     || initial; // 起動時は必ず接続試行
 
                 if need_audio_restart {
-                    println!("Debug: Starting audio device connection");
-                    println!(
-                        "Debug: Input device: {:?}",
-                        settings.audio.input_device_name
-                    );
-                    println!(
-                        "Debug: Output device: {:?}",
-                        settings.audio.output_device_name
+                    info!(
+                        "音声デバイスへの接続を開始する - 入力: {:?}、出力: {:?}",
+                        settings.audio.input_device_name, settings.audio.output_device_name
                     );
 
                     // まずは利用可能なデバイスをリスト
                     let input_devices = audio.list_input_devices();
                     let output_devices = audio.list_output_devices();
-                    println!("Debug: Available input devices: {:?}", input_devices);
-                    println!("Debug: Available output devices: {:?}", output_devices);
+                    debug!("利用できる入力デバイス: {:?}", input_devices);
+                    debug!("利用できる出力デバイス: {:?}", output_devices);
 
                     let mut audio_success = false;
                     let max_retries = if initial { 5 } else { 2 }; // 起動時により多くリトライ
 
                     for attempt in 0..max_retries {
                         if attempt > 0 {
-                            println!(
-                                "Audio device connection attempt {} of {}",
+                            info!(
+                                "音声デバイスへの接続を再試行する（{} / {} 回目）",
                                 attempt + 1,
                                 max_retries
                             );
@@ -1243,32 +1246,33 @@ impl CaptureCardViewer {
                             settings.audio.channels,
                         ) {
                             Ok(_) => {
-                                println!("Debug: Audio devices connected successfully");
+                                info!("音声デバイスに接続した");
                                 self.audio_last_error = None;
                                 audio_success = true;
                                 break;
                             }
                             Err(e) => {
-                                println!("Audio capture failed (attempt {}): {}", attempt + 1, e);
+                                warn!(
+                                    "音声デバイスへの接続に失敗した（{} 回目）: {}",
+                                    attempt + 1,
+                                    e
+                                );
                                 self.audio_last_error = Some(e.clone());
 
                                 // 3回目以降のリトライではデフォルトデバイスを試行
                                 if attempt == 2 && initial {
-                                    println!("Debug: Trying with default devices...");
+                                    info!("既定のデバイスで接続し直す");
                                     match audio
                                         .start_passthrough_with_settings(None, None, None, None)
                                     {
                                         Ok(_) => {
-                                            println!("Debug: Audio connected with default devices");
+                                            info!("既定のデバイスで音声に接続した");
                                             self.audio_last_error = None;
                                             audio_success = true;
                                             break;
                                         }
                                         Err(e2) => {
-                                            println!(
-                                                "Default audio connection also failed: {}",
-                                                e2
-                                            );
+                                            warn!("既定のデバイスでも音声に接続できない: {}", e2);
                                         }
                                     }
                                 }
@@ -1281,7 +1285,7 @@ impl CaptureCardViewer {
                         self.last_audio_rate = settings.audio.sample_rate;
                         self.last_audio_channels = settings.audio.channels;
                     } else {
-                        println!("Debug: All audio connection attempts failed");
+                        error!("音声デバイスへの接続を全て試したが失敗した");
                     }
                 }
 

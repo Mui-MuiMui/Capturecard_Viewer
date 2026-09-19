@@ -1,6 +1,7 @@
 use crate::settings::AppSettings;
 use crate::video::DeviceCapabilities;
 use eframe::egui;
+use log::debug;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -626,8 +627,9 @@ fn show_device_settings_tab(
                 .checkbox(&mut settings.audio.passthrough_enabled, "有効")
                 .changed()
             {
-                println!(
-                    "Audio passthrough changed to: {}",
+                // ここで書き換わるのはドラフト。実設定へ反映されるのは「適用」または「OK」のとき
+                debug!(
+                    "設定ダイアログで音声パススルーを {} に変更した",
                     settings.audio.passthrough_enabled
                 );
             }
