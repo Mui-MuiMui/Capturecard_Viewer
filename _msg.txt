@@ -1,0 +1,15 @@
+fix: パススルーの設定を音声ストリーム開始前に反映する
+
+apply_settings は start_passthrough_with_settings のあとで
+set_audio_passthrough_enabled を呼んでいた。そのため無効の設定を保存して
+終了し再起動すると、フラグの初期値 true のまま出力ストリームが play() され、
+反映されるまでの短い間に最初のバッファが出力されうる。
+
+パススルーの反映を音声ブロックの先頭へ移し、ストリームを開始する前に
+フラグが確定しているようにする。
+
+CodeRabbit の指摘 (PR #21) への対応。
+
+Asana: https://app.asana.com/1/1218412078016612/project/1218457296782693/task/1218459958806421
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
