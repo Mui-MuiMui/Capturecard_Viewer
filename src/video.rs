@@ -423,3 +423,76 @@ impl Clone for VideoFrame {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_WIDTH: usize = 2;
+    const TEST_HEIGHT: usize = 2;
+    const TEST_FRAME_LEN: usize = TEST_WIDTH * TEST_HEIGHT * 3;
+
+    /// 識別しやすいように全画素を marker で埋めたフレームを作る
+    fn test_frame(marker: u8) -> VideoFrame {
+        VideoFrame {
+            width: TEST_WIDTH,
+            height: TEST_HEIGHT,
+            data: vec![marker; TEST_FRAME_LEN],
+        }
+    }
+
+    #[test]
+    fn frame_buffer_take_front_after_push_returns_latest_frame() {
+        let mut buffer = FrameBuffer::new();
+        buffer.push_back(test_frame(1), 1.0, true);
+        buffer.push_back(test_frame(2), 1.0, true);
+
+        let frame = buffer
+            .take_front()
+            .expect("push 済みなのでフレームが取れる");
+        assert_eq!(frame.width, TEST_WIDTH);
+        assert_eq!(frame.height, TEST_HEIGHT);
+        assert_eq!(frame.data, vec![2u8; TEST_FRAME_LEN]);
+    }
+
+    #[test]
+    fn frame_buffer_take_front_without_push_returns_none() {
+        let mut buffer = FrameBuffer::new();
+        assert!(buffer.take_front().is_none());
+    }
+
+    #[test]
+    fn frame_buffer_concurrent_push_returns_latest_frame_without_panic() {
+        // コールバックスレッドが push し続ける裏で UI スレッドが取り出す状況を模す
+        const PUSH_COUNT: usize = 500;
+        let buffer = Arc::new(Mutex::new(FrameBuffer::new()));
+
+        let writer = {
+            let buffer = Arc::clone(&buffer);
+            std::thread::spawn(move || {
+                for i in 0..PUSH_COUNT {
+                    buffer.lock().expect("書き込み側のロックに失敗").push_back(
+                        test_frame(i as u8),
+                        1.0,
+                        true,
+                    );
+                }
+            })
+        };
+
+        while !writer.is_finished() {
+            let _ = buffer
+                .lock()
+                .expect("読み出し側のロックに失敗")
+                .take_front();
+        }
+        writer.join().expect("書き込みスレッドがパニックした");
+
+        let frame = buffer
+            .lock()
+            .expect("読み出し側のロックに失敗")
+            .take_front()
+            .expect("最後に push したフレームが残っている");
+        assert_eq!(frame.data, vec![(PUSH_COUNT - 1) as u8; TEST_FRAME_LEN]);
+    }
+}
