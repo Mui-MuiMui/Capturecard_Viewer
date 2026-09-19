@@ -13,6 +13,7 @@ use log::{debug, error, info, trace, warn};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 mod audio;
@@ -101,6 +102,10 @@ pub struct CaptureCardViewer {
 
     // ウィンドウ管理
     always_on_top: bool,
+
+    // 進行中のスクリーンショット保存スレッド。
+    // 終了時に join して、書き出し途中の JPEG が残らないようにする
+    screenshot_save_threads: Vec<JoinHandle<()>>,
 }
 
 impl Default for CaptureCardViewer {
@@ -156,6 +161,8 @@ impl Default for CaptureCardViewer {
 
             // ウィンドウ管理
             always_on_top: false,
+
+            screenshot_save_threads: Vec::new(),
         };
 
         // 保存されたデバイスがない場合は自動選択
@@ -438,6 +445,11 @@ impl eframe::App for CaptureCardViewer {
         // 終了時は必ず書き出す。デバウンスの待ち時間中に終了しても、
         // ウィンドウのサイズ・位置や音量の変更を取りこぼさないようにする
         self.save_settings_now();
+
+        // 撮った直後に閉じても最後の 1 枚が残るように、保存の完了を待ってから抜ける。
+        // ここで待たないと、main が返った時点でプロセスごと落ちて
+        // 書きかけの JPEG がディスクに残る
+        self.join_screenshot_save_threads();
     }
 }
 
@@ -554,10 +566,38 @@ impl CaptureCardViewer {
         // ホットキーを連打するとスレッドが並ぶが、撮るたびに 1 枚残るほうを優先して
         // 進行中の保存があっても捨てない。ファイル名は撮影時刻をミリ秒まで含むので、
         // 人が連打できる間隔なら衝突しない（同一ミリ秒の衝突は元からある別の問題）
-        std::thread::spawn(move || match save_frame_as_jpeg(&frame, &path) {
+        let handle = std::thread::spawn(move || match save_frame_as_jpeg(&frame, &path) {
             Ok(()) => info!("スクリーンショットを {} へ保存した", path.display()),
             Err(e) => error!("スクリーンショットを保存できない: {}", e),
         });
+
+        // ハンドルを持っておく。捨てるとスレッドが切り離され、終了時に
+        // 書き出しの完了を待てなくなる（壊れた JPEG が残りうる）。
+        // 溜め込まないよう、積む前に終わった分を落とす
+        drop_finished_threads(&mut self.screenshot_save_threads);
+        self.screenshot_save_threads.push(handle);
+    }
+
+    /// 進行中のスクリーンショット保存がすべて終わるまで待つ。
+    ///
+    /// 待ち時間は JPEG のエンコードとディスクへの書き出しが終わるまでで、
+    /// 1080p なら通常は数十 ms。終了時に呼ぶ
+    fn join_screenshot_save_threads(&mut self) {
+        let handles = std::mem::take(&mut self.screenshot_save_threads);
+        if handles.is_empty() {
+            return;
+        }
+
+        debug!(
+            "スクリーンショットの保存スレッド {} 件を待つ",
+            handles.len()
+        );
+        for handle in handles {
+            if handle.join().is_err() {
+                // release ビルドは panic = "abort" なのでここには来ない
+                warn!("スクリーンショットの保存スレッドがパニックした");
+            }
+        }
     }
 
     fn show_windowed_ui(&mut self, ctx: &egui::Context) {
@@ -882,6 +922,14 @@ impl CaptureCardViewer {
             self.show_context_menu = false;
         }
     }
+}
+
+/// 完了済みのスレッドハンドルを取り除く。
+///
+/// `JoinHandle` を持ち続けるのは終了時に `join` するためだけなので、
+/// 終わったものは落としてよい。落とさないと撮影のたびに要素が増え続ける
+fn drop_finished_threads<T>(handles: &mut Vec<JoinHandle<T>>) {
+    handles.retain(|handle| !handle.is_finished());
 }
 
 /// 映像フレームを JPEG として `path` へ書き出す。
@@ -2132,5 +2180,49 @@ mod tests {
 
         assert!(err.contains("大きさのない"), "想定外のエラー: {}", err);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn drop_finished_threads_empty_stays_empty() {
+        let mut handles: Vec<JoinHandle<()>> = Vec::new();
+
+        drop_finished_threads(&mut handles);
+
+        assert!(handles.is_empty());
+    }
+
+    #[test]
+    fn drop_finished_threads_removes_only_completed_handles() {
+        // 合図が来るまで終わらないスレッドを 1 本混ぜ、
+        // 終わった分だけが落ちることを見る
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let mut handles = vec![
+            std::thread::spawn(|| {}),
+            std::thread::spawn(move || {
+                let _ = release_rx.recv();
+            }),
+        ];
+
+        // is_finished はスレッドが抜けきってから true になるため、待ち合わせる
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !handles[0].is_finished() {
+            assert!(Instant::now() < deadline, "1 本目のスレッドが終わらない");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        drop_finished_threads(&mut handles);
+
+        assert_eq!(handles.len(), 1, "終わっていないスレッドだけが残ること");
+        assert!(
+            !handles[0].is_finished(),
+            "残ったのは実行中のスレッドであること"
+        );
+
+        // 後始末。合図を送ってからでないとスレッドが残る
+        release_tx.send(()).expect("合図を送れること");
+        handles
+            .remove(0)
+            .join()
+            .expect("実行中だったスレッドを回収できること");
     }
 }

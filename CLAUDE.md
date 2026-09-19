@@ -50,6 +50,8 @@ cargo build --release
 - 効果音再生スレッド（再生ごとに spawn）
 - スクリーンショットの保存スレッド（撮影ごとに spawn。JPEG エンコードとファイル書き出しを行う）
 
+保存スレッドの `JoinHandle` は `CaptureCardViewer::screenshot_save_threads` が持ち、`on_exit` で全て join する。**ここを捨てるとスレッドが切り離され、撮影直後に閉じたときプロセスの終了が書き出しを追い越して壊れた JPEG が残る。** 溜め込まないよう、撮影のたびに `drop_finished_threads` で完了済みのハンドルを落としている。
+
 ### ロック順序
 
 `Arc<Mutex<..>>` を 4 つ持つ（`settings` / `video_capture` / `audio_capture` / `screenshot_manager`）。
