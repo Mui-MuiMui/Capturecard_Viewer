@@ -22,7 +22,7 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 
 - ビルドには MSVC ツールチェインと Windows SDK が必要（`build.rs` が `embed_resource` で `app.rc` をコンパイルするため）
 - バージョン番号の出どころは `Cargo.toml` の `version` だけ。`build.rs` が `app.rc` 用のヘッダーを生成するので、他の場所に数値を書かない（`docs/BUILD.md` の「バージョン番号」）
-- `cargo clippy --all-targets` はクリーンではなく、既知の警告が残っている（詳細は Asana のタスク参照）
+- `cargo clippy --all-targets` は警告ゼロが前提。警告を増やしたままコミットしない
 - `cargo fmt --check` は差分ゼロが前提。落ちたら自分の変更を `cargo fmt` で整形してからコミットする
 - 整形の基準はリポジトリ直下の `rustfmt.toml`。`edition` だけ指定し、他は rustfmt の既定値に従う
 
