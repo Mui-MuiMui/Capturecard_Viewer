@@ -3,18 +3,6 @@ use crate::video::DeviceCapabilities;
 use eframe::egui;
 use log::debug;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
-
-static TEST_SOUND_FLAG: AtomicBool = AtomicBool::new(false);
-
-// デバイス能力のキャッシュ
-static DEVICE_CAPABILITIES_CACHE: std::sync::OnceLock<Mutex<HashMap<String, DeviceCapabilities>>> =
-    std::sync::OnceLock::new();
-
-pub fn should_play_test_sound() -> bool {
-    TEST_SOUND_FLAG.swap(false, Ordering::SeqCst)
-}
 
 /// 設定ダイアログで行われた操作。
 ///
@@ -31,6 +19,76 @@ pub enum SettingsDialogAction {
     /// キャンセル: ドラフトを捨てて閉じる。タイトルバーの × も同じ扱い。
     /// 「適用」で既に反映したぶんは元に戻さない
     Cancel,
+    /// テスト再生: 効果音を編集中の音量で鳴らすだけ。
+    /// 設定は動かさないしダイアログも閉じない
+    TestSound,
+}
+
+/// 設定ダイアログのタブ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    #[default]
+    Device,
+    Screenshot,
+}
+
+/// ホットキー入力ダイアログの入力状態。
+///
+/// 以前は `static mut CAPTURING` / `static mut TEMP_HOTKEY` に持っていた。
+/// `static_mut_refs` が Rust 2024 edition でエラーになるほか、
+/// 参照のたびに `unsafe` が要るため構造体へ移した。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HotkeyCaptureState {
+    /// キー入力の待機中か
+    capturing: bool,
+    /// 待機中に確定したホットキー文字列。
+    /// OK を押すまで呼び出し側へは渡さない
+    temp: String,
+}
+
+impl HotkeyCaptureState {
+    pub fn is_capturing(&self) -> bool {
+        self.capturing
+    }
+
+    /// 待機中に確定したホットキー文字列。まだ何も取れていなければ空。
+    pub fn temp(&self) -> &str {
+        &self.temp
+    }
+
+    /// キー入力の待機を始める。前回の取得結果は捨てる。
+    pub fn start(&mut self) {
+        self.capturing = true;
+        self.temp.clear();
+    }
+
+    /// キー入力の待機をやめる。取得済みの文字列は残す。
+    pub fn stop(&mut self) {
+        self.capturing = false;
+    }
+
+    /// キーの組み合わせが確定したので待機を終える。
+    pub fn finish(&mut self, hotkey: String) {
+        self.temp = hotkey;
+        self.capturing = false;
+    }
+
+    /// 確定した文字列を取り出して状態を空に戻す。
+    /// 何も取れていなければ `None` を返し、呼び出し側の値を書き換えさせない。
+    pub fn take_captured(&mut self) -> Option<String> {
+        self.capturing = false;
+        if self.temp.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.temp))
+        }
+    }
+
+    /// 取得結果ごと状態を捨てる。キャンセルとクリアで使う。
+    pub fn reset(&mut self) {
+        self.capturing = false;
+        self.temp.clear();
+    }
 }
 
 /// 操作に対して、ダイアログの外側（`CaptureCardViewer`）が行うこと。
@@ -52,11 +110,22 @@ pub struct SettingsDialogTransition {
 ///
 /// こうしないと、未確定の編集が共有設定へ混ざり、ウィンドウ操作や音量変更を
 /// きっかけにした保存に巻き込まれてファイルへ書き出されてしまう。
+///
+/// 選択中のタブ、デバイス能力のキャッシュ、ホットキー入力の状態は
+/// ドラフトとは別に持つ。これらは設定の中身ではないので「適用」や「キャンセル」
+/// では捨てず、ダイアログを開き直しても引き継ぐ（static だったときと同じ振る舞い）。
 #[derive(Default)]
 pub struct SettingsDialogState {
     draft: Option<AppSettings>,
     // 開いた時点の設定。ドラフトのどの項目が実際に編集されたかを判別するために持つ
     original: Option<AppSettings>,
+    // 選択中のタブ
+    selected_tab: SettingsTab,
+    // デバイス名 → そのデバイスが扱えるフォーマット・解像度・FPS。
+    // 取得はデバイスを開く重い処理なので一度取ったら保持する
+    device_capabilities: HashMap<String, DeviceCapabilities>,
+    // ホットキー入力ダイアログの入力状態
+    hotkey_capture: HotkeyCaptureState,
 }
 
 impl SettingsDialogState {
@@ -89,6 +158,14 @@ impl SettingsDialogState {
         self.draft.as_mut()
     }
 
+    /// ホットキー入力ダイアログの入力状態。
+    ///
+    /// ホットキー入力ダイアログは設定ダイアログから開くが、設定ダイアログを
+    /// × で先に閉じても入力中の状態を失わないよう、`end_edit` では触らない。
+    pub fn hotkey_capture_mut(&mut self) -> &mut HotkeyCaptureState {
+        &mut self.hotkey_capture
+    }
+
     /// ドラフトを実行中の設定へ反映する。ドラフトを持っていなければ何もしない。
     pub fn commit_into(&self, target: &mut AppSettings) {
         if let (Some(draft), Some(original)) = (&self.draft, &self.original) {
@@ -118,6 +195,12 @@ impl SettingsDialogState {
                 commit_draft: false,
                 save_to_file: false,
                 close: true,
+            },
+            // 効果音を鳴らすだけなので、ドラフトもファイルもダイアログも動かさない
+            SettingsDialogAction::TestSound => SettingsDialogTransition {
+                commit_draft: false,
+                save_to_file: false,
+                close: false,
             },
         }
     }
@@ -186,13 +269,19 @@ pub fn show_settings_dialog(
     input_devices: &[String],
     output_devices: &[String],
 ) -> SettingsDialogAction {
-    use std::sync::OnceLock;
-    static SELECTED_TAB: OnceLock<Mutex<i32>> = OnceLock::new();
-    let selected_tab = SELECTED_TAB.get_or_init(|| Mutex::new(0));
+    // フィールドごとに分解して受ける。ドラフトを編集しながら
+    // デバイス能力のキャッシュも書き換えるため、dialog をまるごと借りると
+    // 二重の可変借用になる
+    let SettingsDialogState {
+        draft,
+        selected_tab,
+        device_capabilities,
+        ..
+    } = dialog;
 
     // ドラフトが用意できていなければ描画しない。呼び出し側が begin_edit を
     // 呼ぶまで待つ
-    let Some(draft) = dialog.draft_mut() else {
+    let Some(draft) = draft.as_mut() else {
         return SettingsDialogAction::None;
     };
 
@@ -205,26 +294,28 @@ pub fn show_settings_dialog(
         .show(ctx, |ui| {
             // タブ選択
             ui.horizontal(|ui| {
-                if let Ok(mut tab) = selected_tab.lock() {
-                    ui.selectable_value(&mut *tab, 0, "デバイス設定");
-                    ui.selectable_value(&mut *tab, 1, "スクリーンショット設定");
-                }
+                ui.selectable_value(selected_tab, SettingsTab::Device, "デバイス設定");
+                ui.selectable_value(
+                    selected_tab,
+                    SettingsTab::Screenshot,
+                    "スクリーンショット設定",
+                );
             });
 
             ui.separator();
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                if let Ok(tab) = selected_tab.lock() {
-                    match *tab {
-                        0 => show_device_settings_tab(
-                            ui,
-                            draft,
-                            video_devices,
-                            input_devices,
-                            output_devices,
-                        ),
-                        1 => show_screenshot_settings_tab(ui, draft, show_hotkey_dialog),
-                        _ => {}
+            egui::ScrollArea::vertical().show(ui, |ui| match selected_tab {
+                SettingsTab::Device => show_device_settings_tab(
+                    ui,
+                    draft,
+                    device_capabilities,
+                    video_devices,
+                    input_devices,
+                    output_devices,
+                ),
+                SettingsTab::Screenshot => {
+                    if show_screenshot_settings_tab(ui, draft, show_hotkey_dialog) {
+                        button = SettingsDialogAction::TestSound;
                     }
                 }
             });
@@ -253,15 +344,13 @@ pub fn show_settings_dialog(
 fn show_device_settings_tab(
     ui: &mut egui::Ui,
     settings: &mut AppSettings,
+    capabilities: &mut HashMap<String, DeviceCapabilities>,
     video_devices: &[(String, String)],
     input_devices: &[String],
     output_devices: &[String],
 ) {
     ui.heading("デバイス設定");
     ui.add_space(10.0);
-
-    // キャッシュの初期化
-    let capabilities_cache = DEVICE_CAPABILITIES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     // ビデオ設定
     ui.group(|ui| {
@@ -306,25 +395,21 @@ fn show_device_settings_tab(
             let new_device = settings.video.device_name.clone().unwrap_or_default();
 
             // デバイス能力を取得（キャッシュ確認）
-            if let Ok(mut cache) = capabilities_cache.lock() {
-                if !cache.contains_key(&new_device) && !new_device.is_empty() {
-                    // キャッシュにない場合は取得
-                    ui.spinner(); // 読み込み中表示
-                    if let Ok(caps) =
-                        crate::video::VideoCapture::get_device_capabilities(Some(&new_device))
-                    {
-                        cache.insert(new_device.clone(), caps);
-                    }
+            if !capabilities.contains_key(&new_device) && !new_device.is_empty() {
+                // キャッシュにない場合は取得
+                ui.spinner(); // 読み込み中表示
+                if let Ok(caps) =
+                    crate::video::VideoCapture::get_device_capabilities(Some(&new_device))
+                {
+                    capabilities.insert(new_device.clone(), caps);
                 }
             }
 
             // デフォルトのフォーマットを設定
-            if let Ok(cache) = capabilities_cache.lock() {
-                if let Some(caps) = cache.get(&new_device) {
-                    // 最初のフォーマットを選択
-                    if let Some((format, _)) = caps.first() {
-                        settings.video.format = Some(format.clone());
-                    }
+            if let Some(caps) = capabilities.get(&new_device) {
+                // 最初のフォーマットを選択
+                if let Some((format, _)) = caps.first() {
+                    settings.video.format = Some(format.clone());
                 }
             }
         }
@@ -343,56 +428,52 @@ fn show_device_settings_tab(
                 .selected_text(&current_format)
                 .show_ui(ui, |ui| {
                     // キャッシュからフォーマット一覧を取得
-                    if let Ok(cache) = capabilities_cache.lock() {
-                        if let Some(caps) = cache.get(&selected_device) {
-                            for (format, _) in caps {
-                                if ui
-                                    .selectable_value(
-                                        &mut settings.video.format,
-                                        Some(format.clone()),
-                                        format,
-                                    )
-                                    .clicked()
-                                {
-                                    format_changed = true;
-                                }
+                    if let Some(caps) = capabilities.get(&selected_device) {
+                        for (format, _) in caps {
+                            if ui
+                                .selectable_value(
+                                    &mut settings.video.format,
+                                    Some(format.clone()),
+                                    format,
+                                )
+                                .clicked()
+                            {
+                                format_changed = true;
                             }
-                        } else {
-                            // キャッシュがない場合はデフォルト
-                            ui.selectable_value(
-                                &mut settings.video.format,
-                                Some("YUY2".to_string()),
-                                "YUY2",
-                            );
-                            ui.selectable_value(
-                                &mut settings.video.format,
-                                Some("MJPEG".to_string()),
-                                "MJPEG",
-                            );
-                            ui.selectable_value(
-                                &mut settings.video.format,
-                                Some("RGB24".to_string()),
-                                "RGB24",
-                            );
                         }
+                    } else {
+                        // キャッシュがない場合はデフォルト
+                        ui.selectable_value(
+                            &mut settings.video.format,
+                            Some("YUY2".to_string()),
+                            "YUY2",
+                        );
+                        ui.selectable_value(
+                            &mut settings.video.format,
+                            Some("MJPEG".to_string()),
+                            "MJPEG",
+                        );
+                        ui.selectable_value(
+                            &mut settings.video.format,
+                            Some("RGB24".to_string()),
+                            "RGB24",
+                        );
                     }
                 });
         });
 
         // フォーマット変更時に解像度をリセット
         if format_changed {
-            if let Ok(cache) = capabilities_cache.lock() {
-                if let Some(caps) = cache.get(&selected_device) {
-                    if let Some(current_format) = &settings.video.format {
-                        // 現在のフォーマットに対応する最初の解像度を選択
-                        for (format, resolutions) in caps {
-                            if format == current_format {
-                                if let Some((w, h, fps)) = resolutions.first() {
-                                    settings.video.resolution = Some((*w, *h));
-                                    settings.video.fps = Some(*fps);
-                                }
-                                break;
+            if let Some(caps) = capabilities.get(&selected_device) {
+                if let Some(current_format) = &settings.video.format {
+                    // 現在のフォーマットに対応する最初の解像度を選択
+                    for (format, resolutions) in caps {
+                        if format == current_format {
+                            if let Some((w, h, fps)) = resolutions.first() {
+                                settings.video.resolution = Some((*w, *h));
+                                settings.video.fps = Some(*fps);
                             }
+                            break;
                         }
                     }
                 }
@@ -408,81 +489,77 @@ fn show_device_settings_tab(
             egui::ComboBox::from_id_source("resolution_combo")
                 .selected_text(format!("{}x{}", current_resolution.0, current_resolution.1))
                 .show_ui(ui, |ui| {
-                    if let Ok(cache) = capabilities_cache.lock() {
-                        if let Some(caps) = cache.get(&selected_device) {
-                            if let Some(current_format) = &settings.video.format {
-                                // 現在のフォーマットに対応する解像度一覧
-                                let mut unique_resolutions =
-                                    std::collections::HashSet::<(u32, u32)>::new();
-                                for (format, resolutions) in caps {
-                                    if format == current_format {
-                                        for (w, h, _) in resolutions {
-                                            unique_resolutions.insert((*w, *h));
-                                        }
-                                    }
-                                }
-
-                                // ソートして表示
-                                let mut sorted_resolutions: Vec<_> =
-                                    unique_resolutions.into_iter().collect();
-                                sorted_resolutions.sort_by(|a, b| {
-                                    let size_a = a.0 * a.1;
-                                    let size_b = b.0 * b.1;
-                                    size_b.cmp(&size_a)
-                                });
-
-                                for (w, h) in sorted_resolutions {
-                                    if ui
-                                        .selectable_value(
-                                            &mut settings.video.resolution,
-                                            Some((w, h)),
-                                            format!("{}x{}", w, h),
-                                        )
-                                        .clicked()
-                                    {
-                                        resolution_changed = true;
+                    if let Some(caps) = capabilities.get(&selected_device) {
+                        if let Some(current_format) = &settings.video.format {
+                            // 現在のフォーマットに対応する解像度一覧
+                            let mut unique_resolutions =
+                                std::collections::HashSet::<(u32, u32)>::new();
+                            for (format, resolutions) in caps {
+                                if format == current_format {
+                                    for (w, h, _) in resolutions {
+                                        unique_resolutions.insert((*w, *h));
                                     }
                                 }
                             }
-                        } else {
-                            // デフォルトの解像度
-                            ui.selectable_value(
-                                &mut settings.video.resolution,
-                                Some((1920, 1080)),
-                                "1920x1080",
-                            );
-                            ui.selectable_value(
-                                &mut settings.video.resolution,
-                                Some((1280, 720)),
-                                "1280x720",
-                            );
-                            ui.selectable_value(
-                                &mut settings.video.resolution,
-                                Some((640, 480)),
-                                "640x480",
-                            );
+
+                            // ソートして表示
+                            let mut sorted_resolutions: Vec<_> =
+                                unique_resolutions.into_iter().collect();
+                            sorted_resolutions.sort_by(|a, b| {
+                                let size_a = a.0 * a.1;
+                                let size_b = b.0 * b.1;
+                                size_b.cmp(&size_a)
+                            });
+
+                            for (w, h) in sorted_resolutions {
+                                if ui
+                                    .selectable_value(
+                                        &mut settings.video.resolution,
+                                        Some((w, h)),
+                                        format!("{}x{}", w, h),
+                                    )
+                                    .clicked()
+                                {
+                                    resolution_changed = true;
+                                }
+                            }
                         }
+                    } else {
+                        // デフォルトの解像度
+                        ui.selectable_value(
+                            &mut settings.video.resolution,
+                            Some((1920, 1080)),
+                            "1920x1080",
+                        );
+                        ui.selectable_value(
+                            &mut settings.video.resolution,
+                            Some((1280, 720)),
+                            "1280x720",
+                        );
+                        ui.selectable_value(
+                            &mut settings.video.resolution,
+                            Some((640, 480)),
+                            "640x480",
+                        );
                     }
                 });
         });
 
         // 解像度変更時にFPSをリセット
         if resolution_changed {
-            if let Ok(cache) = capabilities_cache.lock() {
-                if let Some(caps) = cache.get(&selected_device) {
-                    if let Some(current_format) = &settings.video.format {
-                        if let Some((w, h)) = settings.video.resolution {
-                            // 現在のフォーマットと解像度に対応する最初のFPSを選択
-                            for (format, resolutions) in caps {
-                                if format == current_format {
-                                    for (res_w, res_h, fps) in resolutions {
-                                        if *res_w == w && *res_h == h {
-                                            settings.video.fps = Some(*fps);
-                                            break;
-                                        }
+            if let Some(caps) = capabilities.get(&selected_device) {
+                if let Some(current_format) = &settings.video.format {
+                    if let Some((w, h)) = settings.video.resolution {
+                        // 現在のフォーマットと解像度に対応する最初のFPSを選択
+                        for (format, resolutions) in caps {
+                            if format == current_format {
+                                for (res_w, res_h, fps) in resolutions {
+                                    if *res_w == w && *res_h == h {
+                                        settings.video.fps = Some(*fps);
+                                        break;
                                     }
-                                    break;
                                 }
+                                break;
                             }
                         }
                     }
@@ -498,41 +575,39 @@ fn show_device_settings_tab(
             egui::ComboBox::from_id_source("fps_combo")
                 .selected_text(format!("{} fps", current_fps))
                 .show_ui(ui, |ui| {
-                    if let Ok(cache) = capabilities_cache.lock() {
-                        if let Some(caps) = cache.get(&selected_device) {
-                            if let Some(current_format) = &settings.video.format {
-                                if let Some((w, h)) = settings.video.resolution {
-                                    // 現在のフォーマットと解像度に対応するFPS一覧
-                                    let mut available_fps = Vec::new();
-                                    for (format, resolutions) in caps {
-                                        if format == current_format {
-                                            for (res_w, res_h, fps) in resolutions {
-                                                if *res_w == w && *res_h == h {
-                                                    available_fps.push(*fps);
-                                                }
+                    if let Some(caps) = capabilities.get(&selected_device) {
+                        if let Some(current_format) = &settings.video.format {
+                            if let Some((w, h)) = settings.video.resolution {
+                                // 現在のフォーマットと解像度に対応するFPS一覧
+                                let mut available_fps = Vec::new();
+                                for (format, resolutions) in caps {
+                                    if format == current_format {
+                                        for (res_w, res_h, fps) in resolutions {
+                                            if *res_w == w && *res_h == h {
+                                                available_fps.push(*fps);
                                             }
                                         }
                                     }
+                                }
 
-                                    // 重複を削除してソート
-                                    available_fps.sort();
-                                    available_fps.dedup();
-                                    available_fps.reverse(); // 大きい順
+                                // 重複を削除してソート
+                                available_fps.sort();
+                                available_fps.dedup();
+                                available_fps.reverse(); // 大きい順
 
-                                    for fps in available_fps {
-                                        ui.selectable_value(
-                                            &mut settings.video.fps,
-                                            Some(fps),
-                                            format!("{} fps", fps),
-                                        );
-                                    }
+                                for fps in available_fps {
+                                    ui.selectable_value(
+                                        &mut settings.video.fps,
+                                        Some(fps),
+                                        format!("{} fps", fps),
+                                    );
                                 }
                             }
-                        } else {
-                            // デフォルトのFPS
-                            ui.selectable_value(&mut settings.video.fps, Some(30), "30 fps");
-                            ui.selectable_value(&mut settings.video.fps, Some(60), "60 fps");
                         }
+                    } else {
+                        // デフォルトのFPS
+                        ui.selectable_value(&mut settings.video.fps, Some(30), "30 fps");
+                        ui.selectable_value(&mut settings.video.fps, Some(60), "60 fps");
                     }
                 });
         });
@@ -659,13 +734,19 @@ fn show_device_settings_tab(
     });
 }
 
+/// スクリーンショット設定タブを描画し、「テスト再生」が押されたかを返す。
+///
+/// 効果音の再生はダイアログの仕事ではないので、ここでは鳴らさずに
+/// イベントとして上へ返す（`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
 fn show_screenshot_settings_tab(
     ui: &mut egui::Ui,
     settings: &mut AppSettings,
     show_hotkey_dialog: &mut bool,
-) {
+) -> bool {
     ui.heading("スクリーンショット設定");
     ui.add_space(10.0);
+
+    let mut test_sound_requested = false;
 
     // 保存フォルダー
     ui.group(|ui| {
@@ -733,7 +814,7 @@ fn show_screenshot_settings_tab(
 
             ui.horizontal(|ui| {
                 if ui.button("テスト再生").clicked() {
-                    TEST_SOUND_FLAG.store(true, Ordering::SeqCst);
+                    test_sound_requested = true;
                 }
                 if ui.button("クリア").clicked() {
                     settings.screenshot.sound_file = None;
@@ -775,6 +856,8 @@ fn show_screenshot_settings_tab(
         ui.add_space(5.0);
         ui.small("『ホットキー設定...』を押して希望のキーコンビネーションを入力してください。");
     });
+
+    test_sound_requested
 }
 
 /// egui のキーを、ホットキー文字列で使う名前に変換する。
@@ -863,15 +946,17 @@ fn build_hotkey_string(modifiers: &egui::Modifiers, keys_down: &[egui::Key]) -> 
     Some(parts.join("+"))
 }
 
-#[allow(static_mut_refs)]
+/// ホットキー入力ダイアログを描画する。
+///
+/// `captured_hotkey` は呼び出し側が持つ確定済みのホットキー、
+/// `capture` は入力待機中の一時状態。両方とも呼び出し側が保持する。
+/// 戻り値は、このフレームでホットキーが確定したかどうか。
 pub fn show_hotkey_capture_dialog(
     ctx: &egui::Context,
     show_dialog: &mut bool,
     captured_hotkey: &mut String,
+    capture: &mut HotkeyCaptureState,
 ) -> bool {
-    static mut CAPTURING: bool = false;
-    static mut TEMP_HOTKEY: String = String::new();
-
     let mut close_dialog = false;
 
     egui::Window::new("ホットキー設定")
@@ -883,7 +968,7 @@ pub fn show_hotkey_capture_dialog(
                 ui.heading("ホットキー設定");
                 ui.add_space(10.0);
 
-                if unsafe { !CAPTURING } {
+                if !capture.is_capturing() {
                     ui.label(
                         "『キャプチャ開始』を押してスクリーンショット用のキーを入力してください",
                     );
@@ -903,10 +988,7 @@ pub fn show_hotkey_capture_dialog(
                     ui.add_space(15.0);
 
                     if ui.button("キャプチャ開始").clicked() {
-                        unsafe {
-                            CAPTURING = true;
-                            TEMP_HOTKEY.clear();
-                        }
+                        capture.start();
                     }
                 } else {
                     ui.colored_label(egui::Color32::YELLOW, "キー入力待機中...");
@@ -920,29 +1002,22 @@ pub fn show_hotkey_capture_dialog(
                         keys_down.sort();
 
                         if let Some(hotkey) = build_hotkey_string(&i.modifiers, &keys_down) {
-                            unsafe {
-                                TEMP_HOTKEY = hotkey;
-                                CAPTURING = false;
-                            }
+                            capture.finish(hotkey);
                         }
                     });
 
-                    unsafe {
-                        if !TEMP_HOTKEY.is_empty() {
-                            ui.add_space(10.0);
-                            ui.horizontal(|ui| {
-                                ui.label("取得:");
-                                ui.monospace(&TEMP_HOTKEY);
-                            });
-                        }
+                    if !capture.temp().is_empty() {
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            ui.label("取得:");
+                            ui.monospace(capture.temp());
+                        });
                     }
 
                     ui.add_space(10.0);
 
                     if ui.button("停止").clicked() {
-                        unsafe {
-                            CAPTURING = false;
-                        }
+                        capture.stop();
                     }
                 }
 
@@ -950,30 +1025,21 @@ pub fn show_hotkey_capture_dialog(
 
                 ui.horizontal(|ui| {
                     if ui.button("OK").clicked() {
-                        unsafe {
-                            if !TEMP_HOTKEY.is_empty() {
-                                *captured_hotkey = TEMP_HOTKEY.clone();
-                                TEMP_HOTKEY.clear();
-                            }
-                            CAPTURING = false;
+                        // 何も取れていなければ現在のホットキーをそのまま残す
+                        if let Some(hotkey) = capture.take_captured() {
+                            *captured_hotkey = hotkey;
                         }
                         close_dialog = true;
                     }
 
                     if ui.button("キャンセル").clicked() {
-                        unsafe {
-                            CAPTURING = false;
-                            TEMP_HOTKEY.clear();
-                        }
+                        capture.reset();
                         close_dialog = true;
                     }
 
                     if ui.button("クリア").clicked() {
                         captured_hotkey.clear();
-                        unsafe {
-                            CAPTURING = false;
-                            TEMP_HOTKEY.clear();
-                        }
+                        capture.reset();
                         close_dialog = true;
                     }
                 });
@@ -1076,6 +1142,15 @@ mod tests {
     }
 
     #[test]
+    fn transition_for_test_sound_changes_nothing() {
+        // テスト再生は効果音を鳴らすだけ。ドラフトの反映も保存もクローズもしない
+        let transition = SettingsDialogState::transition_for(SettingsDialogAction::TestSound);
+        assert!(!transition.commit_draft);
+        assert!(!transition.save_to_file);
+        assert!(!transition.close);
+    }
+
+    #[test]
     fn resolve_action_window_closed_without_button_returns_cancel() {
         // タイトルバーの × で閉じた場合。ボタンは押されていないが、
         // ドラフトを捨てるためにキャンセルとして扱う
@@ -1099,6 +1174,7 @@ mod tests {
             SettingsDialogAction::Ok,
             SettingsDialogAction::Cancel,
             SettingsDialogAction::Apply,
+            SettingsDialogAction::TestSound,
         ] {
             assert_eq!(resolve_action(action, true), action);
             assert_eq!(resolve_action(action, false), action);
@@ -1407,5 +1483,114 @@ mod tests {
             ),
             Some("Ctrl+S".to_string())
         );
+    }
+
+    #[test]
+    fn hotkey_capture_state_default_is_idle_and_empty() {
+        let capture = HotkeyCaptureState::default();
+        assert!(!capture.is_capturing());
+        assert_eq!(capture.temp(), "");
+    }
+
+    #[test]
+    fn hotkey_capture_state_start_enters_capturing_and_clears_previous_result() {
+        // 『キャプチャ開始』を押し直したときに、前回取ったキーが
+        // 残っていると、何も押さずに OK しただけで古い値が確定してしまう
+        let mut capture = HotkeyCaptureState::default();
+        capture.finish("Ctrl+S".to_string());
+
+        capture.start();
+
+        assert!(capture.is_capturing());
+        assert_eq!(capture.temp(), "");
+    }
+
+    #[test]
+    fn hotkey_capture_state_finish_leaves_capturing_and_keeps_key() {
+        let mut capture = HotkeyCaptureState::default();
+        capture.start();
+
+        capture.finish("Ctrl+Shift+A".to_string());
+
+        assert!(!capture.is_capturing());
+        assert_eq!(capture.temp(), "Ctrl+Shift+A");
+    }
+
+    #[test]
+    fn hotkey_capture_state_stop_keeps_captured_key() {
+        // 『停止』は待機をやめるだけで、取得済みのキーは捨てない
+        let mut capture = HotkeyCaptureState::default();
+        capture.finish("F5".to_string());
+        capture.start();
+        capture.finish("F6".to_string());
+
+        capture.stop();
+
+        assert!(!capture.is_capturing());
+        assert_eq!(capture.temp(), "F6");
+    }
+
+    #[test]
+    fn hotkey_capture_state_take_captured_returns_key_and_empties_state() {
+        let mut capture = HotkeyCaptureState::default();
+        capture.start();
+        capture.finish("Ctrl+S".to_string());
+
+        assert_eq!(capture.take_captured(), Some("Ctrl+S".to_string()));
+        assert!(!capture.is_capturing());
+        assert_eq!(capture.temp(), "");
+        // 2 度目は何も返さない。返すと同じキーを再度確定させてしまう
+        assert_eq!(capture.take_captured(), None);
+    }
+
+    #[test]
+    fn hotkey_capture_state_take_captured_without_key_returns_none() {
+        // 何も入力せずに OK を押した場合。呼び出し側の現在値を消さないよう None を返す
+        let mut capture = HotkeyCaptureState::default();
+        capture.start();
+
+        assert_eq!(capture.take_captured(), None);
+        assert!(!capture.is_capturing());
+    }
+
+    #[test]
+    fn hotkey_capture_state_reset_discards_capturing_and_key() {
+        // キャンセルとクリア。次に開いたときへ入力中の状態を持ち越さない
+        let mut capture = HotkeyCaptureState::default();
+        capture.start();
+        capture.finish("Alt+F4".to_string());
+        capture.start();
+
+        capture.reset();
+
+        assert!(!capture.is_capturing());
+        assert_eq!(capture.temp(), "");
+    }
+
+    #[test]
+    fn settings_dialog_state_end_edit_keeps_hotkey_capture_state() {
+        // ホットキー入力ダイアログを開いたまま設定ダイアログを × で閉じても、
+        // 入力中の状態を失わない（static だったときと同じ振る舞い）
+        let mut state = SettingsDialogState::default();
+        state.begin_edit(&sample_settings());
+        state.hotkey_capture_mut().start();
+
+        state.end_edit();
+
+        assert!(!state.has_draft());
+        assert!(state.hotkey_capture_mut().is_capturing());
+    }
+
+    #[test]
+    fn settings_dialog_state_default_tab_is_device() {
+        let mut state = SettingsDialogState::default();
+        assert_eq!(state.selected_tab, SettingsTab::Device);
+
+        // タブの選択はドラフトとは別なので、開いて閉じても引き継がれる
+        state.begin_edit(&sample_settings());
+        state.selected_tab = SettingsTab::Screenshot;
+        state.end_edit();
+
+        assert_eq!(state.selected_tab, SettingsTab::Screenshot);
     }
 }
