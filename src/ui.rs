@@ -23,9 +23,9 @@ pub fn should_play_test_sound() -> bool {
 pub enum SettingsDialogAction {
     /// まだ何も押されていない（編集中）
     None,
-    /// 適用: ドラフトを実行中の設定へ反映する。ファイルへは書かず、ダイアログも閉じない
+    /// 適用: ドラフトを実行中の設定へ反映してファイルへ保存する。ダイアログは閉じない
     Apply,
-    /// OK: ドラフトを実行中の設定へ反映し、ファイルへ保存して閉じる
+    /// OK: 適用と同じことをしたうえで閉じる
     Ok,
     /// キャンセル: ドラフトを捨てて閉じる。タイトルバーの × も同じ扱い。
     /// 「適用」で既に反映したぶんは元に戻さない
@@ -94,7 +94,7 @@ impl SettingsDialogState {
             },
             SettingsDialogAction::Apply => SettingsDialogTransition {
                 commit_draft: true,
-                save_to_file: false,
+                save_to_file: true,
                 close: false,
             },
             SettingsDialogAction::Ok => SettingsDialogTransition {
@@ -1010,12 +1010,24 @@ mod tests {
     }
 
     #[test]
-    fn transition_for_apply_commits_without_saving_and_keeps_dialog_open() {
-        // 適用 = 実行中の設定へ反映する。ファイルへは書かず、閉じない
+    fn transition_for_apply_commits_and_saves_without_closing() {
+        // 適用 = 反映してファイルへ保存する。閉じないところだけが OK と違う
         let transition = SettingsDialogState::transition_for(SettingsDialogAction::Apply);
         assert!(transition.commit_draft);
-        assert!(!transition.save_to_file);
+        assert!(transition.save_to_file);
         assert!(!transition.close);
+    }
+
+    #[test]
+    fn transition_for_apply_and_ok_differ_only_in_closing() {
+        // 「適用」と「OK」の違いは閉じるかどうかだけにする。
+        // 保存の有無で分けると「適用したのに再起動で戻る」が起きる
+        let apply = SettingsDialogState::transition_for(SettingsDialogAction::Apply);
+        let ok = SettingsDialogState::transition_for(SettingsDialogAction::Ok);
+        assert_eq!(apply.commit_draft, ok.commit_draft);
+        assert_eq!(apply.save_to_file, ok.save_to_file);
+        assert!(!apply.close);
+        assert!(ok.close);
     }
 
     #[test]
@@ -1187,6 +1199,7 @@ mod tests {
 
         let applied = SettingsDialogState::transition_for(SettingsDialogAction::Apply);
         assert!(applied.commit_draft);
+        assert!(applied.save_to_file);
         assert!(!applied.close);
         commit_draft(&mut shared, state.draft().expect("ドラフトがある"));
 

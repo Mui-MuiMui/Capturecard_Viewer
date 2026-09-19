@@ -82,7 +82,7 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 
 **設定を書き換える処理を足すときは `AppSettings::save()` を直接呼ばず `mark_settings_dirty()` を使うこと。** 直接呼ぶと、ウィンドウをドラッグしている間ずっと毎フレーム TOML を書き出す元の問題に戻る。
 
-例外は 2 つ。起動時の書き戻し（`may_write_defaults_on_startup()` で守られている）と、設定ダイアログの OK ボタン（`main.rs` の `handle_settings_dialog_action`）。後者はユーザーの明示的な保存操作なので即座に書き出す。
+例外は 2 つ。起動時の書き戻し（`may_write_defaults_on_startup()` で守られている）と、設定ダイアログの「適用」「OK」（`main.rs` の `handle_settings_dialog_action`）。後者はユーザーの明示的な保存操作なので即座に書き出す。
 
 ### 設定ダイアログはドラフトを編集する
 
@@ -90,12 +90,13 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 
 | 操作 | 反映 | ファイルへ保存 | 閉じる |
 |---|---|---|---|
-| 適用 | する | しない | しない |
+| 適用 | する | する | しない |
 | OK | する | する | する |
 | キャンセル | しない | しない | する |
 | ×（タイトルバー） | しない | しない | する（キャンセルと同じ） |
 
 - × は `egui::Window::open()` が `show_settings` を false にするだけでボタンが押されないため、描画後の開閉状態から `ui::resolve_action` が拾ってキャンセルへ倒している
+- **「適用」と「OK」の違いは閉じるかどうかだけ。** 保存の有無で分けると「適用したのに再起動で戻る」という曖昧さが残るため、Windows のプロパティシートと同じ意味に揃えてある
 - **キャンセルは「適用」で反映済みの内容を戻さない。** 戻すには反映前の状態をもう 1 つ持つ必要があり、デバイスの開き直しも 2 度走る
 - 反映は `ui::commit_draft` が `video` / `audio` / `screenshot` と、ダイアログが編集する `ui` の 2 項目（`maintain_aspect_ratio` / `volume`）だけに限っている。`ui` を丸ごと入れると、ダイアログを開いている間に動かしたウィンドウの位置が巻き戻る。**ダイアログに `ui` の項目を足すときは `commit_draft` にも足すこと**
 - ホットキー入力ダイアログと効果音のテスト再生もドラフトを見る。ドラフトへ書いたホットキーはその場で登録しない（2 秒ごとの `apply_settings` が共有設定側の古い値で登録し直してしまうため）

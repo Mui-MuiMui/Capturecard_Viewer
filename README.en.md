@@ -50,12 +50,12 @@ Edits in the settings window are kept as a draft and do not affect the running a
 
 | Button | Behavior |
 |---|---|
-| 適用 (Apply) | Applies the edits to the running application. Does not write to the settings file, and keeps the window open |
-| OK | Applies the edits, saves them to the settings file, and closes the window |
+| 適用 (Apply) | Applies the edits to the running application and saves them to the settings file. Keeps the window open |
+| OK | Does the same as 適用, and then closes the window |
 | キャンセル (Cancel) | Discards edits that have not been applied yet, and closes the window. **Anything already applied with 適用 is NOT reverted** |
 | × (title bar) | Same as Cancel |
 
-- Once applied with 適用, the values become part of the running settings, so they will be written to the settings file later, triggered by things like moving the window or changing the volume. Do not press 適用 if you do not want the values persisted.
+- The only difference between 適用 and OK is whether the window closes. Both save to the settings file, so the values survive a restart.
 - Hotkey and sound file changes also take effect only after you press 適用 or OK. The sound "テスト再生" (test playback) button plays the current sound effect at the volume you are editing.
 
 > **Note:** The application interface is currently Japanese only.

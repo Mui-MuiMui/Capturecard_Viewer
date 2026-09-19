@@ -1210,7 +1210,8 @@ impl CaptureCardViewer {
         }
 
         if transition.save_to_file {
-            // OK はユーザーの明示的な保存操作なので、デバウンスを待たずに書き出す
+            // 「適用」と「OK」はユーザーの明示的な保存操作なので、
+            // デバウンスを待たずに書き出す
             self.save_settings_now();
         }
 
