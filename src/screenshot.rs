@@ -23,7 +23,8 @@ pub struct ScreenshotManager {
 
 /// `"F5"` や `"Ctrl+Shift+A"` のような文字列を `HotKey` に変換する。
 ///
-/// 修飾キーだけの指定（`"Ctrl+Shift"` など）は登録できないため、エラーにする。
+/// 修飾キーだけの指定（`"Ctrl+Shift"` など）と、通常キーを 2 つ以上含む指定
+/// （`"Ctrl+A+B"` など）は登録できないため、エラーにする。
 fn parse_hotkey(hotkey_str: &str) -> Result<HotKey, String> {
     let parts: Vec<&str> = hotkey_str.split('+').collect();
     let mut modifiers = Modifiers::empty();
@@ -37,6 +38,12 @@ fn parse_hotkey(hotkey_str: &str) -> Result<HotKey, String> {
             "shift" => modifiers |= Modifiers::SHIFT,
             "win" | "windows" | "super" => modifiers |= Modifiers::SUPER,
             key => {
+                // HotKey が持てる通常キーは 1 つだけ。黙って上書きすると
+                // "Ctrl+A+B" が "Ctrl+B" として登録され、設定した覚えのない
+                // キーが効いてしまうため、2 つ目を見つけた時点で弾く
+                if key_code.is_some() {
+                    return Err("Multiple key codes specified".to_string());
+                }
                 key_code = Some(parse_key_code(key)?);
             }
         }
@@ -371,6 +378,14 @@ mod tests {
     fn parse_hotkey_unknown_key_returns_error() {
         assert!(parse_hotkey("Ctrl+Nonexistent").is_err());
         assert!(parse_hotkey("F13").is_err());
+    }
+
+    #[test]
+    fn parse_hotkey_multiple_key_codes_returns_error() {
+        // 黙って最後のキーで上書きせず、エラーにする
+        assert!(parse_hotkey("Ctrl+A+B").is_err());
+        assert!(parse_hotkey("A+B").is_err());
+        assert!(parse_hotkey("F5+F6").is_err());
     }
 
     #[test]
