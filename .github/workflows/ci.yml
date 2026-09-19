@@ -68,3 +68,24 @@ jobs:
       # #[ignore] を付けた実機テスト（キャプチャーデバイスが要る）は走らせない
       - name: テストを実行する
         run: cargo test --locked
+
+      # THIRD-PARTY-LICENSES.txt は about.hbs と Cargo.lock から生成している。
+      # 依存を足したり上げたりして再生成し忘れると、配布物とライセンス表記が
+      # 食い違う。生成し直してコミット済みのファイルと突き合わせる。
+      #
+      # 第三者の Action を増やさずに cargo install で入れる。初回は数分
+      # かかるが、Swatinem/rust-cache が ~/.cargo/bin もキャッシュ対象に
+      # するため 2 回目以降は復元されて終わる。
+      # cli フィーチャを付けないと実行ファイルが作られない点に注意。
+      # 版を固定するのは、cargo-about の版が変わると出力も変わりうるため。
+      - name: cargo-about を用意する
+        run: cargo install cargo-about --locked --version 0.9.2 --features cli
+
+      # 生成と確認を分けているのは、windows ランナーの既定シェルが pwsh で、
+      # 1 つの run にまとめると前半の失敗が握り潰されるため
+      - name: ライセンス一覧を生成し直す
+        run: cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES.txt
+
+      # 差分があれば、依存を変えたあとの再生成とコミットを忘れている
+      - name: ライセンス一覧が Cargo.lock と一致するか確認する
+        run: git diff --exit-code -- THIRD-PARTY-LICENSES.txt
