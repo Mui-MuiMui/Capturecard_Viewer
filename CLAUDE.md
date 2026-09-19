@@ -21,8 +21,10 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 ```
 
 - ビルドには MSVC ツールチェインと Windows SDK が必要（`build.rs` が `embed_resource` で `app.rc` をコンパイルするため）
+- バージョン番号の出どころは `Cargo.toml` の `version` だけ。`build.rs` が `app.rc` 用のヘッダーを生成するので、他の場所に数値を書かない（`docs/BUILD.md` の「バージョン番号」）
 - `cargo clippy --all-targets` はクリーンではなく、既知の警告が残っている（詳細は Asana のタスク参照）
-- `cargo fmt --check` は現状リポジトリ全体で差分を出す。整形は独立したコミットで行うこと
+- `cargo fmt --check` は差分ゼロが前提。落ちたら自分の変更を `cargo fmt` で整形してからコミットする
+- 整形の基準はリポジトリ直下の `rustfmt.toml`。`edition` だけ指定し、他は rustfmt の既定値に従う
 
 ## モジュール構成
 
@@ -62,9 +64,13 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 
 `Cargo.toml` の `[profile.release]` に `panic = "abort"` があるため、`main.rs` 内の `std::panic::catch_unwind` は release ビルドで一切機能しない。
 
-### 設定ファイルの読み込みは全か無か
+### 設定構造体の `#[serde(default)]` を外さない
 
-`AppSettings::load()` は `confy::load(..).unwrap_or_default()` なので、**構造体にフィールドを 1 つ足すと既存ユーザーの設定が丸ごと初期化される**。設定構造体を変更する場合は `#[serde(default)]` を必ず付けること。
+`AppSettings` と配下の 4 構造体には、構造体レベルで `#[serde(default)]` が付いている。これが無いと、項目を 1 つ足すだけで既存ユーザーの設定が失われる。`Option` 以外の項目はパース自体が失敗して全項目が初期化され、`Option` の項目は `None` になって `Default` に書いた既定値が効かなくなる。**設定の構造体を新しく足すときも必ず付けること。**
+
+読み込みに失敗した場合、`AppSettings::load()` は壊れたファイルの `.bak` への退避を試みてから既定値で起動する。退避は失敗することがある（保存先のパスが取れない、rename が拒否される）。失敗の理由はまだどこにも残らない（ログ基盤が未導入のため）。
+
+`load()` は `(AppSettings, LoadOutcome)` を返す。`LoadOutcome` は退避まで含めて成功したかを表し、**退避できなかった場合に起動時の書き戻しを止めるためにある。** 退避に失敗すると読めなかったファイルがディスクに残るので、そこへ既定値を `save()` すると証跡ごと潰れる。`CaptureCardViewer::default` の起動時保存は `may_write_defaults_on_startup()` で守ってあるので、**起動経路に `save()` を足すときは同じ判断を通すこと。** 設定ダイアログからの明示的な保存は、ユーザーの意思なので抑止していない。
 
 ### UI にあるが動作していない設定がある
 

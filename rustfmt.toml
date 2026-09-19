@@ -1,0 +1,12 @@
+# rustfmt の設定。stable の rustfmt で警告なく使えるオプションのみを置く。
+
+# cargo fmt は Cargo.toml から edition を読むが、エディタなどから rustfmt を
+# 直接起動した場合は edition 2015 と見なされ、整形結果が変わることがある。
+# ここで明示して cargo fmt と揃える。
+edition = "2021"
+
+# 他は rustfmt の既定値をそのまま使う（max_width = 100、tab_spaces = 4 など）。
+# newline_style も既定の "Auto" のままにする。このリポジトリは index が LF、
+# Windows の作業ツリーが CRLF（core.autocrlf = true）なので、"Unix" を強制すると
+# 作業ツリーが LF に書き換えられ、次のチェックアウトで CRLF に戻されて
+# cargo fmt --check が安定しなくなる。
