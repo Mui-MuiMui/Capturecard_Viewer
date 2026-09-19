@@ -22,6 +22,9 @@ use video::VideoCapture;
 /// デバイスリストのキャッシュを更新する間隔
 const DEVICE_LIST_CACHE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// 保存されたウィンドウサイズが使えない場合に使う大きさ
+const DEFAULT_WINDOW_SIZE: (f32, f32) = (1280.0, 720.0);
+
 /// 復元したウィンドウを「画面内にある」と見なすために必要な、モニタの作業領域との
 /// 重なりの最小幅と最小高さ。タイトルバーを掴んでウィンドウを動かせる程度の
 /// 大きさを見えていることの条件にしている
@@ -867,6 +870,23 @@ fn calculate_aspect_ratio_size(image_size: egui::Vec2, available_size: egui::Vec
     }
 }
 
+/// 保存されたウィンドウサイズのうち、ウィンドウとして成立する値だけを採用して返す。
+///
+/// 設定ファイルは手で編集できるため、0 や負数や NaN が入りうる。検証せずに
+/// `with_inner_size` へ渡すと、winit の先の OS の API 次第で操作できない大きさの
+/// ウィンドウになったり、起動そのものに失敗したりする。**採用できない値は
+/// 既定のサイズへ倒す。**
+fn window_size_or_default(saved: Option<(f32, f32)>) -> (f32, f32) {
+    match saved {
+        Some((width, height))
+            if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 =>
+        {
+            (width, height)
+        }
+        _ => DEFAULT_WINDOW_SIZE,
+    }
+}
+
 /// 保存されたウィンドウの位置が、いずれかのモニタの作業領域と十分に重なるかを判定する。
 ///
 /// サブモニタを外した、解像度を変えた、といった理由で保存値が画面外になることがある。
@@ -970,8 +990,8 @@ fn main() -> Result<(), eframe::Error> {
     let (settings, _) = AppSettings::load();
     let mut viewport_builder = egui::ViewportBuilder::default().with_icon(load_icon());
 
-    // 保存されたウィンドウサイズがあれば適用
-    let inner_size = settings.ui.last_window_size.unwrap_or((1280.0, 720.0));
+    // 保存されたウィンドウサイズがあれば適用する。値が壊れていれば既定のサイズにする
+    let inner_size = window_size_or_default(settings.ui.last_window_size);
     viewport_builder = viewport_builder.with_inner_size([inner_size.0, inner_size.1]);
 
     // 保存されたウィンドウ位置は、モニタ構成が変わって画面外を指していることがある。
@@ -1560,6 +1580,42 @@ mod tests {
             &PathBuf::from("sound/SS.mp3"),
             &Some(PathBuf::from("sound/SS.mp3"))
         ));
+    }
+
+    #[test]
+    fn window_size_or_default_valid_size_is_kept() {
+        assert_eq!(window_size_or_default(Some((800.0, 600.0))), (800.0, 600.0));
+    }
+
+    #[test]
+    fn window_size_or_default_none_returns_default() {
+        // 初回起動。保存された値がまだ無い
+        assert_eq!(window_size_or_default(None), (1280.0, 720.0));
+    }
+
+    #[test]
+    fn window_size_or_default_unusable_size_returns_default() {
+        // 設定ファイルを手で編集すると、ウィンドウとして成立しない値が入りうる。
+        // そのまま with_inner_size へ渡さないことを確かめる
+        let unusable = [
+            (0.0, 720.0),
+            (1280.0, 0.0),
+            (-1280.0, 720.0),
+            (1280.0, -720.0),
+            (f32::NAN, 720.0),
+            (1280.0, f32::NAN),
+            (f32::INFINITY, 720.0),
+            (1280.0, f32::NEG_INFINITY),
+        ];
+
+        for size in unusable {
+            assert_eq!(
+                window_size_or_default(Some(size)),
+                (1280.0, 720.0),
+                "size={:?} をそのまま採用した",
+                size
+            );
+        }
     }
 
     // is_position_visible のテストで使うモニタ構成。
