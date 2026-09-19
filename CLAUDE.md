@@ -80,7 +80,6 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 
 以下は設定画面から変更できるが実装が追いついていない。README の記述もこれらを前提に書かれているため、修正時は README も合わせて更新すること。
 
-- 音声パススルーの有効/無効（フラグがストリーム側から参照されていない）
 - オーディオのサンプリングレート／チャンネル数（`start_passthrough_with_settings` の引数が未使用）
 - ビデオフォーマットの MJPEG / RGB24（内部で YUYV に強制される）
 

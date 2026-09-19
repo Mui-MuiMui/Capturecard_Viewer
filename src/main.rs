@@ -948,6 +948,10 @@ impl CaptureCardViewer {
 
             // Audio - 改良されたリトライとデフォルト設定
             if let Ok(mut audio) = self.audio_capture.lock() {
+                // ストリームを開始する前にパススルーの設定を反映する。
+                // 開始後に反映すると、無効のまま起動したときに最初のバッファが出力されてしまう。
+                audio.set_audio_passthrough_enabled(settings.audio.passthrough_enabled);
+
                 let need_audio_restart = settings.audio.input_device_name != self.last_audio_device
                     || settings.audio.sample_rate != self.last_audio_rate
                     || settings.audio.channels != self.last_audio_channels
@@ -1033,10 +1037,9 @@ impl CaptureCardViewer {
                     }
                 }
 
-                // 音量とパススルー設定を適用
+                // 音量を適用
                 self.volume = settings.ui.volume;
                 audio.set_volume(self.volume);
-                audio.set_audio_passthrough_enabled(settings.audio.passthrough_enabled);
             }
 
             // UI設定

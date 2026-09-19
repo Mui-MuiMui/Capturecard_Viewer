@@ -96,7 +96,6 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 
 Some options can be changed in the settings window but have no effect yet. These are tracked as known issues.
 
-- Enabling or disabling audio passthrough
 - Audio sample rate and channel count
 - Selecting MJPEG or RGB24 as the video format (YUY2 is always used internally)
 
