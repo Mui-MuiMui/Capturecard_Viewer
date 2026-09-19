@@ -664,6 +664,92 @@ fn show_screenshot_settings_tab(
     });
 }
 
+/// egui のキーを、ホットキー文字列で使う名前に変換する。
+/// ホットキーとして扱わないキーは `None` を返す。
+fn hotkey_key_name(key: egui::Key) -> Option<&'static str> {
+    let name = match key {
+        egui::Key::A => "A",
+        egui::Key::B => "B",
+        egui::Key::C => "C",
+        egui::Key::D => "D",
+        egui::Key::E => "E",
+        egui::Key::F => "F",
+        egui::Key::G => "G",
+        egui::Key::H => "H",
+        egui::Key::I => "I",
+        egui::Key::J => "J",
+        egui::Key::K => "K",
+        egui::Key::L => "L",
+        egui::Key::M => "M",
+        egui::Key::N => "N",
+        egui::Key::O => "O",
+        egui::Key::P => "P",
+        egui::Key::Q => "Q",
+        egui::Key::R => "R",
+        egui::Key::S => "S",
+        egui::Key::T => "T",
+        egui::Key::U => "U",
+        egui::Key::V => "V",
+        egui::Key::W => "W",
+        egui::Key::X => "X",
+        egui::Key::Y => "Y",
+        egui::Key::Z => "Z",
+        egui::Key::F1 => "F1",
+        egui::Key::F2 => "F2",
+        egui::Key::F3 => "F3",
+        egui::Key::F4 => "F4",
+        egui::Key::F5 => "F5",
+        egui::Key::F6 => "F6",
+        egui::Key::F7 => "F7",
+        egui::Key::F8 => "F8",
+        egui::Key::F9 => "F9",
+        egui::Key::F10 => "F10",
+        egui::Key::F11 => "F11",
+        egui::Key::F12 => "F12",
+        egui::Key::Num0 => "0",
+        egui::Key::Num1 => "1",
+        egui::Key::Num2 => "2",
+        egui::Key::Num3 => "3",
+        egui::Key::Num4 => "4",
+        egui::Key::Num5 => "5",
+        egui::Key::Num6 => "6",
+        egui::Key::Num7 => "7",
+        egui::Key::Num8 => "8",
+        egui::Key::Num9 => "9",
+        egui::Key::Space => "Space",
+        egui::Key::Enter => "Enter",
+        _ => return None,
+    };
+    Some(name)
+}
+
+/// 押されている修飾キーと通常キーから、`screenshot::parse_hotkey` が解釈できる
+/// ホットキー文字列を組み立てる。
+///
+/// 通常キーが 1 つも押されていない（修飾キーだけの）場合は `None` を返す。
+fn build_hotkey_string(modifiers: &egui::Modifiers, keys_down: &[egui::Key]) -> Option<String> {
+    // 通常キーが 1 つも無いうちは確定させない。修飾キーだけの文字列を確定させると
+    // screenshot::parse_hotkey が "No key code specified" で弾き、登録に失敗する。
+    // 押されているキーのうち対応している最初の 1 つだけを使う（ホットキーに含められる
+    // 通常キーは 1 つだけのため）。
+    let key_name = keys_down.iter().copied().find_map(hotkey_key_name)?;
+
+    let mut parts = Vec::new();
+
+    if modifiers.ctrl {
+        parts.push("Ctrl");
+    }
+    if modifiers.shift {
+        parts.push("Shift");
+    }
+    if modifiers.alt {
+        parts.push("Alt");
+    }
+    parts.push(key_name);
+
+    Some(parts.join("+"))
+}
+
 #[allow(static_mut_refs)]
 pub fn show_hotkey_capture_dialog(
     ctx: &egui::Context,
@@ -715,69 +801,14 @@ pub fn show_hotkey_capture_dialog(
 
                     // キーボード入力をキャプチャ
                     ctx.input(|i| {
-                        let mut keys = Vec::new();
+                        // HashSet の反復順は不定なので、同じ組み合わせから常に同じ
+                        // ホットキー文字列が得られるよう並べてから渡す
+                        let mut keys_down: Vec<egui::Key> = i.keys_down.iter().copied().collect();
+                        keys_down.sort();
 
-                        if i.modifiers.ctrl {
-                            keys.push("Ctrl");
-                        }
-                        if i.modifiers.shift {
-                            keys.push("Shift");
-                        }
-                        if i.modifiers.alt {
-                            keys.push("Alt");
-                        }
-
-                        // 押されたキーをチェック
-                        for key in &i.keys_down {
-                            match key {
-                                egui::Key::A => keys.push("A"),
-                                egui::Key::B => keys.push("B"),
-                                egui::Key::C => keys.push("C"),
-                                egui::Key::D => keys.push("D"),
-                                egui::Key::E => keys.push("E"),
-                                egui::Key::F => keys.push("F"),
-                                egui::Key::G => keys.push("G"),
-                                egui::Key::H => keys.push("H"),
-                                egui::Key::I => keys.push("I"),
-                                egui::Key::J => keys.push("J"),
-                                egui::Key::K => keys.push("K"),
-                                egui::Key::L => keys.push("L"),
-                                egui::Key::M => keys.push("M"),
-                                egui::Key::N => keys.push("N"),
-                                egui::Key::O => keys.push("O"),
-                                egui::Key::P => keys.push("P"),
-                                egui::Key::Q => keys.push("Q"),
-                                egui::Key::R => keys.push("R"),
-                                egui::Key::S => keys.push("S"),
-                                egui::Key::T => keys.push("T"),
-                                egui::Key::U => keys.push("U"),
-                                egui::Key::V => keys.push("V"),
-                                egui::Key::W => keys.push("W"),
-                                egui::Key::X => keys.push("X"),
-                                egui::Key::Y => keys.push("Y"),
-                                egui::Key::Z => keys.push("Z"),
-                                egui::Key::F1 => keys.push("F1"),
-                                egui::Key::F2 => keys.push("F2"),
-                                egui::Key::F3 => keys.push("F3"),
-                                egui::Key::F4 => keys.push("F4"),
-                                egui::Key::F5 => keys.push("F5"),
-                                egui::Key::F6 => keys.push("F6"),
-                                egui::Key::F7 => keys.push("F7"),
-                                egui::Key::F8 => keys.push("F8"),
-                                egui::Key::F9 => keys.push("F9"),
-                                egui::Key::F10 => keys.push("F10"),
-                                egui::Key::F11 => keys.push("F11"),
-                                egui::Key::F12 => keys.push("F12"),
-                                egui::Key::Space => keys.push("Space"),
-                                egui::Key::Enter => keys.push("Enter"),
-                                _ => {}
-                            }
-                        }
-
-                        if !keys.is_empty() && keys.len() > (if i.modifiers.any() { 1 } else { 0 })
-                        {
+                        if let Some(hotkey) = build_hotkey_string(&i.modifiers, &keys_down) {
                             unsafe {
-                                TEMP_HOTKEY = keys.join("+");
+                                TEMP_HOTKEY = hotkey;
                                 CAPTURING = false;
                             }
                         }
@@ -843,4 +874,126 @@ pub fn show_hotkey_capture_dialog(
     }
 
     hotkey_captured
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn modifiers(ctrl: bool, shift: bool, alt: bool) -> egui::Modifiers {
+        egui::Modifiers {
+            alt,
+            ctrl,
+            shift,
+            mac_cmd: false,
+            // Windows では command は ctrl と同じ値にする決まりになっている
+            command: ctrl,
+        }
+    }
+
+    #[test]
+    fn build_hotkey_string_no_input_returns_none() {
+        assert_eq!(
+            build_hotkey_string(&modifiers(false, false, false), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn build_hotkey_string_one_modifier_only_returns_none() {
+        assert_eq!(
+            build_hotkey_string(&modifiers(true, false, false), &[]),
+            None
+        );
+        assert_eq!(
+            build_hotkey_string(&modifiers(false, true, false), &[]),
+            None
+        );
+        assert_eq!(
+            build_hotkey_string(&modifiers(false, false, true), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn build_hotkey_string_two_modifiers_only_returns_none() {
+        // 修飾キーが 2 つ押されただけで確定してしまう不具合の再現
+        assert_eq!(
+            build_hotkey_string(&modifiers(true, true, false), &[]),
+            None
+        );
+        assert_eq!(
+            build_hotkey_string(&modifiers(true, false, true), &[]),
+            None
+        );
+        assert_eq!(
+            build_hotkey_string(&modifiers(false, true, true), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn build_hotkey_string_three_modifiers_only_returns_none() {
+        assert_eq!(build_hotkey_string(&modifiers(true, true, true), &[]), None);
+    }
+
+    #[test]
+    fn build_hotkey_string_unsupported_key_only_returns_none() {
+        // 対応していないキーは通常キーとして数えない
+        assert_eq!(
+            build_hotkey_string(&modifiers(true, true, false), &[egui::Key::Tab]),
+            None
+        );
+    }
+
+    #[test]
+    fn build_hotkey_string_single_key_returns_key_only() {
+        assert_eq!(
+            build_hotkey_string(&modifiers(false, false, false), &[egui::Key::F5]),
+            Some("F5".to_string())
+        );
+        assert_eq!(
+            build_hotkey_string(&modifiers(false, false, false), &[egui::Key::A]),
+            Some("A".to_string())
+        );
+    }
+
+    #[test]
+    fn build_hotkey_string_one_modifier_with_key_returns_combination() {
+        assert_eq!(
+            build_hotkey_string(&modifiers(true, false, false), &[egui::Key::S]),
+            Some("Ctrl+S".to_string())
+        );
+    }
+
+    #[test]
+    fn build_hotkey_string_three_modifiers_with_key_keeps_fixed_order() {
+        assert_eq!(
+            build_hotkey_string(&modifiers(true, true, true), &[egui::Key::A]),
+            Some("Ctrl+Shift+Alt+A".to_string())
+        );
+    }
+
+    #[test]
+    fn build_hotkey_string_digit_keys_are_supported() {
+        assert_eq!(
+            build_hotkey_string(&modifiers(false, false, false), &[egui::Key::Num0]),
+            Some("0".to_string())
+        );
+        assert_eq!(
+            build_hotkey_string(&modifiers(true, true, false), &[egui::Key::Num9]),
+            Some("Ctrl+Shift+9".to_string())
+        );
+    }
+
+    #[test]
+    fn build_hotkey_string_ignores_unsupported_keys_when_key_is_present() {
+        assert_eq!(
+            build_hotkey_string(
+                &modifiers(true, false, false),
+                &[egui::Key::Tab, egui::Key::S]
+            ),
+            Some("Ctrl+S".to_string())
+        );
+    }
 }
