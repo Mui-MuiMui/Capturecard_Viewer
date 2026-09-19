@@ -92,6 +92,8 @@ cargo build --release
 
 **例外はテストコードの中。** テストバイナリの標準出力は `cargo test -- --nocapture` で読めるため、`println!` を使ってよい（`src/video.rs` の計測用テストがその例）。`src/main.rs` 冒頭の `#![cfg_attr(test, allow(clippy::print_stdout))]` がこれを許している。**クレートルートに置いてあるのは、テストを持つモジュール側に `#[allow]` を散らかさないため。**
 
+**デバイス起因の不具合を調べるときは `.claude/skills/device-debug/SKILL.md` の手順に従う。** ログの読み方、正常時の所要時間の目安、症状ごとの確認順をまとめてある。
+
 ### catch_unwind は機能しない
 
 `Cargo.toml` の `[profile.release]` に `panic = "abort"` があるため、`main.rs` 内の `std::panic::catch_unwind` は release ビルドで一切機能しない。
@@ -130,7 +132,9 @@ cargo build --release
 - `ui` の 2 項目はダイアログの外（ホイールでの音量調整、コンテキストメニュー）でも変わるため、開いた時点の値（`SettingsDialogState::original`）と比べて**ダイアログで実際に編集されたときだけ**反映する。無条件に入れると、ダイアログを開いたままホイールで音量を変えて「適用」を押したときに巻き戻る
 - ホットキー入力ダイアログと効果音のテスト再生もドラフトを見る。ドラフトへ書いたホットキーはその場で登録しない（2 秒ごとの `apply_settings` が共有設定側の古い値で登録し直してしまうため）
 
-`ui.rs` にはまだタブ選択・デバイス能力キャッシュ・ホットキー入力の `static` が残っている。これらは別タスクで構造体へ移す。
+タブ選択・デバイス能力キャッシュ・ホットキー入力も `SettingsDialogState` が持つ。これらは設定の中身ではないので「キャンセル」や `end_edit` では捨てず、ダイアログを開き直しても引き継ぐ。**`ui.rs` に `static` を追加しないこと。** ダイアログの新しい状態は `SettingsDialogState` へ追加する。
+
+「テスト再生」は `SettingsDialogAction::TestSound` として呼び出し側へ返し、`CaptureCardViewer` が鳴らす。ダイアログは閉じず、設定も保存もしない。
 
 ### UI にあるが動作していない設定がある
 

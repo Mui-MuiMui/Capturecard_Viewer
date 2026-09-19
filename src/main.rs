@@ -343,6 +343,7 @@ impl eframe::App for CaptureCardViewer {
                 ctx,
                 &mut self.show_hotkey_dialog,
                 &mut self.temp_hotkey,
+                self.settings_dialog.hotkey_capture_mut(),
             );
 
             // ホットキーがキャプチャされた場合、設定を更新
@@ -426,26 +427,6 @@ impl eframe::App for CaptureCardViewer {
                 }
             } else {
                 warn!("ホットキーの登録で screenshot_manager のロックを取得できない");
-            }
-        }
-        // テストサウンドリクエストを処理
-        if crate::ui::should_play_test_sound() {
-            // 設定ダイアログを開いている間はドラフトの音量で鳴らす。
-            // スライダーを動かした結果をその場で確かめられるようにするため。
-            // 効果音のファイル自体は「適用」か「OK」まで差し替わらない
-            let volume = match self.settings_dialog.draft() {
-                Some(draft) => Some(draft.screenshot.sound_volume),
-                None => self
-                    .settings
-                    .lock()
-                    .ok()
-                    .map(|settings| settings.screenshot.sound_volume),
-            };
-
-            if let Some(volume) = volume {
-                if let Ok(ss) = self.screenshot_manager.lock() {
-                    ss.play_screenshot_sound(volume);
-                }
             }
         }
 
@@ -1409,6 +1390,10 @@ impl CaptureCardViewer {
     /// ドラフトの反映・保存・クローズをここで行うのは、UI 側に状態と副作用を
     /// 持たせないため（`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
     fn handle_settings_dialog_action(&mut self, action: ui::SettingsDialogAction) {
+        if action == ui::SettingsDialogAction::TestSound {
+            self.play_test_sound();
+        }
+
         let transition = ui::SettingsDialogState::transition_for(action);
 
         if transition.commit_draft {
@@ -1428,6 +1413,26 @@ impl CaptureCardViewer {
         if transition.close {
             self.settings_dialog.end_edit();
             self.show_settings = false;
+        }
+    }
+
+    /// 設定ダイアログの「テスト再生」で効果音を鳴らす。
+    ///
+    /// ダイアログを開いている間はドラフトの音量で鳴らす。スライダーを
+    /// 動かした結果をその場で確かめられるようにするため。
+    /// 効果音のファイル自体は「適用」か「OK」まで差し替わらない。
+    fn play_test_sound(&self) {
+        // この操作が返るのはダイアログを描画しているときだけなので、ドラフトは必ずある
+        let Some(volume) = self
+            .settings_dialog
+            .draft()
+            .map(|draft| draft.screenshot.sound_volume)
+        else {
+            return;
+        };
+
+        if let Ok(ss) = self.screenshot_manager.lock() {
+            ss.play_screenshot_sound(volume);
         }
     }
 
