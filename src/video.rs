@@ -1,3 +1,4 @@
+use log::{debug, info, trace, warn};
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{
     ApiBackend, CameraFormat, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
@@ -163,6 +164,30 @@ fn yuy2_to_rgb_naive(
     out[converted_len..].fill(0);
 }
 
+/// 「最初の 1 回だけ」を判定するフラグ。
+///
+/// フレームコールバックは 1080p60 なら毎秒 60 回呼ばれるため、到着や
+/// フォールバックをそのまま記録するとログが埋まる。初回だけ記録するための
+/// 判定をここに閉じ込めて、単体テストできるようにしてある。
+#[derive(Debug, Default)]
+struct FirstTimeOnly {
+    fired: bool,
+}
+
+impl FirstTimeOnly {
+    /// 最初に呼ばれたときだけ `true` を返す。2 回目以降は常に `false`。
+    fn take(&mut self) -> bool {
+        let first = !self.fired;
+        self.fired = true;
+        first
+    }
+}
+
+/// 経過時間をミリ秒で返す。ログの書式を揃えるための補助。
+fn elapsed_ms(start: Instant) -> f32 {
+    start.elapsed().as_secs_f32() * 1000.0
+}
+
 pub struct VideoFrame {
     pub width: usize,
     pub height: usize,
@@ -261,17 +286,36 @@ impl VideoCapture {
     }
 
     pub fn list_devices() -> Vec<(String, String)> {
+        let start = Instant::now();
         match nokhwa::query(ApiBackend::MediaFoundation) {
-            Ok(devices) => devices
-                .into_iter()
-                .map(|info| {
-                    (
-                        info.human_name().to_string(),
-                        info.description().to_string(),
-                    )
-                })
-                .collect(),
-            Err(_) => Vec::new(),
+            Ok(devices) => {
+                let devices: Vec<(String, String)> = devices
+                    .into_iter()
+                    .map(|info| {
+                        (
+                            info.human_name().to_string(),
+                            info.description().to_string(),
+                        )
+                    })
+                    .collect();
+                // 設定の device_name と実際に見えている名前を突き合わせられるよう、
+                // 件数だけでなく名前もそのまま残す
+                debug!(
+                    "映像デバイスの一覧を取得した（{} 件、{:.1}ms）: {:?}",
+                    devices.len(),
+                    elapsed_ms(start),
+                    devices.iter().map(|(name, _)| name).collect::<Vec<_>>()
+                );
+                devices
+            }
+            Err(e) => {
+                warn!(
+                    "映像デバイスの列挙に失敗した（{:.1}ms）: {}",
+                    elapsed_ms(start),
+                    e
+                );
+                Vec::new()
+            }
         }
     }
 
@@ -284,8 +328,26 @@ impl VideoCapture {
     ) -> Result<(), String> {
         self.stop_capture();
 
+        debug!(
+            "映像キャプチャの要求 - デバイス: {}、解像度: {}、フォーマット: {}、fps: {}",
+            device_name.unwrap_or("（未指定。先頭のデバイス）"),
+            resolution
+                .map(|(w, h)| format!("{}x{}", w, h))
+                .unwrap_or_else(|| "（未指定）".to_string()),
+            format.unwrap_or("（未指定）"),
+            fps.map(|v| v.to_string())
+                .unwrap_or_else(|| "（未指定）".to_string()),
+        );
+
+        let query_start = Instant::now();
         let devices = nokhwa::query(ApiBackend::MediaFoundation)
             .map_err(|e| format!("Failed to query devices: {}", e))?;
+        debug!(
+            "映像デバイスを {} 件列挙した（{:.1}ms）: {:?}",
+            devices.len(),
+            elapsed_ms(query_start),
+            devices.iter().map(|d| d.human_name()).collect::<Vec<_>>()
+        );
 
         let device_info = if let Some(name) = device_name {
             devices
@@ -298,16 +360,31 @@ impl VideoCapture {
 
         // Windows Media Foundationでの問題を回避するフォーマット設定
         let requested_format = if let Some((w, h)) = resolution {
+            // 設定画面では MJPEG / RGB24 も選べるが、実装が追いついておらず
+            // すべて YUYV で開いている。選んだ値と実際の値が食い違うので記録する
             let ff = match format.unwrap_or("") {
                 "YUY2" => FrameFormat::YUYV,
-                // MJPEGとRGB24はWindows MFで問題があるため、YUYVフォールバック
-                "MJPEG" => FrameFormat::YUYV, // YUYVで代替してMJPEGシミュレート
-                "RGB24" => FrameFormat::YUYV, // YUYVで代替してRGB変換
                 // 未指定: デフォルトフォーマット
                 "" => FrameFormat::YUYV,
-                _ => FrameFormat::YUYV,
+                other @ ("MJPEG" | "RGB24") => {
+                    warn!("ビデオフォーマット {} は未実装のため YUY2 で開く", other);
+                    FrameFormat::YUYV
+                }
+                other => {
+                    warn!(
+                        "未知のビデオフォーマット {} を指定されたので YUY2 で開く",
+                        other
+                    );
+                    FrameFormat::YUYV
+                }
             };
             let fps_value = fps.unwrap_or(60).clamp(15, 120);
+            if let Some(requested) = fps.filter(|v| *v != fps_value) {
+                warn!(
+                    "fps {} は対応範囲外なので {} に丸める",
+                    requested, fps_value
+                );
+            }
 
             // フォールバック戦略: 安定したYUYVを使用
             RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
@@ -317,6 +394,7 @@ impl VideoCapture {
             )))
         } else {
             // 高解像度優先（安定性のためYUYVを使用）
+            debug!("解像度が未指定なので 1280x720 YUYV 60fps を要求する");
             RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
                 Resolution::new(1280, 720),
                 FrameFormat::YUYV,
@@ -331,6 +409,13 @@ impl VideoCapture {
             // 1 世代ぶん遅らせて回収するのは、置き換えた直後のフレームは
             // UI スレッドがテクスチャ化のために掴んでいることが多いため。
             let mut recyclable: Option<Arc<VideoFrame>> = None;
+            // 毎フレーム流れる事象のうち、初回だけ記録したいもの。
+            // 2 回目以降は trace! に落とすか、何も出さない
+            let mut first_frame = FirstTimeOnly::default();
+            let mut fallback_notice = FirstTimeOnly::default();
+            let mut short_frame_notice = FirstTimeOnly::default();
+            let mut decode_error_notice = FirstTimeOnly::default();
+            let mut lock_error_notice = FirstTimeOnly::default();
             move |frame: nokhwa::Buffer| {
                 let start = Instant::now();
                 let res = frame.resolution();
@@ -347,7 +432,19 @@ impl VideoCapture {
                     FrameFormat::YUYV if width.is_multiple_of(2) => {
                         // YUY2の高速パス
                         let raw_data = frame.buffer_bytes();
-                        if raw_data.len() >= width * height * 2 {
+                        if raw_data.len() < width * height * 2 {
+                            // フレームを捨てるので画面が止まる。以降は同じ行が
+                            // 毎フレーム出るため初回だけ残す
+                            if short_frame_notice.take() {
+                                warn!(
+                                    "YUY2 のフレームが短いので破棄した（{}x{} に必要な {} バイトに対し {} バイト）。以降は記録しない",
+                                    width,
+                                    height,
+                                    width * height * 2,
+                                    raw_data.len()
+                                );
+                            }
+                        } else {
                             // 回収できた Vec があれば使い回し、無ければ新規に確保する
                             let mut rgb = recyclable
                                 .take()
@@ -364,8 +461,22 @@ impl VideoCapture {
 
                     _ => {
                         // その他のフォーマットも標準デコード
-                        if let Ok(rgb_data) = frame.decode_image::<RgbFormat>() {
-                            rgb_vec = Some(rgb_data.into_raw());
+                        if fallback_notice.take() {
+                            warn!(
+                                "YUY2 の高速パスを使えないのでデコーダへフォールバックする（フォーマット: {:?}、{}x{}）。以降は記録しない",
+                                source_format, width, height
+                            );
+                        }
+                        match frame.decode_image::<RgbFormat>() {
+                            Ok(rgb_data) => rgb_vec = Some(rgb_data.into_raw()),
+                            Err(e) => {
+                                if decode_error_notice.take() {
+                                    warn!(
+                                        "フレームのデコードに失敗した（フォーマット: {:?}、{}x{}）: {}。以降は記録しない",
+                                        source_format, width, height, e
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -376,23 +487,81 @@ impl VideoCapture {
                         height,
                         data,
                     };
-                    if let Ok(mut guard) = fb.lock() {
-                        recyclable = guard.push_back(vf, decode_ms, used_fast);
+                    match fb.lock() {
+                        Ok(mut guard) => {
+                            recyclable = guard.push_back(vf, decode_ms, used_fast);
+                            if first_frame.take() {
+                                // 「接続した」と「映像が出ている」は別物なので、
+                                // 最初の 1 枚が届いたことだけは info で残す
+                                info!(
+                                    "最初のフレームが届いた（{}x{}、フォーマット: {:?}、変換 {:.2}ms、経路: {}）",
+                                    width,
+                                    height,
+                                    source_format,
+                                    decode_ms,
+                                    if used_fast { "高速パス" } else { "デコーダ" }
+                                );
+                            } else {
+                                trace!(
+                                    "フレームが届いた（{}x{}、変換 {:.2}ms）",
+                                    width,
+                                    height,
+                                    decode_ms
+                                );
+                            }
+                        }
+                        Err(_) => {
+                            if lock_error_notice.take() {
+                                warn!(
+                                    "フレームバッファのロックを取得できないのでフレームを捨てた。以降は記録しない"
+                                );
+                            }
+                        }
                     }
                 }
             }
         };
 
+        let create_start = Instant::now();
         let mut camera = CallbackCamera::new(
             device_info.index().clone(),
             requested_format,
             frame_callback,
         )
         .map_err(|e| format!("Failed to create camera: {}", e))?;
+        let create_ms = elapsed_ms(create_start);
 
+        // 実際に確定したフォーマットは open_stream の前に読む。
+        // ストリーム開始後は nokhwa のフレーム取得スレッドがカメラのロックを
+        // 握り続けるため、待たされて UI スレッドが止まる
+        //
+        // fps は載せない。nokhwa のバインディングが MF_MT_FRAME_RATE
+        // （上位 32 ビットが分子、下位 32 ビットが分母）を `fps as u32` で
+        // 読んでおり、分母しか取れていない。整数フレームレートでは常に 1 になる
+        // （nokhwa-bindings-windows 0.4.6 の `format_refreshed`）。
+        // 要求した fps は直前の debug! に残してある
+        let actual_format = camera.camera_format().ok();
+
+        let open_start = Instant::now();
         camera
             .open_stream()
             .map_err(|e| format!("Failed to open camera stream: {}", e))?;
+        let open_ms = elapsed_ms(open_start);
+
+        info!(
+            "映像ストリームを開いた（デバイス: {}、実際の設定: {}、Camera::new {:.1}ms、open_stream {:.1}ms）",
+            device_info.human_name(),
+            actual_format
+                .map(|f| format!(
+                    "{}x{} {:?}",
+                    f.resolution().width_x,
+                    f.resolution().height_y,
+                    f.format()
+                ))
+                .unwrap_or_else(|| "（取得できない）".to_string()),
+            create_ms,
+            open_ms
+        );
 
         self.camera = Some(camera);
 
@@ -401,11 +570,21 @@ impl VideoCapture {
 
     pub fn stop_capture(&mut self) {
         if let Some(mut camera) = self.camera.take() {
-            let _ = camera.stop_stream();
+            let stop_start = Instant::now();
+            match camera.stop_stream() {
+                Ok(()) => info!("映像ストリームを閉じた（{:.1}ms）", elapsed_ms(stop_start)),
+                Err(e) => warn!(
+                    "映像ストリームを閉じられなかった（{:.1}ms）: {}",
+                    elapsed_ms(stop_start),
+                    e
+                ),
+            }
         }
 
         if let Ok(mut buf) = self.frames.lock() {
             buf.reset();
+        } else {
+            warn!("フレームバッファのロックを取得できないので統計を消せない");
         }
     }
 
@@ -442,7 +621,15 @@ impl VideoCapture {
     ) -> Result<DeviceCapabilities, String> {
         use nokhwa::Camera;
 
-        // デバイス情報を取得
+        let start = Instant::now();
+        debug!(
+            "デバイス能力の取得を開始する: {}",
+            device_name.unwrap_or("（未指定。先頭のデバイス）")
+        );
+
+        // 失敗をここで warn! にしない。呼び出し側（main.rs の
+        // dispatch_capability_requests）が、デバイス名付きで理由をログへ出し、
+        // 設定ダイアログにも表示する。ここで出すと同じ内容が 2 行並ぶ
         let devices = nokhwa::query(ApiBackend::MediaFoundation)
             .map_err(|e| format!("Failed to query devices: {}", e))?;
 
@@ -460,8 +647,16 @@ impl VideoCapture {
             CameraFormat::new(Resolution::new(640, 480), FrameFormat::YUYV, 30),
         ));
 
+        // キャプチャ中のデバイスをもう一度開く。取得そのものは `capability-query`
+        // スレッドで走るので UI は止まらないが、ここが伸びると設定ダイアログの
+        // 「対応形式を取得中...」が長く出たままになる
+        let open_start = Instant::now();
         let mut camera = Camera::new(device_info.index().clone(), requested_format)
             .map_err(|e| format!("Failed to create camera for capability query: {}", e))?;
+        debug!(
+            "能力取得のためにデバイスを開いた（{:.1}ms）",
+            elapsed_ms(open_start)
+        );
 
         let mut result: DeviceCapabilities = Vec::new();
 
@@ -502,12 +697,22 @@ impl VideoCapture {
                         }
                     });
 
+                    debug!(
+                        "{} の対応する組み合わせを {} 件取得した",
+                        format_name,
+                        resolutions_with_fps.len()
+                    );
                     if !resolutions_with_fps.is_empty() {
                         result.push((format_name.to_string(), resolutions_with_fps));
                     }
                 }
-                Err(_) => {
-                    // エラーの場合、デフォルト値を設定
+                Err(e) => {
+                    // エラーの場合、デフォルト値を設定。
+                    // 画面に出る選択肢がデバイスの実際の能力ではなくなるので残す
+                    warn!(
+                        "{} の対応する組み合わせを取得できないので既定値を使う: {}",
+                        format_name, e
+                    );
                     let default_resolutions = match format_name {
                         "YUY2" => vec![(1280, 720, 60), (640, 480, 30)],
                         "MJPEG" => vec![(1920, 1080, 30), (1280, 720, 60), (640, 480, 30)],
@@ -523,6 +728,7 @@ impl VideoCapture {
 
         // 結果が空の場合はデフォルト値を返す
         if result.is_empty() {
+            warn!("どのフォーマットの能力も取得できなかったので既定値を返す");
             result = vec![
                 ("YUY2".to_string(), vec![(1280, 720, 60), (640, 480, 30)]),
                 (
@@ -531,6 +737,19 @@ impl VideoCapture {
                 ),
             ];
         }
+
+        // 総所要時間とフォーマット数は呼び出し側が info! で出すので、
+        // ここではフォーマットごとの内訳だけを debug! に残す
+        debug!(
+            "デバイス能力の内訳（{}、{:.1}ms）: {}",
+            device_info.human_name(),
+            elapsed_ms(start),
+            result
+                .iter()
+                .map(|(format_name, list)| format!("{}: {} 件", format_name, list.len()))
+                .collect::<Vec<_>>()
+                .join("、")
+        );
 
         Ok(result)
     }
@@ -565,6 +784,32 @@ mod tests {
             height: TEST_HEIGHT,
             data: vec![marker; TEST_FRAME_LEN],
         }
+    }
+
+    #[test]
+    fn first_time_only_first_take_returns_true() {
+        let mut flag = FirstTimeOnly::default();
+        assert!(flag.take());
+    }
+
+    #[test]
+    fn first_time_only_subsequent_takes_return_false() {
+        // 毎フレーム呼ばれる前提なので、2 回目以降は必ず false になること
+        let mut flag = FirstTimeOnly::default();
+        flag.take();
+        assert!(!flag.take());
+        assert!(!flag.take());
+        assert!(!flag.take());
+    }
+
+    #[test]
+    fn first_time_only_instances_are_independent() {
+        // 「初回のフレーム」と「初回のフォールバック」を別々に数えるため、
+        // 片方を消費してももう片方は初回のまま
+        let mut first = FirstTimeOnly::default();
+        let mut second = FirstTimeOnly::default();
+        assert!(first.take());
+        assert!(second.take());
     }
 
     #[test]
