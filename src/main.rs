@@ -11,7 +11,7 @@ use eframe::egui;
 use image::GenericImageView;
 use log::{debug, error, info, trace, warn};
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -516,60 +516,67 @@ impl CaptureCardViewer {
         }
     }
 
+    /// いま表示しているフレームを JPEG で保存する。
+    ///
+    /// ロックは settings → video → screenshot の順に 1 つずつ取り、重ねない。
+    /// エンコードと書き出しは別スレッドへ逃がす。1080p の JPEG エンコードは
+    /// 数十 ms かかり、UI スレッドで行うと映像が一瞬止まるため
     fn take_screenshot(&mut self) {
         debug!("スクリーンショットの保存を開始する");
 
-        // 最新フレームの生データを抽出。
+        // 保存先と効果音の音量だけを取り出してロックを手放す。
+        // get_screenshot_path は連番を決めるためにファイルの有無を見るが、
+        // ファイルを作るのは保存スレッドなので、ここでは何も書かない
+        let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S-%3f").to_string();
+        let path_and_volume = self.settings.lock().ok().map(|settings| {
+            (
+                settings.get_screenshot_path(&timestamp),
+                settings.screenshot.sound_volume,
+            )
+        });
+        let Some((path, sound_volume)) = path_and_volume else {
+            warn!("スクリーンショットの保存で settings のロックを取得できない");
+            return;
+        };
+
+        // 最新フレームを取り出したらすぐロックを手放す。Arc の複製なので
+        // 画素データは複製されず、フレームコールバック側の push を待たせない。
         // スクリーンショットはいま画面に出ている画を保存するので、新着でなくてよい
-        if let Ok(video) = self.video_capture.lock() {
-            if let Some(frame) = video.get_latest_frame() {
-                debug!(
-                    "保存対象の映像フレームを取得した: {}x{}",
-                    frame.width, frame.height
-                );
-
-                // タイムスタンプとパスを構築
-                let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S-%3f").to_string();
-                if let Ok(settings) = self.settings.lock() {
-                    let path = settings.get_screenshot_path(&timestamp);
-                    debug!("保存先: {}", path.display());
-
-                    // 親ディレクトリを作成
-                    if let Some(parent) = path.parent() {
-                        if let Err(e) = std::fs::create_dir_all(parent) {
-                            error!("保存先のディレクトリを作成できない: {}", e);
-                        }
-                    }
-
-                    // RGBデータを画像に変換して保存
-                    // image クレートが Vec の所有権を要求するため、ここだけは複製が要る
-                    if let Some(img_buf) = image::RgbImage::from_raw(
-                        frame.width as u32,
-                        frame.height as u32,
-                        frame.data.clone(),
-                    ) {
-                        match img_buf.save(&path) {
-                            Ok(()) => {
-                                info!("スクリーンショットを {} へ保存した", path.display());
-                                let volume = settings.screenshot.sound_volume;
-                                if let Ok(ss) = self.screenshot_manager.lock() {
-                                    ss.play_screenshot_sound(volume);
-                                }
-                            }
-                            Err(e) => error!("スクリーンショットを保存できない: {}", e),
-                        }
-                    } else {
-                        error!("映像フレームから画像を組み立てられない");
-                    }
-                } else {
-                    warn!("スクリーンショットの保存で settings のロックを取得できない");
-                }
-            } else {
-                warn!("映像フレームが無いのでスクリーンショットを撮れない");
+        let latest_frame = match self.video_capture.lock() {
+            Ok(video) => video.get_latest_frame(),
+            Err(_) => {
+                warn!("スクリーンショットの保存で video_capture のロックを取得できない");
+                return;
             }
+        };
+        let Some(frame) = latest_frame else {
+            warn!("映像フレームが無いのでスクリーンショットを撮れない");
+            return;
+        };
+        debug!(
+            "保存対象の映像フレームを取得した: {}x{}、保存先: {}",
+            frame.width,
+            frame.height,
+            path.display()
+        );
+
+        // 効果音は保存の完了を待たずに鳴らす。撮った手応えをその場で返すため。
+        // 保存まで待つと、エンコードにかかる数十 ms だけシャッター音が遅れる。
+        // 保存に失敗した場合は音だけ鳴ることになるが、失敗はログに残す
+        if let Ok(ss) = self.screenshot_manager.lock() {
+            ss.play_screenshot_sound(sound_volume);
         } else {
-            warn!("スクリーンショットの保存で video_capture のロックを取得できない");
+            warn!("スクリーンショットの効果音で screenshot_manager のロックを取得できない");
         }
+
+        // エンコードと書き出しは UI スレッドから外す。
+        // ホットキーを連打するとスレッドが並ぶが、撮るたびに 1 枚残るほうを優先して
+        // 進行中の保存があっても捨てない。ファイル名は撮影時刻をミリ秒まで含むので、
+        // 人が連打できる間隔なら衝突しない（同一ミリ秒の衝突は元からある別の問題）
+        std::thread::spawn(move || match save_frame_as_jpeg(&frame, &path) {
+            Ok(()) => info!("スクリーンショットを {} へ保存した", path.display()),
+            Err(e) => error!("スクリーンショットを保存できない: {}", e),
+        });
     }
 
     fn show_windowed_ui(&mut self, ctx: &egui::Context) {
@@ -894,6 +901,52 @@ impl CaptureCardViewer {
             self.show_context_menu = false;
         }
     }
+}
+
+/// 映像フレームを JPEG として `path` へ書き出す。
+///
+/// アプリの状態にも共有ロックにも触れないので、そのまま別スレッドで実行でき、
+/// テストからも呼べる。保存スレッドはこの関数だけを呼ぶ。
+fn save_frame_as_jpeg(frame: &video::VideoFrame, path: &Path) -> Result<(), String> {
+    // 大きさのないフレームは JPEG として書き出せてしまうが、開けない
+    // ファイルが残るだけなので、ディレクトリを作る前に弾く
+    if frame.width == 0 || frame.height == 0 {
+        return Err(format!(
+            "大きさのない映像フレームは保存できない: {}x{}",
+            frame.width, frame.height
+        ));
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "保存先のディレクトリ {} を作成できない: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+
+    let (Ok(width), Ok(height)) = (u32::try_from(frame.width), u32::try_from(frame.height)) else {
+        return Err(format!(
+            "画像として扱えない大きさのフレーム: {}x{}",
+            frame.width, frame.height
+        ));
+    };
+
+    // image クレートが Vec の所有権を要求するため、ここだけは複製が要る。
+    // UI スレッドの外なので、1080p で 6MB の複製が描画を止めることはない
+    let img = image::RgbImage::from_raw(width, height, frame.data.clone()).ok_or_else(|| {
+        format!(
+            "映像フレームから画像を組み立てられない: {}x{} に対して {} バイト",
+            width,
+            height,
+            frame.data.len()
+        )
+    })?;
+
+    img.save(path)
+        .map_err(|e| format!("{} へ書き出せない: {}", path.display(), e))
 }
 
 // 映像の縦横比を保ったまま、表示領域に収まる大きさを求める。
@@ -1512,6 +1565,7 @@ impl CaptureCardViewer {
 mod tests {
     use super::*;
     use egui::Vec2;
+    use tempfile::tempdir;
 
     #[test]
     fn should_refresh_device_list_never_updated_returns_true() {
@@ -2003,5 +2057,75 @@ mod tests {
             icon.rgba.chunks(4).any(|px| px != [255, 0, 0, 255]),
             "アイコンが赤一色になっている"
         );
+    }
+    // 2x2 の RGB フレーム。赤・緑・青・白を 1 画素ずつ並べてある
+    fn test_frame_2x2() -> video::VideoFrame {
+        video::VideoFrame {
+            width: 2,
+            height: 2,
+            data: vec![
+                255, 0, 0, // 左上: 赤
+                0, 255, 0, // 右上: 緑
+                0, 0, 255, // 左下: 青
+                255, 255, 255, // 右下: 白
+            ],
+        }
+    }
+
+    #[test]
+    fn save_frame_as_jpeg_writes_decodable_file() {
+        // JPEG は非可逆なので画素値は比較せず、読み戻せることと大きさだけを見る
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("shot.jpg");
+
+        save_frame_as_jpeg(&test_frame_2x2(), &path).expect("保存できること");
+
+        let decoded = image::open(&path).expect("保存した JPEG を読み戻せること");
+        assert_eq!(decoded.dimensions(), (2, 2));
+    }
+
+    #[test]
+    fn save_frame_as_jpeg_creates_missing_parent_directory() {
+        // 保存先フォルダが無い状態で撮影されることがあるため、親ごと作る
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("shots").join("2026").join("shot.jpg");
+
+        save_frame_as_jpeg(&test_frame_2x2(), &path).expect("保存できること");
+
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn save_frame_as_jpeg_short_data_returns_error_without_creating_file() {
+        // 画素数に対してデータが足りないフレーム。壊れたファイルを残さないこと
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("shot.jpg");
+        let frame = video::VideoFrame {
+            width: 2,
+            height: 2,
+            data: vec![0; 11],
+        };
+
+        let err = save_frame_as_jpeg(&frame, &path).expect_err("エラーになること");
+
+        assert!(err.contains("組み立てられない"), "想定外のエラー: {}", err);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn save_frame_as_jpeg_zero_sized_frame_returns_error() {
+        // フレームが来ていない状態を取り違えて保存しようとした場合
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("shot.jpg");
+        let frame = video::VideoFrame {
+            width: 0,
+            height: 0,
+            data: Vec::new(),
+        };
+
+        let err = save_frame_as_jpeg(&frame, &path).expect_err("エラーになること");
+
+        assert!(err.contains("大きさのない"), "想定外のエラー: {}", err);
+        assert!(!path.exists());
     }
 }
