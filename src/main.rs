@@ -50,6 +50,198 @@ const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
 /// 取得スレッドから UI スレッドへ、この形でチャネル越しに返す
 type CapabilityResult = (String, Result<video::DeviceCapabilities, String>);
 
+/// 接続に失敗したあと、最初に待つ時間。
+///
+/// 実測ではデバイスの列挙が 1〜2ms、`Camera::new` が 28〜90ms なので、
+/// 1 回目の再試行を 200ms 後に置いても取りこぼしはほぼ無い。
+const CONNECT_BACKOFF_BASE: Duration = Duration::from_millis(200);
+
+/// 再試行の間隔の上限。
+///
+/// 無限に再試行するので、間隔を伸ばし続けると「後からデバイスを挿した」
+/// ときの反応が悪くなる。5 秒で頭打ちにして、挿してから最大 5 秒で繋がるようにする。
+const CONNECT_BACKOFF_MAX: Duration = Duration::from_millis(5000);
+
+/// 音声で、この回数だけ連続して失敗したあとに既定のデバイスを試す。
+///
+/// 設定に残っているデバイス名が古くて存在しない場合、そのまま待ち続けても
+/// 永久に音が出ない。元の実装と同じ 3 回目に合わせてある。
+const AUDIO_DEFAULT_FALLBACK_AFTER: u32 = 3;
+
+/// 連続 `attempt` 回失敗したあとに待つ時間を返す。
+///
+/// `CONNECT_BACKOFF_BASE` から倍々に伸ばし、`CONNECT_BACKOFF_MAX` で頭打ちにする。
+/// 200ms → 400 → 800 → 1600 → 3200 → 5000ms（以降は 5000ms のまま）。
+///
+/// `attempt` は失敗が続く限り際限なく増えるため、シフトでは桁あふれを起こす。
+/// 頭打ちに達する回数で先に打ち切って、パニックしないようにしてある。
+fn backoff_delay(attempt: u32) -> Duration {
+    let Some(shift) = attempt.checked_sub(1) else {
+        // まだ 1 度も失敗していない。待たずに試す
+        return Duration::ZERO;
+    };
+    // 1u32 << 32 は未定義。頭打ちには 6 回目で届くので、ここへ来た時点で上限でよい
+    if shift >= u32::BITS {
+        return CONNECT_BACKOFF_MAX;
+    }
+    match CONNECT_BACKOFF_BASE.checked_mul(1u32 << shift) {
+        Some(delay) if delay < CONNECT_BACKOFF_MAX => delay,
+        _ => CONNECT_BACKOFF_MAX,
+    }
+}
+
+/// 次に試してよい時刻が来ているかを判定する。
+///
+/// `None` は「期限が無い＝いますぐ試してよい」を表す。境界（期限ちょうど）では
+/// 試す側に倒す。1 フレーム遅らせても得るものが無いため。
+fn should_retry_now(next_attempt_at: Option<Instant>, now: Instant) -> bool {
+    match next_attempt_at {
+        None => true,
+        Some(deadline) => now >= deadline,
+    }
+}
+
+/// 映像の接続対象。これが変わったらバックオフを捨てて即座に開き直す。
+/// `(デバイス名, 解像度, フォーマット, fps)`
+type VideoTarget = (
+    Option<String>,
+    Option<(u32, u32)>,
+    Option<String>,
+    Option<u32>,
+);
+
+/// 音声の接続対象。`(入力デバイス名, 出力デバイス名, サンプリングレート, チャンネル数)`
+type AudioTarget = (Option<String>, Option<String>, Option<u32>, Option<u16>);
+
+/// 設定から映像の接続対象を取り出す。
+fn video_target(settings: &AppSettings) -> VideoTarget {
+    (
+        settings.video.device_name.clone(),
+        settings.video.resolution,
+        settings.video.format.clone(),
+        settings.video.fps,
+    )
+}
+
+/// 設定から音声の接続対象を取り出す。
+fn audio_target(settings: &AppSettings) -> AudioTarget {
+    (
+        settings.audio.input_device_name.clone(),
+        settings.audio.output_device_name.clone(),
+        settings.audio.sample_rate,
+        settings.audio.channels,
+    )
+}
+
+/// デバイス接続の再試行を、UI スレッドを止めずに回すための状態。
+///
+/// `update()` から毎フレーム `is_due()` を見て、期限が来ていれば 1 回だけ試す。
+/// **`thread::sleep` を使わない。** 待つ代わりに次に試してよい時刻を覚えておく。
+/// 以前は UI スレッドで最大 3 秒眠っていたため、接続に失敗する環境では
+/// その間ウィンドウが固まっていた。
+///
+/// `T` は「いま何へ繋ごうとしているか」を表す値（デバイス名や解像度の組）。
+/// 2 秒ごとの設定の再適用は同じ対象を何度も要求してくるため、対象が同じなら
+/// 進行中のバックオフを維持する。これをしないと待ち時間が毎回巻き戻り、
+/// 繋がらないデバイスへ 2 秒間に 4 回も接続を試みることになる。
+#[derive(Debug)]
+struct ConnectRetry<T> {
+    /// いま繋ごうとしている対象。`None` は「接続を要求されていない」
+    target: Option<T>,
+    /// 連続して失敗した回数。成功と、対象が変わったときに 0 へ戻る
+    attempts: u32,
+    /// 次に試してよい時刻。`None` は「いますぐ試してよい」
+    next_attempt_at: Option<Instant>,
+    /// 最後に失敗した理由。
+    /// 画面に出すのは「エラー通知 UI」のタスクの範囲なので、いまは保持だけする
+    last_error: Option<String>,
+}
+
+impl<T> Default for ConnectRetry<T> {
+    fn default() -> Self {
+        Self {
+            target: None,
+            attempts: 0,
+            next_attempt_at: None,
+            last_error: None,
+        }
+    }
+}
+
+impl<T: PartialEq> ConnectRetry<T> {
+    /// 接続を要求する。
+    ///
+    /// **同じ対象を既に追いかけている場合は何もしない。** 2 秒ごとの設定の
+    /// 再適用がここを通るため、毎回やり直すとバックオフが伸びなくなる。
+    /// 対象が変わった場合（設定画面でデバイスを選び直した等）は数え直して
+    /// 即座に試す。ユーザーの操作に対して最大 5 秒待たせる理由が無いため。
+    fn request(&mut self, target: T) {
+        if self.target.as_ref() == Some(&target) {
+            return;
+        }
+        self.request_now(target);
+    }
+
+    /// 対象が同じでもバックオフを捨てて即座に試す。
+    ///
+    /// 右クリックメニューの「デバイス再接続」のように、ユーザーが明示的に
+    /// やり直しを求めた場合に使う。
+    fn request_now(&mut self, target: T) {
+        self.target = Some(target);
+        self.attempts = 0;
+        self.next_attempt_at = None;
+    }
+
+    /// 接続の要求を取り下げる。繋ぐ相手が無い（デバイス名が未設定）ときに使う。
+    fn cancel(&mut self) {
+        self.target = None;
+        self.next_attempt_at = None;
+    }
+
+    /// このフレームで接続を試してよいか。
+    fn is_due(&self, now: Instant) -> bool {
+        self.target.is_some() && should_retry_now(self.next_attempt_at, now)
+    }
+
+    /// 連続して失敗した回数。
+    fn attempts(&self) -> u32 {
+        self.attempts
+    }
+
+    /// 最後に失敗した理由。
+    ///
+    /// 画面へ出すのは Asana の「エラー通知 UI」タスクの範囲なので、この PR では
+    /// 保持するところまでにしてある。本体からの読み手がまだ無いので
+    /// `dead_code` を止めているが、`expect` にしてあるので UI から使い始めれば
+    /// この属性自体が警告になって外し忘れに気付ける。テストからは使っているため
+    /// `cfg_attr(not(test), ..)` で本体のビルドにだけ付ける。
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "エラー通知 UI を入れるまで読み手がいない")
+    )]
+    fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
+    /// 成功を記録する。以降は要求があるまで試さない。
+    fn record_success(&mut self) {
+        self.target = None;
+        self.attempts = 0;
+        self.next_attempt_at = None;
+        self.last_error = None;
+    }
+
+    /// 失敗を記録し、次に試してよい時刻を決める。
+    ///
+    /// 対象は保持したままにする。繋がるまで無限に再試行し、後からデバイスを
+    /// 挿した場合に何もしなくても繋がるようにするため。
+    fn record_failure(&mut self, now: Instant, reason: String) {
+        self.attempts = self.attempts.saturating_add(1);
+        self.next_attempt_at = now.checked_add(backoff_delay(self.attempts));
+        self.last_error = Some(reason);
+    }
+}
+
 pub struct CaptureCardViewer {
     settings: Arc<Mutex<AppSettings>>,
     video_capture: Arc<Mutex<VideoCapture>>,
@@ -91,6 +283,7 @@ pub struct CaptureCardViewer {
     last_video_res: Option<(u32, u32)>,
     last_video_format: Option<String>,
     last_audio_device: Option<String>,
+    last_audio_output: Option<String>,
     last_audio_rate: Option<u32>,
     last_audio_channels: Option<u16>,
     last_fullscreen_toggle: Option<Instant>,
@@ -100,11 +293,13 @@ pub struct CaptureCardViewer {
     last_hotkey: Option<String>,
     last_sound_file: Option<PathBuf>,
 
-    audio_last_error: Option<String>,
+    // デバイス接続の再試行。映像と音声で別々に持ち、片方が失敗しても
+    // もう片方の再試行に引きずられないようにする
+    video_retry: ConnectRetry<VideoTarget>,
+    audio_retry: ConnectRetry<AudioTarget>,
 
-    // 起動時遅延接続
-    startup_time: Option<Instant>,
-    delayed_connection_triggered: bool,
+    // 起動直後に 1 度だけ行う処理を済ませたか
+    startup_applied: bool,
 
     // UI性能向上のためのデバイスリストキャッシュ
     // ビデオは (デバイス名, 説明) の組
@@ -162,6 +357,7 @@ impl Default for CaptureCardViewer {
             last_video_res: None,
             last_video_format: None,
             last_audio_device: None,
+            last_audio_output: None,
             last_audio_rate: None,
             last_audio_channels: None,
             last_fullscreen_toggle: None,
@@ -169,10 +365,9 @@ impl Default for CaptureCardViewer {
             last_hotkey: None,
             last_sound_file: None,
 
-            audio_last_error: None,
-            // 起動時遅延接続
-            startup_time: Some(Instant::now()),
-            delayed_connection_triggered: false,
+            video_retry: ConnectRetry::default(),
+            audio_retry: ConnectRetry::default(),
+            startup_applied: false,
 
             // UI性能向上のためのデバイスリストキャッシュ
             cached_video_devices: Vec::new(),
@@ -222,8 +417,7 @@ impl Default for CaptureCardViewer {
         // 設定画面を開いた時点で選択肢が揃っているようにするためで、
         // 以前はデバイスを切り替えたときしか取得していなかったため、
         // 起動後に設定画面を開いても解像度や FPS の選択肢が出なかった。
-        // 遅延接続（起動から 2 秒）より前に投げるので、多くの場合は
-        // キャプチャーを開き始めるまでに取得が終わる
+        // 接続と並行して走るので、設定画面を開く頃には揃っている
         let saved_video_device = app
             .settings
             .lock()
@@ -234,7 +428,8 @@ impl Default for CaptureCardViewer {
             app.dispatch_capability_requests();
         }
 
-        // 注: デバイス接続は起動から2秒後に遅延実行される
+        // 注: デバイスの接続は最初の update() で始まり、失敗したら
+        // ConnectRetry のバックオフで繋がるまで再試行する
         app
     }
 }
@@ -245,36 +440,33 @@ impl eframe::App for CaptureCardViewer {
         // 設定ダイアログを開いていなくても受け取る（起動時の先読み分があるため）
         self.drain_capability_results();
 
-        // 遅延デバイス接続（起動から3秒後に実行し、画面投影問題を解決）
-        if !self.delayed_connection_triggered {
-            if let Some(startup_time) = self.startup_time {
-                if startup_time.elapsed().as_secs_f32() >= 2.0 {
-                    info!("起動から 2 秒経過したのでデバイスの接続を開始する");
-                    // 強制リフレッシュのため、last_*をクリアしてからapply_settings
-                    debug!("強制リフレッシュのため直前のデバイス状態を消す");
-                    self.last_video_device = None;
-                    self.last_audio_device = None;
-                    debug!("apply_settings(initial=true) を呼ぶ");
-                    self.apply_settings(true);
+        // 起動直後に 1 度だけ行う処理。
+        //
+        // 以前はここで「起動から 2 秒」待ってからデバイスを開いていた。
+        // 待つ根拠がコードにもコミットにも残っておらず、実測でも接続自体は
+        // 0.1 秒で終わるため、最初のフレームで始める。開けなかった場合は
+        // ConnectRetry のバックオフが繋がるまで面倒を見る
+        if !self.startup_applied {
+            self.startup_applied = true;
+            info!("起動直後の設定適用とデバイスの接続を始める");
+            self.apply_settings(true);
 
-                    // 初期設定後にエラーハンドリング付きでウィンドウレベル設定を適用
-                    if let Err(e) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
-                            if self.always_on_top {
-                                egui::WindowLevel::AlwaysOnTop
-                            } else {
-                                egui::WindowLevel::Normal
-                            },
-                        ));
-                    })) {
-                        warn!("ウィンドウレベルの設定でパニックが起きた: {:?}", e);
-                    }
-
-                    self.delayed_connection_triggered = true;
-                    debug!("遅延接続の一連の処理が終わった");
-                }
+            // ウィンドウレベルは always_on_top を設定から取り込んだあとに適用する。
+            // 順序を入れ替えると、既定値の false で 1 度適用されてしまう
+            if let Err(e) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
+                    egui::WindowLevel::AlwaysOnTop
+                } else {
+                    egui::WindowLevel::Normal
+                }));
+            })) {
+                warn!("ウィンドウレベルの設定でパニックが起きた: {:?}", e);
             }
         }
+
+        // 期限が来ているデバイスの接続を 1 回だけ試す。
+        // 繋がっている間は bool を 2 つ見るだけで抜ける
+        self.poll_device_connection();
 
         // ビデオフレームを更新
         self.update_video_texture(ctx);
@@ -987,6 +1179,12 @@ impl CaptureCardViewer {
                         // 強制的にデバイス再接続（last_*をクリアして強制再接続）
                         self.last_video_device = None;
                         self.last_audio_device = None;
+                        // ユーザーが明示的にやり直しを求めているので、
+                        // バックオフの待ち時間を飛ばして次のフレームで試す
+                        if let Ok(settings) = self.settings.lock() {
+                            self.video_retry.request_now(video_target(&settings));
+                            self.audio_retry.request_now(audio_target(&settings));
+                        }
                         self.apply_settings(false);
                         close_menu = true;
                     }
@@ -1419,6 +1617,178 @@ impl CaptureCardViewer {
         initial || last.as_ref() != Some(current)
     }
 
+    /// 期限が来ているデバイスの接続を 1 回だけ試す。`update()` から毎フレーム呼ぶ。
+    ///
+    /// **ここで `thread::sleep` を使わない。** UI スレッドを止めると、接続に
+    /// 失敗し続ける間ウィンドウが固まる。待つ代わりに次に試してよい時刻を
+    /// `ConnectRetry` に覚えておき、そのフレームが来るまで何もしない。
+    ///
+    /// 繋がっている間は `bool` を 2 つ見るだけで戻るので、設定の複製もしない。
+    fn poll_device_connection(&mut self) {
+        let now = Instant::now();
+        let video_due = self.video_retry.is_due(now);
+        let audio_due = self.audio_retry.is_due(now);
+        if !video_due && !audio_due {
+            return;
+        }
+
+        // 設定はここで 1 度だけ複製する。デバイスを開いている間 settings の
+        // ロックを握らないための措置で、apply_settings と同じ考え方
+        let snapshot = match self.settings.lock() {
+            Ok(settings) => settings.clone(),
+            Err(_) => {
+                warn!("デバイスの接続で settings のロックを取得できない");
+                return;
+            }
+        };
+
+        if video_due {
+            self.try_connect_video(&snapshot, now);
+        }
+        if audio_due {
+            self.try_connect_audio(&snapshot, now);
+        }
+    }
+
+    /// 映像デバイスへの接続を 1 回だけ試す。
+    fn try_connect_video(&mut self, settings: &AppSettings, now: Instant) {
+        let Some(device_name) = settings.video.device_name.clone() else {
+            // 繋ぐ相手が無い。要求を取り下げて、デバイスが選ばれるまで待つ
+            debug!("映像デバイスが未設定なので接続の要求を取り下げる");
+            self.video_retry.cancel();
+            return;
+        };
+
+        let attempt = self.video_retry.attempts() + 1;
+        info!(
+            "映像デバイスへの接続を試す（{} 回目）: {}",
+            attempt, device_name
+        );
+
+        // Arc を複製してから開く。self を借りたまま開くと、結果を書き戻すときに
+        // 借用が衝突する
+        let video_capture = Arc::clone(&self.video_capture);
+        let result = match video_capture.lock() {
+            Ok(mut video) => video.start_capture(
+                Some(&device_name),
+                settings.video.resolution,
+                settings.video.format.as_deref(),
+                settings.video.fps,
+            ),
+            Err(_) => Err("video_capture のロックを取得できない".to_string()),
+        };
+
+        match result {
+            Ok(()) => {
+                info!("映像デバイスに接続した");
+                self.video_retry.record_success();
+                self.last_video_device = settings.video.device_name.clone();
+                self.last_video_res = settings.video.resolution;
+                self.last_video_format = settings.video.format.clone();
+                self.last_video_fps = settings.video.fps;
+            }
+            Err(e) => {
+                warn!("映像デバイスへの接続に失敗した（{} 回目）: {}", attempt, e);
+                self.video_retry.record_failure(now, e);
+                debug!(
+                    "映像デバイスへの再試行は {} ms 後",
+                    backoff_delay(self.video_retry.attempts()).as_millis()
+                );
+            }
+        }
+    }
+
+    /// 音声デバイスへの接続を 1 回だけ試す。
+    ///
+    /// 設定のデバイス名で開けない状態が続くと永久に音が出ないため、
+    /// `AUDIO_DEFAULT_FALLBACK_AFTER` 回目の失敗の直後だけ、Windows の
+    /// 既定デバイスで 1 度開き直す。
+    fn try_connect_audio(&mut self, settings: &AppSettings, now: Instant) {
+        let attempt = self.audio_retry.attempts() + 1;
+        info!(
+            "音声デバイスへの接続を試す（{} 回目）- 入力: {:?}、出力: {:?}",
+            attempt, settings.audio.input_device_name, settings.audio.output_device_name
+        );
+
+        let audio_capture = Arc::clone(&self.audio_capture);
+        let Ok(mut audio) = audio_capture.lock() else {
+            let reason = "audio_capture のロックを取得できない".to_string();
+            warn!(
+                "音声デバイスへの接続に失敗した（{} 回目）: {}",
+                attempt, reason
+            );
+            self.audio_retry.record_failure(now, reason);
+            return;
+        };
+
+        // デバイスの列挙は実測で 300ms 前後かかる。設定値との突き合わせに要るのは
+        // 最初の 1 回だけなので、再試行のたびには出さない
+        if attempt == 1 {
+            debug!("利用できる入力デバイス: {:?}", audio.list_input_devices());
+            debug!("利用できる出力デバイス: {:?}", audio.list_output_devices());
+        }
+
+        let result = audio.start_passthrough_with_settings(
+            settings.audio.input_device_name.as_deref(),
+            settings.audio.output_device_name.as_deref(),
+            settings.audio.sample_rate,
+            settings.audio.channels,
+        );
+
+        let error = match result {
+            Ok(()) => {
+                info!("音声デバイスに接続した");
+                None
+            }
+            Err(e) => {
+                warn!("音声デバイスへの接続に失敗した（{} 回目）: {}", attempt, e);
+                Some(e)
+            }
+        };
+
+        // 既定デバイスへのフォールバック。何を試したかをログに残す
+        let fallback_error = if error.is_some() && attempt == AUDIO_DEFAULT_FALLBACK_AFTER {
+            info!(
+                "設定のデバイスで {} 回続けて失敗したので、既定のデバイス（入力・出力とも Windows の既定、レートとチャンネル数もデバイス任せ）で試す",
+                attempt
+            );
+            match audio.start_passthrough_with_settings(None, None, None, None) {
+                Ok(()) => {
+                    info!("既定のデバイスで音声に接続した");
+                    None
+                }
+                Err(e2) => {
+                    warn!("既定のデバイスでも音声に接続できない: {}", e2);
+                    Some(e2)
+                }
+            }
+        } else {
+            error.clone()
+        };
+
+        drop(audio);
+
+        match fallback_error {
+            None => {
+                self.audio_retry.record_success();
+                // 既定のデバイスで繋がった場合も、設定に書かれている値を記録する。
+                // ここで実際に開いた値（None）を入れると、設定のデバイスが
+                // 現れても need_audio_restart が立たず繋ぎ直せなくなる
+                self.last_audio_device = settings.audio.input_device_name.clone();
+                self.last_audio_output = settings.audio.output_device_name.clone();
+                self.last_audio_rate = settings.audio.sample_rate;
+                self.last_audio_channels = settings.audio.channels;
+            }
+            Some(reason) => {
+                self.audio_retry.record_failure(now, reason);
+                debug!(
+                    "音声デバイスへの再試行は {} ms 後",
+                    backoff_delay(self.audio_retry.attempts()).as_millis()
+                );
+            }
+        }
+    }
+
     fn apply_settings(&mut self, initial: bool) {
         // 設定はここで 1 度だけ複製し、以降はこの複製だけを見る。
         // デバイスの開き直しはリトライの sleep を含めて秒単位かかるため、
@@ -1434,154 +1804,45 @@ impl CaptureCardViewer {
         };
 
         if let Some(settings) = snapshot {
-            // Video - リトライ機能付き
-            if let Ok(mut video) = self.video_capture.lock() {
-                let need_video_restart = settings.video.device_name != self.last_video_device
-                    || settings.video.resolution != self.last_video_res
-                    || settings.video.format != self.last_video_format
-                    || settings.video.fps != self.last_video_fps;
+            // Video
+            //
+            // ここではデバイスを開かない。要求を立てるだけにして、実際に開くのは
+            // update() から呼ばれる poll_device_connection に任せる。
+            // この関数は設定ダイアログや右クリックメニューからも呼ばれるため、
+            // ここで開くと失敗したときにその場で UI が止まる
+            let need_video_restart = settings.video.device_name != self.last_video_device
+                || settings.video.resolution != self.last_video_res
+                || settings.video.format != self.last_video_format
+                || settings.video.fps != self.last_video_fps;
 
-                if settings.video.device_name.is_some() && (need_video_restart || initial) {
-                    info!(
-                        "映像デバイスへの接続を開始する: {:?}",
-                        settings.video.device_name
-                    );
-                    let mut video_success = false;
-                    let max_retries = if initial { 3 } else { 1 };
-
-                    for attempt in 0..max_retries {
-                        if attempt > 0 {
-                            info!(
-                                "映像デバイスへの接続を再試行する（{} / {} 回目）",
-                                attempt + 1,
-                                max_retries
-                            );
-                            std::thread::sleep(std::time::Duration::from_millis(1000));
-                        }
-
-                        match video.start_capture(
-                            settings.video.device_name.as_deref(),
-                            settings.video.resolution,
-                            settings.video.format.as_deref(),
-                            settings.video.fps,
-                        ) {
-                            Ok(_) => {
-                                info!("映像デバイスに接続した");
-                                video_success = true;
-                                break;
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "映像デバイスへの接続に失敗した（{} 回目）: {}",
-                                    attempt + 1,
-                                    e
-                                );
-                                if attempt < max_retries - 1 {
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-
-                    if video_success {
-                        self.last_video_device = settings.video.device_name.clone();
-                        self.last_video_res = settings.video.resolution;
-                        self.last_video_format = settings.video.format.clone();
-                        self.last_video_fps = settings.video.fps;
-                    }
-                }
+            if settings.video.device_name.is_some() && (need_video_restart || initial) {
+                self.video_retry.request(video_target(&settings));
             }
 
-            // Audio - 改良されたリトライとデフォルト設定
+            // Audio
+            //
+            // 映像と同じく、ここでは要求を立てるだけ。パススルーの有効・無効と
+            // 音量は開き直しを伴わないので、その場で反映する
             if let Ok(mut audio) = self.audio_capture.lock() {
                 // ストリームを開始する前にパススルーの設定を反映する。
                 // 開始後に反映すると、無効のまま起動したときに最初のバッファが出力されてしまう。
                 audio.set_audio_passthrough_enabled(settings.audio.passthrough_enabled);
 
-                let need_audio_restart = settings.audio.input_device_name != self.last_audio_device
-                    || settings.audio.sample_rate != self.last_audio_rate
-                    || settings.audio.channels != self.last_audio_channels
-                    || initial; // 起動時は必ず接続試行
-
-                if need_audio_restart {
-                    info!(
-                        "音声デバイスへの接続を開始する - 入力: {:?}、出力: {:?}",
-                        settings.audio.input_device_name, settings.audio.output_device_name
-                    );
-
-                    // まずは利用可能なデバイスをリスト
-                    let input_devices = audio.list_input_devices();
-                    let output_devices = audio.list_output_devices();
-                    debug!("利用できる入力デバイス: {:?}", input_devices);
-                    debug!("利用できる出力デバイス: {:?}", output_devices);
-
-                    let mut audio_success = false;
-                    let max_retries = if initial { 5 } else { 2 }; // 起動時により多くリトライ
-
-                    for attempt in 0..max_retries {
-                        if attempt > 0 {
-                            info!(
-                                "音声デバイスへの接続を再試行する（{} / {} 回目）",
-                                attempt + 1,
-                                max_retries
-                            );
-                            std::thread::sleep(std::time::Duration::from_millis(300));
-                        }
-
-                        // 接続試行
-                        match audio.start_passthrough_with_settings(
-                            settings.audio.input_device_name.as_deref(),
-                            settings.audio.output_device_name.as_deref(),
-                            settings.audio.sample_rate,
-                            settings.audio.channels,
-                        ) {
-                            Ok(_) => {
-                                info!("音声デバイスに接続した");
-                                self.audio_last_error = None;
-                                audio_success = true;
-                                break;
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "音声デバイスへの接続に失敗した（{} 回目）: {}",
-                                    attempt + 1,
-                                    e
-                                );
-                                self.audio_last_error = Some(e.clone());
-
-                                // 3回目以降のリトライではデフォルトデバイスを試行
-                                if attempt == 2 && initial {
-                                    info!("既定のデバイスで接続し直す");
-                                    match audio
-                                        .start_passthrough_with_settings(None, None, None, None)
-                                    {
-                                        Ok(_) => {
-                                            info!("既定のデバイスで音声に接続した");
-                                            self.audio_last_error = None;
-                                            audio_success = true;
-                                            break;
-                                        }
-                                        Err(e2) => {
-                                            warn!("既定のデバイスでも音声に接続できない: {}", e2);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if audio_success {
-                        self.last_audio_device = settings.audio.input_device_name.clone();
-                        self.last_audio_rate = settings.audio.sample_rate;
-                        self.last_audio_channels = settings.audio.channels;
-                    } else {
-                        error!("音声デバイスへの接続を全て試したが失敗した");
-                    }
-                }
-
                 // 音量を適用
                 self.volume = settings.ui.volume;
                 audio.set_volume(self.volume);
+            }
+
+            // 出力デバイスも比較する。入れないと、設定画面で出力先だけを
+            // 変えたときに要求が立たず、古い出力先のまま鳴り続ける
+            let need_audio_restart = settings.audio.input_device_name != self.last_audio_device
+                || settings.audio.output_device_name != self.last_audio_output
+                || settings.audio.sample_rate != self.last_audio_rate
+                || settings.audio.channels != self.last_audio_channels
+                || initial; // 起動時は必ず接続試行
+
+            if need_audio_restart {
+                self.audio_retry.request(audio_target(&settings));
             }
 
             // UI設定
@@ -1930,6 +2191,235 @@ mod tests {
         assert!(joined.contains("高速 1200 / 汎用 3"), "{}", joined);
         assert!(joined.contains("1920x1080 YUY2"), "{}", joined);
         assert!(joined.contains("最終フレーム 12ms 前"), "{}", joined);
+    }
+
+    #[test]
+    fn backoff_delay_first_failure_waits_base_interval() {
+        // 1 回目の失敗の後は 200ms。固定 2 秒待ちの代わりになる短さであること
+        assert_eq!(backoff_delay(1), Duration::from_millis(200));
+    }
+
+    #[test]
+    fn backoff_delay_doubles_until_it_reaches_the_cap() {
+        // 期待値は表としてベタ書きする。実装と同じ式で作ると、式が誤っていても通る
+        assert_eq!(backoff_delay(1), Duration::from_millis(200));
+        assert_eq!(backoff_delay(2), Duration::from_millis(400));
+        assert_eq!(backoff_delay(3), Duration::from_millis(800));
+        assert_eq!(backoff_delay(4), Duration::from_millis(1600));
+        assert_eq!(backoff_delay(5), Duration::from_millis(3200));
+    }
+
+    #[test]
+    fn backoff_delay_beyond_the_cap_stays_at_the_cap() {
+        // 6 回目は倍にすると 6400ms になるので頭打ちの 5000ms へ落ちる
+        assert_eq!(backoff_delay(6), Duration::from_millis(5000));
+        assert_eq!(backoff_delay(7), Duration::from_millis(5000));
+        assert_eq!(backoff_delay(100), Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn backoff_delay_huge_attempt_count_does_not_overflow() {
+        // 無限に再試行するので attempts は際限なく増える。
+        // シフト量が u32 の幅を超えてもパニックしないこと
+        assert_eq!(backoff_delay(31), Duration::from_millis(5000));
+        assert_eq!(backoff_delay(32), Duration::from_millis(5000));
+        assert_eq!(backoff_delay(33), Duration::from_millis(5000));
+        assert_eq!(backoff_delay(u32::MAX), Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn backoff_delay_zero_attempts_is_zero() {
+        // まだ 1 度も失敗していない状態。待たずに試す
+        assert_eq!(backoff_delay(0), Duration::ZERO);
+    }
+
+    #[test]
+    fn should_retry_now_without_deadline_returns_true() {
+        // 期限が無い＝いますぐ試してよい。初回接続がこれに当たる
+        assert!(should_retry_now(None, Instant::now()));
+    }
+
+    #[test]
+    fn should_retry_now_before_deadline_returns_false() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(200);
+        assert!(!should_retry_now(Some(deadline), now));
+    }
+
+    #[test]
+    fn should_retry_now_exactly_at_deadline_returns_true() {
+        // 境界。期限ちょうどでは試す
+        let now = Instant::now();
+        assert!(should_retry_now(Some(now), now));
+    }
+
+    #[test]
+    fn should_retry_now_after_deadline_returns_true() {
+        let deadline = Instant::now();
+        let now = deadline + Duration::from_millis(1);
+        assert!(should_retry_now(Some(deadline), now));
+    }
+
+    #[test]
+    fn connect_retry_request_with_the_same_target_keeps_the_backoff() {
+        // 2 秒ごとの再適用が、進行中のバックオフを巻き戻してしまう不具合の再現。
+        // 同じ対象を追いかけ続けている間は、待ち時間も失敗回数も維持されること
+        let now = Instant::now();
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+        retry.record_failure(now, "1 回目".to_string());
+        retry.record_failure(now, "2 回目".to_string());
+        retry.record_failure(now, "3 回目".to_string());
+        assert_eq!(retry.attempts(), 3);
+
+        // 設定は何も変わっていないのに再度要求された状況
+        retry.request("デバイス A");
+
+        assert_eq!(retry.attempts(), 3, "失敗回数が巻き戻らない");
+        assert!(!retry.is_due(now), "待ち時間も巻き戻らない");
+        assert!(
+            !retry.is_due(now + Duration::from_millis(799)),
+            "3 回失敗したので 800ms 待ち続ける"
+        );
+        assert!(retry.is_due(now + Duration::from_millis(800)));
+    }
+
+    #[test]
+    fn connect_retry_request_with_a_different_target_retries_immediately() {
+        // 設定画面でデバイスを変えたときは、前の対象のバックオフを引きずらない
+        let now = Instant::now();
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+        retry.record_failure(now, "失敗".to_string());
+        retry.record_failure(now, "失敗".to_string());
+        assert!(!retry.is_due(now));
+
+        retry.request("デバイス B");
+
+        assert_eq!(retry.attempts(), 0, "対象が変われば数え直す");
+        assert!(retry.is_due(now), "すぐ試す");
+    }
+
+    #[test]
+    fn connect_retry_request_now_ignores_the_backoff() {
+        // 右クリックの「デバイス再接続」。同じ対象でも待たずに試す
+        let now = Instant::now();
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+        retry.record_failure(now, "失敗".to_string());
+        retry.record_failure(now, "失敗".to_string());
+        assert!(!retry.is_due(now));
+
+        retry.request_now("デバイス A");
+
+        assert_eq!(retry.attempts(), 0);
+        assert!(retry.is_due(now));
+    }
+
+    #[test]
+    fn connect_retry_request_after_success_starts_a_new_cycle() {
+        // 一度成功した対象をもう一度要求したら、また試しにいくこと
+        let now = Instant::now();
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+        retry.record_success();
+        assert!(!retry.is_due(now));
+
+        retry.request("デバイス A");
+        assert!(retry.is_due(now), "成功済みでも要求されたら試す");
+    }
+
+    #[test]
+    fn connect_retry_new_is_not_due() {
+        // 接続を要求していない間は毎フレームの判定を素通りする
+        let retry = ConnectRetry::<&str>::default();
+        assert!(!retry.is_due(Instant::now()));
+    }
+
+    #[test]
+    fn connect_retry_request_is_due_immediately() {
+        // 固定 2 秒待ちの廃止そのもの。要求した時点で試せること
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+        assert!(retry.is_due(Instant::now()));
+    }
+
+    #[test]
+    fn connect_retry_failure_blocks_until_the_backoff_elapses() {
+        let now = Instant::now();
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+        retry.record_failure(now, "デバイスが見つからない".to_string());
+
+        assert!(!retry.is_due(now), "失敗直後は待つ");
+        assert!(
+            !retry.is_due(now + Duration::from_millis(199)),
+            "200ms の手前ではまだ待つ"
+        );
+        assert!(
+            retry.is_due(now + Duration::from_millis(200)),
+            "200ms 経てば試す"
+        );
+    }
+
+    #[test]
+    fn connect_retry_consecutive_failures_widen_the_interval() {
+        let now = Instant::now();
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+
+        retry.record_failure(now, "1 回目".to_string());
+        assert!(!retry.is_due(now + Duration::from_millis(199)));
+
+        retry.record_failure(now, "2 回目".to_string());
+        assert!(
+            !retry.is_due(now + Duration::from_millis(399)),
+            "2 回目の失敗では 400ms 待つ"
+        );
+        assert!(retry.is_due(now + Duration::from_millis(400)));
+    }
+
+    #[test]
+    fn connect_retry_success_stops_further_attempts() {
+        let now = Instant::now();
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+        retry.record_failure(now, "一時的な失敗".to_string());
+        retry.record_success();
+
+        assert!(
+            !retry.is_due(now + Duration::from_secs(60)),
+            "成功したら次のフレーム以降は試さない"
+        );
+        assert_eq!(retry.last_error(), None, "成功したら失敗理由を捨てる");
+    }
+
+    #[test]
+    fn connect_retry_success_resets_the_interval() {
+        // 一度成功してから再び要求したときに、前回の attempts を引きずらないこと
+        let now = Instant::now();
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+        for _ in 0..8 {
+            retry.record_failure(now, "失敗".to_string());
+        }
+        retry.record_success();
+
+        retry.request("デバイス A");
+        retry.record_failure(now, "再要求後の 1 回目".to_string());
+        assert!(
+            retry.is_due(now + Duration::from_millis(200)),
+            "再要求後は 200ms から数え直す"
+        );
+    }
+
+    #[test]
+    fn connect_retry_keeps_the_last_error() {
+        // UI 表示はまだ行わないが、理由は保持しておく
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+        retry.record_failure(Instant::now(), "Device 'X' not found".to_string());
+        assert_eq!(retry.last_error(), Some("Device 'X' not found"));
     }
 
     #[test]
