@@ -77,10 +77,15 @@ cargo test -- --ignored
 ```
 
 - `cargo fmt --check` は差分ゼロが前提。落ちたら自分の変更を `cargo fmt` で整形する。整形の基準はリポジトリ直下の `rustfmt.toml`
-- `cargo clippy` には既知の警告が残っている
+- `cargo clippy --all-targets` は警告ゼロが前提。`-- -D warnings` を付けて実行すれば警告の混入を検出できる
 - `--ignored` 付きのテストはキャプチャーデバイスを接続した状態で実行する
 
 開発フローに沿って進める場合は `/cv:review` がこれらをまとめて実行する。
+
+これらは GitHub Actions でも回る（`.github/workflows/ci.yml`）。`dev` / `main` への PR と push が対象で、ランナーは windows-latest。
+CI が実行するのは `cargo fmt --check` → `cargo clippy --locked --all-targets -- -D warnings` → `cargo build --locked --release` → `cargo test --locked` の 4 つで、`--ignored` 付きの実機テストは走らせない。
+clippy は `-D warnings` 付きで回すため、警告が 1 件でも増えると CI が落ちる。
+`--locked` はコミット済みの `Cargo.lock` をそのまま使わせるため。付けないと `Cargo.toml` と食い違っていても勝手に再解決され、手元と違う依存で CI が通ってしまう。
 
 ## 配布時に同梱するもの
 

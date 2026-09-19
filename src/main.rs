@@ -37,6 +37,8 @@ pub struct CaptureCardViewer {
 
     // 映像表示関連
     video_texture: Option<egui::TextureHandle>,
+    // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
+    last_frame_generation: u64,
     pending_hotkey: Option<String>,
     temp_hotkey: String, // ホットキーダイアログ用の一時保存
     // 最後に適用した実行時パラメータ（差分ベースの再起動回避用）
@@ -88,6 +90,7 @@ impl Default for CaptureCardViewer {
             last_volume_sent: -1.0,
             last_settings_applied: Instant::now(),
             video_texture: None,
+            last_frame_generation: 0,
             pending_hotkey: None,
             temp_hotkey: String::new(),
             last_video_device: None,
@@ -352,26 +355,32 @@ impl eframe::App for CaptureCardViewer {
 
 impl CaptureCardViewer {
     fn update_video_texture(&mut self, ctx: &egui::Context) {
-        if let Ok(video) = self.video_capture.lock() {
-            if let Some(frame) = video.get_latest_frame() {
-                // 最適化: テクスチャオプションをNearest（補間なし）に設定し、性能向上
-                let texture_options = egui::TextureOptions {
-                    magnification: egui::TextureFilter::Nearest,
-                    minification: egui::TextureFilter::Linear,
-                    wrap_mode: egui::TextureWrapMode::ClampToEdge,
-                };
+        // 新着フレームが無ければ何もしない。既存のテクスチャをそのまま使い回す
+        let new_frame = self
+            .video_capture
+            .lock()
+            .ok()
+            .and_then(|video| video.get_frame_if_newer(self.last_frame_generation));
 
-                let image = egui::ColorImage::from_rgb([frame.width, frame.height], &frame.data);
-                if let Some(texture) = &mut self.video_texture {
-                    texture.set(image, texture_options);
-                } else {
-                    self.video_texture =
-                        Some(ctx.load_texture("video_frame", image, texture_options));
-                }
+        if let Some((frame, generation)) = new_frame {
+            self.last_frame_generation = generation;
 
-                // より積極的な再描画要求
-                ctx.request_repaint();
+            // 最適化: テクスチャオプションをNearest（補間なし）に設定し、性能向上
+            let texture_options = egui::TextureOptions {
+                magnification: egui::TextureFilter::Nearest,
+                minification: egui::TextureFilter::Linear,
+                wrap_mode: egui::TextureWrapMode::ClampToEdge,
+            };
+
+            let image = egui::ColorImage::from_rgb([frame.width, frame.height], &frame.data);
+            if let Some(texture) = &mut self.video_texture {
+                texture.set(image, texture_options);
+            } else {
+                self.video_texture = Some(ctx.load_texture("video_frame", image, texture_options));
             }
+
+            // より積極的な再描画要求
+            ctx.request_repaint();
         }
         // フレームがない場合でも定期的に再チェック
         ctx.request_repaint_after(std::time::Duration::from_millis(16)); // ~60fps
@@ -400,7 +409,8 @@ impl CaptureCardViewer {
     fn take_screenshot(&mut self) {
         println!("take_screenshot: Starting screenshot process");
 
-        // 最新フレームの生データを抽出
+        // 最新フレームの生データを抽出。
+        // スクリーンショットはいま画面に出ている画を保存するので、新着でなくてよい
         if let Ok(video) = self.video_capture.lock() {
             if let Some(frame) = video.get_latest_frame() {
                 println!(
@@ -422,6 +432,7 @@ impl CaptureCardViewer {
                     }
 
                     // RGBデータを画像に変換して保存
+                    // image クレートが Vec の所有権を要求するため、ここだけは複製が要る
                     if let Some(img_buf) = image::RgbImage::from_raw(
                         frame.width as u32,
                         frame.height as u32,
