@@ -55,13 +55,16 @@ jobs:
       - name: 整形を確認する
         run: cargo fmt --check
 
-      # 警告はエラー扱いにする。警告ゼロが前提なので、混入したらここで落とす
+      # 警告はエラー扱いにする。警告ゼロが前提なので、混入したらここで落とす。
+      # --locked はコミット済みの Cargo.lock をそのまま使うため。付けないと
+      # Cargo.toml と食い違っていても勝手に再解決され、手元と違う依存で
+      # CI が通ってしまう（以降の cargo コマンドも同じ理由で付けている）
       - name: clippy をかける
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: release ビルドする
-        run: cargo build --release
+        run: cargo build --locked --release
 
       # #[ignore] を付けた実機テスト（キャプチャーデバイスが要る）は走らせない
       - name: テストを実行する
-        run: cargo test
+        run: cargo test --locked
