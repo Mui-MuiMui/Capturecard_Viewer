@@ -46,10 +46,12 @@ cargo build --release
 - egui/eframe の UI スレッド（`update()` が毎フレーム呼ばれる。ここが全ての起点）
 - nokhwa のフレームコールバックスレッド
 - cpal の入力コールバック／出力コールバックスレッド
-- ホットキーリスナースレッド（`set_hotkey` のたびに再生成される）
+- ホットキーリスナースレッド（`ScreenshotManager::new` で 1 本だけ起動し、`Drop` で join する）
 - 効果音再生スレッド（再生ごとに spawn）
 - スクリーンショットの保存スレッド（撮影ごとに spawn。JPEG エンコードとファイル書き出しを行う）
 - デバイス能力取得スレッド（要求ごとに spawn。結果は mpsc チャネルで UI スレッドへ返す）
+
+ホットキーのリスナースレッドは `GlobalHotKeyEvent::receiver()` が返すイベントチャネルを `recv_timeout(200ms)` で待つ。**このチャネルはプロセスに 1 つしかないので、リスナーもアプリ全体で 1 本だけにする。** `set_hotkey` は登録と解除だけを行い、スレッドは作り直さない。リスナーが照合に使う「登録中のホットキー ID」は `Arc<Mutex<Option<u32>>>` で共有し、`set_hotkey` が差し替える。終了要求は `AtomicBool` で、タイムアウトのたびに確認する（終了までに最大 200ms かかる）。
 
 保存スレッドの `JoinHandle` は `CaptureCardViewer::screenshot_save_threads` が持ち、`on_exit` で全て join する。**ここを捨てるとスレッドが切り離され、撮影直後に閉じたときプロセスの終了が書き出しを追い越して壊れた JPEG が残る。** 溜め込まないよう、撮影のたびに `drop_finished_threads` で完了済みのハンドルを落としている。
 
