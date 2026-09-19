@@ -237,26 +237,31 @@ impl eframe::App for CaptureCardViewer {
         let current_size = viewport.inner_rect.map(|r| (r.width(), r.height()));
         let current_pos = viewport.outer_rect.map(|r| (r.left(), r.top()));
 
-        // サイズまたは位置が変更された場合、設定を更新
+        // サイズまたは位置が変更された場合、設定を更新。
+        // フルスクリーン中は画面全体の矩形しか取れないため記録しない。
+        // こうすることで、フルスクリーンへ入る直前のジオメトリが設定に残り、
+        // フルスクリーンのまま終了しても次回はウィンドウ表示で復元される
         let mut window_geometry_changed = false;
-        if let Ok(mut settings) = self.settings.lock() {
-            let mut changed = false;
+        if Self::should_record_window_geometry(self.is_fullscreen, viewport.fullscreen) {
+            if let Ok(mut settings) = self.settings.lock() {
+                let mut changed = false;
 
-            if let Some((width, height)) = current_size {
-                if settings.ui.last_window_size != Some((width, height)) {
-                    settings.ui.last_window_size = Some((width, height));
-                    changed = true;
+                if let Some((width, height)) = current_size {
+                    if settings.ui.last_window_size != Some((width, height)) {
+                        settings.ui.last_window_size = Some((width, height));
+                        changed = true;
+                    }
                 }
-            }
 
-            if let Some((x, y)) = current_pos {
-                if settings.ui.last_window_pos != Some((x, y)) {
-                    settings.ui.last_window_pos = Some((x, y));
-                    changed = true;
+                if let Some((x, y)) = current_pos {
+                    if settings.ui.last_window_pos != Some((x, y)) {
+                        settings.ui.last_window_pos = Some((x, y));
+                        changed = true;
+                    }
                 }
-            }
 
-            window_geometry_changed = changed;
+                window_geometry_changed = changed;
+            }
         }
 
         // ここでは書き出さない。ウィンドウのドラッグ中は毎フレーム値が変わるため、
@@ -1199,6 +1204,24 @@ impl CaptureCardViewer {
         self.save_settings_now();
     }
 
+    /// ウィンドウの位置とサイズを設定へ記録してよいかを判定する。
+    ///
+    /// フルスクリーン中に報告される矩形は画面全体なので、記録すると
+    /// 次回起動時に画面全体のサイズで復元されてしまう。
+    ///
+    /// `app_fullscreen` はアプリが持つフラグ、`viewport_fullscreen` は OS から
+    /// 報告された状態（`None` は不明）。`ViewportCommand::Fullscreen` の効果は
+    /// 次のフレーム以降に現れるため、解除した直後はアプリ側のフラグが false でも
+    /// OS 側はまだフルスクリーンを報告している。**この 1 フレームで記録すると
+    /// 画面全体の矩形を掴んでしまうので、両方がフルスクリーンでないときだけ
+    /// 記録する。**
+    fn should_record_window_geometry(
+        app_fullscreen: bool,
+        viewport_fullscreen: Option<bool>,
+    ) -> bool {
+        !app_fullscreen && viewport_fullscreen != Some(true)
+    }
+
     /// デバイスリストのキャッシュを更新すべきかを判定する。
     /// `elapsed` は前回更新からの経過時間で、`None` は「一度も取得していない」を表す。
     fn should_refresh_device_list(elapsed: Option<Duration>) -> bool {
@@ -1335,6 +1358,56 @@ mod tests {
         assert!(CaptureCardViewer::should_flush_settings(Some(
             Duration::from_secs(3600)
         )));
+    }
+
+    #[test]
+    fn should_record_window_geometry_windowed_returns_true() {
+        // 通常のウィンドウ表示中は記録する
+        assert!(CaptureCardViewer::should_record_window_geometry(
+            false,
+            Some(false)
+        ));
+    }
+
+    #[test]
+    fn should_record_window_geometry_fullscreen_returns_false() {
+        // フルスクリーン中の矩形は画面全体。記録すると次回起動時に
+        // 画面全体サイズで復元されてしまう
+        assert!(!CaptureCardViewer::should_record_window_geometry(
+            true,
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn should_record_window_geometry_just_entered_fullscreen_returns_false() {
+        // フルスクリーンへ入った直後。アプリ側のフラグだけが先に立ち、
+        // OS 側はまだウィンドウ表示を報告している
+        assert!(!CaptureCardViewer::should_record_window_geometry(
+            true,
+            Some(false)
+        ));
+    }
+
+    #[test]
+    fn should_record_window_geometry_just_left_fullscreen_returns_false() {
+        // フルスクリーンを解除した直後。アプリ側のフラグだけが先に降り、
+        // OS 側はまだ画面全体の矩形を報告している
+        assert!(!CaptureCardViewer::should_record_window_geometry(
+            false,
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn should_record_window_geometry_unknown_viewport_state_follows_app_flag() {
+        // OS から状態が取れない場合はアプリ側のフラグに従う
+        assert!(CaptureCardViewer::should_record_window_geometry(
+            false, None
+        ));
+        assert!(!CaptureCardViewer::should_record_window_geometry(
+            true, None
+        ));
     }
 
     #[test]
