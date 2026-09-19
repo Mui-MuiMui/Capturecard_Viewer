@@ -7,6 +7,14 @@ edition = "2021"
 # THIRD-PARTY-LICENSES.txt の一覧から除外する。
 publish = false
 
+# println! / eprintln! を足し直すのを CI で止める。
+# #![windows_subsystem = "windows"] でコンソールが無く、標準出力はどこにも
+# 届かないため、ログは log クレートのマクロを使う（src/logging.rs）。
+# CI は -D warnings なので、warn にしておけば混入した時点で落ちる。
+[lints.clippy]
+print_stdout = "warn"
+print_stderr = "warn"
+
 [dependencies]
 eframe = "0.26"
 egui = "0.26"
