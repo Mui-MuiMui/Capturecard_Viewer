@@ -562,12 +562,6 @@ mod tests {
         assert_eq!(frame.data, vec![(PUSH_COUNT - 1) as u8; TEST_FRAME_LEN]);
         assert_eq!(generation, PUSH_COUNT as u64);
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
     // 期待値は BT.601 の整数近似式を手計算した結果をベタ書きする。
     // 実装と同じ式で計算すると、実装が誤っていてもテストが通ってしまうため。
 
