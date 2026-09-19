@@ -48,11 +48,18 @@ cargo build --release
 - cpal の入力コールバック／出力コールバックスレッド
 - ホットキーリスナースレッド（`set_hotkey` のたびに再生成される）
 - 効果音再生スレッド（再生ごとに spawn）
+- スクリーンショットの保存スレッド（撮影ごとに spawn。JPEG エンコードとファイル書き出しを行う）
 
 ### ロック順序
 
 `Arc<Mutex<..>>` を 4 つ持つ（`settings` / `video_capture` / `audio_capture` / `screenshot_manager`）。
-現状コード内でロック順序が統一されておらず、`apply_settings` は settings → video → audio → screenshot の順、`take_screenshot` は video → settings → screenshot の順になっている。いまは全て UI スレッドからのみ呼ばれるため顕在化しないが、**処理を別スレッドへ逃がす変更を入れるときは必ずロック順序を settings → video → audio → screenshot に揃えること**。
+
+**現在、複数のロックを重ねて取っている箇所は無い。** 必要な値を取り出したらロックを手放し、次のロックを取る形に揃えてある。
+
+- `apply_settings` は先頭で設定を丸ごと複製し、以降はその複製だけを見る。デバイスの開き直しはリトライの `sleep` を含めて秒単位かかるため、その間ロックを握らない
+- `take_screenshot` は settings → video → screenshot の順に 1 つずつ取り、エンコードと保存は別スレッドへ渡す
+
+**ネストが避けられない処理を足すときは、順序を settings → video → audio → screenshot に揃えること。** また、**ロックを握ったまま重い処理（デバイスの開き直し、画像のエンコード、ファイル I/O）を行わないこと。** 特に `video_capture` はフレームコールバックスレッドと共有しており、握っている間そちらの `push_back` が止まる。
 
 ## 作業時の注意点
 
