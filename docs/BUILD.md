@@ -31,6 +31,29 @@ cargo build --release
 cargo build
 ```
 
+## バージョン番号
+
+**出どころは `Cargo.toml` の `version` だけ。** バージョンを上げるときはここだけを書き換える。
+
+`build.rs` が `CARGO_PKG_VERSION_*` から `OUT_DIR/version.h` を生成し、`app.rc` がそれを `#include` して exe のバージョンリソースに流し込む。**`app.rc` に数値を直接書かない。**
+
+埋め込まれた値は PowerShell で確認できる。
+
+```powershell
+(Get-Item target/release/capturecard_viewer.exe).VersionInfo | Format-List FileVersion,ProductVersion,FileVersionRaw,ProductVersionRaw
+```
+
+| `Cargo.toml` の `version` | `FileVersion`（文字列） | `FileVersionRaw`（数値） |
+|---|---|---|
+| `1.0.6` | `1.0.6` | `1.0.6.0` |
+| `1.0.7-rc1` | `1.0.7-rc1` | `1.0.7.0` |
+
+数値のバージョンは 16 bit 整数 4 つに限られるため、プレリリース識別子は文字列側にだけ入る。第 4 フィールドは常に 0。
+
+`app.rc` を編集するときは、先頭の `#pragma code_page(65001)` を消さないこと。rc.exe は既定でシステムのコードページ（日本語環境では 932）としてファイルを読むため、これがないと UTF-8 の日本語コメントが 2 バイト文字と解釈されて改行を食い、直後の行まで巻き込む。
+
+exe に埋め込まれる値の話はここまで。`CHANGELOG.md` の見出しとリリースのタグは別途更新する。
+
 ## 検証
 
 ```bash
