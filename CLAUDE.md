@@ -31,7 +31,7 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 | ファイル | 役割 |
 |---|---|
 | `src/main.rs` | アプリ状態 `CaptureCardViewer`、`eframe::App` 実装、映像描画、コンテキストメニュー、デバイス接続の適用とリトライ、スクリーンショット処理、エントリポイント |
-| `src/video.rs` | nokhwa `CallbackCamera` によるキャプチャ、YUY2→RGB 変換、`FrameBuffer`（ダブルバッファ）、デバイス能力の取得 |
+| `src/video.rs` | nokhwa `CallbackCamera` によるキャプチャ、YUY2→RGB 変換、`FrameBuffer`（`Arc` によるフレーム共有と世代番号）、デバイス能力の取得 |
 | `src/audio.rs` | cpal による入力→リングバッファ→出力のパススルー、音量制御 |
 | `src/screenshot.rs` | global-hotkey によるグローバルホットキー登録とリスナースレッド、rodio による効果音再生 |
 | `src/settings.rs` | `AppSettings` とその serde 定義、confy による読み書き、保存パスの決定 |
@@ -40,6 +40,10 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 ### 映像パイプライン
 
 キャプチャーデバイス → nokhwa `Buffer` → フレームコールバックで YUY2→RGB 変換 → `FrameBuffer` → `update_video_texture` で egui テクスチャ化 → 描画
+
+`FrameBuffer` はフレームを `Arc<VideoFrame>` で保持し、取り出し側へは `Arc` の複製を渡す。**画素データを複製しないので、取り出しても 1080p で 6MB の memcpy は発生しない。**
+
+`FrameBuffer` は push のたびに進む世代番号を持つ。`update_video_texture` は `get_frame_if_newer` で前回反映した世代と比較し、新着が無ければテクスチャを更新しない。**新着の有無を問わず最後のフレームが要る用途（スクリーンショット）は `get_latest_frame` を使う。** 世代番号はキャプチャ停止時も巻き戻さない。巻き戻すと再接続後の最初のフレームが呼び出し側の記録と一致し、新着と判別できなくなる。
 
 ### スレッド構成
 
