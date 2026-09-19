@@ -1,9 +1,11 @@
+use log::{error, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 // confy が設定ファイルの置き場所を決めるのに使う名前。
 // ここがずれると既存の設定ファイルを見失うため、1 箇所にまとめてある。
-const APP_NAME: &str = "capturecard_viewer";
+// ログの出力先も同じデータディレクトリを基準に決めるので、logging から参照する。
+pub(crate) const APP_NAME: &str = "capturecard_viewer";
 
 // 各構造体の #[serde(default)] は、項目を追加したあとも古い設定ファイルを
 // 読めるようにするためのもの。これが無いと、
@@ -188,20 +190,40 @@ impl AppSettings {
     pub fn load() -> (Self, LoadOutcome) {
         match confy::load(APP_NAME, None) {
             Ok(settings) => (settings, LoadOutcome::Loaded),
-            Err(_) => {
+            Err(e) => {
+                error!("設定ファイルを読み込めないため既定値で起動する: {}", e);
+
                 // 読み込みに失敗した設定ファイルは、既定値で起動する前に退避する。
                 // 黙って上書きすると、ユーザーが自分の設定を取り戻す手段が無くなる。
                 //
-                // 読み込みの失敗理由・設定パスの取得の失敗・退避の失敗は、理由
-                // そのものをここで捨てている。コンソールもログ基盤も無く伝える先が
-                // 無いため。ログ基盤を入れるときに、この 3 つを出力すること。
-                // 失敗したという事実だけは LoadOutcome として呼び出し側へ渡す。
+                // 失敗したという事実は LoadOutcome として呼び出し側へ渡し、
+                // 理由はログに残す。ここは起動直後で UI がまだ無いため、
+                // ユーザーへ伝える手段がログしかない。
                 let outcome = match confy::get_configuration_file_path(APP_NAME, None) {
-                    Ok(path) => outcome_from_backup(backup_broken_config(&path)),
+                    Ok(path) => {
+                        let backup = backup_broken_config(&path);
+                        match &backup {
+                            Ok(Some(backup_path)) => warn!(
+                                "読み込めなかった設定ファイルを {} へ退避した",
+                                backup_path.display()
+                            ),
+                            // 元のファイルが無い。退避するものが無いだけなので何も言わない
+                            Ok(None) => {}
+                            Err(e) => error!(
+                                "読み込めなかった設定ファイル {} を退避できない: {}",
+                                path.display(),
+                                e
+                            ),
+                        }
+                        outcome_from_backup(backup)
+                    }
                     // 設定ファイルの置き場所が分からず、退避を試みることすらできない。
                     // 読めなかったファイルが残っている可能性があるため、
                     // 書き戻さない側に倒す。
-                    Err(_) => LoadOutcome::BrokenFileLeftBehind,
+                    Err(e) => {
+                        error!("設定ファイルの置き場所が分からず退避できない: {}", e);
+                        LoadOutcome::BrokenFileLeftBehind
+                    }
                 };
                 (Self::default(), outcome)
             }
@@ -217,7 +239,7 @@ impl AppSettings {
         match confy::store(APP_NAME, None, self) {
             Ok(()) => true,
             Err(e) => {
-                eprintln!("Failed to save settings: {}", e);
+                error!("設定の保存に失敗した: {}", e);
                 false
             }
         }

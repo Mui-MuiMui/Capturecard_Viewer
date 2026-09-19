@@ -1,5 +1,6 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, SampleRate, SupportedStreamConfig, SupportedStreamConfigRange};
+use log::{debug, error, info, trace};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -27,9 +28,8 @@ pub struct AudioCapture {
 
 impl AudioCapture {
     pub fn new() -> Self {
-        println!("Debug: Creating AudioCapture with WASAPI host");
         let host = cpal::default_host();
-        println!("Debug: Host created: {:?}", host.id());
+        debug!("AudioCapture を作成した（ホスト: {:?}）", host.id());
 
         Self {
             host,
@@ -67,24 +67,24 @@ impl AudioCapture {
         desired_channels: Option<u16>,
     ) -> Result<(), String> {
         self.stop_capture();
-        println!("Debug: Starting simplified audio passthrough");
+        info!("音声パススルーを開始する");
 
         // デバイス取得の簡素化
         let input_device = if let Some(name) = input_device_name {
-            println!("Debug: Looking for input device: {}", name);
+            debug!("入力デバイスを名前で探す: {}", name);
             self.find_device_by_name(name, true)?
         } else {
-            println!("Debug: Using default input device");
+            debug!("既定の入力デバイスを使う");
             self.host
                 .default_input_device()
                 .ok_or_else(|| "No default input device".to_string())?
         };
 
         let output_device = if let Some(name) = output_device_name {
-            println!("Debug: Looking for output device: {}", name);
+            debug!("出力デバイスを名前で探す: {}", name);
             self.find_device_by_name(name, false)?
         } else {
-            println!("Debug: Using default output device");
+            debug!("既定の出力デバイスを使う");
             self.host
                 .default_output_device()
                 .ok_or_else(|| "No default output device".to_string())?
@@ -97,8 +97,8 @@ impl AudioCapture {
         let output_device_name = output_device
             .name()
             .unwrap_or_else(|_| "Unknown Output".to_string());
-        println!(
-            "Debug: Selected devices - Input: '{}', Output: '{}'",
+        info!(
+            "使用するデバイス - 入力: {}、出力: {}",
             input_device_name, output_device_name
         );
 
@@ -139,8 +139,8 @@ impl AudioCapture {
             })
             .unwrap_or(output_default);
 
-        println!(
-            "Debug: Audio config - Input: {}Hz {}ch ({:?}), Output: {}Hz {}ch ({:?})",
+        info!(
+            "音声の設定 - 入力: {}Hz {}ch ({:?})、出力: {}Hz {}ch ({:?})",
             input_config.sample_rate().0,
             input_config.channels(),
             input_config.sample_format(),
@@ -160,10 +160,7 @@ impl AudioCapture {
         let producer = Arc::new(Mutex::new(producer));
         let consumer = Arc::new(Mutex::new(consumer));
 
-        println!(
-            "Debug: Created ring buffer with {} samples",
-            buffer_size * 2
-        );
+        debug!("リングバッファを作成した（{} サンプル）", buffer_size * 2);
 
         // 入力ストリーム。デバイスのサンプル型ごとに正規化の仕方が違うので明示的に分ける
         let input_stream_config = input_config.config();
@@ -238,7 +235,7 @@ impl AudioCapture {
         .map_err(|e| format!("Failed to build output stream: {}", e))?;
 
         // ストリーム開始
-        println!("Debug: Starting audio streams...");
+        debug!("音声ストリームを開始する");
         input_stream
             .play()
             .map_err(|e| format!("Failed to start input stream: {}", e))?;
@@ -255,7 +252,7 @@ impl AudioCapture {
         self.raw_audio_consumer = Some(consumer.clone());
         self.processed_audio_consumer = Some(consumer);
 
-        println!("Debug: Audio passthrough started successfully");
+        info!("音声パススルーを開始した");
         Ok(())
     }
 
@@ -278,7 +275,8 @@ impl AudioCapture {
     }
 
     pub fn set_audio_passthrough_enabled(&mut self, enabled: bool) {
-        println!("Setting audio passthrough enabled: {}", enabled);
+        // apply_settings から 2 秒ごとに呼ばれる。変化の有無を判別できないので trace に落とす
+        trace!("音声パススルーの有効/無効を設定する: {}", enabled);
         // 出力コールバック（リアルタイムスレッド）から読むため、ロックを取らない
         self.audio_passthrough_enabled
             .store(enabled, Ordering::Relaxed);
@@ -388,7 +386,7 @@ where
                 }
             }
         },
-        |e| eprintln!("Input stream error: {}", e),
+        |e| error!("入力ストリームのエラー: {}", e),
         None,
     )
 }
@@ -419,7 +417,7 @@ where
                 data.fill(to_sample(0.0));
             }
         },
-        |e| eprintln!("Output stream error: {}", e),
+        |e| error!("出力ストリームのエラー: {}", e),
         None,
     )
 }

@@ -13,6 +13,8 @@ egui = "0.26"
 nokhwa = { version = "0.10", features = ["input-msmf", "output-threaded", "decoding"] }
 cpal = "0.15"
 confy = "0.6"
+# ログのファサード。出力先の実装は src/logging.rs にある
+log = "0.4.34"
 global-hotkey = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 image = "0.24"

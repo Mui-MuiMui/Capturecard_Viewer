@@ -115,11 +115,26 @@ release ビルドは `lto` と `codegen-units = 1` の影響で時間がかか�
 
 ## デバッグ時の注意
 
-`src/main.rs` 冒頭の `#![windows_subsystem = "windows"]` によってコンソールが割り当てられないため、**標準出力と標準エラーはどこにも表示されない。**
+`src/main.rs` 冒頭の `#![windows_subsystem = "windows"]` によってコンソールが割り当てられないため、**標準出力と標準エラーはどこにも表示されない。** `println!` を足してもデバッグの役に立たない。
 
-一時的に出力を見たい場合は、この属性をコメントアウトしてビルドするとコンソールが付く。ただしコミットしないこと。
+代わりに `log` クレートのマクロを使う。出力先は `src/logging.rs` が用意するファイルで、置き場所は設定ファイルの隣。
 
-恒久的な対処としてファイルへのログ出力を入れる作業がバックログにある。
+```
+%AppData%\capturecard_viewer\logs\capturecard_viewer-YYYYMMDD-HHMMSS.log
+```
+
+1 回の起動につき 1 ファイル作られ、起動時に新しいものから 10 個だけ残して削除される。
+
+既定のレベルは `info`。詳細を見たいときは環境変数で上げる。
+
+```
+set CAPTURECARD_VIEWER_LOG=trace
+capturecard_viewer.exe
+```
+
+受け付ける値は `error` / `warn` / `info` / `debug` / `trace`。解釈できない値を渡した場合は `info` に戻る。
+
+テストコードの中は例外で、テストバイナリの標準出力は `cargo test -- --nocapture` で読めるため `println!` を使ってよい（`src/video.rs` の計測用テストがその例）。
 
 ## Cargo.lock
 

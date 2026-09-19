@@ -27,7 +27,7 @@ reviews:
     - path: "src/**/*.rs"
       instructions: |
         - コードコメントと UI 文字列は日本語で書く。
-        - `println!` / `eprintln!` を新たに追加しない。`#![windows_subsystem = "windows"]` によりコンソールが無く、出力はどこにも届かない。ログが必要ならファイル出力の仕組みを使う。
+        - `println!` / `eprintln!` を新たに追加しない。`#![windows_subsystem = "windows"]` によりコンソールが無く、出力はどこにも届かない。代わりに `log` クレートのマクロ（`error!` / `warn!` / `info!` / `debug!` / `trace!`）を使う。出力先は `src/logging.rs` がファイルへ向けている。例外は `#[cfg(test)]` の中で、テストバイナリの標準出力は `cargo test -- --nocapture` で読めるため `println!` を使ってよい。
         - serde で読み書きする設定構造体（`AppSettings` など）にフィールドを追加するときは `#[serde(default)]` を必ず付ける。付けないと既存ユーザーの設定ファイルが丸ごと初期化される。
         - 複数の `Mutex` を同時にロックする場合、順序は settings → video_capture → audio_capture → screenshot_manager に揃える。
 

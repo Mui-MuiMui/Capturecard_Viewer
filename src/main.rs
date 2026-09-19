@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 mod audio;
+mod logging;
 mod screenshot;
 mod settings;
 mod ui;
@@ -1029,6 +1030,13 @@ fn monitor_work_areas() -> Vec<egui::Rect> {
 }
 
 fn main() -> Result<(), eframe::Error> {
+    // 何よりも先にログ基盤を用意する。これ以降の失敗を記録できるようにするため。
+    //
+    // 失敗しても起動は続ける。ログが無いだけでアプリの機能には影響しない。
+    // 失敗の理由を書き出す先はこの時点に存在しない（コンソールが無く、
+    // ログファイルも開けていない）ので、戻り値はここで捨てるしかない。
+    let _ = logging::init();
+
     // 設定から保存されたウィンドウサイズと位置を読み込む。
     // ここでは読み込み結果を使わない。既定値の書き戻しは
     // CaptureCardViewer::default 側だけで行うため。
