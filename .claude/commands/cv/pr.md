@@ -59,9 +59,13 @@ gh pr view <番号> --json comments,reviews
 gh api repos/{owner}/{repo}/pulls/<番号>/comments
 ```
 
+CodeRabbit（`coderabbitai[bot]`）の自動レビューも同じコマンドで取得できる。**人間のレビューを依頼する前に、CodeRabbit の指摘へ一通り対応しておく。**
+
 ### 2. 対応方針を示す
 
 指摘ごとに「直す」か「直さない理由」を示す。**判断が分かれる指摘は、直す前に確認する。**
+
+CodeRabbit の指摘も鵜呑みにせず妥当性を判断する。このリポジトリの方針と合わないものは直さず、4 でその理由を返信する。
 
 ### 3. 修正して積む
 
