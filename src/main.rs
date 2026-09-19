@@ -1328,10 +1328,8 @@ impl CaptureCardViewer {
         let transition = ui::SettingsDialogState::transition_for(action);
 
         if transition.commit_draft {
-            if let Some(draft) = self.settings_dialog.draft() {
-                if let Ok(mut settings) = self.settings.lock() {
-                    ui::commit_draft(&mut settings, draft);
-                }
+            if let Ok(mut settings) = self.settings.lock() {
+                self.settings_dialog.commit_into(&mut settings);
             }
             // 反映した内容でデバイスを開き直す
             self.apply_settings(false);

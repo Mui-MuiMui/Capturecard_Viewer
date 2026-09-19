@@ -54,6 +54,8 @@ pub struct SettingsDialogTransition {
 #[derive(Default)]
 pub struct SettingsDialogState {
     draft: Option<AppSettings>,
+    // 開いた時点の設定。ドラフトのどの項目が実際に編集されたかを判別するために持つ
+    original: Option<AppSettings>,
 }
 
 impl SettingsDialogState {
@@ -69,11 +71,13 @@ impl SettingsDialogState {
     /// 持ち越されていた。
     pub fn begin_edit(&mut self, current: &AppSettings) {
         self.draft = Some(current.clone());
+        self.original = Some(current.clone());
     }
 
     /// 編集を終える。ドラフトは捨てる。
     pub fn end_edit(&mut self) {
         self.draft = None;
+        self.original = None;
     }
 
     pub fn draft(&self) -> Option<&AppSettings> {
@@ -82,6 +86,13 @@ impl SettingsDialogState {
 
     pub fn draft_mut(&mut self) -> Option<&mut AppSettings> {
         self.draft.as_mut()
+    }
+
+    /// ドラフトを実行中の設定へ反映する。ドラフトを持っていなければ何もしない。
+    pub fn commit_into(&self, target: &mut AppSettings) {
+        if let (Some(draft), Some(original)) = (&self.draft, &self.original) {
+            commit_draft(target, draft, original);
+        }
     }
 
     /// 操作に対して、ダイアログの外側が行うことを決める。
@@ -129,20 +140,35 @@ pub fn resolve_action(
 }
 
 /// ドラフトのうち、設定ダイアログが編集する範囲だけを実行中の設定へ反映する。
+/// `original` はダイアログを開いた時点の設定。
 ///
 /// `ui` セクションを丸ごと上書きしないのは、ウィンドウのサイズ・位置、
 /// 最前面表示、画面ドラッグ移動がダイアログの外で変わるため。丸ごと入れると、
 /// ダイアログを開いている間に動かしたウィンドウの位置が、開いた時点の
 /// スナップショットで巻き戻る。
 ///
+/// ダイアログでも外でも変えられる `maintain_aspect_ratio` と `volume` は、
+/// **ダイアログで実際に編集されたときだけ**反映する。開いた時点の値と同じなら
+/// 外側の変更（映像上でのホイール操作、コンテキストメニュー）を残す。無条件に
+/// 入れると、ダイアログを開いたままホイールで音量を変えて「適用」を押したときに
+/// 音量が巻き戻る。
+///
+/// `video` / `audio` / `screenshot` にこの比較が要らないのは、ダイアログの外から
+/// 書き換わらないため。ホットキー入力ダイアログもドラフトへ書く。
+///
 /// **ダイアログに `ui` セクションの項目を足すときは、ここにも足すこと。**
-pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings) {
+pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &AppSettings) {
     target.video = draft.video.clone();
     target.audio = draft.audio.clone();
     target.screenshot = draft.screenshot.clone();
-    // ダイアログの「ユーザーインターフェース」グループが編集する 2 項目だけ
-    target.ui.maintain_aspect_ratio = draft.ui.maintain_aspect_ratio;
-    target.ui.volume = draft.ui.volume;
+
+    // ダイアログの「ユーザーインターフェース」グループが編集する 2 項目
+    if draft.ui.maintain_aspect_ratio != original.ui.maintain_aspect_ratio {
+        target.ui.maintain_aspect_ratio = draft.ui.maintain_aspect_ratio;
+    }
+    if draft.ui.volume != original.ui.volume {
+        target.ui.volume = draft.ui.volume;
+    }
 }
 
 /// 設定ダイアログを描画し、行われた操作を返す。
@@ -1080,9 +1106,10 @@ mod tests {
     #[test]
     fn commit_draft_replaces_device_and_screenshot_sections() {
         let mut shared = AppSettings::default();
+        let original = AppSettings::default();
         let draft = sample_settings();
 
-        commit_draft(&mut shared, &draft);
+        commit_draft(&mut shared, &draft, &original);
 
         assert_eq!(shared.video.format, Some("MJPEG".to_string()));
         assert_eq!(shared.video.resolution, Some((1920, 1080)));
@@ -1096,11 +1123,13 @@ mod tests {
 
     #[test]
     fn commit_draft_applies_ui_items_the_dialog_edits() {
-        // 「ユーザーインターフェース」グループの 2 項目は反映する
+        // 「ユーザーインターフェース」グループの 2 項目は、ダイアログで
+        // 編集されていれば反映する
         let mut shared = AppSettings::default();
+        let original = AppSettings::default();
         let draft = sample_settings();
 
-        commit_draft(&mut shared, &draft);
+        commit_draft(&mut shared, &draft, &original);
 
         assert_eq!(shared.ui.volume, 80.0);
         assert!(!shared.ui.maintain_aspect_ratio);
@@ -1114,18 +1143,67 @@ mod tests {
         // 書き戻すと位置が飛ぶ
         let mut shared = sample_settings();
         let draft = shared.clone();
+        let original = shared.clone();
 
         shared.ui.last_window_size = Some((1280.0, 720.0));
         shared.ui.last_window_pos = Some((100.0, 200.0));
         shared.ui.always_on_top = false;
         shared.ui.enable_drag_move = true;
 
-        commit_draft(&mut shared, &draft);
+        commit_draft(&mut shared, &draft, &original);
 
         assert_eq!(shared.ui.last_window_size, Some((1280.0, 720.0)));
         assert_eq!(shared.ui.last_window_pos, Some((100.0, 200.0)));
         assert!(!shared.ui.always_on_top);
         assert!(shared.ui.enable_drag_move);
+    }
+
+    #[test]
+    fn commit_draft_keeps_ui_items_changed_outside_dialog() {
+        // ダイアログを開いたまま映像上でホイール操作をして音量を変え、
+        // コンテキストメニューでアスペクト比を切り替えたあとに「適用」を
+        // 押しても、それらが巻き戻ってはいけない
+        let original = sample_settings();
+        let draft = original.clone(); // ダイアログでは何も編集していない
+        let mut shared = original.clone();
+
+        shared.ui.volume = 150.0;
+        shared.ui.maintain_aspect_ratio = true;
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.ui.volume, 150.0);
+        assert!(shared.ui.maintain_aspect_ratio);
+    }
+
+    #[test]
+    fn commit_draft_applies_ui_items_edited_in_dialog_over_outside_changes() {
+        // ダイアログ側で編集していれば、外側の変更より優先する
+        let original = sample_settings();
+        let mut draft = original.clone();
+        let mut shared = original.clone();
+
+        draft.ui.volume = 120.0;
+        draft.ui.maintain_aspect_ratio = true;
+        shared.ui.volume = 150.0;
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.ui.volume, 120.0);
+        assert!(shared.ui.maintain_aspect_ratio);
+    }
+
+    #[test]
+    fn settings_dialog_state_commit_into_without_draft_does_nothing() {
+        // ドラフトを持っていない状態で反映しても何も起きない
+        let state = SettingsDialogState::default();
+        let mut shared = sample_settings();
+        let before = shared.clone();
+
+        state.commit_into(&mut shared);
+
+        assert_eq!(shared.video.fps, before.video.fps);
+        assert_eq!(shared.ui.volume, before.ui.volume);
     }
 
     #[test]
@@ -1201,7 +1279,7 @@ mod tests {
         assert!(applied.commit_draft);
         assert!(applied.save_to_file);
         assert!(!applied.close);
-        commit_draft(&mut shared, state.draft().expect("ドラフトがある"));
+        state.commit_into(&mut shared);
 
         let cancelled = SettingsDialogState::transition_for(SettingsDialogAction::Cancel);
         assert!(!cancelled.commit_draft);
