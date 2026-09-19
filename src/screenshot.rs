@@ -235,8 +235,6 @@ impl ScreenshotManager {
         false
     }
 
-    // 後方互換性のために保持される非推奨プレースホルダー（何もしない）
-
     fn start_hotkey_listener(&mut self) {
         // 既存のリスナーを停止
         if let Ok(mut shutdown) = self.listener_shutdown.lock() {
