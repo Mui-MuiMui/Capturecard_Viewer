@@ -423,3 +423,68 @@ impl Clone for VideoFrame {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 期待値は BT.601 の整数近似式を手計算した結果をベタ書きする。
+    // 実装と同じ式で計算すると、実装が誤っていてもテストが通ってしまうため。
+
+    #[test]
+    fn yuy2_to_rgb_naive_known_pattern_converts_two_pixels() {
+        // Y0=81, U=90, Y1=145, V=240 (赤寄りの YUYV ペア)
+        let src = [81u8, 90, 145, 240];
+        let out = yuy2_to_rgb_naive(2, 1, &src);
+        assert_eq!(out, vec![254, 0, 0, 255, 73, 73]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_output_length_is_width_times_height_times_three() {
+        let src = [235u8, 128, 235, 128, 235, 128, 235, 128];
+        let out = yuy2_to_rgb_naive(2, 2, &src);
+        assert_eq!(out.len(), 2 * 2 * 3);
+        assert_eq!(
+            out,
+            vec![254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254]
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_odd_width_leaves_last_pixel_black() {
+        // 幅が奇数だと出力が 6 バイト単位で割り切れず、最後の 1 画素は変換されず 0 のまま残る
+        let src = [235u8, 128, 235, 128, 0, 0];
+        let out = yuy2_to_rgb_naive(3, 1, &src);
+        assert_eq!(out, vec![254, 254, 254, 254, 254, 254, 0, 0, 0]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_short_source_leaves_remaining_pixels_black() {
+        // 入力が 1 ペア分しかない場合、残りの画素は 0 のまま (パニックしない)
+        let src = [235u8, 128, 235, 128];
+        let out = yuy2_to_rgb_naive(4, 1, &src);
+        assert_eq!(out, vec![254, 254, 254, 254, 254, 254, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_max_input_saturates_at_255() {
+        // Y=255, U=255, V=255 では R と B が 255 を超えるため飽和する
+        let src = [255u8, 255, 255, 255];
+        let out = yuy2_to_rgb_naive(2, 1, &src);
+        assert_eq!(out, vec![255, 125, 255, 255, 125, 255]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_min_input_saturates_at_0() {
+        // Y=0, U=0, V=0 では R と B が負になるため 0 に飽和する
+        let src = [0u8, 0, 0, 0];
+        let out = yuy2_to_rgb_naive(2, 1, &src);
+        assert_eq!(out, vec![0, 135, 0, 0, 135, 0]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_zero_size_returns_empty() {
+        let out = yuy2_to_rgb_naive(0, 0, &[]);
+        assert!(out.is_empty());
+    }
+}
