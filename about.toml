@@ -1,0 +1,59 @@
+# cargo-about の設定。THIRD-PARTY-LICENSES.txt の生成元。
+#
+#     cargo about generate about.hbs -o THIRD-PARTY-LICENSES.txt
+#
+# 依存を足したり上げたりしたら再生成する。CI（.github/workflows/ci.yml）が
+# 生成結果とコミット済みのファイルを突き合わせ、食い違ったら落ちる。
+
+# Windows 10/11 専用アプリなので、このターゲットで実際にリンクされる依存だけを
+# 見る。絞らないと他プラットフォーム向けの依存（X11、CoreAudio など）まで
+# 配布物に含まれていないのに一覧へ載ってしまう。
+targets = ["x86_64-pc-windows-msvc"]
+
+# dev-dependencies（tempfile / toml）は配布する exe に入らないので対象外。
+# build-dependencies（embed-resource）は生成物がバイナリへ入りうるため含める。
+ignore-dev-dependencies = true
+
+# capturecard_viewer 自身は「第三者の」ライセンス一覧に載せない。
+# Cargo.toml の publish = false を見て除外される。
+# 本体のライセンスはリポジトリ直下の LICENSE にある。
+private = { ignore = true }
+
+# 配布して問題のないライセンスだけを並べる。ここに無いライセンスの依存が
+# 混ざると生成が失敗するので、ライセンスポリシーの検査を兼ねている。
+#
+# GPL / AGPL / LGPL は意図的に入れていない。本アプリは MIT で単一バイナリを
+# 配布するため、コピーレフトの依存が入ると配布条件を満たせなくなる。
+# 混入したらここで生成が落ちて気付ける。
+#
+# 並びは SPDX 識別子のアルファベット順。コメントは代表的な利用元。
+accepted = [
+    # 大半の依存がこのどちらか
+    "MIT",
+    "Apache-2.0",
+    # exr / lebe / nanorand / ogg / symphonia 系、encoding_rs の一部
+    "BSD-3-Clause",
+    # clipboard-win / error-code
+    "BSL-1.0",
+    # mozjpeg / mozjpeg-sys（libjpeg 本体）
+    "IJG",
+    # libloading
+    "ISC",
+    # option-ext（dirs-sys 経由）。ファイル単位のコピーレフトで、
+    # 改変せずそのまま使う限り MIT での配布と両立する
+    "MPL-2.0",
+    # epaint が同梱する絵文字フォント
+    "OFL-1.1",
+    # epaint が同梱する Ubuntu フォント。SPDX の識別子ではないため
+    # cargo-about 0.9.2 は本文を出力できず、生成時に
+    # 「LicenseRef-UFL-1.0 has no license file」と警告が出る。
+    # 本文は epaint crate の fonts/UFL.txt にある。
+    # about.toml の clarify で対応付けようとすると、0.9.2 では
+    # LicenseRef の本文選択の条件が反転しており別ライセンスの本文が
+    # 割り当てられてしまうため、対応付けは行っていない。
+    "LicenseRef-UFL-1.0",
+    # icu / zerovec / tinystr / unicode-ident など
+    "Unicode-3.0",
+    # mozjpeg-sys（zlib 部分）
+    "Zlib",
+]

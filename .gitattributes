@@ -1,0 +1,14 @@
+# THIRD-PARTY-LICENSES.txt は cargo-about の生成物で、CI が
+# `git diff --exit-code` で差分の有無を見る。改行が環境によって
+# CRLF になると、中身が同じでも差分ありと判定されうる。
+# 作業ツリーでも LF に固定して、手元と CI で同じ結果になるようにする。
+#
+# 生成元の about.hbs は、テンプレートの改行がそのまま出力の改行になるため
+# 同じ理由で固定する。about.toml は出力に影響しないが、生成まわりの
+# ファイルとして揃えておく。
+#
+# リポジトリ全体には適用しない。既存のファイルが一斉に正規化され、
+# 本筋と無関係な差分が出るため。
+THIRD-PARTY-LICENSES.txt text eol=lf
+about.hbs                text eol=lf
+about.toml               text eol=lf

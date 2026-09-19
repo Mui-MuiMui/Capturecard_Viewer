@@ -1,0 +1,60 @@
+================================================================================
+THIRD-PARTY SOFTWARE LICENSES
+================================================================================
+
+Capturecard Viewer links the Rust crates listed in section 2 into its
+executable. The full text of every license that applies to them is reproduced
+in section 3.
+
+Licenses that have no SPDX identifier (shown as LicenseRef-* in section 2) are
+not reproduced in section 3; their text ships inside the crate itself.
+
+Capturecard Viewer itself is distributed under the MIT License; see the LICENSE
+file at the root of the repository.
+
+--------------------------------------------------------------------------------
+このファイルは cargo-about が Cargo.lock から生成しています。手で編集せず、
+依存を追加・更新したら次のコマンドで作り直してください。
+
+    cargo about generate about.hbs -o THIRD-PARTY-LICENSES.txt
+
+対象ターゲットは x86_64-pc-windows-msvc（Windows 専用アプリのため）。
+設定は about.toml、体裁はこのテンプレート about.hbs にあります。
+--------------------------------------------------------------------------------
+
+
+================================================================================
+1. LICENSE OVERVIEW
+================================================================================
+
+{{#each overview}}
+  {{{id}}} ({{{name}}}): {{{count}}}
+{{/each}}
+
+================================================================================
+2. CRATES
+================================================================================
+
+{{#each crates}}
+{{{package.name}}} {{{package.version}}}
+  License: {{{license}}}
+{{#if package.repository}}
+  Repository: {{{package.repository}}}
+{{/if}}
+
+{{/each}}
+================================================================================
+3. LICENSE TEXTS
+================================================================================
+{{#each licenses}}
+
+================================================================================
+{{{name}}} ({{{id}}})
+================================================================================
+Used by:
+{{#each used_by}}
+  - {{{crate.name}}} {{{crate.version}}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

@@ -2,6 +2,10 @@
 name = "capturecard_viewer"
 version = "1.0.6"
 edition = "2021"
+# 配布するアプリであってライブラリではない。crates.io へ公開しないことを明示する。
+# cargo-about の private.ignore がこの指定を見て、本体を
+# THIRD-PARTY-LICENSES.txt の一覧から除外する。
+publish = false
 
 [dependencies]
 eframe = "0.26"
