@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, SupportedStreamConfigRange};
+use cpal::{Device, SampleFormat, SampleRate, SupportedStreamConfig, SupportedStreamConfigRange};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -63,8 +63,8 @@ impl AudioCapture {
         &mut self,
         input_device_name: Option<&str>,
         output_device_name: Option<&str>,
-        _desired_sample_rate: Option<u32>,
-        _desired_channels: Option<u16>,
+        desired_sample_rate: Option<u32>,
+        desired_channels: Option<u16>,
     ) -> Result<(), String> {
         self.stop_capture();
         println!("Debug: Starting simplified audio passthrough");
@@ -102,14 +102,42 @@ impl AudioCapture {
             input_device_name, output_device_name
         );
 
-        // 設定の簡素化
-        let input_config = input_device
+        // デバイスの既定設定。希望値が無いときの基準であり、
+        // 対応設定を列挙できなかったときの退避先でもある
+        let input_default = input_device
             .default_input_config()
             .map_err(|e| format!("Failed to get input config: {}", e))?;
 
-        let output_config = output_device
+        let output_default = output_device
             .default_output_config()
             .map_err(|e| format!("Failed to get output config: {}", e))?;
+
+        // 設定画面で選んだサンプルレート・チャンネル数を、デバイスが対応する
+        // 組み合わせの中で最も近いものへ寄せる。列挙できない、または選べる設定が
+        // 無いデバイスでは既定設定のまま開く（従来の挙動）
+        let input_config = input_device
+            .supported_input_configs()
+            .ok()
+            .and_then(|configs| {
+                select_best_config(
+                    &configs.collect::<Vec<_>>(),
+                    desired_sample_rate.unwrap_or_else(|| input_default.sample_rate().0),
+                    desired_channels.unwrap_or_else(|| input_default.channels()),
+                )
+            })
+            .unwrap_or(input_default);
+
+        let output_config = output_device
+            .supported_output_configs()
+            .ok()
+            .and_then(|configs| {
+                select_best_config(
+                    &configs.collect::<Vec<_>>(),
+                    desired_sample_rate.unwrap_or_else(|| output_default.sample_rate().0),
+                    desired_channels.unwrap_or_else(|| output_default.channels()),
+                )
+            })
+            .unwrap_or(output_default);
 
         println!(
             "Debug: Audio config - Input: {}Hz {}ch ({:?}), Output: {}Hz {}ch ({:?})",
@@ -231,23 +259,6 @@ impl AudioCapture {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    fn select_best_config(
-        configs: &mut [SupportedStreamConfigRange],
-        desired_sample_rate: Option<u32>,
-        _desired_channels: Option<u16>,
-    ) -> Option<cpal::SupportedStreamConfig> {
-        if configs.is_empty() {
-            return None;
-        }
-
-        // デフォルト設定を使用 (簡素化)
-        let config = *configs.first()?;
-        let sample_rate = desired_sample_rate.unwrap_or(48000);
-
-        Some(config.with_sample_rate(cpal::SampleRate(sample_rate)))
-    }
-
     pub fn stop_capture(&mut self) {
         if let Some(s) = self.input_stream.take() {
             let _ = s.pause();
@@ -289,6 +300,61 @@ impl AudioCapture {
         }
         Err(format!("Device '{name}' not found"))
     }
+}
+
+/// 対応しているサンプルフォーマットの優先度。小さいほど優先する。未対応なら `None`。
+///
+/// `build_input_stream_with` / `build_output_stream_with` で扱える型と一致させること。
+/// ここに無いフォーマットを選ぶと、設定としては選べてもストリームを組み立てられない。
+fn sample_format_priority(format: SampleFormat) -> Option<u8> {
+    match format {
+        // リングバッファと同じ表現なので変換が要らない
+        SampleFormat::F32 => Some(0),
+        SampleFormat::I16 => Some(1),
+        SampleFormat::I32 => Some(2),
+        SampleFormat::U16 => Some(3),
+        _ => None,
+    }
+}
+
+/// デバイスが対応する設定から、希望するサンプルレート・チャンネル数に最も近いものを選ぶ。
+///
+/// 選ぶ順は チャンネル数の差 → サンプルレートの差 → サンプルフォーマットの優先度。
+/// チャンネル数を先に見るのは、モノラルとステレオの違いが聴感に直結するのに対し、
+/// サンプルレートは必ず「対応している中で最も近い値」へ寄せられるため。
+/// すべて同点なら列挙順の先頭を選ぶ（デバイスが優先する設定が先に来る）。
+///
+/// WASAPI はデバイスのミックスフォーマットのチャンネル数しか列挙しないため、
+/// モノラルを希望してもステレオしか選べないことがある。UI の選択肢をデバイスの
+/// 能力から生成する作業は別タスク。
+///
+/// 選べる設定が 1 つも無ければ `None`。呼び出し側はデバイスの既定設定へ落とす。
+fn select_best_config(
+    configs: &[SupportedStreamConfigRange],
+    desired_sample_rate: u32,
+    desired_channels: u16,
+) -> Option<SupportedStreamConfig> {
+    configs
+        .iter()
+        .filter_map(|range| {
+            let priority = sample_format_priority(range.sample_format())?;
+            let min_rate = range.min_sample_rate().0;
+            let max_rate = range.max_sample_rate().0;
+            // 壊れた列挙で clamp が panic するのを避ける
+            if min_rate > max_rate {
+                return None;
+            }
+
+            let rate = desired_sample_rate.clamp(min_rate, max_rate);
+            let key = (
+                range.channels().abs_diff(desired_channels),
+                rate.abs_diff(desired_sample_rate),
+                priority,
+            );
+            Some((key, range.try_with_sample_rate(SampleRate(rate))?))
+        })
+        .min_by_key(|(key, _)| *key)
+        .map(|(_, config)| config)
 }
 
 /// 未対応のサンプルフォーマットに当たったときのエラー文言を組み立てる。
@@ -666,5 +732,167 @@ mod tests {
         for raw in [0u16, 1, 32768, 65535] {
             assert_eq!(f32_to_u16(u16_to_f32(raw)), raw);
         }
+    }
+
+    /// テスト用の対応設定。`supported_input_configs()` が返す形を模す。
+    fn config_range(
+        channels: u16,
+        min_rate: u32,
+        max_rate: u32,
+        format: SampleFormat,
+    ) -> SupportedStreamConfigRange {
+        SupportedStreamConfigRange::new(
+            channels,
+            SampleRate(min_rate),
+            SampleRate(max_rate),
+            cpal::SupportedBufferSize::Unknown,
+            format,
+        )
+    }
+
+    /// WASAPI のように離散的なレートを列挙するデバイスを模す
+    fn discrete_range(
+        channels: u16,
+        rate: u32,
+        format: SampleFormat,
+    ) -> SupportedStreamConfigRange {
+        config_range(channels, rate, rate, format)
+    }
+
+    #[test]
+    fn select_best_config_exact_match_is_chosen() {
+        let configs = [
+            discrete_range(2, 44100, SampleFormat::F32),
+            discrete_range(2, 48000, SampleFormat::F32),
+            discrete_range(2, 96000, SampleFormat::F32),
+        ];
+
+        let selected = select_best_config(&configs, 48000, 2).expect("選べるはず");
+
+        assert_eq!(selected.sample_rate(), SampleRate(48000));
+        assert_eq!(selected.channels(), 2);
+    }
+
+    #[test]
+    fn select_best_config_unsupported_rate_falls_back_to_nearest() {
+        // 44100 は列挙されていない。48000 (差 3900) が 32000 (差 12100) より近い
+        let configs = [
+            discrete_range(2, 32000, SampleFormat::F32),
+            discrete_range(2, 48000, SampleFormat::F32),
+        ];
+
+        let selected = select_best_config(&configs, 44100, 2).expect("選べるはず");
+
+        assert_eq!(selected.sample_rate(), SampleRate(48000));
+    }
+
+    #[test]
+    fn select_best_config_equidistant_rates_pick_the_first() {
+        // 40000 は 32000 と 48000 の中間。列挙順の先頭を選ぶ
+        let configs = [
+            discrete_range(2, 32000, SampleFormat::F32),
+            discrete_range(2, 48000, SampleFormat::F32),
+        ];
+
+        let selected = select_best_config(&configs, 40000, 2).expect("選べるはず");
+
+        assert_eq!(selected.sample_rate(), SampleRate(32000));
+    }
+
+    #[test]
+    fn select_best_config_prefers_matching_channels_over_matching_rate() {
+        // WASAPI はミックスフォーマットのチャンネル数しか列挙しないが、
+        // 複数出る環境ではチャンネル数を先に合わせる
+        let configs = [
+            discrete_range(2, 48000, SampleFormat::F32),
+            discrete_range(1, 44100, SampleFormat::F32),
+        ];
+
+        let selected = select_best_config(&configs, 48000, 1).expect("選べるはず");
+
+        assert_eq!(selected.channels(), 1);
+        assert_eq!(selected.sample_rate(), SampleRate(44100));
+    }
+
+    #[test]
+    fn select_best_config_unavailable_channels_falls_back_to_nearest() {
+        // モノラルを希望してもステレオしか無ければステレオを選ぶ
+        let configs = [discrete_range(2, 48000, SampleFormat::F32)];
+
+        let selected = select_best_config(&configs, 48000, 1).expect("選べるはず");
+
+        assert_eq!(selected.channels(), 2);
+    }
+
+    #[test]
+    fn select_best_config_skips_unsupported_sample_formats() {
+        // U8 と I64 は変換関数が無く、選んでもストリームを組み立てられない。
+        // 希望レートに一致していても選ばない
+        let configs = [
+            discrete_range(2, 48000, SampleFormat::U8),
+            discrete_range(2, 48000, SampleFormat::I64),
+            discrete_range(2, 44100, SampleFormat::I16),
+        ];
+
+        let selected = select_best_config(&configs, 48000, 2).expect("選べるはず");
+
+        assert_eq!(selected.sample_format(), SampleFormat::I16);
+        assert_eq!(selected.sample_rate(), SampleRate(44100));
+    }
+
+    #[test]
+    fn select_best_config_prefers_f32_when_rate_and_channels_tie() {
+        // f32 はリングバッファと同じ表現なので変換が要らない
+        let configs = [
+            discrete_range(2, 48000, SampleFormat::I16),
+            discrete_range(2, 48000, SampleFormat::F32),
+        ];
+
+        let selected = select_best_config(&configs, 48000, 2).expect("選べるはず");
+
+        assert_eq!(selected.sample_format(), SampleFormat::F32);
+    }
+
+    #[test]
+    fn select_best_config_clamps_into_a_continuous_range() {
+        // 連続した範囲を返すホストでは、範囲内へ丸める
+        let configs = [config_range(2, 8000, 96000, SampleFormat::F32)];
+
+        let inside = select_best_config(&configs, 44100, 2).expect("選べるはず");
+        assert_eq!(inside.sample_rate(), SampleRate(44100));
+
+        let above = select_best_config(&configs, 192000, 2).expect("選べるはず");
+        assert_eq!(above.sample_rate(), SampleRate(96000));
+
+        let below = select_best_config(&configs, 5512, 2).expect("選べるはず");
+        assert_eq!(below.sample_rate(), SampleRate(8000));
+    }
+
+    #[test]
+    fn select_best_config_empty_list_returns_none() {
+        assert!(select_best_config(&[], 48000, 2).is_none());
+    }
+
+    #[test]
+    fn select_best_config_all_unsupported_formats_returns_none() {
+        let configs = [
+            discrete_range(2, 48000, SampleFormat::U8),
+            discrete_range(2, 48000, SampleFormat::F64),
+        ];
+
+        assert!(select_best_config(&configs, 48000, 2).is_none());
+    }
+
+    #[test]
+    fn select_best_config_reversed_range_is_skipped() {
+        // min > max の壊れた列挙で panic しないこと
+        let configs = [
+            config_range(2, 96000, 8000, SampleFormat::F32),
+            discrete_range(2, 44100, SampleFormat::I16),
+        ];
+
+        let selected = select_best_config(&configs, 48000, 2).expect("選べるはず");
+
+        assert_eq!(selected.sample_rate(), SampleRate(44100));
     }
 }
