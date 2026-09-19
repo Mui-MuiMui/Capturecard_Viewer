@@ -11,9 +11,10 @@ use eframe::egui;
 use image::GenericImageView;
 use log::{debug, error, info, trace, warn};
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 mod audio;
@@ -112,6 +113,10 @@ pub struct CaptureCardViewer {
 
     // ウィンドウ管理
     always_on_top: bool,
+
+    // 進行中のスクリーンショット保存スレッド。
+    // 終了時に join して、書き出し途中の JPEG が残らないようにする
+    screenshot_save_threads: Vec<JoinHandle<()>>,
 }
 
 impl Default for CaptureCardViewer {
@@ -170,6 +175,8 @@ impl Default for CaptureCardViewer {
 
             // ウィンドウ管理
             always_on_top: false,
+
+            screenshot_save_threads: Vec::new(),
         };
 
         // 保存されたデバイスがない場合は自動選択
@@ -476,6 +483,11 @@ impl eframe::App for CaptureCardViewer {
         // 終了時は必ず書き出す。デバウンスの待ち時間中に終了しても、
         // ウィンドウのサイズ・位置や音量の変更を取りこぼさないようにする
         self.save_settings_now();
+
+        // 撮った直後に閉じても最後の 1 枚が残るように、保存の完了を待ってから抜ける。
+        // ここで待たないと、main が返った時点でプロセスごと落ちて
+        // 書きかけの JPEG がディスクに残る
+        self.join_screenshot_save_threads();
     }
 }
 
@@ -535,59 +547,94 @@ impl CaptureCardViewer {
         }
     }
 
+    /// いま表示しているフレームを JPEG で保存する。
+    ///
+    /// ロックは settings → video → screenshot の順に 1 つずつ取り、重ねない。
+    /// エンコードと書き出しは別スレッドへ逃がす。1080p の JPEG エンコードは
+    /// 数十 ms かかり、UI スレッドで行うと映像が一瞬止まるため
     fn take_screenshot(&mut self) {
         debug!("スクリーンショットの保存を開始する");
 
-        // 最新フレームの生データを抽出。
+        // 保存先と効果音の音量だけを取り出してロックを手放す。
+        // get_screenshot_path は連番を決めるためにファイルの有無を見るが、
+        // ファイルを作るのは保存スレッドなので、ここでは何も書かない
+        let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S-%3f").to_string();
+        let path_and_volume = self.settings.lock().ok().map(|settings| {
+            (
+                settings.get_screenshot_path(&timestamp),
+                settings.screenshot.sound_volume,
+            )
+        });
+        let Some((path, sound_volume)) = path_and_volume else {
+            warn!("スクリーンショットの保存で settings のロックを取得できない");
+            return;
+        };
+
+        // 最新フレームを取り出したらすぐロックを手放す。Arc の複製なので
+        // 画素データは複製されず、フレームコールバック側の push を待たせない。
         // スクリーンショットはいま画面に出ている画を保存するので、新着でなくてよい
-        if let Ok(video) = self.video_capture.lock() {
-            if let Some(frame) = video.get_latest_frame() {
-                debug!(
-                    "保存対象の映像フレームを取得した: {}x{}",
-                    frame.width, frame.height
-                );
-
-                // タイムスタンプとパスを構築
-                let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S-%3f").to_string();
-                if let Ok(settings) = self.settings.lock() {
-                    let path = settings.get_screenshot_path(&timestamp);
-                    debug!("保存先: {}", path.display());
-
-                    // 親ディレクトリを作成
-                    if let Some(parent) = path.parent() {
-                        if let Err(e) = std::fs::create_dir_all(parent) {
-                            error!("保存先のディレクトリを作成できない: {}", e);
-                        }
-                    }
-
-                    // RGBデータを画像に変換して保存
-                    // image クレートが Vec の所有権を要求するため、ここだけは複製が要る
-                    if let Some(img_buf) = image::RgbImage::from_raw(
-                        frame.width as u32,
-                        frame.height as u32,
-                        frame.data.clone(),
-                    ) {
-                        match img_buf.save(&path) {
-                            Ok(()) => {
-                                info!("スクリーンショットを {} へ保存した", path.display());
-                                let volume = settings.screenshot.sound_volume;
-                                if let Ok(ss) = self.screenshot_manager.lock() {
-                                    ss.play_screenshot_sound(volume);
-                                }
-                            }
-                            Err(e) => error!("スクリーンショットを保存できない: {}", e),
-                        }
-                    } else {
-                        error!("映像フレームから画像を組み立てられない");
-                    }
-                } else {
-                    warn!("スクリーンショットの保存で settings のロックを取得できない");
-                }
-            } else {
-                warn!("映像フレームが無いのでスクリーンショットを撮れない");
+        let latest_frame = match self.video_capture.lock() {
+            Ok(video) => video.get_latest_frame(),
+            Err(_) => {
+                warn!("スクリーンショットの保存で video_capture のロックを取得できない");
+                return;
             }
+        };
+        let Some(frame) = latest_frame else {
+            warn!("映像フレームが無いのでスクリーンショットを撮れない");
+            return;
+        };
+        debug!(
+            "保存対象の映像フレームを取得した: {}x{}、保存先: {}",
+            frame.width,
+            frame.height,
+            path.display()
+        );
+
+        // 効果音は保存の完了を待たずに鳴らす。撮った手応えをその場で返すため。
+        // 保存まで待つと、エンコードにかかる数十 ms だけシャッター音が遅れる。
+        // 保存に失敗した場合は音だけ鳴ることになるが、失敗はログに残す
+        if let Ok(ss) = self.screenshot_manager.lock() {
+            ss.play_screenshot_sound(sound_volume);
         } else {
-            warn!("スクリーンショットの保存で video_capture のロックを取得できない");
+            warn!("スクリーンショットの効果音で screenshot_manager のロックを取得できない");
+        }
+
+        // エンコードと書き出しは UI スレッドから外す。
+        // ホットキーを連打するとスレッドが並ぶが、撮るたびに 1 枚残るほうを優先して
+        // 進行中の保存があっても捨てない。ファイル名は撮影時刻をミリ秒まで含むので、
+        // 人が連打できる間隔なら衝突しない（同一ミリ秒の衝突は元からある別の問題）
+        let handle = std::thread::spawn(move || match save_frame_as_jpeg(&frame, &path) {
+            Ok(()) => info!("スクリーンショットを {} へ保存した", path.display()),
+            Err(e) => error!("スクリーンショットを保存できない: {}", e),
+        });
+
+        // ハンドルを持っておく。捨てるとスレッドが切り離され、終了時に
+        // 書き出しの完了を待てなくなる（壊れた JPEG が残りうる）。
+        // 溜め込まないよう、積む前に終わった分を落とす
+        drop_finished_threads(&mut self.screenshot_save_threads);
+        self.screenshot_save_threads.push(handle);
+    }
+
+    /// 進行中のスクリーンショット保存がすべて終わるまで待つ。
+    ///
+    /// 待ち時間は JPEG のエンコードとディスクへの書き出しが終わるまでで、
+    /// 1080p なら通常は数十 ms。終了時に呼ぶ
+    fn join_screenshot_save_threads(&mut self) {
+        let handles = std::mem::take(&mut self.screenshot_save_threads);
+        if handles.is_empty() {
+            return;
+        }
+
+        debug!(
+            "スクリーンショットの保存スレッド {} 件を待つ",
+            handles.len()
+        );
+        for handle in handles {
+            if handle.join().is_err() {
+                // release ビルドは panic = "abort" なのでここには来ない
+                warn!("スクリーンショットの保存スレッドがパニックした");
+            }
         }
     }
 
@@ -915,6 +962,60 @@ impl CaptureCardViewer {
     }
 }
 
+/// 完了済みのスレッドハンドルを取り除く。
+///
+/// `JoinHandle` を持ち続けるのは終了時に `join` するためだけなので、
+/// 終わったものは落としてよい。落とさないと撮影のたびに要素が増え続ける
+fn drop_finished_threads<T>(handles: &mut Vec<JoinHandle<T>>) {
+    handles.retain(|handle| !handle.is_finished());
+}
+
+/// 映像フレームを JPEG として `path` へ書き出す。
+///
+/// アプリの状態にも共有ロックにも触れないので、そのまま別スレッドで実行でき、
+/// テストからも呼べる。保存スレッドはこの関数だけを呼ぶ。
+fn save_frame_as_jpeg(frame: &video::VideoFrame, path: &Path) -> Result<(), String> {
+    // 大きさのないフレームは JPEG として書き出せてしまうが、開けない
+    // ファイルが残るだけなので、ディレクトリを作る前に弾く
+    if frame.width == 0 || frame.height == 0 {
+        return Err(format!(
+            "大きさのない映像フレームは保存できない: {}x{}",
+            frame.width, frame.height
+        ));
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "保存先のディレクトリ {} を作成できない: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+
+    let (Ok(width), Ok(height)) = (u32::try_from(frame.width), u32::try_from(frame.height)) else {
+        return Err(format!(
+            "画像として扱えない大きさのフレーム: {}x{}",
+            frame.width, frame.height
+        ));
+    };
+
+    // image クレートが Vec の所有権を要求するため、ここだけは複製が要る。
+    // UI スレッドの外なので、1080p で 6MB の複製が描画を止めることはない
+    let img = image::RgbImage::from_raw(width, height, frame.data.clone()).ok_or_else(|| {
+        format!(
+            "映像フレームから画像を組み立てられない: {}x{} に対して {} バイト",
+            width,
+            height,
+            frame.data.len()
+        )
+    })?;
+
+    img.save(path)
+        .map_err(|e| format!("{} へ書き出せない: {}", path.display(), e))
+}
+
 // 映像の縦横比を保ったまま、表示領域に収まる大きさを求める。
 //
 // self を使わない純粋な計算なので、ユニットテストできるよう
@@ -1168,7 +1269,20 @@ impl CaptureCardViewer {
     }
 
     fn apply_settings(&mut self, initial: bool) {
-        if let Ok(settings) = self.settings.lock() {
+        // 設定はここで 1 度だけ複製し、以降はこの複製だけを見る。
+        // デバイスの開き直しはリトライの sleep を含めて秒単位かかるため、
+        // その間 settings のロックを握っていると他の経路が止まる。
+        // 複製しておけば video / audio / screenshot のロックをネストせずに済み、
+        // 複数のロックを重ねて取る箇所がこの関数から無くなる
+        let snapshot = match self.settings.lock() {
+            Ok(settings) => Some(settings.clone()),
+            Err(_) => {
+                warn!("設定の適用で settings のロックを取得できない");
+                None
+            }
+        };
+
+        if let Some(settings) = snapshot {
             // Video - リトライ機能付き
             if let Ok(mut video) = self.video_capture.lock() {
                 let need_video_restart = settings.video.device_name != self.last_video_device
@@ -1593,6 +1707,7 @@ impl CaptureCardViewer {
 mod tests {
     use super::*;
     use egui::Vec2;
+    use tempfile::tempdir;
 
     #[test]
     fn should_refresh_device_list_never_updated_returns_true() {
@@ -2084,5 +2199,119 @@ mod tests {
             icon.rgba.chunks(4).any(|px| px != [255, 0, 0, 255]),
             "アイコンが赤一色になっている"
         );
+    }
+    // 2x2 の RGB フレーム。赤・緑・青・白を 1 画素ずつ並べてある
+    fn test_frame_2x2() -> video::VideoFrame {
+        video::VideoFrame {
+            width: 2,
+            height: 2,
+            data: vec![
+                255, 0, 0, // 左上: 赤
+                0, 255, 0, // 右上: 緑
+                0, 0, 255, // 左下: 青
+                255, 255, 255, // 右下: 白
+            ],
+        }
+    }
+
+    #[test]
+    fn save_frame_as_jpeg_writes_decodable_file() {
+        // JPEG は非可逆なので画素値は比較せず、読み戻せることと大きさだけを見る
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("shot.jpg");
+
+        save_frame_as_jpeg(&test_frame_2x2(), &path).expect("保存できること");
+
+        let decoded = image::open(&path).expect("保存した JPEG を読み戻せること");
+        assert_eq!(decoded.dimensions(), (2, 2));
+    }
+
+    #[test]
+    fn save_frame_as_jpeg_creates_missing_parent_directory() {
+        // 保存先フォルダが無い状態で撮影されることがあるため、親ごと作る
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("shots").join("2026").join("shot.jpg");
+
+        save_frame_as_jpeg(&test_frame_2x2(), &path).expect("保存できること");
+
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn save_frame_as_jpeg_short_data_returns_error_without_creating_file() {
+        // 画素数に対してデータが足りないフレーム。壊れたファイルを残さないこと
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("shot.jpg");
+        let frame = video::VideoFrame {
+            width: 2,
+            height: 2,
+            data: vec![0; 11],
+        };
+
+        let err = save_frame_as_jpeg(&frame, &path).expect_err("エラーになること");
+
+        assert!(err.contains("組み立てられない"), "想定外のエラー: {}", err);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn save_frame_as_jpeg_zero_sized_frame_returns_error() {
+        // フレームが来ていない状態を取り違えて保存しようとした場合
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("shot.jpg");
+        let frame = video::VideoFrame {
+            width: 0,
+            height: 0,
+            data: Vec::new(),
+        };
+
+        let err = save_frame_as_jpeg(&frame, &path).expect_err("エラーになること");
+
+        assert!(err.contains("大きさのない"), "想定外のエラー: {}", err);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn drop_finished_threads_empty_stays_empty() {
+        let mut handles: Vec<JoinHandle<()>> = Vec::new();
+
+        drop_finished_threads(&mut handles);
+
+        assert!(handles.is_empty());
+    }
+
+    #[test]
+    fn drop_finished_threads_removes_only_completed_handles() {
+        // 合図が来るまで終わらないスレッドを 1 本混ぜ、
+        // 終わった分だけが落ちることを見る
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let mut handles = vec![
+            std::thread::spawn(|| {}),
+            std::thread::spawn(move || {
+                let _ = release_rx.recv();
+            }),
+        ];
+
+        // is_finished はスレッドが抜けきってから true になるため、待ち合わせる
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !handles[0].is_finished() {
+            assert!(Instant::now() < deadline, "1 本目のスレッドが終わらない");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        drop_finished_threads(&mut handles);
+
+        assert_eq!(handles.len(), 1, "終わっていないスレッドだけが残ること");
+        assert!(
+            !handles[0].is_finished(),
+            "残ったのは実行中のスレッドであること"
+        );
+
+        // 後始末。合図を送ってからでないとスレッドが残る
+        release_tx.send(()).expect("合図を送れること");
+        handles
+            .remove(0)
+            .join()
+            .expect("実行中だったスレッドを回収できること");
     }
 }
