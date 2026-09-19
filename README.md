@@ -22,7 +22,7 @@ Windows10/11向け
 フォルダごと消してください。  
 設定ファイルを消す場合は下記ディレクトリを削除してください。  
 下記ディレクトリに保存されます。  
-> %AppData%\Capturecard_Viewer
+> %AppData%\capturecard_viewer
 
 
 ## 使い方
@@ -75,7 +75,7 @@ JPEG はファイルが小さくなりますが、文字や細い線ににじみ
 ## 設定保存場所について
 
 下記ディレクトリに保存されます。  
-> %AppData%\Capturecard_Viewer
+> %AppData%\capturecard_viewer
 
 削除することで初期値で再作成されます。  
 
