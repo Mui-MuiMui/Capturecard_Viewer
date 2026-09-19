@@ -208,9 +208,18 @@ impl AppSettings {
         }
     }
 
-    pub fn save(&self) {
-        if let Err(e) = confy::store(APP_NAME, None, self) {
-            eprintln!("Failed to save settings: {}", e);
+    // 保存できたかを返す。
+    //
+    // 結果を捨てないのは、デバウンスして書き出す側が失敗を検知して
+    // 再試行できるようにするため。失敗を握り潰すと、書けなかった変更が
+    // 保存済みとして扱われて消える。
+    pub fn save(&self) -> bool {
+        match confy::store(APP_NAME, None, self) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("Failed to save settings: {}", e);
+                false
+            }
         }
     }
 
