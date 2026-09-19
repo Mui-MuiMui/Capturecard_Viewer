@@ -83,9 +83,11 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 - オーディオのサンプリングレート／チャンネル数（`start_passthrough_with_settings` の引数が未使用）
 - ビデオフォーマットの MJPEG / RGB24（内部で YUYV に強制される）
 
-### 相対パス依存
+### アセットは exe に埋め込んである
 
-`icon.ico` と既定の効果音 `sound/SS.mp3` はカレントディレクトリ基準で解決される。exe の場所と CWD が異なると読み込みに失敗する。
+`icon.ico` と既定の効果音 `sound/SS.mp3` は `include_bytes!` で実行ファイルに埋め込んである。ファイルとして読みに行かないため、カレントディレクトリに左右されない。
+
+設定に保存された効果音のパスだけは外部のファイルを読む。相対パスは `current_exe()` の親ディレクトリ基準で解決し、見つからなければ埋め込みの既定音へ倒す（`screenshot::resolve_sound_path`）。**カレントディレクトリ基準でファイルを解決する処理を新たに足さないこと。**
 
 ## コーディング規約
 
