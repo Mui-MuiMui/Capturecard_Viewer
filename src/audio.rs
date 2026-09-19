@@ -15,15 +15,8 @@ pub struct AudioCapture {
     host: cpal::Host,
     input_stream: Option<cpal::Stream>,
     output_stream: Option<cpal::Stream>,
-    is_active: bool,
     volume: Arc<Mutex<f32>>,
-    // 簡素化されたリングバッファ（シングルバッファ構成）
-    buffer_capacity: usize,
-
     audio_passthrough_enabled: Arc<AtomicBool>,
-    // 音声データ用のコンシューマハンドル
-    raw_audio_consumer: Option<Arc<Mutex<AudioConsumer>>>,
-    processed_audio_consumer: Option<Arc<Mutex<AudioConsumer>>>,
 }
 
 impl AudioCapture {
@@ -35,13 +28,9 @@ impl AudioCapture {
             host,
             input_stream: None,
             output_stream: None,
-            is_active: false,
             volume: Arc::new(Mutex::new(1.0)),
-            buffer_capacity: 0,
             // 既定では音声パススルーを有効にする（音が出る状態で起動する）
             audio_passthrough_enabled: Arc::new(AtomicBool::new(true)),
-            raw_audio_consumer: None,
-            processed_audio_consumer: None,
         }
     }
 
@@ -246,11 +235,6 @@ impl AudioCapture {
 
         self.input_stream = Some(input_stream);
         self.output_stream = Some(output_stream);
-        self.is_active = true;
-
-        // 簡素化のため、raw/processedバッファは使用しない
-        self.raw_audio_consumer = Some(consumer.clone());
-        self.processed_audio_consumer = Some(consumer);
 
         info!("音声パススルーを開始した");
         Ok(())
@@ -263,8 +247,6 @@ impl AudioCapture {
         if let Some(s) = self.output_stream.take() {
             let _ = s.pause();
         }
-        self.is_active = false;
-        self.buffer_capacity = 0;
     }
 
     pub fn set_volume(&mut self, volume_percent: f32) {
