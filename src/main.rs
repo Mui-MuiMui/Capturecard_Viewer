@@ -22,6 +22,15 @@ use video::VideoCapture;
 /// デバイスリストのキャッシュを更新する間隔
 const DEVICE_LIST_CACHE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// 保存されたウィンドウサイズが使えない場合に使う大きさ
+const DEFAULT_WINDOW_SIZE: (f32, f32) = (1280.0, 720.0);
+
+/// 復元したウィンドウを「画面内にある」と見なすために必要な、モニタの作業領域との
+/// 重なりの最小幅と最小高さ。タイトルバーを掴んでウィンドウを動かせる程度の
+/// 大きさを見えていることの条件にしている
+const MIN_VISIBLE_WINDOW_WIDTH: f32 = 120.0;
+const MIN_VISIBLE_WINDOW_HEIGHT: f32 = 32.0;
+
 /// 設定をディスクへ書き出すまでに待つ時間。
 /// ウィンドウのドラッグ中や音量スクロール中は設定が毎フレーム変わるため、
 /// 最後の変更からこの時間が空くまで書き出しをまとめる
@@ -240,26 +249,31 @@ impl eframe::App for CaptureCardViewer {
         let current_size = viewport.inner_rect.map(|r| (r.width(), r.height()));
         let current_pos = viewport.outer_rect.map(|r| (r.left(), r.top()));
 
-        // サイズまたは位置が変更された場合、設定を更新
+        // サイズまたは位置が変更された場合、設定を更新。
+        // フルスクリーン中は画面全体の矩形しか取れないため記録しない。
+        // こうすることで、フルスクリーンへ入る直前のジオメトリが設定に残り、
+        // フルスクリーンのまま終了しても次回はウィンドウ表示で復元される
         let mut window_geometry_changed = false;
-        if let Ok(mut settings) = self.settings.lock() {
-            let mut changed = false;
+        if Self::should_record_window_geometry(self.is_fullscreen, viewport.fullscreen) {
+            if let Ok(mut settings) = self.settings.lock() {
+                let mut changed = false;
 
-            if let Some((width, height)) = current_size {
-                if settings.ui.last_window_size != Some((width, height)) {
-                    settings.ui.last_window_size = Some((width, height));
-                    changed = true;
+                if let Some((width, height)) = current_size {
+                    if settings.ui.last_window_size != Some((width, height)) {
+                        settings.ui.last_window_size = Some((width, height));
+                        changed = true;
+                    }
                 }
-            }
 
-            if let Some((x, y)) = current_pos {
-                if settings.ui.last_window_pos != Some((x, y)) {
-                    settings.ui.last_window_pos = Some((x, y));
-                    changed = true;
+                if let Some((x, y)) = current_pos {
+                    if settings.ui.last_window_pos != Some((x, y)) {
+                        settings.ui.last_window_pos = Some((x, y));
+                        changed = true;
+                    }
                 }
-            }
 
-            window_geometry_changed = changed;
+                window_geometry_changed = changed;
+            }
         }
 
         // ここでは書き出さない。ウィンドウのドラッグ中は毎フレーム値が変わるため、
@@ -901,6 +915,119 @@ fn calculate_aspect_ratio_size(image_size: egui::Vec2, available_size: egui::Vec
     }
 }
 
+/// 保存されたウィンドウサイズのうち、ウィンドウとして成立する値だけを採用して返す。
+///
+/// 設定ファイルは手で編集できるため、0 や負数や NaN が入りうる。検証せずに
+/// `with_inner_size` へ渡すと、winit の先の OS の API 次第で操作できない大きさの
+/// ウィンドウになったり、起動そのものに失敗したりする。**採用できない値は
+/// 既定のサイズへ倒す。**
+fn window_size_or_default(saved: Option<(f32, f32)>) -> (f32, f32) {
+    match saved {
+        Some((width, height))
+            if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 =>
+        {
+            (width, height)
+        }
+        _ => DEFAULT_WINDOW_SIZE,
+    }
+}
+
+/// 保存されたウィンドウの位置が、いずれかのモニタの作業領域と十分に重なるかを判定する。
+///
+/// サブモニタを外した、解像度を変えた、といった理由で保存値が画面外になることがある。
+/// そのまま復元するとウィンドウが見えず、タイトルバーも掴めないので復帰できない。
+///
+/// `monitors` はモニタの作業領域の一覧。**空の場合は false を返す。** モニタの構成が
+/// 分からないまま位置を指定するより、OS に任せたほうが安全なため。
+fn is_position_visible(pos: (f32, f32), size: (f32, f32), monitors: &[egui::Rect]) -> bool {
+    if monitors.is_empty() {
+        return false;
+    }
+
+    // 設定ファイルは手で編集できるので、NaN や inf が入っていることを想定する
+    if ![pos.0, pos.1, size.0, size.1].iter().all(|v| v.is_finite()) {
+        return false;
+    }
+
+    // 大きさが潰れているウィンドウは、どこに置いても見えない
+    if size.0 <= 0.0 || size.1 <= 0.0 {
+        return false;
+    }
+
+    let window = egui::Rect::from_min_size(egui::pos2(pos.0, pos.1), egui::vec2(size.0, size.1));
+
+    // ウィンドウ自体が最小値より小さい場合は、その全体が収まることを求める
+    let required_width = MIN_VISIBLE_WINDOW_WIDTH.min(window.width());
+    let required_height = MIN_VISIBLE_WINDOW_HEIGHT.min(window.height());
+
+    monitors.iter().any(|monitor| {
+        let overlap = monitor.intersect(window);
+        // 重なりが無い場合、intersect は負の幅・高さを持つ矩形を返す
+        overlap.width() >= required_width && overlap.height() >= required_height
+    })
+}
+
+/// 各モニタの作業領域（タスクバーなどを除いた領域）を返す。取得できなければ空の `Vec`。
+///
+/// **この関数は `eframe::run_native` より前に呼ぶ前提で書いてある。** winit が
+/// プロセスの DPI 認識を設定するのは `run_native` の中なので、ここで得られる座標は
+/// Windows が仮想化した座標、つまり既定の拡大率で割った論理座標になる。
+/// 設定に保存されているウィンドウ位置も egui のポイント（論理座標）なので、
+/// そのまま比較できる。**DPI 認識を宣言するマニフェストを追加すると前提が崩れる。**
+#[cfg(windows)]
+fn monitor_work_areas() -> Vec<egui::Rect> {
+    use winapi::shared::minwindef::{BOOL, DWORD, LPARAM, TRUE};
+    use winapi::shared::windef::{HDC, HMONITOR, LPRECT};
+    use winapi::um::winuser::{EnumDisplayMonitors, GetMonitorInfoW, MONITORINFO};
+
+    /// `EnumDisplayMonitors` のコールバック。`lparam` で受け取った `Vec` へ作業領域を積む
+    unsafe extern "system" fn collect_work_area(
+        monitor: HMONITOR,
+        _hdc: HDC,
+        _clip: LPRECT,
+        lparam: LPARAM,
+    ) -> BOOL {
+        let areas = &mut *(lparam as *mut Vec<egui::Rect>);
+
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as DWORD;
+        if GetMonitorInfoW(monitor, &mut info) != 0 {
+            let work = info.rcWork;
+            areas.push(egui::Rect::from_min_max(
+                egui::pos2(work.left as f32, work.top as f32),
+                egui::pos2(work.right as f32, work.bottom as f32),
+            ));
+        }
+
+        // 列挙を続ける
+        TRUE
+    }
+
+    let mut areas: Vec<egui::Rect> = Vec::new();
+    // hdc と lprcClip を null にすると仮想画面全体のモニタが列挙される
+    let enumerated = unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(collect_work_area),
+            &mut areas as *mut Vec<egui::Rect> as LPARAM,
+        )
+    };
+
+    if enumerated == 0 {
+        // 途中まで積んだ内容は信用できない。取得できなかったものとして扱う
+        return Vec::new();
+    }
+
+    areas
+}
+
+/// Windows 以外ではモニタ情報を取得しない。位置の復元は OS に任せる
+#[cfg(not(windows))]
+fn monitor_work_areas() -> Vec<egui::Rect> {
+    Vec::new()
+}
+
 fn main() -> Result<(), eframe::Error> {
     // 設定から保存されたウィンドウサイズと位置を読み込む。
     // ここでは読み込み結果を使わない。既定値の書き戻しは
@@ -908,16 +1035,17 @@ fn main() -> Result<(), eframe::Error> {
     let (settings, _) = AppSettings::load();
     let mut viewport_builder = egui::ViewportBuilder::default().with_icon(load_icon());
 
-    // 保存されたウィンドウサイズがあれば適用
-    if let Some((width, height)) = settings.ui.last_window_size {
-        viewport_builder = viewport_builder.with_inner_size([width, height]);
-    } else {
-        viewport_builder = viewport_builder.with_inner_size([1280.0, 720.0]);
-    }
+    // 保存されたウィンドウサイズがあれば適用する。値が壊れていれば既定のサイズにする
+    let inner_size = window_size_or_default(settings.ui.last_window_size);
+    viewport_builder = viewport_builder.with_inner_size([inner_size.0, inner_size.1]);
 
-    // 保存されたウィンドウ位置があれば適用
-    if let Some((x, y)) = settings.ui.last_window_pos {
-        viewport_builder = viewport_builder.with_position([x, y]);
+    // 保存されたウィンドウ位置は、モニタ構成が変わって画面外を指していることがある。
+    // 作業領域と十分に重なるときだけ適用し、そうでなければ位置指定ごと捨てて
+    // OS の既定の配置に任せる。見えないウィンドウで起動するよりは良い
+    if let Some(pos) = settings.ui.last_window_pos {
+        if is_position_visible(pos, inner_size, &monitor_work_areas()) {
+            viewport_builder = viewport_builder.with_position([pos.0, pos.1]);
+        }
     }
 
     let options = eframe::NativeOptions {
@@ -1273,6 +1401,24 @@ impl CaptureCardViewer {
         self.save_settings_now();
     }
 
+    /// ウィンドウの位置とサイズを設定へ記録してよいかを判定する。
+    ///
+    /// フルスクリーン中に報告される矩形は画面全体なので、記録すると
+    /// 次回起動時に画面全体のサイズで復元されてしまう。
+    ///
+    /// `app_fullscreen` はアプリが持つフラグ、`viewport_fullscreen` は OS から
+    /// 報告された状態（`None` は不明）。`ViewportCommand::Fullscreen` の効果は
+    /// 次のフレーム以降に現れるため、解除した直後はアプリ側のフラグが false でも
+    /// OS 側はまだフルスクリーンを報告している。**この 1 フレームで記録すると
+    /// 画面全体の矩形を掴んでしまうので、両方がフルスクリーンでないときだけ
+    /// 記録する。**
+    fn should_record_window_geometry(
+        app_fullscreen: bool,
+        viewport_fullscreen: Option<bool>,
+    ) -> bool {
+        !app_fullscreen && viewport_fullscreen != Some(true)
+    }
+
     /// デバイスリストのキャッシュを更新すべきかを判定する。
     /// `elapsed` は前回更新からの経過時間で、`None` は「一度も取得していない」を表す。
     fn should_refresh_device_list(elapsed: Option<Duration>) -> bool {
@@ -1412,6 +1558,56 @@ mod tests {
     }
 
     #[test]
+    fn should_record_window_geometry_windowed_returns_true() {
+        // 通常のウィンドウ表示中は記録する
+        assert!(CaptureCardViewer::should_record_window_geometry(
+            false,
+            Some(false)
+        ));
+    }
+
+    #[test]
+    fn should_record_window_geometry_fullscreen_returns_false() {
+        // フルスクリーン中の矩形は画面全体。記録すると次回起動時に
+        // 画面全体サイズで復元されてしまう
+        assert!(!CaptureCardViewer::should_record_window_geometry(
+            true,
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn should_record_window_geometry_just_entered_fullscreen_returns_false() {
+        // フルスクリーンへ入った直後。アプリ側のフラグだけが先に立ち、
+        // OS 側はまだウィンドウ表示を報告している
+        assert!(!CaptureCardViewer::should_record_window_geometry(
+            true,
+            Some(false)
+        ));
+    }
+
+    #[test]
+    fn should_record_window_geometry_just_left_fullscreen_returns_false() {
+        // フルスクリーンを解除した直後。アプリ側のフラグだけが先に降り、
+        // OS 側はまだ画面全体の矩形を報告している
+        assert!(!CaptureCardViewer::should_record_window_geometry(
+            false,
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn should_record_window_geometry_unknown_viewport_state_follows_app_flag() {
+        // OS から状態が取れない場合はアプリ側のフラグに従う
+        assert!(CaptureCardViewer::should_record_window_geometry(
+            false, None
+        ));
+        assert!(!CaptureCardViewer::should_record_window_geometry(
+            true, None
+        ));
+    }
+
+    #[test]
     fn needs_reapply_not_applied_yet_returns_true() {
         // まだ一度も適用できていない場合は適用する
         assert!(CaptureCardViewer::needs_reapply(
@@ -1458,6 +1654,178 @@ mod tests {
             &PathBuf::from("sound/SS.mp3"),
             &Some(PathBuf::from("sound/SS.mp3"))
         ));
+    }
+
+    #[test]
+    fn window_size_or_default_valid_size_is_kept() {
+        assert_eq!(window_size_or_default(Some((800.0, 600.0))), (800.0, 600.0));
+    }
+
+    #[test]
+    fn window_size_or_default_none_returns_default() {
+        // 初回起動。保存された値がまだ無い
+        assert_eq!(window_size_or_default(None), (1280.0, 720.0));
+    }
+
+    #[test]
+    fn window_size_or_default_unusable_size_returns_default() {
+        // 設定ファイルを手で編集すると、ウィンドウとして成立しない値が入りうる。
+        // そのまま with_inner_size へ渡さないことを確かめる
+        let unusable = [
+            (0.0, 720.0),
+            (1280.0, 0.0),
+            (-1280.0, 720.0),
+            (1280.0, -720.0),
+            (f32::NAN, 720.0),
+            (1280.0, f32::NAN),
+            (f32::INFINITY, 720.0),
+            (1280.0, f32::NEG_INFINITY),
+        ];
+
+        for size in unusable {
+            assert_eq!(
+                window_size_or_default(Some(size)),
+                (1280.0, 720.0),
+                "size={:?} をそのまま採用した",
+                size
+            );
+        }
+    }
+
+    // is_position_visible のテストで使うモニタ構成。
+    // 1920x1080 の下端 40px をタスクバーが占めている想定で、作業領域は 1920x1040。
+    // 副モニタは主モニタの右隣に並べてある
+    fn primary_monitor() -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1920.0, 1040.0))
+    }
+
+    fn secondary_monitor() -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(1920.0, 0.0), egui::pos2(3840.0, 1040.0))
+    }
+
+    #[test]
+    fn is_position_visible_inside_primary_monitor_returns_true() {
+        assert!(is_position_visible(
+            (100.0, 100.0),
+            (1280.0, 720.0),
+            &[primary_monitor()]
+        ));
+    }
+
+    #[test]
+    fn is_position_visible_far_off_screen_returns_false() {
+        // 外したサブモニタの上にウィンドウがあった場合に相当する
+        assert!(!is_position_visible(
+            (-5000.0, 300.0),
+            (1280.0, 720.0),
+            &[primary_monitor()]
+        ));
+    }
+
+    #[test]
+    fn is_position_visible_barely_overlapping_returns_false() {
+        // 右端から 10px だけ覗いている状態。タイトルバーを掴めないので不可とする
+        assert!(!is_position_visible(
+            (1910.0, 500.0),
+            (1280.0, 720.0),
+            &[primary_monitor()]
+        ));
+    }
+
+    #[test]
+    fn is_position_visible_exactly_minimum_overlap_returns_true() {
+        // 境界。右下に 120x32 だけ残る位置（作業領域の右端 1920 / 下端 1040 から引いた値）
+        assert!(is_position_visible(
+            (1800.0, 1008.0),
+            (1280.0, 720.0),
+            &[primary_monitor()]
+        ));
+    }
+
+    #[test]
+    fn is_position_visible_one_pixel_short_of_minimum_returns_false() {
+        // 境界の外側。幅の重なりが 119px しかない
+        assert!(!is_position_visible(
+            (1801.0, 1008.0),
+            (1280.0, 720.0),
+            &[primary_monitor()]
+        ));
+    }
+
+    #[test]
+    fn is_position_visible_negative_side_minimum_overlap_returns_true() {
+        // 左へはみ出した側の境界。幅 800 のウィンドウを -680 に置くと 120px 残る
+        assert!(is_position_visible(
+            (-680.0, 0.0),
+            (800.0, 600.0),
+            &[primary_monitor()]
+        ));
+    }
+
+    #[test]
+    fn is_position_visible_on_secondary_monitor_returns_true() {
+        // 副モニタが繋がっている間はそのまま復元してよい
+        assert!(is_position_visible(
+            (2000.0, 100.0),
+            (1280.0, 720.0),
+            &[primary_monitor(), secondary_monitor()]
+        ));
+    }
+
+    #[test]
+    fn is_position_visible_secondary_monitor_removed_returns_false() {
+        // 同じ位置でも副モニタを外した構成では画面外になる
+        assert!(!is_position_visible(
+            (2000.0, 100.0),
+            (1280.0, 720.0),
+            &[primary_monitor()]
+        ));
+    }
+
+    #[test]
+    fn is_position_visible_no_monitors_returns_false() {
+        // モニタ情報が取れなかった場合。位置指定を諦めて OS に任せる
+        assert!(!is_position_visible((100.0, 100.0), (1280.0, 720.0), &[]));
+    }
+
+    #[test]
+    fn is_position_visible_window_smaller_than_minimum_overlap_returns_true() {
+        // 最小の重なりより小さいウィンドウは、全体が収まっていれば見えている
+        assert!(is_position_visible(
+            (100.0, 100.0),
+            (50.0, 20.0),
+            &[primary_monitor()]
+        ));
+    }
+
+    #[test]
+    fn is_position_visible_zero_size_returns_false() {
+        // 大きさが潰れていると、どこに置いても見えない
+        assert!(!is_position_visible(
+            (100.0, 100.0),
+            (0.0, 0.0),
+            &[primary_monitor()]
+        ));
+    }
+
+    #[test]
+    fn is_position_visible_non_finite_values_return_false() {
+        // 設定ファイルは手で編集できるため、NaN や inf が入りうる
+        let broken = [
+            ((f32::NAN, 100.0), (1280.0, 720.0)),
+            ((100.0, f32::INFINITY), (1280.0, 720.0)),
+            ((100.0, 100.0), (f32::NAN, 720.0)),
+            ((100.0, 100.0), (1280.0, f32::NEG_INFINITY)),
+        ];
+
+        for (pos, size) in broken {
+            assert!(
+                !is_position_visible(pos, size, &[primary_monitor()]),
+                "pos={:?} size={:?} を画面内と判定した",
+                pos,
+                size
+            );
+        }
     }
 
     #[test]

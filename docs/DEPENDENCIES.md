@@ -144,9 +144,9 @@ flowchart TD
 
 `winapi` 0.3 は長く更新が止まっており、Microsoft 公式の `windows-sys` / `windows` クレートへ移行するのが現在の主流。
 
-現状 `winapi` は `Cargo.toml` に `winuser` と `windef` の feature 付きで宣言されているが、**`src/` 内で実際に使われている形跡がない。** 移行以前に、まず本当に必要かを確認すること。不要なら削除するのが最も安い。
+`winapi` は `src/main.rs` の `monitor_work_areas` で使っている。ウィンドウ位置の復元時に、保存された位置が画面内かを判定するためモニタの作業領域を列挙する用途（`EnumDisplayMonitors` / `GetMonitorInfoW`）。feature は `minwindef` / `winuser` / `windef` の 3 つ。
 
-必要になる場面としては、バックログの「復元したウィンドウ位置が画面外になる場合のフォールバック」でモニタ情報を取得する際が挙げられる。そのタスクに着手する時点で、`windows-sys` を採用するか判断する。
+使用箇所がこの 1 関数だけなので、`windows-sys` へ移す場合の影響は小さい。移行するなら、この関数の中だけを書き換えれば済む。
 
 ## 調査の再実行
 
