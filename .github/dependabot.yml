@@ -1,0 +1,38 @@
+# 第三者の Action の SHA 固定を Dependabot に更新させる。
+#
+# ci.yml / release.yml では Action をタグではなく不変のコミット SHA で固定している。
+# 乗っ取り対策としては有効だが、代わりに更新が手作業になり放置されやすい。
+# Dependabot は SHA の行末に付けた `# v7.0.1` 形式のコメントを版の手掛かりにして、
+# SHA とコメントの両方を書き換えた PR を作る。
+#
+# dtolnay/rust-toolchain だけは master ブランチの SHA を指しており、対応する
+# リリースタグが無い（上流のタグは v1 のみ）。Dependabot が版を決められないため
+# 更新 PR は作られない見込み。これまで通り手で上げる。
+#
+# 各キーの意味は Dependabot options reference を参照。
+# https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference
+#
+# cargo を対象にしていない理由は docs/DEPENDENCIES.md の「Dependabot の対象」。
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    # ワークフローの実体は .github/workflows/ 以下にあるが、
+    # github-actions エコシステムではリポジトリのルートを指定する
+    directory: "/"
+
+    schedule:
+      # Action の更新頻度を考えると日次は多すぎる。週 1 で足りる
+      interval: "weekly"
+
+    # PR の向き先。指定しないと既定ブランチの main へ向いてしまう。
+    # 通常の PR は dev へ出す（.claude/skills/naming-conventions/SKILL.md）
+    target-branch: "dev"
+
+    # 空の配列で既定の dependencies ラベルの付与を止める。
+    # このリポジトリではラベルを運用していないため、付けても意味がない
+    labels: []
+
+    commit-message:
+      # CI 設定の変更なので ci（naming-conventions skill の種別表に合わせる）
+      prefix: "ci"
