@@ -122,7 +122,7 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 
 - If the device is not found, the application keeps retrying until it connects. The interval starts at 0.2 s and widens up to 5 s.
   - This also covers plugging the capture card in after the application has started; just wait and it will connect.
-  - The window stays responsive while retrying. To retry right away, use Right-click → "デバイス再接続" (Reconnect device).
+  - Retrying no longer freezes the window for seconds at a time. To retry right away, use Right-click → "デバイス再接続" (Reconnect device).
 
 **Settings that are not yet implemented**
 
