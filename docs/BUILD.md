@@ -76,7 +76,7 @@ cargo test
 cargo test -- --ignored
 ```
 
-- `cargo fmt --check` は現状リポジトリ全体で差分が出る。整形は独立した変更として行う
+- `cargo fmt --check` は差分ゼロが前提。落ちたら自分の変更を `cargo fmt` で整形する。整形の基準はリポジトリ直下の `rustfmt.toml`
 - `cargo clippy` には既知の警告が残っている
 - `--ignored` 付きのテストはキャプチャーデバイスを接続した状態で実行する
 

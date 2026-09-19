@@ -4,8 +4,6 @@ use std::sync::{Arc, Mutex};
 
 use ringbuf::HeapRb;
 
-
-
 pub struct AudioCapture {
     host: cpal::Host,
     input_stream: Option<cpal::Stream>,
@@ -14,7 +12,6 @@ pub struct AudioCapture {
     volume: Arc<Mutex<f32>>,
     // 簡素化されたリングバッファ（シングルバッファ構成）
     buffer_capacity: usize,
-    
 
     audio_passthrough_enabled: Arc<Mutex<bool>>,
     // 音声データ用のコンシューマハンドル - 型の複雑さは設計上必要
@@ -29,7 +26,7 @@ impl AudioCapture {
         println!("Debug: Creating AudioCapture with WASAPI host");
         let host = cpal::default_host();
         println!("Debug: Host created: {:?}", host.id());
-        
+
         Self {
             host,
             input_stream: None,
@@ -77,7 +74,7 @@ impl AudioCapture {
                 .default_input_device()
                 .ok_or_else(|| "No default input device".to_string())?
         };
-        
+
         let output_device = if let Some(name) = output_device_name {
             println!("Debug: Looking for output device: {}", name);
             self.find_device_by_name(name, false)?
@@ -89,35 +86,51 @@ impl AudioCapture {
         };
 
         // デバイス名をログ出力
-        let input_device_name = input_device.name().unwrap_or_else(|_| "Unknown Input".to_string());
-        let output_device_name = output_device.name().unwrap_or_else(|_| "Unknown Output".to_string());
-        println!("Debug: Selected devices - Input: '{}', Output: '{}'", input_device_name, output_device_name);
+        let input_device_name = input_device
+            .name()
+            .unwrap_or_else(|_| "Unknown Input".to_string());
+        let output_device_name = output_device
+            .name()
+            .unwrap_or_else(|_| "Unknown Output".to_string());
+        println!(
+            "Debug: Selected devices - Input: '{}', Output: '{}'",
+            input_device_name, output_device_name
+        );
 
         // 設定の簡素化
         let input_config = input_device
             .default_input_config()
             .map_err(|e| format!("Failed to get input config: {}", e))?;
-            
+
         let output_config = output_device
             .default_output_config()
             .map_err(|e| format!("Failed to get output config: {}", e))?;
 
-        println!("Debug: Audio config - Input: {}Hz {}ch ({:?}), Output: {}Hz {}ch ({:?})", 
-                input_config.sample_rate().0, input_config.channels(), input_config.sample_format(),
-                output_config.sample_rate().0, output_config.channels(), output_config.sample_format());
+        println!(
+            "Debug: Audio config - Input: {}Hz {}ch ({:?}), Output: {}Hz {}ch ({:?})",
+            input_config.sample_rate().0,
+            input_config.channels(),
+            input_config.sample_format(),
+            output_config.sample_rate().0,
+            output_config.channels(),
+            output_config.sample_format()
+        );
 
         // メモリリーク修正: リングバッファサイズを制限
         let sample_rate = input_config.sample_rate().0;
         let channels = input_config.channels() as usize;
         let buffer_size = (sample_rate as usize * channels * 50) / 1000; // 50msバッファに削減
-        
+
         let ring = HeapRb::<f32>::new(buffer_size * 2); // サイズを削減
         let (producer, consumer) = ring.split();
-        
+
         let producer = Arc::new(Mutex::new(producer));
         let consumer = Arc::new(Mutex::new(consumer));
-        
-        println!("Debug: Created ring buffer with {} samples", buffer_size * 2);
+
+        println!(
+            "Debug: Created ring buffer with {} samples",
+            buffer_size * 2
+        );
 
         // 入力ストリーム - F32のみサポート（簡素化）
         let input_stream = if input_config.sample_format() == SampleFormat::F32 {
@@ -150,7 +163,8 @@ impl AudioCapture {
                 |e| eprintln!("Input stream error: {}", e),
                 None,
             )
-        }.map_err(|e| format!("Failed to build input stream: {}", e))?;
+        }
+        .map_err(|e| format!("Failed to build input stream: {}", e))?;
 
         // 出力ストリーム - F32のみサポート（簡素化）
         let vol_arc = self.volume.clone();
@@ -197,24 +211,27 @@ impl AudioCapture {
                 |e| eprintln!("Output stream error: {}", e),
                 None,
             )
-        }.map_err(|e| format!("Failed to build output stream: {}", e))?;
+        }
+        .map_err(|e| format!("Failed to build output stream: {}", e))?;
 
         // ストリーム開始
         println!("Debug: Starting audio streams...");
-        input_stream.play().map_err(|e| format!("Failed to start input stream: {}", e))?;
+        input_stream
+            .play()
+            .map_err(|e| format!("Failed to start input stream: {}", e))?;
         std::thread::sleep(std::time::Duration::from_millis(50));
-        output_stream.play().map_err(|e| format!("Failed to start output stream: {}", e))?;
+        output_stream
+            .play()
+            .map_err(|e| format!("Failed to start output stream: {}", e))?;
 
         self.input_stream = Some(input_stream);
         self.output_stream = Some(output_stream);
         self.is_active = true;
-        
+
         // 簡素化のため、raw/processedバッファは使用しない
         self.raw_audio_consumer = Some(consumer.clone());
         self.processed_audio_consumer = Some(consumer);
-        
 
-        
         println!("Debug: Audio passthrough started successfully");
         Ok(())
     }
@@ -232,20 +249,26 @@ impl AudioCapture {
         // デフォルト設定を使用 (簡素化)
         let config = *configs.first()?;
         let sample_rate = desired_sample_rate.unwrap_or(48000);
-        
+
         Some(config.with_sample_rate(cpal::SampleRate(sample_rate)))
     }
 
     pub fn stop_capture(&mut self) {
-        if let Some(s) = self.input_stream.take() { let _ = s.pause(); }
-        if let Some(s) = self.output_stream.take() { let _ = s.pause(); }
+        if let Some(s) = self.input_stream.take() {
+            let _ = s.pause();
+        }
+        if let Some(s) = self.output_stream.take() {
+            let _ = s.pause();
+        }
         self.is_active = false;
         self.buffer_capacity = 0;
     }
 
     pub fn set_volume(&mut self, volume_percent: f32) {
         let v = (volume_percent / 100.0).clamp(0.0, 2.0);
-        if let Ok(mut vol) = self.volume.lock() { *vol = v; }
+        if let Ok(mut vol) = self.volume.lock() {
+            *vol = v;
+        }
     }
 
     pub fn set_audio_passthrough_enabled(&mut self, enabled: bool) {
@@ -255,18 +278,26 @@ impl AudioCapture {
         }
     }
 
-
-
     fn find_device_by_name(&self, name: &str, input: bool) -> Result<Device, String> {
-        let iter = if input { self.host.input_devices() } else { self.host.output_devices() }
-            .map_err(|e| format!("enumerate devices: {e}"))?;
+        let iter = if input {
+            self.host.input_devices()
+        } else {
+            self.host.output_devices()
+        }
+        .map_err(|e| format!("enumerate devices: {e}"))?;
         for d in iter {
-            if let Ok(n) = d.name() { if n == name { return Ok(d); } }
+            if let Ok(n) = d.name() {
+                if n == name {
+                    return Ok(d);
+                }
+            }
         }
         Err(format!("Device '{name}' not found"))
     }
 }
 
 impl Drop for AudioCapture {
-    fn drop(&mut self) { self.stop_capture(); }
+    fn drop(&mut self) {
+        self.stop_capture();
+    }
 }

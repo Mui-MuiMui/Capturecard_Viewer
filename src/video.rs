@@ -1,30 +1,32 @@
 use nokhwa::pixel_format::RgbFormat;
-use nokhwa::utils::{RequestedFormat, RequestedFormatType, CameraFormat, Resolution, ApiBackend, FrameFormat};
+use nokhwa::utils::{
+    ApiBackend, CameraFormat, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
+};
 use nokhwa::CallbackCamera;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use std::collections::VecDeque;
 // YUY2 -> RGB24 高速変換 (最適化版)
 
 fn yuy2_to_rgb_naive(width: usize, height: usize, src: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; width * height * 3];
-    
+
     // 安全確保: 偶数幅前提 (YUYV ペア)
     let src_chunks = src.chunks_exact(4);
     let out_chunks = out.chunks_exact_mut(6);
-    
+
     for (src_chunk, out_chunk) in src_chunks.zip(out_chunks) {
         let y0 = src_chunk[0] as i32;
-        let u  = src_chunk[1] as i32;
+        let u = src_chunk[1] as i32;
         let y1 = src_chunk[2] as i32;
-        let v  = src_chunk[3] as i32;
-        
+        let v = src_chunk[3] as i32;
+
         // BT.601 変換 (整数演算で高速化)
         let c0 = y0 - 16;
         let c1 = y1 - 16;
         let d = u - 128;
         let e = v - 128;
-        
+
         // 係数を1024倍して整数演算に変換 (1.164 ≈ 1192/1024)
         let r0 = (1192 * c0 + 1634 * e) >> 10;
         let g0 = (1192 * c0 - 401 * d - 833 * e) >> 10;
@@ -32,7 +34,7 @@ fn yuy2_to_rgb_naive(width: usize, height: usize, src: &[u8]) -> Vec<u8> {
         let r1 = (1192 * c1 + 1634 * e) >> 10;
         let g1 = (1192 * c1 - 401 * d - 833 * e) >> 10;
         let b1 = (1192 * c1 + 2066 * d) >> 10;
-        
+
         out_chunk[0] = r0.clamp(0, 255) as u8;
         out_chunk[1] = g0.clamp(0, 255) as u8;
         out_chunk[2] = b0.clamp(0, 255) as u8;
@@ -40,7 +42,7 @@ fn yuy2_to_rgb_naive(width: usize, height: usize, src: &[u8]) -> Vec<u8> {
         out_chunk[4] = g1.clamp(0, 255) as u8;
         out_chunk[5] = b1.clamp(0, 255) as u8;
     }
-    
+
     out
 }
 
@@ -63,17 +65,32 @@ struct FrameBuffer {
 
 impl FrameBuffer {
     fn new() -> Self {
-        Self { front: None, back: None, dirty: false, last_frame_instant: None, frame_intervals: VecDeque::with_capacity(120), last_decode_ms: 0.0, fast_count: 0, fallback_count: 0 }
+        Self {
+            front: None,
+            back: None,
+            dirty: false,
+            last_frame_instant: None,
+            frame_intervals: VecDeque::with_capacity(120),
+            last_decode_ms: 0.0,
+            fast_count: 0,
+            fallback_count: 0,
+        }
     }
     fn push_back(&mut self, frame: VideoFrame, decode_ms: f32, fast: bool) {
         self.back = Some(frame);
         self.dirty = true;
         self.last_decode_ms = decode_ms;
-        if fast { self.fast_count += 1; } else { self.fallback_count += 1; }
+        if fast {
+            self.fast_count += 1;
+        } else {
+            self.fallback_count += 1;
+        }
         let now = Instant::now();
         if let Some(prev) = self.last_frame_instant.replace(now) {
             let dt = now.duration_since(prev).as_secs_f32() * 1000.0;
-            if self.frame_intervals.len() == 120 { self.frame_intervals.pop_front(); }
+            if self.frame_intervals.len() == 120 {
+                self.frame_intervals.pop_front();
+            }
             self.frame_intervals.push_back(dt);
         }
     }
@@ -86,10 +103,10 @@ impl FrameBuffer {
         self.front.as_ref().map(|frame| VideoFrame {
             width: frame.width,
             height: frame.height,
-            data: frame.data.clone()
+            data: frame.data.clone(),
         })
     }
-    
+
     // メモリリーク防止: 古いフレームをクリア
     fn clear_old_frames(&mut self) {
         // 前回のフレームを破棄
@@ -97,7 +114,6 @@ impl FrameBuffer {
             self.back = None;
         }
     }
-
 }
 
 pub struct VideoCapture {
@@ -108,38 +124,51 @@ pub struct VideoCapture {
 
 impl VideoCapture {
     pub fn new() -> Self {
-    Self { camera: None, frames: Arc::new(Mutex::new(FrameBuffer::new())), is_active: false }
+        Self {
+            camera: None,
+            frames: Arc::new(Mutex::new(FrameBuffer::new())),
+            is_active: false,
+        }
     }
-    
+
     pub fn list_devices() -> Vec<(String, String)> {
         match nokhwa::query(ApiBackend::MediaFoundation) {
-            Ok(devices) => {
-                devices.into_iter()
-                    .map(|info| (info.human_name().to_string(), info.description().to_string()))
-                    .collect()
-            }
+            Ok(devices) => devices
+                .into_iter()
+                .map(|info| {
+                    (
+                        info.human_name().to_string(),
+                        info.description().to_string(),
+                    )
+                })
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
 
-    pub fn start_capture(&mut self, device_name: Option<&str>, resolution: Option<(u32, u32)>, format: Option<&str>, fps: Option<u32>) -> Result<(), String> {
+    pub fn start_capture(
+        &mut self,
+        device_name: Option<&str>,
+        resolution: Option<(u32, u32)>,
+        format: Option<&str>,
+        fps: Option<u32>,
+    ) -> Result<(), String> {
         self.stop_capture();
-        
+
         let devices = nokhwa::query(ApiBackend::MediaFoundation)
             .map_err(|e| format!("Failed to query devices: {}", e))?;
-            
+
         let device_info = if let Some(name) = device_name {
-            devices.into_iter()
+            devices
+                .into_iter()
                 .find(|d| d.human_name() == name)
                 .ok_or_else(|| format!("Device '{}' not found", name))?
         } else {
-            devices.into_iter()
-                .next()
-                .ok_or("No video devices found")?
+            devices.into_iter().next().ok_or("No video devices found")?
         };
-        
+
         // Windows Media Foundationでの問題を回避するフォーマット設定
-        let requested_format = if let Some((w,h)) = resolution {
+        let requested_format = if let Some((w, h)) = resolution {
             let ff = match format.unwrap_or("") {
                 "YUY2" => FrameFormat::YUYV,
                 // MJPEGとRGB24はWindows MFで問題があるため、YUYVフォールバック
@@ -150,10 +179,10 @@ impl VideoCapture {
                 _ => FrameFormat::YUYV,
             };
             let fps_value = fps.unwrap_or(60).clamp(15, 120);
-            
+
             // フォールバック戦略: 安定したYUYVを使用
             RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
-                Resolution::new(w,h),
+                Resolution::new(w, h),
                 ff,
                 fps_value,
             )))
@@ -165,7 +194,7 @@ impl VideoCapture {
                 60,
             )))
         };
-        
+
         let frame_callback = {
             let fb = self.frames.clone();
             move |frame: nokhwa::Buffer| {
@@ -179,7 +208,7 @@ impl VideoCapture {
                 let mut rgb_vec: Option<Vec<u8>> = None;
                 // フレームフォーマットを取得して適切な処理を行う
                 let source_format = frame.source_frame_format();
-                
+
                 match source_format {
                     FrameFormat::YUYV if width % 2 == 0 => {
                         // YUY2の高速パス
@@ -189,7 +218,7 @@ impl VideoCapture {
                             rgb_vec = Some(rgb);
                             used_fast = true;
                         }
-                    },
+                    }
 
                     _ => {
                         // その他のフォーマットも標準デコード
@@ -200,35 +229,46 @@ impl VideoCapture {
                 }
                 if let Some(data) = rgb_vec {
                     let decode_ms = start.elapsed().as_secs_f32() * 1000.0;
-                    let vf = VideoFrame { width, height, data };
-                    if let Ok(mut guard) = fb.lock() { 
-                        guard.push_back(vf, decode_ms, used_fast); 
+                    let vf = VideoFrame {
+                        width,
+                        height,
+                        data,
+                    };
+                    if let Ok(mut guard) = fb.lock() {
+                        guard.push_back(vf, decode_ms, used_fast);
                     }
                 }
             }
         };
-        
-        let mut camera = CallbackCamera::new(device_info.index().clone(), requested_format, frame_callback)
-            .map_err(|e| format!("Failed to create camera: {}", e))?;
-            
-        camera.open_stream()
+
+        let mut camera = CallbackCamera::new(
+            device_info.index().clone(),
+            requested_format,
+            frame_callback,
+        )
+        .map_err(|e| format!("Failed to create camera: {}", e))?;
+
+        camera
+            .open_stream()
             .map_err(|e| format!("Failed to open camera stream: {}", e))?;
-            
+
         self.camera = Some(camera);
         self.is_active = true;
-        
+
         Ok(())
     }
-    
+
     pub fn stop_capture(&mut self) {
         if let Some(mut camera) = self.camera.take() {
             let _ = camera.stop_stream();
         }
         self.is_active = false;
-        
-    if let Ok(mut buf) = self.frames.lock() { *buf = FrameBuffer::new(); }
+
+        if let Ok(mut buf) = self.frames.lock() {
+            *buf = FrameBuffer::new();
+        }
     }
-    
+
     pub fn get_latest_frame(&self) -> Option<VideoFrame> {
         self.frames.lock().ok().and_then(|mut fb| {
             let frame = fb.take_front();
@@ -238,22 +278,19 @@ impl VideoCapture {
         })
     }
 
-
-
-
-
-
-    
     #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.is_active
     }
-    
+
     #[allow(dead_code)]
     pub fn get_supported_formats(&self) -> Vec<(String, Vec<(u32, u32)>)> {
         // 簡略化された実装 - 実際のフォーマットには、より複雑なロジックが必要
         vec![
-            ("MJPEG".to_string(), vec![(1920, 1080), (1280, 720), (640, 480)]),
+            (
+                "MJPEG".to_string(),
+                vec![(1920, 1080), (1280, 720), (640, 480)],
+            ),
             ("YUY2".to_string(), vec![(1280, 720), (640, 480)]),
         ]
     }
@@ -262,65 +299,71 @@ impl VideoCapture {
     pub fn get_supported_formats_for(_device: &str) -> Vec<(String, Vec<(u32, u32)>)> {
         // デバイス毎のプレースホルダー; 実際の実装ではデバイス機能を照会
         vec![
-            ("MJPEG".to_string(), vec![(1920,1080),(1280,720),(640,480)]),
-            ("YUY2".to_string(), vec![(1280,720),(640,480)]),
-            ("RGB24".to_string(), vec![(1280,720),(640,480)]),
+            (
+                "MJPEG".to_string(),
+                vec![(1920, 1080), (1280, 720), (640, 480)],
+            ),
+            ("YUY2".to_string(), vec![(1280, 720), (640, 480)]),
+            ("RGB24".to_string(), vec![(1280, 720), (640, 480)]),
         ]
     }
-    
+
     // デバイスの能力を取得するメソッド
-    pub fn get_device_capabilities(device_name: Option<&str>) -> Result<Vec<(String, Vec<(u32, u32, u32)>)>, String> {
+    pub fn get_device_capabilities(
+        device_name: Option<&str>,
+    ) -> Result<Vec<(String, Vec<(u32, u32, u32)>)>, String> {
         use nokhwa::Camera;
-        
+
         // デバイス情報を取得
         let devices = nokhwa::query(ApiBackend::MediaFoundation)
             .map_err(|e| format!("Failed to query devices: {}", e))?;
-            
+
         let device_info = if let Some(name) = device_name {
-            devices.into_iter()
+            devices
+                .into_iter()
                 .find(|d| d.human_name() == name)
                 .ok_or_else(|| format!("Device '{}' not found", name))?
         } else {
-            devices.into_iter()
-                .next()
-                .ok_or("No video devices found")?
+            devices.into_iter().next().ok_or("No video devices found")?
         };
-        
+
         // カメラを一時的に開いて能力を取得
-        let requested_format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
-            Resolution::new(640, 480),
-            FrameFormat::YUYV,
-            30,
-        )));
-        
+        let requested_format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(
+            CameraFormat::new(Resolution::new(640, 480), FrameFormat::YUYV, 30),
+        ));
+
         let mut camera = Camera::new(device_info.index().clone(), requested_format)
             .map_err(|e| format!("Failed to create camera for capability query: {}", e))?;
-        
+
         let mut result: Vec<(String, Vec<(u32, u32, u32)>)> = Vec::new();
-        
+
         // 各フォーマットで対応解像度・FPSを取得
         let formats = vec![
             ("YUY2", FrameFormat::YUYV),
             ("MJPEG", FrameFormat::MJPEG),
             ("RGB24", FrameFormat::RAWRGB),
         ];
-        
+
         for (format_name, frame_format) in formats {
             match camera.compatible_list_by_resolution(frame_format) {
                 Ok(resolution_map) => {
                     let mut resolutions_with_fps: Vec<(u32, u32, u32)> = Vec::new();
-                    
+
                     for (resolution, fps_list) in resolution_map.iter() {
                         // 各解像度に対して利用可能な全FPSを記録
                         for fps in fps_list.iter() {
-                            resolutions_with_fps.push((resolution.width_x, resolution.height_y, *fps));
+                            resolutions_with_fps.push((
+                                resolution.width_x,
+                                resolution.height_y,
+                                *fps,
+                            ));
                         }
                     }
-                    
+
                     // 重複を削除してユニークな組み合わせのみ保持
                     resolutions_with_fps.sort();
                     resolutions_with_fps.dedup();
-                    
+
                     // 解像度でソート（大きい順）、同じ解像度ならFPSでソート（大きい順）
                     resolutions_with_fps.sort_by(|a, b| {
                         let size_a = a.0 * a.1;
@@ -330,7 +373,7 @@ impl VideoCapture {
                             other => other,
                         }
                     });
-                    
+
                     if !resolutions_with_fps.is_empty() {
                         result.push((format_name.to_string(), resolutions_with_fps));
                     }
@@ -349,15 +392,18 @@ impl VideoCapture {
                 }
             }
         }
-        
+
         // 結果が空の場合はデフォルト値を返す
         if result.is_empty() {
             result = vec![
                 ("YUY2".to_string(), vec![(1280, 720, 60), (640, 480, 30)]),
-                ("MJPEG".to_string(), vec![(1920, 1080, 30), (1280, 720, 60), (640, 480, 30)]),
+                (
+                    "MJPEG".to_string(),
+                    vec![(1920, 1080, 30), (1280, 720, 60), (640, 480, 30)],
+                ),
             ];
         }
-        
+
         Ok(result)
     }
 }
