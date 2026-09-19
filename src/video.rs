@@ -14,7 +14,86 @@ pub type FormatCapability = (String, Vec<(u32, u32, u32)>);
 /// デバイスが対応する全フォーマットの能力一覧。
 pub type DeviceCapabilities = Vec<FormatCapability>;
 
+/// YCbCr -> RGB 変換の係数。
+///
+/// リミテッドレンジ（Y 16〜235、Cb/Cr 16〜240）の信号をフルレンジ RGB（0〜255）へ
+/// 展開する行列を、1024 倍の固定小数点（`>> 10` で戻す）で保持する。
+///
+/// 各係数の導出は以下。Kr / Kb は色空間ごとの輝度の重み、Kg = 1 - Kr - Kb。
+///
+/// ```text
+/// y   = 255/219                        (Y のレンジ 219 段を 255 段へ伸ばす)
+/// r_v = 255/224 * 2 * (1 - Kr)
+/// g_u = 255/224 * 2 * Kb * (1 - Kb) / Kg
+/// g_v = 255/224 * 2 * Kr * (1 - Kr) / Kg
+/// b_u = 255/224 * 2 * (1 - Kb)
+/// ```
+///
+/// `g_u` と `g_v` は減算に使うため、符号を除いた大きさを持つ。
+#[derive(Debug, PartialEq, Eq)]
+struct ColorMatrix {
+    /// Y - 16 に掛ける係数
+    y: i32,
+    /// R への Cr - 128 の寄与
+    r_v: i32,
+    /// G から引く Cb - 128 の寄与
+    g_u: i32,
+    /// G から引く Cr - 128 の寄与
+    g_v: i32,
+    /// B への Cb - 128 の寄与
+    b_u: i32,
+}
+
+/// BT.601（SD 向け。Kr = 0.299、Kb = 0.114）。
+///
+/// 1.164 / 1.596 / 0.392 / 0.813 / 2.017 に相当する。
+/// `g_v` だけは上式の丸め（832）ではなく 833 を使っている。古くから出回っている
+/// 整数版の定数をそのまま引き継いだもので、1/1024 の差しかないため変えていない。
+static BT601: ColorMatrix = ColorMatrix {
+    y: 1192,
+    r_v: 1634,
+    g_u: 401,
+    g_v: 833,
+    b_u: 2066,
+};
+
+/// BT.709（HD 向け。Kr = 0.2126、Kb = 0.0722）。
+///
+/// 上式に代入すると 1.16438 / 1.79274 / 0.21325 / 0.53291 / 2.11240 となり、
+/// 1024 倍して四捨五入すると 1192 / 1836 / 218 / 546 / 2163 になる。
+static BT709: ColorMatrix = ColorMatrix {
+    y: 1192,
+    r_v: 1836,
+    g_u: 218,
+    g_v: 546,
+    b_u: 2163,
+};
+
+/// HD とみなす境界。これ以上なら BT.709 を使う。
+///
+/// HD の放送規格（ITU-R BT.709）は 1280x720 以上を対象としており、
+/// それ未満の SD 解像度は BT.601 で符号化される。キャプチャーボードは
+/// 入力信号の色空間を通知してこないため、解像度から推定するしかない。
+const HD_MIN_WIDTH: usize = 1280;
+const HD_MIN_HEIGHT: usize = 720;
+
+/// 解像度から色空間を推定して係数を選ぶ。
+///
+/// 幅と高さのどちらかが HD の境界に達していれば BT.709 とみなす。
+/// 1440x1080 のようにアスペクト比が 1:1 でない HD 形式があるため、
+/// 片方だけを見ると取りこぼす。
+fn color_matrix_for(width: usize, height: usize) -> &'static ColorMatrix {
+    if width >= HD_MIN_WIDTH || height >= HD_MIN_HEIGHT {
+        &BT709
+    } else {
+        &BT601
+    }
+}
+
 /// YUY2 -> RGB24 の高速変換 (最適化版)。
+///
+/// 変換に使う係数は `matrix` で受け取る。解像度から選ぶ場合は
+/// `color_matrix_for` を通す。
 ///
 /// 変換結果は `out` へ書き込む。`out` は呼び出し側が使い回す前提で、
 /// 毎フレームの確保・ゼロクリア・解放を避けるために `&mut Vec<u8>` で受け取る。
@@ -22,13 +101,28 @@ pub type DeviceCapabilities = Vec<FormatCapability>;
 /// `width * height * 3` バイトへリサイズしたうえで全域を書き切る。
 /// 変換できなかった領域（幅が奇数で余る 1 画素、入力が足りない画素）は
 /// 使い回した Vec に残る前フレームの画素が見えないよう 0 で埋める。
-fn yuy2_to_rgb_naive(width: usize, height: usize, src: &[u8], out: &mut Vec<u8>) {
+fn yuy2_to_rgb_naive(
+    width: usize,
+    height: usize,
+    src: &[u8],
+    matrix: &ColorMatrix,
+    out: &mut Vec<u8>,
+) {
     // 既に確保済みの容量はそのまま使う。0 埋めが走るのは伸ばした分だけ
     out.resize(width * height * 3, 0);
 
     // 安全確保: 偶数幅前提 (YUYV ペア)
     // 4 バイト / 6 バイトに満たない端数は変換しない
     let converted_len = {
+        // ループの外に出して、毎画素の間接参照を避ける
+        let ColorMatrix {
+            y: cy,
+            r_v,
+            g_u,
+            g_v,
+            b_u,
+        } = *matrix;
+
         let (src_chunks, _) = src.as_chunks::<4>();
         let (out_chunks, _) = out.as_chunks_mut::<6>();
         let pair_count = src_chunks.len().min(out_chunks.len());
@@ -39,19 +133,19 @@ fn yuy2_to_rgb_naive(width: usize, height: usize, src: &[u8], out: &mut Vec<u8>)
             let y1 = src_chunk[2] as i32;
             let v = src_chunk[3] as i32;
 
-            // BT.601 変換 (整数演算で高速化)
+            // リミテッドレンジの原点へ寄せる (整数演算で高速化)
             let c0 = y0 - 16;
             let c1 = y1 - 16;
             let d = u - 128;
             let e = v - 128;
 
-            // 係数を1024倍して整数演算に変換 (1.164 ≈ 1192/1024)
-            let r0 = (1192 * c0 + 1634 * e) >> 10;
-            let g0 = (1192 * c0 - 401 * d - 833 * e) >> 10;
-            let b0 = (1192 * c0 + 2066 * d) >> 10;
-            let r1 = (1192 * c1 + 1634 * e) >> 10;
-            let g1 = (1192 * c1 - 401 * d - 833 * e) >> 10;
-            let b1 = (1192 * c1 + 2066 * d) >> 10;
+            // 係数は 1024 倍の固定小数点なので >> 10 で戻す
+            let r0 = (cy * c0 + r_v * e) >> 10;
+            let g0 = (cy * c0 - g_u * d - g_v * e) >> 10;
+            let b0 = (cy * c0 + b_u * d) >> 10;
+            let r1 = (cy * c1 + r_v * e) >> 10;
+            let g1 = (cy * c1 - g_u * d - g_v * e) >> 10;
+            let b1 = (cy * c1 + b_u * d) >> 10;
 
             out_chunk[0] = r0.clamp(0, 255) as u8;
             out_chunk[1] = g0.clamp(0, 255) as u8;
@@ -262,7 +356,9 @@ impl VideoCapture {
                                 .and_then(|previous| Arc::try_unwrap(previous).ok())
                                 .map(|previous| previous.data)
                                 .unwrap_or_default();
-                            yuy2_to_rgb_naive(width, height, &raw_data, &mut rgb);
+                            // 入力信号の色空間は通知されないため解像度から推定する
+                            let matrix = color_matrix_for(width, height);
+                            yuy2_to_rgb_naive(width, height, &raw_data, matrix, &mut rgb);
                             rgb_vec = Some(rgb);
                             used_fast = true;
                         }
@@ -490,9 +586,9 @@ mod tests {
 
     /// 変換結果を新しい Vec で受け取るテスト用ヘルパー。
     /// 出力先の使い回しそのものを見るテストは `yuy2_to_rgb_naive` を直接呼ぶ
-    fn convert_yuy2(width: usize, height: usize, src: &[u8]) -> Vec<u8> {
+    fn convert_yuy2(width: usize, height: usize, src: &[u8], matrix: &ColorMatrix) -> Vec<u8> {
         let mut out = Vec::new();
-        yuy2_to_rgb_naive(width, height, src, &mut out);
+        yuy2_to_rgb_naive(width, height, src, matrix, &mut out);
         out
     }
 
@@ -606,21 +702,27 @@ mod tests {
         assert_eq!(frame.data, vec![(PUSH_COUNT - 1) as u8; TEST_FRAME_LEN]);
         assert_eq!(generation, PUSH_COUNT as u64);
     }
-    // 期待値は BT.601 の整数近似式を手計算した結果をベタ書きする。
+    // 期待値は係数表から手計算した結果をベタ書きする。
     // 実装と同じ式で計算すると、実装が誤っていてもテストが通ってしまうため。
+    //
+    // 計算式（`>> 10` は負の値では負の無限大方向へ丸められる）:
+    //   c = Y - 16, d = Cb - 128, e = Cr - 128
+    //   R = (y*c + r_v*e) >> 10
+    //   G = (y*c - g_u*d - g_v*e) >> 10
+    //   B = (y*c + b_u*d) >> 10
 
     #[test]
-    fn yuy2_to_rgb_naive_known_pattern_converts_two_pixels() {
+    fn yuy2_to_rgb_naive_bt601_known_pattern_converts_two_pixels() {
         // Y0=81, U=90, Y1=145, V=240 (赤寄りの YUYV ペア)
         let src = [81u8, 90, 145, 240];
-        let out = convert_yuy2(2, 1, &src);
+        let out = convert_yuy2(2, 1, &src, &BT601);
         assert_eq!(out, vec![254, 0, 0, 255, 73, 73]);
     }
 
     #[test]
     fn yuy2_to_rgb_naive_output_length_is_width_times_height_times_three() {
         let src = [235u8, 128, 235, 128, 235, 128, 235, 128];
-        let out = convert_yuy2(2, 2, &src);
+        let out = convert_yuy2(2, 2, &src, &BT601);
         assert_eq!(out.len(), 2 * 2 * 3);
         assert_eq!(
             out,
@@ -632,7 +734,7 @@ mod tests {
     fn yuy2_to_rgb_naive_odd_width_leaves_last_pixel_black() {
         // 幅が奇数だと出力が 6 バイト単位で割り切れず、最後の 1 画素は変換されず 0 のまま残る
         let src = [235u8, 128, 235, 128, 0, 0];
-        let out = convert_yuy2(3, 1, &src);
+        let out = convert_yuy2(3, 1, &src, &BT601);
         assert_eq!(out, vec![254, 254, 254, 254, 254, 254, 0, 0, 0]);
     }
 
@@ -640,29 +742,29 @@ mod tests {
     fn yuy2_to_rgb_naive_short_source_leaves_remaining_pixels_black() {
         // 入力が 1 ペア分しかない場合、残りの画素は 0 のまま (パニックしない)
         let src = [235u8, 128, 235, 128];
-        let out = convert_yuy2(4, 1, &src);
+        let out = convert_yuy2(4, 1, &src, &BT601);
         assert_eq!(out, vec![254, 254, 254, 254, 254, 254, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
-    fn yuy2_to_rgb_naive_max_input_saturates_at_255() {
+    fn yuy2_to_rgb_naive_bt601_max_input_saturates_at_255() {
         // Y=255, U=255, V=255 では R と B が 255 を超えるため飽和する
         let src = [255u8, 255, 255, 255];
-        let out = convert_yuy2(2, 1, &src);
+        let out = convert_yuy2(2, 1, &src, &BT601);
         assert_eq!(out, vec![255, 125, 255, 255, 125, 255]);
     }
 
     #[test]
-    fn yuy2_to_rgb_naive_min_input_saturates_at_0() {
+    fn yuy2_to_rgb_naive_bt601_min_input_saturates_at_0() {
         // Y=0, U=0, V=0 では R と B が負になるため 0 に飽和する
         let src = [0u8, 0, 0, 0];
-        let out = convert_yuy2(2, 1, &src);
+        let out = convert_yuy2(2, 1, &src, &BT601);
         assert_eq!(out, vec![0, 135, 0, 0, 135, 0]);
     }
 
     #[test]
     fn yuy2_to_rgb_naive_zero_size_returns_empty() {
-        let out = convert_yuy2(0, 0, &[]);
+        let out = convert_yuy2(0, 0, &[], &BT601);
         assert!(out.is_empty());
     }
 
@@ -672,7 +774,7 @@ mod tests {
         // 変換されない領域は 0 になること
         let mut out = vec![0xFFu8; 12];
         let src = [235u8, 128, 235, 128];
-        yuy2_to_rgb_naive(4, 1, &src, &mut out);
+        yuy2_to_rgb_naive(4, 1, &src, &BT601, &mut out);
         assert_eq!(out, vec![254, 254, 254, 254, 254, 254, 0, 0, 0, 0, 0, 0]);
     }
 
@@ -681,7 +783,7 @@ mod tests {
         // 解像度が小さくなっても出力長が追従し、前の内容が残らないこと
         let mut out = vec![0xFFu8; 24];
         let src = [235u8, 128, 235, 128];
-        yuy2_to_rgb_naive(2, 1, &src, &mut out);
+        yuy2_to_rgb_naive(2, 1, &src, &BT601, &mut out);
         assert_eq!(out, vec![254, 254, 254, 254, 254, 254]);
     }
 
@@ -690,11 +792,11 @@ mod tests {
         // 同じ解像度で呼び直したときに再確保が起きないこと（このタスクの本題）
         let src = [81u8, 90, 145, 240, 81, 90, 145, 240];
         let mut out = Vec::new();
-        yuy2_to_rgb_naive(2, 2, &src, &mut out);
+        yuy2_to_rgb_naive(2, 2, &src, &BT601, &mut out);
         let first_ptr = out.as_ptr();
         let first_capacity = out.capacity();
 
-        yuy2_to_rgb_naive(2, 2, &src, &mut out);
+        yuy2_to_rgb_naive(2, 2, &src, &BT601, &mut out);
         assert_eq!(out.as_ptr(), first_ptr, "確保済みの領域を使い回す");
         assert_eq!(out.capacity(), first_capacity);
     }
@@ -720,6 +822,88 @@ mod tests {
     }
 
     #[test]
+    fn yuy2_to_rgb_naive_bt709_known_pattern_converts_two_pixels() {
+        // BT.601 のテストと同じ入力。Y0=81, U=90, Y1=145, V=240
+        let src = [81u8, 90, 145, 240];
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &BT709),
+            vec![255, 24, 0, 255, 98, 69]
+        );
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &BT601),
+            vec![254, 0, 0, 255, 73, 73],
+            "同じ入力でも係数が違えば結果が変わる"
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_bt709_neutral_gray_matches_bt601() {
+        // Cb = Cr = 128 の無彩色では色差の項が 0 になるため、
+        // Y の係数が同じ 1192 である両者の結果は一致する
+        let src = [235u8, 128, 235, 128];
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &BT709),
+            vec![254, 254, 254, 254, 254, 254]
+        );
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &BT601),
+            convert_yuy2(2, 1, &src, &BT709)
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_bt709_max_input_saturates_at_255() {
+        // Y=255, U=255, V=255 では R と B が 255 を超えるため飽和する
+        let src = [255u8, 255, 255, 255];
+        let out = convert_yuy2(2, 1, &src, &BT709);
+        assert_eq!(out, vec![255, 183, 255, 255, 183, 255]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_bt709_min_input_saturates_at_0() {
+        // Y=0, U=0, V=0 では R と B が負になるため 0 に飽和する
+        let src = [0u8, 0, 0, 0];
+        let out = convert_yuy2(2, 1, &src, &BT709);
+        assert_eq!(out, vec![0, 76, 0, 0, 76, 0]);
+    }
+
+    #[test]
+    fn color_matrix_for_sd_resolution_returns_bt601() {
+        // 640x480 (VGA)、720x480 (NTSC)、720x576 (PAL) はいずれも SD
+        assert_eq!(color_matrix_for(640, 480), &BT601);
+        assert_eq!(color_matrix_for(720, 480), &BT601);
+        assert_eq!(color_matrix_for(720, 576), &BT601);
+    }
+
+    #[test]
+    fn color_matrix_for_hd_resolution_returns_bt709() {
+        assert_eq!(color_matrix_for(1280, 720), &BT709);
+        assert_eq!(color_matrix_for(1920, 1080), &BT709);
+        assert_eq!(color_matrix_for(3840, 2160), &BT709);
+    }
+
+    #[test]
+    fn color_matrix_for_just_below_hd_threshold_returns_bt601() {
+        // 幅・高さの両方が境界に届かない場合だけ BT.601
+        assert_eq!(color_matrix_for(1279, 719), &BT601);
+    }
+
+    #[test]
+    fn color_matrix_for_either_dimension_at_threshold_returns_bt709() {
+        // 1440x1080 のようにアスペクト比が 1:1 でない HD 形式を取りこぼさないため、
+        // 幅と高さのどちらかが境界に達していれば BT.709 とみなす
+        assert_eq!(color_matrix_for(1280, 719), &BT709);
+        assert_eq!(color_matrix_for(1279, 720), &BT709);
+        assert_eq!(color_matrix_for(1440, 1080), &BT709);
+    }
+
+    #[test]
+    fn color_matrix_for_zero_size_returns_bt601() {
+        // 解像度が取れない異常系。どちらかに倒すしかないので SD 側へ倒す
+        assert_eq!(color_matrix_for(0, 0), &BT601);
+    }
+
+    #[test]
     #[ignore = "計測用"]
     fn yuy2_to_rgb_naive_1080p_conversion_time() {
         // 実行: cargo test --release -- --ignored --nocapture
@@ -739,16 +923,16 @@ mod tests {
         let allocating_start = Instant::now();
         for _ in 0..FRAMES {
             let mut out = Vec::new();
-            yuy2_to_rgb_naive(WIDTH, HEIGHT, &src, &mut out);
+            yuy2_to_rgb_naive(WIDTH, HEIGHT, &src, &BT709, &mut out);
             std::hint::black_box(&out);
         }
         let allocating_ms = allocating_start.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
 
         let mut out = Vec::new();
-        yuy2_to_rgb_naive(WIDTH, HEIGHT, &src, &mut out);
+        yuy2_to_rgb_naive(WIDTH, HEIGHT, &src, &BT709, &mut out);
         let reusing_start = Instant::now();
         for _ in 0..FRAMES {
-            yuy2_to_rgb_naive(WIDTH, HEIGHT, &src, &mut out);
+            yuy2_to_rgb_naive(WIDTH, HEIGHT, &src, &BT709, &mut out);
             std::hint::black_box(&out);
         }
         let reusing_ms = reusing_start.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
