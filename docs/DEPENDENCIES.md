@@ -162,6 +162,55 @@ curl -s https://crates.io/api/v1/crates/eframe | jq -r .crate.max_stable_version
 
 ## ライセンス
 
-`THIRD-PARTY-LICENSES.txt` は手作業で維持されている。依存を更新すると内容が古くなる。
+`THIRD-PARTY-LICENSES.txt` は `cargo-about` が `Cargo.lock` から生成する。**手で編集しない。**
 
-`cargo-about` による自動生成と `cargo-deny` によるライセンスポリシーの検査がバックログにある。依存更新に着手する前に整えておくと、更新のたびに手で直す必要がなくなる。
+### 再生成
+
+依存を追加・更新したら、`Cargo.lock` の差分と同じコミットで生成し直す。
+
+```bash
+cargo install cargo-about --locked --version 0.9.2 --features cli
+```
+
+```bash
+cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES.txt
+```
+
+- `--features cli` を付けないと実行ファイルが作られない。付け忘れると「バイナリが無い」という警告だけ出てインストールが済んだように見える
+- 版を固定するのは、cargo-about の版が変わると出力も変わりうるため。CI も同じ版を入れる
+- CI（`.github/workflows/ci.yml`）が同じ手順で生成して `git diff --exit-code` にかける。**再生成を忘れると CI が落ちる**
+
+### 設定ファイル
+
+| ファイル | 役割 |
+|---|---|
+| `about.toml` | 対象ターゲット、許可するライセンス、一覧から外す依存 |
+| `about.hbs` | 出力の体裁（プレーンテキストのテンプレート） |
+
+### ライセンスポリシー
+
+`about.toml` の `accepted` に無いライセンスの依存が入ると**生成が失敗する**。GPL / AGPL / LGPL は意図的に載せていないので、コピーレフトの依存が混ざればここで気付ける。
+
+**この仕組みがポリシー検査を兼ねているため、`cargo-deny` は導入していない。** 取得元レジストリの制限や脆弱性情報（RustSec）の検査まで欲しくなった時点で、別途検討する。
+
+生成が落ちたときに `accepted` へ機械的に足さないこと。**単一バイナリを MIT で配布できるライセンスかどうかを判断してから足す。**
+
+### 対象範囲
+
+- ターゲットは `x86_64-pc-windows-msvc` のみ。他のプラットフォーム向けの依存は配布物に入らないため載せない
+- dev-dependencies は配布物に入らないため対象外。build-dependencies は生成物がバイナリに入りうるため対象
+- `capturecard_viewer` 自身は `Cargo.toml` の `publish = false` によって一覧から外れる
+
+### 既知の制限 — Ubuntu フォントのライセンス
+
+`epaint` は既定フォントとして Ubuntu Light を exe に埋め込んでいる。Ubuntu Font Licence 1.0 は **Font Software の各コピーに著作権表示とライセンス本文を含めること**を条件にしているため、`THIRD-PARTY-LICENSES.txt` に本文を載せる必要がある。
+
+ところが `LicenseRef-UFL-1.0` は、SPDX の構文としては正しいユーザー定義参照（`LicenseRef-`）であるものの、SPDX License List には載っていない。載っていない以上 cargo-about が差し込める既定の本文が無く、crate 内のどのファイルが本文かも自動では決まらないため、0.9.2 は本文を出力できない。生成のたびに次の警告が出る（生成自体は成功する）。
+
+```
+WARN LicenseRef-UFL-1.0 has no license file for crate 'epaint 0.26.2'
+```
+
+そのため **`about.hbs` の末尾に本文を直接書いた付録**を置いている。出典は `epaint` crate の `fonts/UFL.txt` と `Ubuntu-Light.ttf` のメタデータ。ここだけ自動生成の対象外なので、**egui を更新したときは同梱フォントが変わっていないか確認すること。**
+
+本来は `about.toml` の clarify で「このファイルがこのライセンスの本文」と教えれば済むはずだが、0.9.2 では LicenseRef 向けの本文選択の条件が反転していて、別のライセンス本文が UFL の見出しで出力されてしまう。上流が直れば付録は外せる。
