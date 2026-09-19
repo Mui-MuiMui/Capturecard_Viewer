@@ -503,6 +503,13 @@ impl CaptureCardViewer {
                         available_size
                     };
 
+                    // 表示領域が潰れている間は描画も当たり判定も行わない。
+                    // 大きさ 0 や負の矩形を割り当てても映像は見えず、
+                    // ドラッグや右クリックの判定だけが残ると誤作動の元になる。
+                    if display_size.x <= 0.0 || display_size.y <= 0.0 {
+                        return;
+                    }
+
                     let rect = egui::Rect::from_center_size(
                         ui.available_rect_before_wrap().center(),
                         display_size,
@@ -596,6 +603,13 @@ impl CaptureCardViewer {
                     } else {
                         available_size
                     };
+
+                    // 表示領域が潰れている間は描画も当たり判定も行わない。
+                    // 大きさ 0 や負の矩形を割り当てても映像は見えず、
+                    // ドラッグや右クリックの判定だけが残ると誤作動の元になる。
+                    if display_size.x <= 0.0 || display_size.y <= 0.0 {
+                        return;
+                    }
 
                     let rect = egui::Rect::from_center_size(
                         ui.available_rect_before_wrap().center(),
@@ -802,7 +816,20 @@ impl CaptureCardViewer {
 //
 // self を使わない純粋な計算なので、ユニットテストできるよう
 // impl の外へ出してある。
+//
+// 幅か高さが 0 以下の入力に対しては egui::Vec2::ZERO を返す。最小化や
+// ウィンドウの極端な縮小で available_size が潰れると 0 除算で縦横比が
+// inf / NaN になり、そのまま Rect へ渡すと描画が壊れるため。
+// 呼び出し側は ZERO を「描画するものがない」と解釈して描画を飛ばす。
 fn calculate_aspect_ratio_size(image_size: egui::Vec2, available_size: egui::Vec2) -> egui::Vec2 {
+    if image_size.x <= 0.0
+        || image_size.y <= 0.0
+        || available_size.x <= 0.0
+        || available_size.y <= 0.0
+    {
+        return egui::Vec2::ZERO;
+    }
+
     let image_aspect = image_size.x / image_size.y;
     let available_aspect = available_size.x / available_size.y;
 
@@ -1308,6 +1335,88 @@ mod tests {
         let size = calculate_aspect_ratio_size(Vec2::new(400.0, 200.0), Vec2::new(1600.0, 1600.0));
 
         assert_eq!(size, Vec2::new(1600.0, 800.0));
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_zero_height_area_returns_zero() {
+        // 最小化やウィンドウの極端な縮小で高さが 0 になる。
+        // available_size.x / available_size.y が inf になるケース
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(400.0, 0.0));
+
+        assert_eq!(size, Vec2::ZERO);
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_zero_width_area_returns_zero() {
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(0.0, 400.0));
+
+        assert_eq!(size, Vec2::ZERO);
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_zero_area_returns_zero() {
+        // 幅も高さも 0。0.0 / 0.0 が NaN になるケース
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::ZERO);
+
+        assert_eq!(size, Vec2::ZERO);
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_negative_area_returns_zero() {
+        // egui のレイアウトは余白が足りないと負の available_size を返すことがある。
+        // 負の大きさの矩形を描画に渡さないよう、ここで潰す
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(-10.0, 400.0));
+
+        assert_eq!(size, Vec2::ZERO);
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_zero_height_image_returns_zero() {
+        // テクスチャ側が潰れている場合。image_size.x / image_size.y が inf になる
+        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 0.0), Vec2::new(400.0, 400.0));
+
+        assert_eq!(size, Vec2::ZERO);
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_zero_image_returns_zero() {
+        // 0.0 / 0.0 で image_aspect が NaN になり、
+        // 掛け算の結果として NaN が呼び出し側へ漏れるケース
+        let size = calculate_aspect_ratio_size(Vec2::ZERO, Vec2::new(400.0, 400.0));
+
+        assert_eq!(size, Vec2::ZERO);
+    }
+
+    #[test]
+    fn calculate_aspect_ratio_size_degenerate_input_never_returns_nan_or_inf() {
+        // 描画へ渡る値が NaN / inf にならないことを、退化した入力の組で一括して確かめる
+        let degenerate = [
+            (Vec2::ZERO, Vec2::ZERO),
+            (Vec2::new(1600.0, 800.0), Vec2::new(400.0, 0.0)),
+            (Vec2::new(1600.0, 800.0), Vec2::new(0.0, 400.0)),
+            (Vec2::new(1600.0, 0.0), Vec2::new(400.0, 400.0)),
+            (Vec2::new(0.0, 800.0), Vec2::new(400.0, 400.0)),
+            (Vec2::new(1600.0, 800.0), Vec2::new(-10.0, -10.0)),
+        ];
+
+        for (image_size, available_size) in degenerate {
+            let size = calculate_aspect_ratio_size(image_size, available_size);
+
+            assert!(
+                size.x.is_finite() && size.y.is_finite(),
+                "image={:?} available={:?} で {:?} を返した",
+                image_size,
+                available_size,
+                size
+            );
+            assert!(
+                size.x >= 0.0 && size.y >= 0.0,
+                "image={:?} available={:?} で負の大きさ {:?} を返した",
+                image_size,
+                available_size,
+                size
+            );
+        }
     }
 
     #[test]
