@@ -32,9 +32,11 @@ reviews:
         - 複数の `Mutex` を同時にロックする場合、順序は settings → video_capture → audio_capture → screenshot_manager に揃える。
 
   tools:
-    # CI で cargo clippy を回すようになったら、指摘の重複を避けるため false にする
+    # CI（.github/workflows/ci.yml）で cargo clippy --all-targets を回しているため、
+    # 指摘の重複を避けて clippy 連携は切る。
+    # CodeRabbit には設計・可読性・見落としのレビューを担当させる
     clippy:
-      enabled: true
+      enabled: false
 
 knowledge_base:
   code_guidelines:
