@@ -710,6 +710,7 @@ dependencies = [
  "embed-resource",
  "global-hotkey",
  "image 0.24.9",
+ "log",
  "nokhwa",
  "rfd",
  "ringbuf",

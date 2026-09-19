@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 // confy が設定ファイルの置き場所を決めるのに使う名前。
 // ここがずれると既存の設定ファイルを見失うため、1 箇所にまとめてある。
-const APP_NAME: &str = "capturecard_viewer";
+// ログの出力先も同じデータディレクトリを基準に決めるので、logging から参照する。
+pub(crate) const APP_NAME: &str = "capturecard_viewer";
 
 // 各構造体の #[serde(default)] は、項目を追加したあとも古い設定ファイルを
 // 読めるようにするためのもの。これが無いと、
