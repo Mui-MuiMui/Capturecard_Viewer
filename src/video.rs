@@ -724,6 +724,11 @@ mod tests {
     fn yuy2_to_rgb_naive_1080p_conversion_time() {
         // 実行: cargo test --release -- --ignored --nocapture
         // 毎フレームの新規確保と、確保済み Vec の使い回しを比べる
+        //
+        // 計測値の出力に println! を使う。アプリ本体では
+        // #![windows_subsystem = "windows"] のため標準出力はどこにも届かないが、
+        // テストバイナリの標準出力は cargo がパイプで受け取るため
+        // --nocapture を付ければ表示される（実測で確認済み）
         const WIDTH: usize = 1920;
         const HEIGHT: usize = 1080;
         const FRAMES: usize = 120;
