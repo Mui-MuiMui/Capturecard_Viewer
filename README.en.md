@@ -77,7 +77,9 @@ Deleting it will recreate the settings with default values on the next launch.
 
 ## Recommended settings
 
-Video settings are read from the device, so some options may not appear.
+The video format, resolution and frame rate options are read from the connected device. The query runs in the background at startup, so the options are usually ready by the time you open the settings window. If it has not finished yet, a spinner appears below the device name and the options fill in once the query completes.
+
+If the query fails, the reason and a "再取得" (retry) button are shown and the options fall back to a built-in default list.
 
 **Video**
 
