@@ -1,29 +1,29 @@
 #![windows_subsystem = "windows"]
 
-use chrono::Local;
 use eframe::egui;
-use image::GenericImageView;
-use std::panic::AssertUnwindSafe;
+use chrono::Local;
 use std::sync::{Arc, Mutex};
+use image::GenericImageView;
 use std::time::Instant;
+use std::panic::AssertUnwindSafe;
 
+mod settings;
+mod video;
 mod audio;
 mod screenshot;
-mod settings;
 mod ui;
-mod video;
 
-use audio::AudioCapture;
-use screenshot::ScreenshotManager;
 use settings::AppSettings;
 use video::VideoCapture;
+use audio::AudioCapture;
+use screenshot::ScreenshotManager;
 
 pub struct CaptureCardViewer {
     settings: Arc<Mutex<AppSettings>>,
     video_capture: Arc<Mutex<VideoCapture>>,
     audio_capture: Arc<Mutex<AudioCapture>>,
     screenshot_manager: Arc<Mutex<ScreenshotManager>>,
-
+    
     // UI状態管理
     show_settings: bool,
     show_context_menu: bool,
@@ -34,14 +34,14 @@ pub struct CaptureCardViewer {
     volume: f32,
     last_volume_sent: f32,
     last_settings_applied: Instant,
-
+    
     // 映像表示関連
     video_texture: Option<egui::TextureHandle>,
     pending_hotkey: Option<String>,
     temp_hotkey: String, // ホットキーダイアログ用の一時保存
     // 最後に適用した実行時パラメータ（差分ベースの再起動回避用）
     last_video_device: Option<String>,
-    last_video_res: Option<(u32, u32)>,
+    last_video_res: Option<(u32,u32)>,
     last_video_format: Option<String>,
     last_audio_device: Option<String>,
     last_audio_rate: Option<u32>,
@@ -50,28 +50,29 @@ pub struct CaptureCardViewer {
     last_video_fps: Option<u32>,
 
     audio_last_error: Option<String>,
-
+    
     // 起動時遅延接続
     startup_time: Option<Instant>,
     delayed_connection_triggered: bool,
-
+    
     // UI性能向上のためのデバイスリストキャッシュ
     cached_input_devices: Vec<String>,
     cached_output_devices: Vec<String>,
     last_device_list_update: Option<Instant>,
-
+    
     // ウィンドウ管理
     always_on_top: bool,
 }
 
 impl Default for CaptureCardViewer {
     fn default() -> Self {
-        let settings = Arc::new(Mutex::new(AppSettings::load()));
+        let (loaded_settings, load_outcome) = AppSettings::load();
+        let settings = Arc::new(Mutex::new(loaded_settings));
         let video_capture = Arc::new(Mutex::new(VideoCapture::new()));
         #[allow(clippy::arc_with_non_send_sync)] // 音声キャプチャは非同期処理で必要
         let audio_capture = Arc::new(Mutex::new(AudioCapture::new()));
         let screenshot_manager = Arc::new(Mutex::new(ScreenshotManager::new()));
-
+        
         let app = Self {
             settings,
             video_capture,
@@ -102,12 +103,12 @@ impl Default for CaptureCardViewer {
             // 起動時遅延接続
             startup_time: Some(Instant::now()),
             delayed_connection_triggered: false,
-
+            
             // UI性能向上のためのデバイスリストキャッシュ
             cached_input_devices: Vec::new(),
             cached_output_devices: Vec::new(),
             last_device_list_update: None,
-
+            
             // ウィンドウ管理
             always_on_top: false,
         };
@@ -117,16 +118,14 @@ impl Default for CaptureCardViewer {
             if let Ok(mut s) = app.settings.lock() {
                 if s.video.device_name.is_none() {
                     let devices = VideoCapture::list_devices();
-                    if let Some((name, _)) = devices.first() {
-                        s.video.device_name = Some(name.clone());
-                    }
+                    if let Some((name,_)) = devices.first() { s.video.device_name = Some(name.clone()); }
                 }
                 if s.audio.input_device_name.is_none() {
                     let ac = AudioCapture::new();
                     let list = ac.list_input_devices();
                     println!("Debug: Available input devices: {:?}", list);
-                    if let Some(name) = list.first() {
-                        s.audio.input_device_name = Some(name.clone());
+                    if let Some(name) = list.first() { 
+                        s.audio.input_device_name = Some(name.clone()); 
                         println!("Debug: Set default input device: {}", name);
                     }
                 }
@@ -135,7 +134,12 @@ impl Default for CaptureCardViewer {
                     s.audio.output_device_name = None;
                     println!("Debug: Using default output device");
                 }
-                s.save();
+                // 読めなかった設定ファイルを退避できなかった場合は書き戻さない。
+                // ここで上書きすると、ディスクに残っている壊れたファイルが既定値で
+                // 潰れ、ユーザーが設定を取り戻す最後の手段が消える。
+                if load_outcome.may_write_defaults_on_startup() {
+                    s.save();
+                }
             }
         }
         // 注: デバイス接続は起動から2秒後に遅延実行される
@@ -156,7 +160,7 @@ impl eframe::App for CaptureCardViewer {
                     self.last_audio_device = None;
                     println!("Debug: Calling apply_settings(initial=true)");
                     self.apply_settings(true);
-
+                    
                     // 初期設定後にエラーハンドリング付きでウィンドウレベル設定を適用
                     if let Err(e) = std::panic::catch_unwind(AssertUnwindSafe(|| {
                         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
@@ -164,24 +168,24 @@ impl eframe::App for CaptureCardViewer {
                                 egui::WindowLevel::AlwaysOnTop
                             } else {
                                 egui::WindowLevel::Normal
-                            },
+                            }
                         ));
                     })) {
                         eprintln!("Warning: Failed to set window level: {:?}", e);
                     }
-
+                    
                     self.delayed_connection_triggered = true;
                     println!("Debug: Delayed connection sequence completed");
                 }
             }
         }
-
+        
         // ビデオフレームを更新
         self.update_video_texture(ctx);
-
+        
         // グローバルホットキーを処理
         self.handle_hotkeys();
-
+        
         // 定期的に実行時設定が保存設定と一致することを確認（外部変更に対応）
         if self.last_settings_applied.elapsed().as_secs_f32() > 2.0 {
             if let Err(e) = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -200,30 +204,30 @@ impl eframe::App for CaptureCardViewer {
             }
             self.last_volume_sent = self.volume;
         }
-
+        
         // ウィンドウサイズと位置を監視して設定に保存
         let viewport = ctx.input(|i| i.viewport().clone());
         let current_size = viewport.inner_rect.map(|r| (r.width(), r.height()));
         let current_pos = viewport.outer_rect.map(|r| (r.left(), r.top()));
-
+        
         // サイズまたは位置が変更された場合、設定を更新
         if let Ok(mut settings) = self.settings.lock() {
             let mut changed = false;
-
+            
             if let Some((width, height)) = current_size {
                 if settings.ui.last_window_size != Some((width, height)) {
                     settings.ui.last_window_size = Some((width, height));
                     changed = true;
                 }
             }
-
+            
             if let Some((x, y)) = current_pos {
                 if settings.ui.last_window_pos != Some((x, y)) {
                     settings.ui.last_window_pos = Some((x, y));
                     changed = true;
                 }
             }
-
+            
             // 変更があった場合は設定を保存
             if changed {
                 settings.save();
@@ -238,24 +242,15 @@ impl eframe::App for CaptureCardViewer {
         } else {
             self.show_windowed_ui(ctx);
         }
-
+        
         // 設定ダイアログ
         if self.show_settings {
             let input_devices = self.get_cached_input_devices().clone();
             let output_devices = self.get_cached_output_devices().clone();
-            let applied = ui::show_settings_dialog(
-                ctx,
-                &mut self.show_settings,
-                &self.settings,
-                &mut self.show_hotkey_dialog,
-                &input_devices,
-                &output_devices,
-            );
-            if applied {
-                self.apply_settings(false);
-            }
+            let applied = ui::show_settings_dialog(ctx, &mut self.show_settings, &self.settings, &mut self.show_hotkey_dialog, &input_devices, &output_devices);
+            if applied { self.apply_settings(false); }
         }
-
+        
         // ホットキーキャプチャダイアログ
         if self.show_hotkey_dialog {
             // ダイアログが開かれた時に現在の設定値をtemp_hotkeyに設定
@@ -264,13 +259,9 @@ impl eframe::App for CaptureCardViewer {
                     self.temp_hotkey = settings.screenshot.hotkey.clone().unwrap_or_default();
                 }
             }
-
-            let hotkey_captured = ui::show_hotkey_capture_dialog(
-                ctx,
-                &mut self.show_hotkey_dialog,
-                &mut self.temp_hotkey,
-            );
-
+            
+            let hotkey_captured = ui::show_hotkey_capture_dialog(ctx, &mut self.show_hotkey_dialog, &mut self.temp_hotkey);
+            
             // ホットキーがキャプチャされた場合、設定を更新
             if hotkey_captured && !self.temp_hotkey.is_empty() {
                 if let Ok(mut settings) = self.settings.lock() {
@@ -279,17 +270,15 @@ impl eframe::App for CaptureCardViewer {
                 }
                 self.pending_hotkey = Some(self.temp_hotkey.clone());
             }
-
+            
             // ダイアログが閉じられた時にtemp_hotkeyをクリア
             if !self.show_hotkey_dialog {
                 self.temp_hotkey.clear();
             }
         }
-
+        
         // コンテキストメニュー
-        if self.show_context_menu {
-            self.show_context_menu(ctx);
-        }
+        if self.show_context_menu { self.show_context_menu(ctx); }
 
         // フルスクリーン切替オーバーレイ (1秒表示)
         if let Some(t) = self.last_fullscreen_toggle {
@@ -298,16 +287,9 @@ impl eframe::App for CaptureCardViewer {
                     .order(egui::Order::Foreground)
                     .fixed_pos(egui::pos2(20.0, 20.0))
                     .show(ctx, |ui| {
-                        egui::Frame::none()
-                            .fill(egui::Color32::from_black_alpha(160))
-                            .rounding(5.0)
-                            .show(ui, |ui| {
-                                ui.label(if self.is_fullscreen {
-                                    "フルスクリーン ON"
-                                } else {
-                                    "フルスクリーン OFF"
-                                });
-                            });
+                        egui::Frame::none().fill(egui::Color32::from_black_alpha(160)).rounding(5.0).show(ui, |ui| {
+                            ui.label(if self.is_fullscreen { "フルスクリーン ON" } else { "フルスクリーン OFF" });
+                        });
                     });
             }
         }
@@ -315,10 +297,10 @@ impl eframe::App for CaptureCardViewer {
         // 新しくキャプチャされたホットキーを即座に登録
         if let Some(hk) = self.pending_hotkey.take() {
             println!("Registering new hotkey: {}", hk);
-            if let Ok(mut ss) = self.screenshot_manager.lock() {
+            if let Ok(mut ss) = self.screenshot_manager.lock() { 
                 match ss.set_hotkey(&hk) {
                     Ok(()) => println!("Hotkey registered successfully: {}", hk),
-                    Err(e) => println!("Failed to register hotkey {}: {}", hk, e),
+                    Err(e) => println!("Failed to register hotkey {}: {}", hk, e)
                 }
             } else {
                 println!("Failed to lock screenshot_manager for hotkey registration");
@@ -328,13 +310,13 @@ impl eframe::App for CaptureCardViewer {
         if crate::ui::should_play_test_sound() {
             if let Ok(settings) = self.settings.lock() {
                 let volume = settings.screenshot.sound_volume;
-                if let Ok(ss) = self.screenshot_manager.lock() {
-                    ss.play_screenshot_sound(volume);
+                if let Ok(ss) = self.screenshot_manager.lock() { 
+                    ss.play_screenshot_sound(volume); 
                 }
             }
         }
     }
-
+    
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // 終了時に最新のウィンドウサイズと位置を取得して保存
         if let Ok(settings) = self.settings.lock() {
@@ -354,13 +336,12 @@ impl CaptureCardViewer {
                     minification: egui::TextureFilter::Linear,
                     wrap_mode: egui::TextureWrapMode::ClampToEdge,
                 };
-
+                
                 let image = egui::ColorImage::from_rgb([frame.width, frame.height], &frame.data);
                 if let Some(texture) = &mut self.video_texture {
                     texture.set(image, texture_options);
                 } else {
-                    self.video_texture =
-                        Some(ctx.load_texture("video_frame", image, texture_options));
+                    self.video_texture = Some(ctx.load_texture("video_frame", image, texture_options));
                 }
 
                 // より積極的な再描画要求
@@ -370,7 +351,7 @@ impl CaptureCardViewer {
         // フレームがない場合でも定期的に再チェック
         ctx.request_repaint_after(std::time::Duration::from_millis(16)); // ~60fps
     }
-
+    
     fn handle_hotkeys(&mut self) {
         let should_screenshot = {
             if let Ok(screenshot_manager) = self.screenshot_manager.lock() {
@@ -384,55 +365,45 @@ impl CaptureCardViewer {
                 false
             }
         };
-
+        
         if should_screenshot {
             println!("Main: Taking screenshot now");
             self.take_screenshot();
         }
     }
-
+    
     fn take_screenshot(&mut self) {
         println!("take_screenshot: Starting screenshot process");
-
+        
         // 最新フレームの生データを抽出
         if let Ok(video) = self.video_capture.lock() {
             if let Some(frame) = video.get_latest_frame() {
-                println!(
-                    "take_screenshot: Got video frame {}x{}",
-                    frame.width, frame.height
-                );
-
+                println!("take_screenshot: Got video frame {}x{}", frame.width, frame.height);
+                
                 // タイムスタンプとパスを構築
                 let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S-%3f").to_string();
                 if let Ok(settings) = self.settings.lock() {
                     let path = settings.get_screenshot_path(&timestamp);
                     println!("take_screenshot: Saving to {:?}", path);
-
+                    
                     // 親ディレクトリを作成
-                    if let Some(parent) = path.parent() {
+                    if let Some(parent) = path.parent() { 
                         if let Err(e) = std::fs::create_dir_all(parent) {
                             println!("take_screenshot: Failed to create directories: {}", e);
                         }
                     }
-
+                    
                     // RGBデータを画像に変換して保存
-                    if let Some(img_buf) = image::RgbImage::from_raw(
-                        frame.width as u32,
-                        frame.height as u32,
-                        frame.data.clone(),
-                    ) {
+                    if let Some(img_buf) = image::RgbImage::from_raw(frame.width as u32, frame.height as u32, frame.data.clone()) {
                         match img_buf.save(&path) {
                             Ok(()) => {
-                                println!(
-                                    "take_screenshot: Screenshot saved successfully to {:?}",
-                                    path
-                                );
+                                println!("take_screenshot: Screenshot saved successfully to {:?}", path);
                                 let volume = settings.screenshot.sound_volume;
-                                if let Ok(ss) = self.screenshot_manager.lock() {
-                                    ss.play_screenshot_sound(volume);
+                                if let Ok(ss) = self.screenshot_manager.lock() { 
+                                    ss.play_screenshot_sound(volume); 
                                 }
                             }
-                            Err(e) => println!("take_screenshot: Failed to save image: {}", e),
+                            Err(e) => println!("take_screenshot: Failed to save image: {}", e)
                         }
                     } else {
                         println!("take_screenshot: Failed to create RgbImage from raw data");
@@ -447,108 +418,100 @@ impl CaptureCardViewer {
             println!("take_screenshot: Failed to lock video_capture");
         }
     }
-
+    
     fn show_windowed_ui(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().inner_margin(egui::Margin::same(2.0))) // マージンを2pxに設定
             .show(ctx, |ui| {
-                // 映像表示エリア
-                let available_size = ui.available_size();
-
-                if let Some(texture) = &self.video_texture {
-                    let image_size = texture.size_vec2();
-                    let display_size = if self.maintain_aspect_ratio {
-                        self.calculate_aspect_ratio_size(image_size, available_size)
-                    } else {
-                        available_size
-                    };
-
-                    let rect = egui::Rect::from_center_size(
-                        ui.available_rect_before_wrap().center(),
-                        display_size,
-                    );
-
-                    let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-                    ui.painter().image(
-                        texture.id(),
-                        rect,
-                        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)),
-                        egui::Color32::WHITE,
-                    );
-
-                    // ウィンドウドラッグを処理（設定が有効な場合のみ）
-                    if response.dragged() {
-                        if let Ok(settings) = self.settings.lock() {
-                            if settings.ui.enable_drag_move {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                            }
-                        }
-                    }
-
-                    // インタラクションを処理
-                    if response.double_clicked() {
-                        self.toggle_fullscreen(ctx, true);
-                    }
-
-                    if response.secondary_clicked() {
-                        self.show_context_menu = true;
-                        self.context_menu_pos =
-                            ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
-                    }
-
-                    // 音量調整のためのスクロールを処理
-                    if response.hovered() {
-                        ctx.input(|i| {
-                            if i.raw_scroll_delta.y > 0.0 {
-                                self.volume = (self.volume + 10.0).min(200.0);
-                                // 設定に保存してリセットを防ぐ
-                                if let Ok(mut settings) = self.settings.lock() {
-                                    settings.ui.volume = self.volume;
-                                    settings.save();
-                                }
-                            } else if i.raw_scroll_delta.y < 0.0 {
-                                self.volume = (self.volume - 10.0).max(0.0);
-                                // 設定に保存してリセットを防ぐ
-                                if let Ok(mut settings) = self.settings.lock() {
-                                    settings.ui.volume = self.volume;
-                                    settings.save();
-                                }
-                            }
-                        });
-                    }
+            // 映像表示エリア
+            let available_size = ui.available_size();
+            
+            if let Some(texture) = &self.video_texture {
+                let image_size = texture.size_vec2();
+                let display_size = if self.maintain_aspect_ratio {
+                    self.calculate_aspect_ratio_size(image_size, available_size)
                 } else {
-                    let response =
-                        ui.allocate_response(available_size, egui::Sense::click_and_drag());
-                    ui.centered_and_justified(|ui| {
-                        ui.label("映像信号がありません");
-                    });
-
-                    // 空エリアでのウィンドウドラッグを処理（設定が有効な場合のみ）
-                    if response.dragged() {
-                        if let Ok(settings) = self.settings.lock() {
-                            if settings.ui.enable_drag_move {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                            }
+                    available_size
+                };
+                
+                let rect = egui::Rect::from_center_size(
+                    ui.available_rect_before_wrap().center(),
+                    display_size
+                );
+                
+                let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+                ui.painter().image(texture.id(), rect, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)), egui::Color32::WHITE);
+                
+                // ウィンドウドラッグを処理（設定が有効な場合のみ）
+                if response.dragged() {
+                    if let Ok(settings) = self.settings.lock() {
+                        if settings.ui.enable_drag_move {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                         }
-                    }
-
-                    // 空エリアでの右クリックを処理
-                    if response.secondary_clicked() {
-                        self.show_context_menu = true;
-                        self.context_menu_pos =
-                            ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
                     }
                 }
-            });
+                
+                // インタラクションを処理
+                if response.double_clicked() {
+                    self.toggle_fullscreen(ctx, true);
+                }
+                
+                if response.secondary_clicked() {
+                    self.show_context_menu = true;
+                    self.context_menu_pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+                }
+                
+                // 音量調整のためのスクロールを処理
+                if response.hovered() {
+                    ctx.input(|i| {
+                        if i.raw_scroll_delta.y > 0.0 {
+                            self.volume = (self.volume + 10.0).min(200.0);
+                            // 設定に保存してリセットを防ぐ
+                            if let Ok(mut settings) = self.settings.lock() {
+                                settings.ui.volume = self.volume;
+                                settings.save();
+                            }
+                        } else if i.raw_scroll_delta.y < 0.0 {
+                            self.volume = (self.volume - 10.0).max(0.0);
+                            // 設定に保存してリセットを防ぐ
+                            if let Ok(mut settings) = self.settings.lock() {
+                                settings.ui.volume = self.volume;
+                                settings.save();
+                            }
+                        }
+                    });
+                }
+            } else {
+                let response = ui.allocate_response(available_size, egui::Sense::click_and_drag());
+                ui.centered_and_justified(|ui| {
+                    ui.label("映像信号がありません");
+                });
+                
+                // 空エリアでのウィンドウドラッグを処理（設定が有効な場合のみ）
+                if response.dragged() {
+                    if let Ok(settings) = self.settings.lock() {
+                        if settings.ui.enable_drag_move {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        }
+                    }
+                }
+                
+                // 空エリアでの右クリックを処理
+                if response.secondary_clicked() {
+                    self.show_context_menu = true;
+                    self.context_menu_pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+                }
+            }
+        });
     }
-
+    
     fn show_fullscreen_ui(&mut self, ctx: &egui::Context) {
         // フルスクリーンUI（装飾なし、ウィンドウ版と同等の機能）
         egui::CentralPanel::default()
             .frame(egui::Frame::none().inner_margin(egui::Margin::same(0.0))) // フルスクリーンはマージン0
             .show(ctx, |ui| {
                 let available_size = ui.available_size();
-
+                
                 if let Some(texture) = &self.video_texture {
                     let image_size = texture.size_vec2();
                     let display_size = if self.maintain_aspect_ratio {
@@ -556,35 +519,27 @@ impl CaptureCardViewer {
                     } else {
                         available_size
                     };
-
+                    
                     let rect = egui::Rect::from_center_size(
                         ui.available_rect_before_wrap().center(),
-                        display_size,
+                        display_size
                     );
-
+                    
                     let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-                    ui.painter().image(
-                        texture.id(),
-                        rect,
-                        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)),
-                        egui::Color32::WHITE,
-                    );
-
+                    ui.painter().image(texture.id(), rect, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)), egui::Color32::WHITE);
+                    
                     // フルスクリーンではドラッグ移動を完全に無効化
                     // （フルスクリーンでは画面の移動自体が意味をなさないため）
-
+                    
                     // ダブルクリックでウィンドウモードに戻る
-                    if response.double_clicked() {
-                        self.toggle_fullscreen(ctx, false);
-                    }
-
+                    if response.double_clicked() { self.toggle_fullscreen(ctx, false); }
+                    
                     // 右クリックでコンテキストメニュー
                     if response.secondary_clicked() {
                         self.show_context_menu = true;
-                        self.context_menu_pos =
-                            ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+                        self.context_menu_pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
                     }
-
+                    
                     // マウススクロールでの音量調整（ウィンドウ版と同じ機能）
                     if response.hovered() {
                         ctx.input(|i| {
@@ -607,30 +562,26 @@ impl CaptureCardViewer {
                     }
                 } else {
                     // 映像信号がない場合
-                    let response =
-                        ui.allocate_response(available_size, egui::Sense::click_and_drag());
+                    let response = ui.allocate_response(available_size, egui::Sense::click_and_drag());
                     ui.centered_and_justified(|ui| {
                         ui.label("映像信号がありません");
                     });
-
+                    
                     // フルスクリーンではドラッグ移動を完全に無効化
                     // （フルスクリーンでは画面の移動自体が意味をなさないため）
-
+                    
                     // ダブルクリックでウィンドウモードに戻る
-                    if response.double_clicked() {
-                        self.toggle_fullscreen(ctx, false);
-                    }
-
+                    if response.double_clicked() { self.toggle_fullscreen(ctx, false); }
+                    
                     // 右クリックでコンテキストメニュー
                     if response.secondary_clicked() {
                         self.show_context_menu = true;
-                        self.context_menu_pos =
-                            ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+                        self.context_menu_pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
                     }
                 }
             });
     }
-
+    
     fn show_context_menu(&mut self, ctx: &egui::Context) {
         let mut close_menu = false;
         let mut final_rect: Option<egui::Rect> = None;
@@ -646,9 +597,8 @@ impl CaptureCardViewer {
                     ui.set_max_width(240.0);
 
                     ui.label(format!("音量: {}%", self.volume as i32));
-                    let volume_response =
-                        ui.add(egui::Slider::new(&mut self.volume, 0.0..=200.0).suffix("%"));
-
+                    let volume_response = ui.add(egui::Slider::new(&mut self.volume, 0.0..=200.0).suffix("%"));
+                    
                     // 音量が変更された場合、設定に反映し保存
                     if volume_response.changed() {
                         if let Ok(mut settings) = self.settings.lock() {
@@ -658,9 +608,8 @@ impl CaptureCardViewer {
                     }
 
                     ui.separator();
-                    let aspect_response =
-                        ui.checkbox(&mut self.maintain_aspect_ratio, "アスペクト比を維持");
-
+                    let aspect_response = ui.checkbox(&mut self.maintain_aspect_ratio, "アスペクト比を維持");
+                    
                     // アスペクト比設定が変更された場合、設定に反映し保存
                     if aspect_response.changed() {
                         if let Ok(mut settings) = self.settings.lock() {
@@ -668,10 +617,10 @@ impl CaptureCardViewer {
                             settings.save(); // 即座に保存
                         }
                     }
-
+                    
                     // 最前面表示のチェックボックス
                     let always_on_top_response = ui.checkbox(&mut self.always_on_top, "最前面表示");
-
+                    
                     // 最前面表示設定が変更された場合
                     if always_on_top_response.changed() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
@@ -679,9 +628,9 @@ impl CaptureCardViewer {
                                 egui::WindowLevel::AlwaysOnTop
                             } else {
                                 egui::WindowLevel::Normal
-                            },
+                            }
                         ));
-
+                        
                         // 設定に保存
                         if let Ok(mut settings) = self.settings.lock() {
                             settings.ui.always_on_top = self.always_on_top;
@@ -690,14 +639,13 @@ impl CaptureCardViewer {
                     }
 
                     // フルスクリーン表示のチェックボックス
-                    let fullscreen_response =
-                        ui.checkbox(&mut self.is_fullscreen, "フルスクリーン表示");
-
+                    let fullscreen_response = ui.checkbox(&mut self.is_fullscreen, "フルスクリーン表示");
+                    
                     // フルスクリーン状態が変更された場合
                     if fullscreen_response.changed() {
                         self.toggle_fullscreen(ctx, self.is_fullscreen);
                     }
-
+                    
                     // 画面ドラッグ移動のチェックボックス
                     let enable_drag_move = if let Ok(settings) = self.settings.lock() {
                         settings.ui.enable_drag_move
@@ -705,9 +653,8 @@ impl CaptureCardViewer {
                         true
                     };
                     let mut temp_enable_drag_move = enable_drag_move;
-                    let drag_move_response =
-                        ui.checkbox(&mut temp_enable_drag_move, "画面ドラッグ移動");
-
+                    let drag_move_response = ui.checkbox(&mut temp_enable_drag_move, "画面ドラッグ移動");
+                    
                     // 画面ドラッグ移動設定が変更された場合
                     if drag_move_response.changed() {
                         if let Ok(mut settings) = self.settings.lock() {
@@ -739,32 +686,22 @@ impl CaptureCardViewer {
             if i.pointer.primary_clicked() {
                 if let Some(pos) = i.pointer.latest_pos() {
                     if let Some(r) = final_rect {
-                        if !r.contains(pos) {
-                            close_menu = true;
-                        }
+                        if !r.contains(pos) { close_menu = true; }
                     } else {
                         close_menu = true;
                     }
                 }
             }
-            if i.key_pressed(egui::Key::Escape) {
-                close_menu = true;
-            }
+            if i.key_pressed(egui::Key::Escape) { close_menu = true; }
         });
 
-        if close_menu {
-            self.show_context_menu = false;
-        }
+        if close_menu { self.show_context_menu = false; }
     }
-
-    fn calculate_aspect_ratio_size(
-        &self,
-        image_size: egui::Vec2,
-        available_size: egui::Vec2,
-    ) -> egui::Vec2 {
+    
+    fn calculate_aspect_ratio_size(&self, image_size: egui::Vec2, available_size: egui::Vec2) -> egui::Vec2 {
         let image_aspect = image_size.x / image_size.y;
         let available_aspect = available_size.x / available_size.y;
-
+        
         if image_aspect > available_aspect {
             // 画像が横長 - 横幅に合わせる
             egui::Vec2::new(available_size.x, available_size.x / image_aspect)
@@ -776,27 +713,30 @@ impl CaptureCardViewer {
 }
 
 fn main() -> Result<(), eframe::Error> {
-    // 設定から保存されたウィンドウサイズと位置を読み込む
-    let settings = AppSettings::load();
-    let mut viewport_builder = egui::ViewportBuilder::default().with_icon(load_icon());
-
+    // 設定から保存されたウィンドウサイズと位置を読み込む。
+    // ここでは読み込み結果を使わない。既定値の書き戻しは
+    // CaptureCardViewer::default 側だけで行うため。
+    let (settings, _) = AppSettings::load();
+    let mut viewport_builder = egui::ViewportBuilder::default()
+        .with_icon(load_icon());
+    
     // 保存されたウィンドウサイズがあれば適用
     if let Some((width, height)) = settings.ui.last_window_size {
         viewport_builder = viewport_builder.with_inner_size([width, height]);
     } else {
         viewport_builder = viewport_builder.with_inner_size([1280.0, 720.0]);
     }
-
+    
     // 保存されたウィンドウ位置があれば適用
     if let Some((x, y)) = settings.ui.last_window_pos {
         viewport_builder = viewport_builder.with_position([x, y]);
     }
-
+    
     let options = eframe::NativeOptions {
         viewport: viewport_builder,
         ..Default::default()
     };
-
+    
     eframe::run_native(
         "Capturecard Viewer",
         options,
@@ -809,8 +749,7 @@ fn main() -> Result<(), eframe::Error> {
 
 fn configure_japanese_font(ctx: &egui::Context) {
     // WindowsフォントディレクトリからMeiryoの読み込みを試行
-    #[cfg(target_os = "windows")]
-    {
+    #[cfg(target_os = "windows")] {
         let candidate_paths = [
             "C:/Windows/Fonts/meiryo.ttc",
             "C:/Windows/Fonts/Meiryo.ttc",
@@ -819,16 +758,10 @@ fn configure_japanese_font(ctx: &egui::Context) {
         for p in candidate_paths.iter() {
             if let Ok(data) = std::fs::read(p) {
                 let mut fonts = egui::FontDefinitions::default();
-                fonts
-                    .font_data
-                    .insert("meiryo".to_string(), egui::FontData::from_owned(data));
+                fonts.font_data.insert("meiryo".to_string(), egui::FontData::from_owned(data));
                 // 優先度のためにプロポーショナル・等幅フォントファミリーの先頭に挿入
-                if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                    fam.insert(0, "meiryo".to_string());
-                }
-                if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                    fam.insert(0, "meiryo".to_string());
-                }
+                if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) { fam.insert(0, "meiryo".to_string()); }
+                if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Monospace) { fam.insert(0, "meiryo".to_string()); }
                 ctx.set_fonts(fonts);
                 break;
             }
@@ -849,7 +782,7 @@ fn load_icon() -> egui::IconData {
             };
         }
     }
-
+    
     // フォールバック: 単純な色付き四角形を作成
     let mut rgba_data = Vec::new();
     for _ in 0..(32 * 32) {
@@ -867,29 +800,23 @@ impl CaptureCardViewer {
         if let Ok(settings) = self.settings.lock() {
             // Video - リトライ機能付き
             if let Ok(mut video) = self.video_capture.lock() {
-                let need_video_restart = settings.video.device_name != self.last_video_device
-                    || settings.video.resolution != self.last_video_res
-                    || settings.video.format != self.last_video_format
-                    || settings.video.fps != self.last_video_fps;
-
+                let need_video_restart =
+                    settings.video.device_name != self.last_video_device ||
+                    settings.video.resolution != self.last_video_res ||
+                    settings.video.format != self.last_video_format ||
+                    settings.video.fps != self.last_video_fps;
+                    
                 if settings.video.device_name.is_some() && (need_video_restart || initial) {
-                    println!(
-                        "Debug: Starting video device connection: {:?}",
-                        settings.video.device_name
-                    );
+                    println!("Debug: Starting video device connection: {:?}", settings.video.device_name);
                     let mut video_success = false;
                     let max_retries = if initial { 3 } else { 1 };
-
+                    
                     for attempt in 0..max_retries {
                         if attempt > 0 {
-                            println!(
-                                "Video device connection attempt {} of {}",
-                                attempt + 1,
-                                max_retries
-                            );
+                            println!("Video device connection attempt {} of {}", attempt + 1, max_retries);
                             std::thread::sleep(std::time::Duration::from_millis(1000));
                         }
-
+                        
                         match video.start_capture(
                             settings.video.device_name.as_deref(),
                             settings.video.resolution,
@@ -909,7 +836,7 @@ impl CaptureCardViewer {
                             }
                         }
                     }
-
+                    
                     if video_success {
                         self.last_video_device = settings.video.device_name.clone();
                         self.last_video_res = settings.video.resolution;
@@ -918,50 +845,41 @@ impl CaptureCardViewer {
                     }
                 }
             }
-
+            
             // Audio - 改良されたリトライとデフォルト設定
             if let Ok(mut audio) = self.audio_capture.lock() {
-                let need_audio_restart = settings.audio.input_device_name != self.last_audio_device
-                    || settings.audio.sample_rate != self.last_audio_rate
-                    || settings.audio.channels != self.last_audio_channels
-                    || initial; // 起動時は必ず接続試行
-
+                let need_audio_restart =
+                    settings.audio.input_device_name != self.last_audio_device ||
+                    settings.audio.sample_rate != self.last_audio_rate ||
+                    settings.audio.channels != self.last_audio_channels ||
+                    initial; // 起動時は必ず接続試行
+                    
                 if need_audio_restart {
                     println!("Debug: Starting audio device connection");
-                    println!(
-                        "Debug: Input device: {:?}",
-                        settings.audio.input_device_name
-                    );
-                    println!(
-                        "Debug: Output device: {:?}",
-                        settings.audio.output_device_name
-                    );
-
+                    println!("Debug: Input device: {:?}", settings.audio.input_device_name);
+                    println!("Debug: Output device: {:?}", settings.audio.output_device_name);
+                    
                     // まずは利用可能なデバイスをリスト
                     let input_devices = audio.list_input_devices();
                     let output_devices = audio.list_output_devices();
                     println!("Debug: Available input devices: {:?}", input_devices);
                     println!("Debug: Available output devices: {:?}", output_devices);
-
+                    
                     let mut audio_success = false;
                     let max_retries = if initial { 5 } else { 2 }; // 起動時により多くリトライ
-
+                    
                     for attempt in 0..max_retries {
                         if attempt > 0 {
-                            println!(
-                                "Audio device connection attempt {} of {}",
-                                attempt + 1,
-                                max_retries
-                            );
+                            println!("Audio device connection attempt {} of {}", attempt + 1, max_retries);
                             std::thread::sleep(std::time::Duration::from_millis(300));
                         }
-
+                        
                         // 接続試行
                         match audio.start_passthrough_with_settings(
-                            settings.audio.input_device_name.as_deref(),
-                            settings.audio.output_device_name.as_deref(),
-                            settings.audio.sample_rate,
-                            settings.audio.channels,
+                            settings.audio.input_device_name.as_deref(), 
+                            settings.audio.output_device_name.as_deref(), 
+                            settings.audio.sample_rate, 
+                            settings.audio.channels
                         ) {
                             Ok(_) => {
                                 println!("Debug: Audio devices connected successfully");
@@ -972,13 +890,11 @@ impl CaptureCardViewer {
                             Err(e) => {
                                 println!("Audio capture failed (attempt {}): {}", attempt + 1, e);
                                 self.audio_last_error = Some(e.clone());
-
+                                
                                 // 3回目以降のリトライではデフォルトデバイスを試行
                                 if attempt == 2 && initial {
                                     println!("Debug: Trying with default devices...");
-                                    match audio
-                                        .start_passthrough_with_settings(None, None, None, None)
-                                    {
+                                    match audio.start_passthrough_with_settings(None, None, None, None) {
                                         Ok(_) => {
                                             println!("Debug: Audio connected with default devices");
                                             self.audio_last_error = None;
@@ -986,17 +902,14 @@ impl CaptureCardViewer {
                                             break;
                                         }
                                         Err(e2) => {
-                                            println!(
-                                                "Default audio connection also failed: {}",
-                                                e2
-                                            );
+                                            println!("Default audio connection also failed: {}", e2);
                                         }
                                     }
                                 }
                             }
                         }
                     }
-
+                    
                     if audio_success {
                         self.last_audio_device = settings.audio.input_device_name.clone();
                         self.last_audio_rate = settings.audio.sample_rate;
@@ -1005,40 +918,39 @@ impl CaptureCardViewer {
                         println!("Debug: All audio connection attempts failed");
                     }
                 }
-
+                
                 // 音量とパススルー設定を適用
                 self.volume = settings.ui.volume;
                 audio.set_volume(self.volume);
                 audio.set_audio_passthrough_enabled(settings.audio.passthrough_enabled);
             }
-
+            
             // UI設定
             self.maintain_aspect_ratio = settings.ui.maintain_aspect_ratio;
             self.always_on_top = settings.ui.always_on_top;
-
+            
             // スクリーンショット設定
             if let Ok(mut ss) = self.screenshot_manager.lock() {
-                if let Some(hk) = &settings.screenshot.hotkey {
-                    let _ = ss.set_hotkey(hk);
+                if let Some(hk) = &settings.screenshot.hotkey { 
+                    let _ = ss.set_hotkey(hk); 
                 }
-                if let Some(sf) = &settings.screenshot.sound_file {
-                    let _ = ss.set_sound_file(sf);
+                if let Some(sf) = &settings.screenshot.sound_file { 
+                    let _ = ss.set_sound_file(sf); 
                 }
             }
         }
-
-        if !initial {
-            self.last_settings_applied = Instant::now();
+        
+        if !initial { 
+            self.last_settings_applied = Instant::now(); 
         }
     }
 
     fn update_cached_device_lists(&mut self) {
         // パフォーマンス影響を避けるため5秒ごとにのみデバイスリストを更新
-        let should_update = self
-            .last_device_list_update
+        let should_update = self.last_device_list_update
             .map(|last| last.elapsed().as_secs() >= 5)
             .unwrap_or(true);
-
+            
         if should_update {
             if let Ok(audio) = self.audio_capture.lock() {
                 self.cached_input_devices = audio.list_input_devices();
@@ -1047,12 +959,12 @@ impl CaptureCardViewer {
             }
         }
     }
-
+    
     fn get_cached_input_devices(&mut self) -> &Vec<String> {
         self.update_cached_device_lists();
         &self.cached_input_devices
     }
-
+    
     fn get_cached_output_devices(&mut self) -> &Vec<String> {
         self.update_cached_device_lists();
         &self.cached_output_devices
@@ -1060,7 +972,7 @@ impl CaptureCardViewer {
 
     fn toggle_fullscreen(&mut self, ctx: &egui::Context, to_full: bool) {
         use eframe::egui::ViewportCommand;
-
+        
         if to_full {
             ctx.send_viewport_cmd(ViewportCommand::Fullscreen(true));
             self.is_fullscreen = true;
@@ -1068,7 +980,7 @@ impl CaptureCardViewer {
             ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
             self.is_fullscreen = false;
         }
-
+        
         self.last_fullscreen_toggle = Some(Instant::now());
     }
 }
