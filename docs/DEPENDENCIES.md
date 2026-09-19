@@ -201,12 +201,16 @@ cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES.txt
 - dev-dependencies は配布物に入らないため対象外。build-dependencies は生成物がバイナリに入りうるため対象
 - `capturecard_viewer` 自身は `Cargo.toml` の `publish = false` によって一覧から外れる
 
-### 既知の制限
+### 既知の制限 — Ubuntu フォントのライセンス
 
-`epaint` が同梱する Ubuntu フォントのライセンス `LicenseRef-UFL-1.0` は SPDX の識別子ではないため、cargo-about 0.9.2 は本文を出力できない。生成のたびに次の警告が出るが、生成自体は成功する。
+`epaint` は既定フォントとして Ubuntu Light を exe に埋め込んでいる。Ubuntu Font Licence 1.0 は **Font Software の各コピーに著作権表示とライセンス本文を含めること**を条件にしているため、`THIRD-PARTY-LICENSES.txt` に本文を載せる必要がある。
+
+ところがこの識別子 `LicenseRef-UFL-1.0` は SPDX のものではないため、cargo-about 0.9.2 は本文を出力できず、生成のたびに次の警告が出る（生成自体は成功する）。
 
 ```
 WARN LicenseRef-UFL-1.0 has no license file for crate 'epaint 0.26.2'
 ```
 
-本文は `epaint` crate の `fonts/UFL.txt` にある。`about.toml` の clarify で対応付ける方法は、0.9.2 では LicenseRef 向けの本文選択の条件が反転しており別のライセンス本文が割り当たってしまうため使っていない。上流が直るか、egui を更新してフォントの扱いが変わった時点で見直す。
+そのため **`about.hbs` の末尾に本文を直接書いた付録**を置いている。出典は `epaint` crate の `fonts/UFL.txt` と `Ubuntu-Light.ttf` のメタデータ。ここだけ自動生成の対象外なので、**egui を更新したときは同梱フォントが変わっていないか確認すること。**
+
+`about.toml` の clarify で対応付ける方法は使えない。0.9.2 では LicenseRef 向けの本文選択の条件が反転していて、別のライセンス本文が UFL の見出しで出力されてしまう。上流が直れば付録は外せる。
