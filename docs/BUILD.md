@@ -43,10 +43,14 @@ cargo build
 (Get-Item target/release/capturecard_viewer.exe).VersionInfo | Format-List FileVersion,ProductVersion,FileVersionRaw,ProductVersionRaw
 ```
 
+`FileVersionRaw` と `ProductVersionRaw` は PowerShell が `FileVersionInfo` に足すプロパティで、`FileMajorPart` などの数値から組み立てられている。.NET の型そのものには無いため、API リファレンスを見ても載っていない。
+
+値の入り方は以下のようになる。**現行バージョンとは無関係な例**であり、ここを実際のバージョンに合わせて更新する必要はない。
+
 | `Cargo.toml` の `version` | `FileVersion`（文字列） | `FileVersionRaw`（数値） |
 |---|---|---|
-| `1.0.6` | `1.0.6` | `1.0.6.0` |
-| `1.0.7-rc1` | `1.0.7-rc1` | `1.0.7.0` |
+| `2.3.4` | `2.3.4` | `2.3.4.0` |
+| `2.3.4-rc1` | `2.3.4-rc1` | `2.3.4.0` |
 
 数値のバージョンは 16 bit 整数 4 つに限られるため、プレリリース識別子は文字列側にだけ入る。第 4 フィールドは常に 0。
 
