@@ -706,6 +706,16 @@ fn hotkey_key_name(key: egui::Key) -> Option<&'static str> {
         egui::Key::F10 => "F10",
         egui::Key::F11 => "F11",
         egui::Key::F12 => "F12",
+        egui::Key::Num0 => "0",
+        egui::Key::Num1 => "1",
+        egui::Key::Num2 => "2",
+        egui::Key::Num3 => "3",
+        egui::Key::Num4 => "4",
+        egui::Key::Num5 => "5",
+        egui::Key::Num6 => "6",
+        egui::Key::Num7 => "7",
+        egui::Key::Num8 => "8",
+        egui::Key::Num9 => "9",
         egui::Key::Space => "Space",
         egui::Key::Enter => "Enter",
         _ => return None,
@@ -961,6 +971,18 @@ mod tests {
         assert_eq!(
             build_hotkey_string(&modifiers(true, true, true), &[egui::Key::A]),
             Some("Ctrl+Shift+Alt+A".to_string())
+        );
+    }
+
+    #[test]
+    fn build_hotkey_string_digit_keys_are_supported() {
+        assert_eq!(
+            build_hotkey_string(&modifiers(false, false, false), &[egui::Key::Num0]),
+            Some("0".to_string())
+        );
+        assert_eq!(
+            build_hotkey_string(&modifiers(true, true, false), &[egui::Key::Num9]),
+            Some("Ctrl+Shift+9".to_string())
         );
     }
 

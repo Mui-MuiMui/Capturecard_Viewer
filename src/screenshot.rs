@@ -88,6 +88,16 @@ fn parse_key_code(key: &str) -> Result<Code, String> {
         "x" => Ok(Code::KeyX),
         "y" => Ok(Code::KeyY),
         "z" => Ok(Code::KeyZ),
+        "0" => Ok(Code::Digit0),
+        "1" => Ok(Code::Digit1),
+        "2" => Ok(Code::Digit2),
+        "3" => Ok(Code::Digit3),
+        "4" => Ok(Code::Digit4),
+        "5" => Ok(Code::Digit5),
+        "6" => Ok(Code::Digit6),
+        "7" => Ok(Code::Digit7),
+        "8" => Ok(Code::Digit8),
+        "9" => Ok(Code::Digit9),
         "space" => Ok(Code::Space),
         "enter" => Ok(Code::Enter),
         "escape" => Ok(Code::Escape),
@@ -426,6 +436,19 @@ mod tests {
         assert_eq!(parse_key_code("f9"), Ok(Code::F9));
         assert_eq!(parse_key_code("f10"), Ok(Code::F10));
         assert_eq!(parse_key_code("f12"), Ok(Code::F12));
+    }
+
+    #[test]
+    fn parse_key_code_digits_are_mapped() {
+        assert_eq!(parse_key_code("0"), Ok(Code::Digit0));
+        assert_eq!(parse_key_code("5"), Ok(Code::Digit5));
+        assert_eq!(parse_key_code("9"), Ok(Code::Digit9));
+    }
+
+    #[test]
+    fn parse_hotkey_digit_with_modifiers_is_accepted() {
+        let hotkey = parse_hotkey("Ctrl+Shift+9").expect("Ctrl+Shift+9 は解析できる");
+        assert_hotkey(&hotkey, Modifiers::CONTROL | Modifiers::SHIFT, Code::Digit9);
     }
 
     #[test]
