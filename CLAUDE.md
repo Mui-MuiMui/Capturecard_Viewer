@@ -82,7 +82,7 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 
 **設定を書き換える処理を足すときは `AppSettings::save()` を直接呼ばず `mark_settings_dirty()` を使うこと。** 直接呼ぶと、ウィンドウをドラッグしている間ずっと毎フレーム TOML を書き出す元の問題に戻る。
 
-例外は 2 つ。起動時の書き戻し（`may_write_defaults_on_startup()` で守られている）と、設定ダイアログの OK ボタン（`src/ui.rs`）。後者はユーザーの明示的な保存操作なので即座に書き出す。
+例外は 2 つ。起動時の書き戻し（`may_write_defaults_on_startup()` で守られている）と、設定ダイアログの OK ボタン（`main.rs` の `handle_settings_dialog_action`）。後者はユーザーの明示的な保存操作なので即座に書き出す。
 
 ### 設定ダイアログはドラフトを編集する
 
@@ -93,7 +93,7 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 | 適用 | する | しない | しない |
 | OK | する | する | する |
 | キャンセル | しない | しない | する |
-| ×（タイトルバー） | キャンセルと同じ | | |
+| ×（タイトルバー） | しない | しない | する（キャンセルと同じ） |
 
 - × は `egui::Window::open()` が `show_settings` を false にするだけでボタンが押されないため、描画後の開閉状態から `ui::resolve_action` が拾ってキャンセルへ倒している
 - **キャンセルは「適用」で反映済みの内容を戻さない。** 戻すには反映前の状態をもう 1 つ持つ必要があり、デバイスの開き直しも 2 度走る
