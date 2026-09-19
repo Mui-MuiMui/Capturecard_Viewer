@@ -107,6 +107,40 @@ impl Default for UiSettings {
     }
 }
 
+// 設定ファイルをどう読めたか。起動時に既定値を書き戻してよいかの判断に使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadOutcome {
+    // 読み込めた。初回起動で confy が既定値のファイルを作った場合も含む
+    Loaded,
+    // 読み込めなかったので既定値で起動した。読めなかったファイルは退避済みか、
+    // そもそも存在しなかった。どちらもディスクに壊れたファイルは残っていない
+    FellBackToDefaults,
+    // 読み込めず、退避もできなかった。読めなかったファイルがそのまま残っている
+    BrokenFileLeftBehind,
+}
+
+impl LoadOutcome {
+    // 起動時に既定値を設定ファイルへ書き戻してよいか。
+    //
+    // 退避できなかった場合だけ false になる。読めなかったファイルがディスクに
+    // 残っているため、ここで書き戻すとユーザーが設定を取り戻す最後の手段が消える。
+    // 書き戻さなければ壊れたファイルは手元に残り、次回以降も退避を試みられる。
+    pub fn may_write_defaults_on_startup(self) -> bool {
+        !matches!(self, LoadOutcome::BrokenFileLeftBehind)
+    }
+}
+
+// 退避の結果から読み込み結果を決める。
+//
+// load() 自体は confy が %AppData% を直接読み書きするためテストできない。
+// 判断の部分だけをこの関数に切り出して、退避が失敗した場合を含めて検証する。
+fn outcome_from_backup(backup: std::io::Result<Option<PathBuf>>) -> LoadOutcome {
+    match backup {
+        Ok(_) => LoadOutcome::FellBackToDefaults,
+        Err(_) => LoadOutcome::BrokenFileLeftBehind,
+    }
+}
+
 // 読み込めなかった設定ファイルを退避する。
 // 退避できた場合は退避先のパスを返す。元のファイルが無い場合は None を返す。
 //
@@ -142,22 +176,30 @@ fn next_backup_path(path: &Path) -> PathBuf {
 }
 
 impl AppSettings {
-    pub fn load() -> Self {
+    // 設定と、その読み込み結果を返す。
+    //
+    // 結果を返しているのは、起動時に既定値を書き戻してよいかを呼び出し側が
+    // 判断できるようにするため。退避に失敗したまま書き戻すと、読めなかった
+    // ファイルを既定値で上書きしてしまい、証跡ごと消える。
+    pub fn load() -> (Self, LoadOutcome) {
         match confy::load(APP_NAME, None) {
-            Ok(settings) => settings,
+            Ok(settings) => (settings, LoadOutcome::Loaded),
             Err(_) => {
                 // 読み込みに失敗した設定ファイルは、既定値で起動する前に退避する。
                 // 黙って上書きすると、ユーザーが自分の設定を取り戻す手段が無くなる。
                 //
-                // 読み込みの失敗理由・設定パスの取得の失敗・退避の失敗は、いずれも
-                // 意図して捨てている。コンソールもログ基盤も無く伝える先が無いうえ、
-                // ここで失敗しても起動を続けるほかないため。退避したファイルが残る
-                // こと自体が、現状で唯一の手がかりになる。
-                // ログ基盤を入れるときに、この 3 つを出力すること。
-                if let Ok(path) = confy::get_configuration_file_path(APP_NAME, None) {
-                    let _ = backup_broken_config(&path);
-                }
-                Self::default()
+                // 読み込みの失敗理由・設定パスの取得の失敗・退避の失敗は、理由
+                // そのものをここで捨てている。コンソールもログ基盤も無く伝える先が
+                // 無いため。ログ基盤を入れるときに、この 3 つを出力すること。
+                // 失敗したという事実だけは LoadOutcome として呼び出し側へ渡す。
+                let outcome = match confy::get_configuration_file_path(APP_NAME, None) {
+                    Ok(path) => outcome_from_backup(backup_broken_config(&path)),
+                    // 設定ファイルの置き場所が分からず、退避を試みることすらできない。
+                    // 読めなかったファイルが残っている可能性があるため、
+                    // 書き戻さない側に倒す。
+                    Err(_) => LoadOutcome::BrokenFileLeftBehind,
+                };
+                (Self::default(), outcome)
             }
         }
     }
@@ -415,6 +457,49 @@ enable_drag_move = false
         assert_eq!(fs::read_to_string(&first).unwrap(), "1 回目");
         assert_eq!(fs::read_to_string(&second).unwrap(), "2 回目");
         assert_eq!(fs::read_to_string(&third).unwrap(), "3 回目");
+    }
+
+    #[test]
+    fn outcome_from_backup_backup_failed_forbids_writing_defaults() {
+        // 退避に失敗した場合。読めなかったファイルがディスクに残っているため、
+        // 起動時に既定値を書き戻してはならない。書き戻すとユーザーが設定を
+        // 取り戻す最後の手段が消える。
+        let failed = Err(std::io::Error::other("退避に失敗した"));
+
+        let outcome = outcome_from_backup(failed);
+
+        assert_eq!(outcome, LoadOutcome::BrokenFileLeftBehind);
+        assert!(!outcome.may_write_defaults_on_startup());
+    }
+
+    #[test]
+    fn outcome_from_backup_backup_succeeded_allows_writing_defaults() {
+        // 退避できた場合。元のファイルは .bak として残っているため、
+        // 既定値を書き戻してよい。
+        let backed_up = Ok(Some(PathBuf::from("default-config.toml.bak")));
+
+        let outcome = outcome_from_backup(backed_up);
+
+        assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
+        assert!(outcome.may_write_defaults_on_startup());
+    }
+
+    #[test]
+    fn outcome_from_backup_nothing_to_back_up_allows_writing_defaults() {
+        // 退避するファイルがそもそも無かった場合。
+        // 潰す相手がいないので、既定値を書き戻してよい。
+        let nothing = Ok(None);
+
+        let outcome = outcome_from_backup(nothing);
+
+        assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
+        assert!(outcome.may_write_defaults_on_startup());
+    }
+
+    #[test]
+    fn load_outcome_loaded_allows_writing_defaults() {
+        // 正常に読めた場合。通常どおり保存してよい。
+        assert!(LoadOutcome::Loaded.may_write_defaults_on_startup());
     }
 
     #[test]

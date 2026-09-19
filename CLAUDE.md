@@ -68,6 +68,8 @@ cargo fmt --check && cargo clippy --all-targets && cargo test
 
 読み込みに失敗した場合、`AppSettings::load()` は壊れたファイルを `.bak` へ退避してから既定値で起動する。失敗の理由はまだどこにも残らない（ログ基盤が未導入のため）。
 
+`load()` は `(AppSettings, LoadOutcome)` を返す。`LoadOutcome` は退避まで含めて成功したかを表し、**退避できなかった場合に起動時の書き戻しを止めるためにある。** 退避に失敗すると読めなかったファイルがディスクに残るので、そこへ既定値を `save()` すると証跡ごと潰れる。`CaptureCardViewer::default` の起動時保存は `may_write_defaults_on_startup()` で守ってあるので、**起動経路に `save()` を足すときは同じ判断を通すこと。** 設定ダイアログからの明示的な保存は、ユーザーの意思なので抑止していない。
+
 ### UI にあるが動作していない設定がある
 
 以下は設定画面から変更できるが実装が追いついていない。README の記述もこれらを前提に書かれているため、修正時は README も合わせて更新すること。

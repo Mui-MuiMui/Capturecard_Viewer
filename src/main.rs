@@ -66,7 +66,8 @@ pub struct CaptureCardViewer {
 
 impl Default for CaptureCardViewer {
     fn default() -> Self {
-        let settings = Arc::new(Mutex::new(AppSettings::load()));
+        let (loaded_settings, load_outcome) = AppSettings::load();
+        let settings = Arc::new(Mutex::new(loaded_settings));
         let video_capture = Arc::new(Mutex::new(VideoCapture::new()));
         #[allow(clippy::arc_with_non_send_sync)] // 音声キャプチャは非同期処理で必要
         let audio_capture = Arc::new(Mutex::new(AudioCapture::new()));
@@ -133,7 +134,13 @@ impl Default for CaptureCardViewer {
                     s.audio.output_device_name = None;
                     println!("Debug: Using default output device");
                 }
-                s.save();            }
+                // 読めなかった設定ファイルを退避できなかった場合は書き戻さない。
+                // ここで上書きすると、ディスクに残っている壊れたファイルが既定値で
+                // 潰れ、ユーザーが設定を取り戻す最後の手段が消える。
+                if load_outcome.may_write_defaults_on_startup() {
+                    s.save();
+                }
+            }
         }
         // 注: デバイス接続は起動から2秒後に遅延実行される
         app
@@ -706,8 +713,10 @@ impl CaptureCardViewer {
 }
 
 fn main() -> Result<(), eframe::Error> {
-    // 設定から保存されたウィンドウサイズと位置を読み込む
-    let settings = AppSettings::load();
+    // 設定から保存されたウィンドウサイズと位置を読み込む。
+    // ここでは読み込み結果を使わない。既定値の書き戻しは
+    // CaptureCardViewer::default 側だけで行うため。
+    let (settings, _) = AppSettings::load();
     let mut viewport_builder = egui::ViewportBuilder::default()
         .with_icon(load_icon());
     
