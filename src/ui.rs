@@ -32,6 +32,116 @@ pub enum SettingsTab {
     Screenshot,
 }
 
+/// デバイス能力の取得状態。
+///
+/// 取得は `Camera::new` でデバイスを開いたうえで 3 フォーマット分の対応表を
+/// 引く重い処理なので、描画スレッドでは行わず使い捨てのスレッドへ投げる。
+/// ダイアログは進行状況をこの型で受け取って描き分ける。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityState {
+    /// 取得を要求済みで、結果を待っている
+    Pending,
+    /// 取得できた
+    Ready(DeviceCapabilities),
+    /// 取得に失敗した。文字列は画面に出す理由
+    Failed(String),
+}
+
+/// デバイス能力のキャッシュと、まだワーカーへ渡していない取得要求。
+///
+/// 触るのは UI スレッド（`CaptureCardViewer`）だけなのでロックを持たない。
+/// 実際の取得は `CaptureCardViewer::dispatch_capability_requests` が別スレッドへ
+/// 投げ、結果はチャネル経由で `apply_result` に入る。
+#[derive(Default)]
+pub struct CapabilityCache {
+    /// デバイス名 → 取得状態
+    states: HashMap<String, CapabilityState>,
+    /// まだワーカーへ渡していないデバイス名
+    requests: Vec<String>,
+    /// デバイスを切り替えた直後で、能力が届いたらフォーマットの既定値を
+    /// 選び直す対象のデバイス名
+    awaiting_defaults: Option<String>,
+}
+
+impl CapabilityCache {
+    /// まだ一度も問い合わせていないデバイスなら、取得を要求して `Pending` にする。
+    ///
+    /// 既に `Pending` / `Ready` / `Failed` のいずれかなら何もしない。描画のたびに
+    /// 呼ばれるため、ここで弾かないと同じデバイスを毎フレーム開きに行く。失敗した
+    /// デバイスを問い合わせ直すのは `retry` の仕事。
+    ///
+    /// 要求を積んだときだけ `true` を返す。
+    pub fn request(&mut self, device: &str) -> bool {
+        if device.is_empty() || self.states.contains_key(device) {
+            return false;
+        }
+        self.states
+            .insert(device.to_string(), CapabilityState::Pending);
+        self.requests.push(device.to_string());
+        true
+    }
+
+    /// 取得済み・失敗済みを問わず問い合わせ直す。「再取得」ボタン用。
+    ///
+    /// 結果待ちの間に押されても投げ直さない。投げ直すと、先に飛ばした取得が
+    /// あとから届いて新しい結果を上書きする。
+    pub fn retry(&mut self, device: &str) -> bool {
+        if device.is_empty() || self.states.get(device) == Some(&CapabilityState::Pending) {
+            return false;
+        }
+        self.states.remove(device);
+        self.request(device)
+    }
+
+    /// 溜まっている取得要求を取り出す。呼び出し側がワーカーへ渡す。
+    pub fn take_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.requests)
+    }
+
+    /// ワーカーから届いた結果を反映する。
+    pub fn apply_result(&mut self, device: String, result: Result<DeviceCapabilities, String>) {
+        let state = match result {
+            Ok(caps) => CapabilityState::Ready(caps),
+            Err(reason) => CapabilityState::Failed(reason),
+        };
+        self.states.insert(device, state);
+    }
+
+    /// 取得状態。まだ要求もしていなければ `None`。
+    pub fn state(&self, device: &str) -> Option<&CapabilityState> {
+        self.states.get(device)
+    }
+
+    /// 取得できた能力。結果待ち・失敗・未要求はいずれも `None` になる。
+    pub fn ready(&self, device: &str) -> Option<&DeviceCapabilities> {
+        match self.states.get(device) {
+            Some(CapabilityState::Ready(caps)) => Some(caps),
+            _ => None,
+        }
+    }
+
+    /// デバイスが切り替わったことを記録する。能力が届いた時点でフォーマットの
+    /// 既定値を選び直させるための目印。
+    pub fn expect_defaults(&mut self, device: &str) {
+        self.awaiting_defaults = Some(device.to_string());
+    }
+
+    /// `device` の能力が届いていて、切り替え直後の選び直しがまだなら `true`。
+    ///
+    /// 一度 `true` を返したら目印を消す。消さないと、ユーザーが選び直した
+    /// フォーマットを毎フレーム先頭へ戻してしまう。
+    pub fn should_apply_defaults(&mut self, device: &str) -> bool {
+        if self.awaiting_defaults.as_deref() != Some(device) {
+            return false;
+        }
+        if !matches!(self.states.get(device), Some(CapabilityState::Ready(_))) {
+            return false;
+        }
+        self.awaiting_defaults = None;
+        true
+    }
+}
+
 /// ホットキー入力ダイアログの入力状態。
 ///
 /// 以前は `static mut CAPTURING` / `static mut TEMP_HOTKEY` に持っていた。
@@ -121,9 +231,9 @@ pub struct SettingsDialogState {
     original: Option<AppSettings>,
     // 選択中のタブ
     selected_tab: SettingsTab,
-    // デバイス名 → そのデバイスが扱えるフォーマット・解像度・FPS。
-    // 取得はデバイスを開く重い処理なので一度取ったら保持する
-    device_capabilities: HashMap<String, DeviceCapabilities>,
+    // デバイス名 → そのデバイスが扱えるフォーマット・解像度・FPS の取得状態。
+    // 取得はデバイスを開く重い処理なので別スレッドへ投げ、一度取ったら保持する
+    capabilities: CapabilityCache,
     // ホットキー入力ダイアログの入力状態
     hotkey_capture: HotkeyCaptureState,
 }
@@ -164,6 +274,14 @@ impl SettingsDialogState {
     /// × で先に閉じても入力中の状態を失わないよう、`end_edit` では触らない。
     pub fn hotkey_capture_mut(&mut self) -> &mut HotkeyCaptureState {
         &mut self.hotkey_capture
+    }
+
+    /// デバイス能力の取得状態。
+    ///
+    /// 取得要求の取り出しと結果の反映は `CaptureCardViewer` が行うため、
+    /// ダイアログを開いていない間（起動時の先読み）も触られる。
+    pub fn capabilities_mut(&mut self) -> &mut CapabilityCache {
+        &mut self.capabilities
     }
 
     /// ドラフトを実行中の設定へ反映する。ドラフトを持っていなければ何もしない。
@@ -275,7 +393,7 @@ pub fn show_settings_dialog(
     let SettingsDialogState {
         draft,
         selected_tab,
-        device_capabilities,
+        capabilities,
         ..
     } = dialog;
 
@@ -308,7 +426,7 @@ pub fn show_settings_dialog(
                 SettingsTab::Device => show_device_settings_tab(
                     ui,
                     draft,
-                    device_capabilities,
+                    capabilities,
                     video_devices,
                     input_devices,
                     output_devices,
@@ -344,7 +462,7 @@ pub fn show_settings_dialog(
 fn show_device_settings_tab(
     ui: &mut egui::Ui,
     settings: &mut AppSettings,
-    capabilities: &mut HashMap<String, DeviceCapabilities>,
+    capabilities: &mut CapabilityCache,
     video_devices: &[(String, String)],
     input_devices: &[String],
     output_devices: &[String],
@@ -359,14 +477,14 @@ fn show_device_settings_tab(
 
         // ビデオデバイス選択
         // 一覧は main.rs 側でキャッシュ済みのものを受け取る（毎フレームの列挙を避けるため）
-        let selected_device = settings.video.device_name.clone().unwrap_or_default();
+        let current_device = settings.video.device_name.clone().unwrap_or_default();
 
         let mut device_changed = false;
         egui::ComboBox::from_label("ビデオデバイス")
-            .selected_text(if selected_device.is_empty() {
+            .selected_text(if current_device.is_empty() {
                 "デバイスを選択..."
             } else {
-                &selected_device
+                &current_device
             })
             .show_ui(ui, |ui| {
                 for (name, description) in video_devices {
@@ -389,28 +507,55 @@ fn show_device_settings_tab(
                 }
             });
 
-        // デバイス変更時の処理
+        // 選択後のデバイス名。この下の能力参照はすべてこちらを使う。
+        // 切り替えたフレームで切り替え前の名前を見ると、1 フレームだけ前の
+        // デバイスの選択肢が出てしまう
+        let selected_device = settings.video.device_name.clone().unwrap_or_default();
+
         if device_changed {
-            // 新しく選択されたデバイス名を取得
-            let new_device = settings.video.device_name.clone().unwrap_or_default();
+            // 能力が届いた時点でフォーマットを選び直させる
+            capabilities.expect_defaults(&selected_device);
+        }
 
-            // デバイス能力を取得（キャッシュ確認）
-            if !capabilities.contains_key(&new_device) && !new_device.is_empty() {
-                // キャッシュにない場合は取得
-                ui.spinner(); // 読み込み中表示
-                if let Ok(caps) =
-                    crate::video::VideoCapture::get_device_capabilities(Some(&new_device))
-                {
-                    capabilities.insert(new_device.clone(), caps);
-                }
+        // 能力の取得を要求する。デバイスを開くのは別スレッドなので UI は止まらない。
+        // 要求済み・取得済み・失敗済みのときは何も起きない
+        capabilities.request(&selected_device);
+
+        // 取得の進行状況。失敗を黙って捨てると、選択肢が既定値のまま出る理由が
+        // ユーザーに分からない
+        let mut retry_requested = false;
+        match capabilities.state(&selected_device) {
+            Some(CapabilityState::Pending) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("対応形式を取得中...");
+                });
             }
+            Some(CapabilityState::Failed(reason)) => {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        format!("⚠ 対応形式を取得できませんでした: {}", reason),
+                    );
+                    if ui.button("再取得").clicked() {
+                        retry_requested = true;
+                    }
+                });
+                ui.label("下の選択肢は既定値です。");
+            }
+            _ => {}
+        }
+        if retry_requested {
+            capabilities.retry(&selected_device);
+        }
 
-            // デフォルトのフォーマットを設定
-            if let Some(caps) = capabilities.get(&new_device) {
-                // 最初のフォーマットを選択
-                if let Some((format, _)) = caps.first() {
-                    settings.video.format = Some(format.clone());
-                }
+        // 切り替えたデバイスの能力が届いたら、先頭のフォーマットを選ぶ
+        if capabilities.should_apply_defaults(&selected_device) {
+            if let Some((format, _)) = capabilities
+                .ready(&selected_device)
+                .and_then(|caps| caps.first())
+            {
+                settings.video.format = Some(format.clone());
             }
         }
 
@@ -428,7 +573,7 @@ fn show_device_settings_tab(
                 .selected_text(&current_format)
                 .show_ui(ui, |ui| {
                     // キャッシュからフォーマット一覧を取得
-                    if let Some(caps) = capabilities.get(&selected_device) {
+                    if let Some(caps) = capabilities.ready(&selected_device) {
                         for (format, _) in caps {
                             if ui
                                 .selectable_value(
@@ -464,7 +609,7 @@ fn show_device_settings_tab(
 
         // フォーマット変更時に解像度をリセット
         if format_changed {
-            if let Some(caps) = capabilities.get(&selected_device) {
+            if let Some(caps) = capabilities.ready(&selected_device) {
                 if let Some(current_format) = &settings.video.format {
                     // 現在のフォーマットに対応する最初の解像度を選択
                     for (format, resolutions) in caps {
@@ -489,7 +634,7 @@ fn show_device_settings_tab(
             egui::ComboBox::from_id_source("resolution_combo")
                 .selected_text(format!("{}x{}", current_resolution.0, current_resolution.1))
                 .show_ui(ui, |ui| {
-                    if let Some(caps) = capabilities.get(&selected_device) {
+                    if let Some(caps) = capabilities.ready(&selected_device) {
                         if let Some(current_format) = &settings.video.format {
                             // 現在のフォーマットに対応する解像度一覧
                             let mut unique_resolutions =
@@ -547,7 +692,7 @@ fn show_device_settings_tab(
 
         // 解像度変更時にFPSをリセット
         if resolution_changed {
-            if let Some(caps) = capabilities.get(&selected_device) {
+            if let Some(caps) = capabilities.ready(&selected_device) {
                 if let Some(current_format) = &settings.video.format {
                     if let Some((w, h)) = settings.video.resolution {
                         // 現在のフォーマットと解像度に対応する最初のFPSを選択
@@ -575,7 +720,7 @@ fn show_device_settings_tab(
             egui::ComboBox::from_id_source("fps_combo")
                 .selected_text(format!("{} fps", current_fps))
                 .show_ui(ui, |ui| {
-                    if let Some(caps) = capabilities.get(&selected_device) {
+                    if let Some(caps) = capabilities.ready(&selected_device) {
                         if let Some(current_format) = &settings.video.format {
                             if let Some((w, h)) = settings.video.resolution {
                                 // 現在のフォーマットと解像度に対応するFPS一覧
@@ -1592,5 +1737,198 @@ mod tests {
         state.end_edit();
 
         assert_eq!(state.selected_tab, SettingsTab::Screenshot);
+    }
+
+    /// 取得できたことにする能力。中身そのものは検証の対象ではないので最小限
+    fn sample_capabilities() -> DeviceCapabilities {
+        vec![
+            ("MJPEG".to_string(), vec![(1920, 1080, 30), (1280, 720, 60)]),
+            ("YUY2".to_string(), vec![(1280, 720, 60)]),
+        ]
+    }
+
+    #[test]
+    fn capability_cache_request_new_device_marks_pending_and_queues() {
+        let mut cache = CapabilityCache::default();
+
+        assert!(cache.request("Capture Device"));
+        assert_eq!(
+            cache.state("Capture Device"),
+            Some(&CapabilityState::Pending)
+        );
+        assert_eq!(cache.take_requests(), vec!["Capture Device".to_string()]);
+    }
+
+    #[test]
+    fn capability_cache_request_twice_queues_only_once() {
+        // 描画のたびに呼ばれるので、二重に投げるとデバイスを何度も開きに行く
+        let mut cache = CapabilityCache::default();
+
+        assert!(cache.request("Capture Device"));
+        assert!(!cache.request("Capture Device"));
+        assert_eq!(cache.take_requests().len(), 1);
+    }
+
+    #[test]
+    fn capability_cache_request_empty_device_name_is_ignored() {
+        // デバイス未選択のとき。空の名前で問い合わせても意味がない
+        let mut cache = CapabilityCache::default();
+
+        assert!(!cache.request(""));
+        assert_eq!(cache.state(""), None);
+        assert!(cache.take_requests().is_empty());
+    }
+
+    #[test]
+    fn capability_cache_request_after_failure_does_not_queue_again() {
+        // 失敗したデバイスを毎フレーム開きに行かない。投げ直すのは「再取得」だけ
+        let mut cache = CapabilityCache::default();
+        cache.request("Capture Device");
+        cache.take_requests();
+        cache.apply_result("Capture Device".to_string(), Err("開けません".to_string()));
+
+        assert!(!cache.request("Capture Device"));
+        assert!(cache.take_requests().is_empty());
+    }
+
+    #[test]
+    fn capability_cache_take_requests_empties_the_queue() {
+        let mut cache = CapabilityCache::default();
+        cache.request("A");
+        cache.request("B");
+
+        assert_eq!(
+            cache.take_requests(),
+            vec!["A".to_string(), "B".to_string()]
+        );
+        assert!(cache.take_requests().is_empty());
+    }
+
+    #[test]
+    fn capability_cache_apply_result_ok_becomes_ready() {
+        let mut cache = CapabilityCache::default();
+        cache.request("Capture Device");
+        cache.take_requests();
+
+        cache.apply_result("Capture Device".to_string(), Ok(sample_capabilities()));
+
+        assert_eq!(cache.ready("Capture Device"), Some(&sample_capabilities()));
+    }
+
+    #[test]
+    fn capability_cache_apply_result_err_becomes_failed_with_reason() {
+        // 理由は画面に出すので、握り潰さず保持する
+        let mut cache = CapabilityCache::default();
+        cache.request("Capture Device");
+        cache.take_requests();
+
+        cache.apply_result(
+            "Capture Device".to_string(),
+            Err("Device 'Capture Device' not found".to_string()),
+        );
+
+        assert_eq!(
+            cache.state("Capture Device"),
+            Some(&CapabilityState::Failed(
+                "Device 'Capture Device' not found".to_string()
+            ))
+        );
+        assert_eq!(cache.ready("Capture Device"), None);
+    }
+
+    #[test]
+    fn capability_cache_ready_is_none_while_pending() {
+        let mut cache = CapabilityCache::default();
+        cache.request("Capture Device");
+
+        assert_eq!(cache.ready("Capture Device"), None);
+    }
+
+    #[test]
+    fn capability_cache_retry_after_failure_queues_again() {
+        let mut cache = CapabilityCache::default();
+        cache.request("Capture Device");
+        cache.take_requests();
+        cache.apply_result("Capture Device".to_string(), Err("開けません".to_string()));
+
+        assert!(cache.retry("Capture Device"));
+        assert_eq!(
+            cache.state("Capture Device"),
+            Some(&CapabilityState::Pending)
+        );
+        assert_eq!(cache.take_requests(), vec!["Capture Device".to_string()]);
+    }
+
+    #[test]
+    fn capability_cache_retry_while_pending_does_not_queue() {
+        // 投げ直すと、先の取得があとから届いて新しい結果を上書きする
+        let mut cache = CapabilityCache::default();
+        cache.request("Capture Device");
+        cache.take_requests();
+
+        assert!(!cache.retry("Capture Device"));
+        assert!(cache.take_requests().is_empty());
+    }
+
+    #[test]
+    fn capability_cache_retry_after_success_queues_again() {
+        let mut cache = CapabilityCache::default();
+        cache.request("Capture Device");
+        cache.take_requests();
+        cache.apply_result("Capture Device".to_string(), Ok(sample_capabilities()));
+
+        assert!(cache.retry("Capture Device"));
+        assert_eq!(
+            cache.state("Capture Device"),
+            Some(&CapabilityState::Pending)
+        );
+    }
+
+    #[test]
+    fn capability_cache_should_apply_defaults_is_true_once_after_result_arrives() {
+        // 目印を消さないと、ユーザーが選び直したフォーマットを毎フレーム戻してしまう
+        let mut cache = CapabilityCache::default();
+        cache.request("Capture Device");
+        cache.take_requests();
+        cache.expect_defaults("Capture Device");
+        cache.apply_result("Capture Device".to_string(), Ok(sample_capabilities()));
+
+        assert!(cache.should_apply_defaults("Capture Device"));
+        assert!(!cache.should_apply_defaults("Capture Device"));
+    }
+
+    #[test]
+    fn capability_cache_should_apply_defaults_is_false_while_pending() {
+        let mut cache = CapabilityCache::default();
+        cache.request("Capture Device");
+        cache.expect_defaults("Capture Device");
+
+        assert!(!cache.should_apply_defaults("Capture Device"));
+    }
+
+    #[test]
+    fn capability_cache_should_apply_defaults_is_false_for_another_device() {
+        // 取得を待っている間にもう一度切り替えた場合。先に届いた別デバイスの
+        // 能力で選択を書き換えない
+        let mut cache = CapabilityCache::default();
+        cache.request("A");
+        cache.request("B");
+        cache.take_requests();
+        cache.expect_defaults("B");
+        cache.apply_result("A".to_string(), Ok(sample_capabilities()));
+
+        assert!(!cache.should_apply_defaults("A"));
+    }
+
+    #[test]
+    fn capability_cache_should_apply_defaults_is_false_when_failed() {
+        // 失敗したときは選択を書き換えない。既定の選択肢のまま残す
+        let mut cache = CapabilityCache::default();
+        cache.request("Capture Device");
+        cache.take_requests();
+        cache.expect_defaults("Capture Device");
+        cache.apply_result("Capture Device".to_string(), Err("開けません".to_string()));
+
+        assert!(!cache.should_apply_defaults("Capture Device"));
     }
 }
