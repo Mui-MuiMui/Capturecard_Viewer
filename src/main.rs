@@ -4,6 +4,7 @@ use chrono::Local;
 use eframe::egui;
 use image::GenericImageView;
 use std::panic::AssertUnwindSafe;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -53,6 +54,10 @@ pub struct CaptureCardViewer {
     last_audio_channels: Option<u16>,
     last_fullscreen_toggle: Option<Instant>,
     last_video_fps: Option<u32>,
+    // 最後に適用したスクリーンショット関連の値
+    // apply_settings が 2 秒ごとに呼ばれるため、差分がないときは再適用しない
+    last_hotkey: Option<String>,
+    last_sound_file: Option<PathBuf>,
 
     audio_last_error: Option<String>,
 
@@ -106,6 +111,8 @@ impl Default for CaptureCardViewer {
             last_audio_channels: None,
             last_fullscreen_toggle: None,
             last_video_fps: None,
+            last_hotkey: None,
+            last_sound_file: None,
 
             audio_last_error: None,
             // 起動時遅延接続
@@ -334,8 +341,16 @@ impl eframe::App for CaptureCardViewer {
             println!("Registering new hotkey: {}", hk);
             if let Ok(mut ss) = self.screenshot_manager.lock() {
                 match ss.set_hotkey(&hk) {
-                    Ok(()) => println!("Hotkey registered successfully: {}", hk),
-                    Err(e) => println!("Failed to register hotkey {}: {}", hk, e),
+                    Ok(()) => {
+                        println!("Hotkey registered successfully: {}", hk);
+                        // apply_settings が同じホットキーを登録し直さないよう記録する
+                        self.last_hotkey = Some(hk.clone());
+                    }
+                    Err(e) => {
+                        println!("Failed to register hotkey {}: {}", hk, e);
+                        // 登録できていないので apply_settings 側で再試行させる
+                        self.last_hotkey = None;
+                    }
                 }
             } else {
                 println!("Failed to lock screenshot_manager for hotkey registration");
@@ -890,6 +905,13 @@ fn load_icon() -> egui::IconData {
 }
 
 impl CaptureCardViewer {
+    /// 設定値を適用し直す必要があるかを判定する。
+    /// `last` は最後に適用できた値で、`None` は「まだ適用できていない」を表す。
+    /// `initial` が真なら値が変わっていなくても適用する。
+    fn needs_reapply<T: PartialEq>(initial: bool, current: &T, last: &Option<T>) -> bool {
+        initial || last.as_ref() != Some(current)
+    }
+
     fn apply_settings(&mut self, initial: bool) {
         if let Ok(settings) = self.settings.lock() {
             // Video - リトライ機能付き
@@ -1049,10 +1071,25 @@ impl CaptureCardViewer {
             // スクリーンショット設定
             if let Ok(mut ss) = self.screenshot_manager.lock() {
                 if let Some(hk) = &settings.screenshot.hotkey {
-                    let _ = ss.set_hotkey(hk);
+                    // 無条件に登録し直すと、2 秒ごとに unregister → register が走って
+                    // その瞬間のキー入力を取りこぼし、リスナースレッドも作り直される
+                    if Self::needs_reapply(initial, hk, &self.last_hotkey) {
+                        match ss.set_hotkey(hk) {
+                            Ok(()) => self.last_hotkey = Some(hk.clone()),
+                            // 失敗すると古いホットキーは解除済みで何も登録されていない。
+                            // last を空にして次の適用タイミングで再試行する
+                            Err(_) => self.last_hotkey = None,
+                        }
+                    }
                 }
                 if let Some(sf) = &settings.screenshot.sound_file {
-                    let _ = ss.set_sound_file(sf);
+                    // 無条件に呼ぶと 2 秒ごとに効果音ファイル全体を読み直すことになる
+                    if Self::needs_reapply(initial, sf, &self.last_sound_file) {
+                        match ss.set_sound_file(sf) {
+                            Ok(()) => self.last_sound_file = Some(sf.clone()),
+                            Err(_) => self.last_sound_file = None,
+                        }
+                    }
                 }
             }
         }
@@ -1160,5 +1197,54 @@ mod tests {
         assert!(CaptureCardViewer::should_refresh_device_list(Some(
             Duration::from_secs(3600)
         )));
+    }
+
+    #[test]
+    fn needs_reapply_not_applied_yet_returns_true() {
+        // まだ一度も適用できていない場合は適用する
+        assert!(CaptureCardViewer::needs_reapply(
+            false,
+            &"F5".to_string(),
+            &None
+        ));
+    }
+
+    #[test]
+    fn needs_reapply_same_value_returns_false() {
+        // 値が変わっていなければ再適用しない（2 秒ごとの再登録を防ぐ肝）
+        assert!(!CaptureCardViewer::needs_reapply(
+            false,
+            &"F5".to_string(),
+            &Some("F5".to_string())
+        ));
+    }
+
+    #[test]
+    fn needs_reapply_changed_value_returns_true() {
+        assert!(CaptureCardViewer::needs_reapply(
+            false,
+            &"F7".to_string(),
+            &Some("F5".to_string())
+        ));
+    }
+
+    #[test]
+    fn needs_reapply_initial_same_value_returns_true() {
+        // 起動直後は値が同じでも適用する
+        assert!(CaptureCardViewer::needs_reapply(
+            true,
+            &"F5".to_string(),
+            &Some("F5".to_string())
+        ));
+    }
+
+    #[test]
+    fn needs_reapply_path_same_value_returns_false() {
+        // PathBuf でも同じ判定になること
+        assert!(!CaptureCardViewer::needs_reapply(
+            false,
+            &PathBuf::from("sound/SS.mp3"),
+            &Some(PathBuf::from("sound/SS.mp3"))
+        ));
     }
 }
