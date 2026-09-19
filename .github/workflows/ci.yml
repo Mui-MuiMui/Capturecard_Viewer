@@ -81,6 +81,12 @@ jobs:
       - name: cargo-about を用意する
         run: cargo install cargo-about --locked --version 0.9.2 --features cli
 
+      # git diff は未追跡のファイルを見ない。一覧ごと消された変更では
+      # 生成で作り直されて「差分なし」と判定されてしまうため、
+      # 追跡対象であることを先に確かめる
+      - name: ライセンス一覧が追跡対象か確認する
+        run: git ls-files --error-unmatch -- THIRD-PARTY-LICENSES.txt
+
       # 生成と確認を分けているのは、windows ランナーの既定シェルが pwsh で、
       # 1 つの run にまとめると前半の失敗が握り潰されるため
       - name: ライセンス一覧を生成し直す
