@@ -1128,11 +1128,19 @@ impl CaptureCardViewer {
 
     /// 保留の有無にかかわらず、いま設定をディスクへ書き出す。
     fn save_settings_now(&mut self) {
-        if let Ok(settings) = self.settings.lock() {
-            settings.save();
-            self.settings_dirty_since = None;
-        }
         // ロックが取れなかった場合は保留のままにして、次の機会に書き出す
+        let Ok(settings) = self.settings.lock() else {
+            return;
+        };
+
+        if settings.save() {
+            self.settings_dirty_since = None;
+        } else {
+            // 書き出せなかった変更を保存済みとして捨てず、保留のまま残す。
+            // 時刻を入れ直しているのは、失敗が続いたときに毎フレーム
+            // 書き込みを試みる状態へ戻さないため
+            self.settings_dirty_since = Some(Instant::now());
+        }
     }
 
     /// 保留中の設定変更を書き出すべきかを判定する。
