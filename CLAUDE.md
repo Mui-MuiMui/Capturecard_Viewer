@@ -48,6 +48,9 @@ cargo build --release
 - cpal の入力コールバック／出力コールバックスレッド
 - ホットキーリスナースレッド（`set_hotkey` のたびに再生成される）
 - 効果音再生スレッド（再生ごとに spawn）
+- デバイス能力取得スレッド（要求ごとに spawn。結果は mpsc チャネルで UI スレッドへ返す）
+
+デバイス能力の取得状態（`ui::CapabilityCache`）は `SettingsDialogState` の中にあり、**UI スレッドだけが触る。** 取得スレッドは結果をチャネルへ送るだけで、キャッシュには触れない。`update()` の先頭の `drain_capability_results()` が受け取って反映する。
 
 ### ロック順序
 

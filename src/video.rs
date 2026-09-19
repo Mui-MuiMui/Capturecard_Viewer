@@ -627,42 +627,19 @@ impl VideoCapture {
             device_name.unwrap_or("（未指定。先頭のデバイス）")
         );
 
-        // デバイス情報を取得
-        let devices = nokhwa::query(ApiBackend::MediaFoundation).map_err(|e| {
-            let message = format!("Failed to query devices: {}", e);
-            // 呼び出し側（ui.rs）は Err を握り潰して選択肢を空のままにするため、
-            // 失敗の理由はここで残すしかない
-            warn!(
-                "デバイス能力を取得できない（{:.1}ms）: {}",
-                elapsed_ms(start),
-                message
-            );
-            message
-        })?;
+        // 失敗をここで warn! にしない。呼び出し側（main.rs の
+        // dispatch_capability_requests）が、デバイス名付きで理由をログへ出し、
+        // 設定ダイアログにも表示する。ここで出すと同じ内容が 2 行並ぶ
+        let devices = nokhwa::query(ApiBackend::MediaFoundation)
+            .map_err(|e| format!("Failed to query devices: {}", e))?;
 
         let device_info = if let Some(name) = device_name {
             devices
                 .into_iter()
                 .find(|d| d.human_name() == name)
-                .ok_or_else(|| {
-                    let message = format!("Device '{}' not found", name);
-                    warn!(
-                        "デバイス能力を取得できない（{:.1}ms）: {}",
-                        elapsed_ms(start),
-                        message
-                    );
-                    message
-                })?
+                .ok_or_else(|| format!("Device '{}' not found", name))?
         } else {
-            devices.into_iter().next().ok_or_else(|| {
-                let message = "No video devices found".to_string();
-                warn!(
-                    "デバイス能力を取得できない（{:.1}ms）: {}",
-                    elapsed_ms(start),
-                    message
-                );
-                message
-            })?
+            devices.into_iter().next().ok_or("No video devices found")?
         };
 
         // カメラを一時的に開いて能力を取得
@@ -670,19 +647,12 @@ impl VideoCapture {
             CameraFormat::new(Resolution::new(640, 480), FrameFormat::YUYV, 30),
         ));
 
-        // キャプチャ中のデバイスをもう一度開く。UI スレッドから同期で呼ばれるため、
-        // ここが伸びると設定ダイアログがその場で固まる
+        // キャプチャ中のデバイスをもう一度開く。取得そのものは `capability-query`
+        // スレッドで走るので UI は止まらないが、ここが伸びると設定ダイアログの
+        // 「対応形式を取得中...」が長く出たままになる
         let open_start = Instant::now();
-        let mut camera =
-            Camera::new(device_info.index().clone(), requested_format).map_err(|e| {
-                let message = format!("Failed to create camera for capability query: {}", e);
-                warn!(
-                    "デバイス能力を取得できない（{:.1}ms）: {}",
-                    elapsed_ms(start),
-                    message
-                );
-                message
-            })?;
+        let mut camera = Camera::new(device_info.index().clone(), requested_format)
+            .map_err(|e| format!("Failed to create camera for capability query: {}", e))?;
         debug!(
             "能力取得のためにデバイスを開いた（{:.1}ms）",
             elapsed_ms(open_start)
@@ -768,8 +738,10 @@ impl VideoCapture {
             ];
         }
 
-        info!(
-            "デバイス能力を取得した（{}、{:.1}ms、{}）",
+        // 総所要時間とフォーマット数は呼び出し側が info! で出すので、
+        // ここではフォーマットごとの内訳だけを debug! に残す
+        debug!(
+            "デバイス能力の内訳（{}、{:.1}ms）: {}",
             device_info.human_name(),
             elapsed_ms(start),
             result
