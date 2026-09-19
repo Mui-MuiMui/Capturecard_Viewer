@@ -844,21 +844,25 @@ fn configure_japanese_font(ctx: &egui::Context) {
     }
 }
 
+// ウィンドウアイコン。実行ファイルに埋め込む。
+// 以前はカレントディレクトリ基準で "icon.ico" を読んでいたため、ショートカット経由など
+// 作業ディレクトリが exe の場所と異なる起動ではファイルを見つけられず、
+// フォールバックの赤い四角が表示されていた。
+const EMBEDDED_ICON: &[u8] = include_bytes!("../icon.ico");
+
 fn load_icon() -> egui::IconData {
-    let icon_path = "icon.ico";
-    if let Ok(icon_data) = std::fs::read(icon_path) {
-        if let Ok(icon) = image::load_from_memory(&icon_data) {
-            let icon_rgba = icon.to_rgba8();
-            let (width, height) = icon.dimensions();
-            return egui::IconData {
-                rgba: icon_rgba.into_raw(),
-                width,
-                height,
-            };
-        }
+    if let Ok(icon) = image::load_from_memory(EMBEDDED_ICON) {
+        let icon_rgba = icon.to_rgba8();
+        let (width, height) = icon.dimensions();
+        return egui::IconData {
+            rgba: icon_rgba.into_raw(),
+            width,
+            height,
+        };
     }
 
-    // フォールバック: 単純な色付き四角形を作成
+    // フォールバック: 単純な色付き四角形を作成。
+    // 埋め込みデータのデコードに失敗した場合だけ通る。
     let mut rgba_data = Vec::new();
     for _ in 0..(32 * 32) {
         rgba_data.extend_from_slice(&[255, 0, 0, 255]);
@@ -1078,5 +1082,33 @@ impl CaptureCardViewer {
         }
 
         self.last_fullscreen_toggle = Some(Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_icon_decodes_embedded_icon() {
+        // 埋め込みアイコンが読めなくなるとフォールバックの赤い四角（32x32）に
+        // なる。大きさで両者を見分けられるため、寸法を直接確かめる。
+        let icon = load_icon();
+
+        assert_eq!(icon.width, 256);
+        assert_eq!(icon.height, 256);
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+    }
+
+    #[test]
+    fn load_icon_is_not_the_red_square_fallback() {
+        // フォールバックは全画素が不透明な赤。埋め込みアイコンがそれと
+        // 一致しないことを確かめ、デコード失敗を見逃さないようにする。
+        let icon = load_icon();
+
+        assert!(
+            icon.rgba.chunks(4).any(|px| px != [255, 0, 0, 255]),
+            "アイコンが赤一色になっている"
+        );
     }
 }
