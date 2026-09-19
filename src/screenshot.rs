@@ -4,8 +4,67 @@ use global_hotkey::{
 };
 use rodio::{Decoder, OutputStream, Sink};
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+// 既定の効果音。実行ファイルに埋め込む。
+// 既定値が "sound/SS.mp3" というカレントディレクトリ基準の相対パスだったため、
+// ショートカット経由など作業ディレクトリが exe の場所と異なる起動では鳴らなかった。
+const EMBEDDED_SOUND: &[u8] = include_bytes!("../sound/SS.mp3");
+
+// 設定に保存された効果音のパスを、何から読むかへ解決した結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SoundSource {
+    // 実行ファイルに埋め込んだ既定の効果音を使う
+    Embedded,
+    // 指定されたファイルを読む。相対パスは解決済み
+    File(PathBuf),
+}
+
+// 設定の効果音パスを、実際に読むパスへ解決する。
+//
+// 相対パスをカレントディレクトリではなく exe の置き場所を基準に解決するのが要点。
+// 既存ユーザーの設定ファイルには、かつての既定値 "sound/SS.mp3" が相対パスのまま
+// 保存されているため、exe の隣から探せるようにする。
+//
+// 見つからない場合は無音ではなく埋め込みの既定音へ倒す。ログの出口が無い現状では、
+// 無音にするとユーザーに原因を伝える手段が無く、故障と区別が付かないため。
+// 効果音そのものを止めたい場合は、設定の sound_file を None にする（設定画面の
+// 「クリア」）。その場合はこの関数が呼ばれない。
+//
+// exists を引数で受けるのはテストのため。実行時は |path| path.exists() を渡す。
+pub fn resolve_sound_path(
+    configured: &Path,
+    exe_dir: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> SoundSource {
+    // 空のパスを exe_dir.join() に通すと exe のディレクトリ自身になり、
+    // ディレクトリを効果音として読もうとしてしまう
+    if configured.as_os_str().is_empty() {
+        return SoundSource::Embedded;
+    }
+
+    let candidate = if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        exe_dir.join(configured)
+    };
+
+    if exists(&candidate) {
+        SoundSource::File(candidate)
+    } else {
+        SoundSource::Embedded
+    }
+}
+
+// 実行ファイルが置かれているディレクトリ。
+// 取得できない場合だけ、従来どおりカレントディレクトリ基準にフォールバックする。
+fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
 
 pub struct ScreenshotManager {
     hotkey_manager: Option<GlobalHotKeyManager>,
@@ -101,13 +160,32 @@ impl ScreenshotManager {
         Ok(())
     }
 
+    // 効果音を読み込む。
+    //
+    // 相対パスは exe の置き場所を基準に解決し、見つからなければ埋め込みの
+    // 既定音を使う。そのため呼び出し後は必ず鳴らせる状態になっている。
+    // Err を返すのは、解決したファイルが存在したのに読めなかった場合だけ。
+    // このときも既定音を入れてあるので、鳴らないという結果にはならない。
     pub fn set_sound_file(&mut self, sound_path: &Path) -> Result<(), String> {
-        match std::fs::read(sound_path) {
-            Ok(data) => {
-                self.sound_data = Some(data);
+        match resolve_sound_path(sound_path, &exe_dir(), |path| path.exists()) {
+            SoundSource::Embedded => {
+                self.sound_data = Some(EMBEDDED_SOUND.to_vec());
                 Ok(())
             }
-            Err(e) => Err(format!("Failed to load sound file: {}", e)),
+            SoundSource::File(path) => match std::fs::read(&path) {
+                Ok(data) => {
+                    self.sound_data = Some(data);
+                    Ok(())
+                }
+                Err(e) => {
+                    self.sound_data = Some(EMBEDDED_SOUND.to_vec());
+                    Err(format!(
+                        "効果音ファイル {} を読み込めないため既定の効果音を使う: {}",
+                        path.display(),
+                        e
+                    ))
+                }
+            },
         }
     }
 
@@ -328,5 +406,90 @@ impl Drop for ScreenshotManager {
 
         // 終了確認のため少し待機
         std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    // exe が置かれている想定のディレクトリ。実在しなくてよい
+    const EXE_DIR: &str = "C:/Program Files/capturecard_viewer";
+
+    #[test]
+    fn resolve_sound_path_absolute_existing_uses_that_file() {
+        // 設定画面からユーザーがファイルを選んだ場合。rfd は絶対パスを返す
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let configured = dir.path().join("custom.mp3");
+        assert!(configured.is_absolute(), "テストの前提: 絶対パスであること");
+
+        let resolved = resolve_sound_path(&configured, Path::new(EXE_DIR), |_| true);
+
+        assert_eq!(resolved, SoundSource::File(configured));
+    }
+
+    #[test]
+    fn resolve_sound_path_absolute_missing_falls_back_to_embedded() {
+        // ユーザーが選んだファイルを後から移動・削除した場合
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let configured = dir.path().join("deleted.mp3");
+
+        let resolved = resolve_sound_path(&configured, Path::new(EXE_DIR), |_| false);
+
+        assert_eq!(resolved, SoundSource::Embedded);
+    }
+
+    #[test]
+    fn resolve_sound_path_relative_existing_resolves_against_exe_dir() {
+        // 既存ユーザーの設定に残っている "sound/SS.mp3" を、exe の隣から見つける。
+        // カレントディレクトリ基準で解決していると exists が false になり、
+        // SoundSource::Embedded へ落ちる
+        let expected = PathBuf::from("C:/Program Files/capturecard_viewer/sound/SS.mp3");
+
+        let resolved = resolve_sound_path(Path::new("sound/SS.mp3"), Path::new(EXE_DIR), |path| {
+            path == expected
+        });
+
+        assert_eq!(resolved, SoundSource::File(expected));
+    }
+
+    #[test]
+    fn resolve_sound_path_relative_missing_falls_back_to_embedded() {
+        // exe の隣にも sound/ が無い配布形態。埋め込みの既定音で鳴らす
+        let resolved = resolve_sound_path(Path::new("sound/SS.mp3"), Path::new(EXE_DIR), |_| false);
+
+        assert_eq!(resolved, SoundSource::Embedded);
+    }
+
+    #[test]
+    fn resolve_sound_path_empty_falls_back_to_embedded() {
+        // 設定に空文字が入っていた場合。exe のディレクトリ自身を
+        // 効果音ファイルとして読もうとしないこと
+        let resolved = resolve_sound_path(Path::new(""), Path::new(EXE_DIR), |_| true);
+
+        assert_eq!(resolved, SoundSource::Embedded);
+    }
+
+    #[test]
+    fn resolve_sound_path_relative_ignores_current_dir() {
+        // 不具合そのものの再現。カレントディレクトリ配下にだけファイルがある
+        // 状況を作り、そこを見に行かないことを確かめる
+        let cwd_candidate = PathBuf::from("sound/SS.mp3");
+
+        let resolved = resolve_sound_path(Path::new("sound/SS.mp3"), Path::new(EXE_DIR), |path| {
+            path == cwd_candidate
+        });
+
+        assert_eq!(resolved, SoundSource::Embedded);
+    }
+
+    #[test]
+    fn embedded_sound_starts_with_mpeg_frame_sync() {
+        // 埋め込む mp3 が空や別形式に差し替わると、例外も出ないまま無音になる。
+        // MPEG のフレーム同期（11 ビットすべて 1）で最低限の形式を確かめる
+        assert!(EMBEDDED_SOUND.len() > 2, "埋め込んだ効果音が短すぎる");
+        assert_eq!(EMBEDDED_SOUND[0], 0xFF);
+        assert_eq!(EMBEDDED_SOUND[1] & 0xE0, 0xE0);
     }
 }

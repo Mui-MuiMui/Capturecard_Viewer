@@ -86,6 +86,11 @@ impl Default for ScreenshotSettings {
     fn default() -> Self {
         Self {
             save_folder: dirs::desktop_dir().unwrap_or_else(|| PathBuf::from(".")),
+            // 相対パスのまま既定値にしてある。既存ユーザーの設定ファイルにも
+            // この値が保存されているため、変えると移行の前提が崩れる。
+            // 解決は screenshot::resolve_sound_path が exe の置き場所を基準に行い、
+            // 見つからなければ埋め込みの既定音へ倒す。
+            // None は「効果音を鳴らさない」の意味なので、既定値には使えない
             sound_file: Some(PathBuf::from("sound/SS.mp3")),
             sound_volume: 100.0,
             hotkey: Some("F5".to_string()),
@@ -357,6 +362,12 @@ enable_drag_move = false
         assert_eq!(settings.audio.channels, Some(2));
         assert!(settings.audio.passthrough_enabled);
         assert_eq!(settings.screenshot.sound_volume, 100.0);
+        // 既存ユーザーの設定にも保存されている値。screenshot::resolve_sound_path が
+        // exe の置き場所を基準に解決する前提になっている
+        assert_eq!(
+            settings.screenshot.sound_file,
+            Some(PathBuf::from("sound/SS.mp3"))
+        );
         assert_eq!(settings.screenshot.hotkey, Some("F5".to_string()));
         assert_eq!(settings.ui.volume, 100.0);
         assert!(settings.ui.maintain_aspect_ratio);
