@@ -45,9 +45,126 @@ pub struct AudioSettings {
 #[serde(default)]
 pub struct ScreenshotSettings {
     pub save_folder: PathBuf,
+    // 保存形式と JPEG の品質を別々の項目にしてある。品質を持つ enum を
+    // 1 項目として持たせると TOML では [screenshot.format] のテーブルになり、
+    // 同じセクションの後続のキー（sound_file など）がテーブルの内側へ
+    // 取り込まれてしまう。また項目を分けておくと、PNG に切り替えても
+    // 品質の値が残り、JPEG へ戻したときに選び直さずに済む。
+    //
+    // エンコードへ渡すときは encoding() で ScreenshotEncoding にまとめ、
+    // 「PNG なのに品質が付いている」組み合わせを作れないようにする
+    #[serde(deserialize_with = "deserialize_screenshot_format")]
+    pub format: ScreenshotFormat,
+    #[serde(deserialize_with = "deserialize_jpeg_quality")]
+    pub jpeg_quality: u8,
     pub sound_file: Option<PathBuf>,
     pub sound_volume: f32,
     pub hotkey: Option<String>,
+}
+
+// スクリーンショットの保存形式。設定ファイルには format = "jpeg" / "png" と書かれる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenshotFormat {
+    // 既存ユーザーの設定ファイルには format が無い。既定を JPEG にしてあるので
+    // 従来どおり JPEG で保存され、拡張子も .jpg のまま変わらない
+    #[default]
+    Jpeg,
+    Png,
+}
+
+impl ScreenshotFormat {
+    // 保存するファイルの拡張子。先頭のドットは含まない
+    pub fn extension(self) -> &'static str {
+        match self {
+            ScreenshotFormat::Jpeg => "jpg",
+            ScreenshotFormat::Png => "png",
+        }
+    }
+}
+
+impl ScreenshotSettings {
+    // 設定からエンコードの指定を組み立てる。
+    //
+    // 品質は設定ファイルを手で書き換えられる前提で、ここで範囲に収める。
+    // image 0.24 の JpegEncoder も内部で 1〜100 に丸めるが、そこに寄りかかると
+    // クレートの版が変わったときに振る舞いが変わる。渡す前に確定させておく
+    pub fn encoding(&self) -> ScreenshotEncoding {
+        match self.format {
+            ScreenshotFormat::Jpeg => ScreenshotEncoding::Jpeg {
+                quality: self.jpeg_quality.clamp(MIN_JPEG_QUALITY, MAX_JPEG_QUALITY),
+            },
+            ScreenshotFormat::Png => ScreenshotEncoding::Png,
+        }
+    }
+}
+
+// 実際にエンコードするときの形式とパラメータ。
+//
+// 設定の保存形式（ScreenshotFormat）と分けてあるのは、保存関数へ
+// 「PNG なのに品質が付いている」ような組み合わせを渡せなくするため。
+// 設定ファイルには書かれないので、TOML の都合に縛られない
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenshotEncoding {
+    Jpeg { quality: u8 },
+    Png,
+}
+
+// JPEG 品質の下限と上限。image クレートの JpegEncoder が受け付ける範囲に合わせてある
+pub const MIN_JPEG_QUALITY: u8 = 1;
+pub const MAX_JPEG_QUALITY: u8 = 100;
+
+// 設定ファイルの format に知らない値が書かれていても、設定全体を失わせない。
+// ここでエラーを返すと TOML のパースがファイル単位で失敗し、保存形式と
+// 無関係な項目まで既定値へ戻ってしまう。
+//
+// 値が文字列ですらない場合（format = 3 など）はここでも落ちる。手で書き換えた
+// ときに起きやすいのは綴りの誤りなので、拾うのはそこまでにしてある。
+fn deserialize_screenshot_format<'de, D>(deserializer: D) -> Result<ScreenshotFormat, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(screenshot_format_from_str(&raw).unwrap_or_else(|| {
+        warn!(
+            "設定の保存形式 \"{}\" を解釈できないので JPEG として扱う",
+            raw
+        );
+        ScreenshotFormat::default()
+    }))
+}
+
+// 範囲外の品質が書かれていても、設定全体を失わせない。u8 のまま読むと
+// jpeg_quality = 256 のような値でパースがファイル単位で失敗し、品質と
+// 無関係な項目まで既定値へ戻ってしまう。TOML の整数は i64 なので、
+// 広いほうで受けてから 1〜100 に丸める。
+//
+// 値が整数ですらない場合（jpeg_quality = 90.5 など）はここでも落ちる。
+// format と同じく、手で書き換えたときに起きやすいところだけを拾う。
+fn deserialize_jpeg_quality<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = i64::deserialize(deserializer)?;
+    let clamped = raw.clamp(i64::from(MIN_JPEG_QUALITY), i64::from(MAX_JPEG_QUALITY));
+    if clamped != raw {
+        warn!(
+            "設定の JPEG 品質 {} は範囲外なので {} として扱う",
+            raw, clamped
+        );
+    }
+    // clamp 済みなので u8 に収まる
+    Ok(clamped as u8)
+}
+
+// 設定ファイルに書かれた文字列から保存形式を決める。
+// 解釈できない場合は None を返す。
+fn screenshot_format_from_str(raw: &str) -> Option<ScreenshotFormat> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "jpeg" | "jpg" => Some(ScreenshotFormat::Jpeg),
+        "png" => Some(ScreenshotFormat::Png),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +207,15 @@ impl Default for ScreenshotSettings {
     fn default() -> Self {
         Self {
             save_folder: dirs::desktop_dir().unwrap_or_else(|| PathBuf::from(".")),
+            format: ScreenshotFormat::Jpeg,
+            // image クレートの save() は JpegEncoder::new を通るため、
+            // これまでの保存は品質 75 固定だった。ゲーム画面のように
+            // 文字や細い線が多い画には 75 では圧縮の跡が見えるので、
+            // 既定をひとつ上の 90 にしてある。ファイルは 75 のおよそ 2 倍に
+            // なるが、それでも PNG よりはずっと小さい。
+            // 品質を気にしない用途は既定のまま、跡を残したくない用途は
+            // PNG を選ぶ、という切り分けにする
+            jpeg_quality: 90,
             // 相対パスのまま既定値にしてある。既存ユーザーの設定ファイルにも
             // この値が保存されているため、変えると移行の前提が崩れる。
             // 解決は screenshot::resolve_sound_path が exe の置き場所を基準に行い、
@@ -250,14 +376,15 @@ impl AppSettings {
     }
 
     pub fn get_screenshot_path(&self, timestamp: &str) -> PathBuf {
+        let extension = self.screenshot.format.extension();
         let mut path = self.screenshot.save_folder.clone();
-        path.push(format!("{}.jpg", timestamp));
+        path.push(format!("{}.{}", timestamp, extension));
 
         // ファイル名の競合を処理
         let mut counter = 1;
         while path.exists() {
             let stem = format!("{}({})", timestamp, counter);
-            path.set_file_name(format!("{}.jpg", stem));
+            path.set_file_name(format!("{}.{}", stem, extension));
             counter += 1;
         }
 
@@ -289,6 +416,8 @@ passthrough_enabled = false
 
 [screenshot]
 save_folder = 'C:\shots'
+format = "png"
+jpeg_quality = 60
 sound_file = 'sound/custom.mp3'
 sound_volume = 50.0
 hotkey = "Ctrl+S"
@@ -417,6 +546,8 @@ show_stats_overlay = true
         assert_eq!(settings.audio.channels, Some(2));
         assert!(settings.audio.passthrough_enabled);
         assert_eq!(settings.screenshot.sound_volume, 100.0);
+        assert_eq!(settings.screenshot.format, ScreenshotFormat::Jpeg);
+        assert_eq!(settings.screenshot.jpeg_quality, 90);
         // 既存ユーザーの設定にも保存されている値。screenshot::resolve_sound_path が
         // exe の置き場所を基準に解決する前提になっている
         assert_eq!(
@@ -471,6 +602,8 @@ show_stats_overlay = true
         assert_eq!(restored.audio.channels, Some(1));
         assert!(!restored.audio.passthrough_enabled);
         assert_eq!(restored.screenshot.save_folder, PathBuf::from(r"C:\shots"));
+        assert_eq!(restored.screenshot.format, ScreenshotFormat::Png);
+        assert_eq!(restored.screenshot.jpeg_quality, 60);
         assert_eq!(
             restored.screenshot.sound_file,
             Some(PathBuf::from("sound/custom.mp3"))
@@ -675,6 +808,194 @@ show_stats_overlay = true
         let path = settings.get_screenshot_path("2026-09-19_12-00-00-000");
 
         assert_eq!(path, dir.path().join("2026-09-19_12-00-00-000.jpg"));
+    }
+
+    #[test]
+    fn get_screenshot_path_png_format_uses_png_extension() {
+        // 保存形式を PNG にしたら拡張子も追従すること
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let mut settings = settings_saving_into(dir.path());
+        settings.screenshot.format = ScreenshotFormat::Png;
+
+        let path = settings.get_screenshot_path("2026-09-19_12-00-00-000");
+
+        assert_eq!(path, dir.path().join("2026-09-19_12-00-00-000.png"));
+    }
+
+    #[test]
+    fn get_screenshot_path_png_conflict_keeps_png_extension() {
+        // 連番を付けるときに拡張子を .jpg へ戻してしまわないこと
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        fs::write(dir.path().join("2026-09-19_12-00-00-000.png"), b"")
+            .expect("先客のファイルを置けること");
+        let mut settings = settings_saving_into(dir.path());
+        settings.screenshot.format = ScreenshotFormat::Png;
+
+        let path = settings.get_screenshot_path("2026-09-19_12-00-00-000");
+
+        assert_eq!(path, dir.path().join("2026-09-19_12-00-00-000(1).png"));
+    }
+
+    #[test]
+    fn get_screenshot_path_png_ignores_jpg_with_same_name() {
+        // 形式が違えばファイル名は衝突しない。同名の .jpg があっても
+        // .png 側は連番を付けずに撮影時刻そのままを使う
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        fs::write(dir.path().join("2026-09-19_12-00-00-000.jpg"), b"")
+            .expect("先客のファイルを置けること");
+        let mut settings = settings_saving_into(dir.path());
+        settings.screenshot.format = ScreenshotFormat::Png;
+
+        let path = settings.get_screenshot_path("2026-09-19_12-00-00-000");
+
+        assert_eq!(path, dir.path().join("2026-09-19_12-00-00-000.png"));
+    }
+
+    #[test]
+    fn screenshot_format_extension_matches_format() {
+        assert_eq!(ScreenshotFormat::Jpeg.extension(), "jpg");
+        assert_eq!(ScreenshotFormat::Png.extension(), "png");
+    }
+
+    #[test]
+    fn encoding_jpeg_passes_quality_through() {
+        let mut settings = AppSettings::default();
+        settings.screenshot.format = ScreenshotFormat::Jpeg;
+        settings.screenshot.jpeg_quality = 55;
+
+        assert_eq!(
+            settings.screenshot.encoding(),
+            ScreenshotEncoding::Jpeg { quality: 55 }
+        );
+    }
+
+    #[test]
+    fn encoding_jpeg_clamps_quality_into_range() {
+        // 設定ファイルを手で書き換えられた場合。エンコーダへ渡す前に丸める
+        let mut settings = AppSettings::default();
+        settings.screenshot.format = ScreenshotFormat::Jpeg;
+
+        settings.screenshot.jpeg_quality = 0;
+        assert_eq!(
+            settings.screenshot.encoding(),
+            ScreenshotEncoding::Jpeg { quality: 1 }
+        );
+
+        settings.screenshot.jpeg_quality = 255;
+        assert_eq!(
+            settings.screenshot.encoding(),
+            ScreenshotEncoding::Jpeg { quality: 100 }
+        );
+    }
+
+    #[test]
+    fn encoding_png_ignores_jpeg_quality() {
+        // PNG は可逆なので品質の値を持ち込まない
+        let mut settings = AppSettings::default();
+        settings.screenshot.format = ScreenshotFormat::Png;
+        settings.screenshot.jpeg_quality = 10;
+
+        assert_eq!(settings.screenshot.encoding(), ScreenshotEncoding::Png);
+    }
+
+    #[test]
+    fn app_settings_missing_format_key_defaults_to_jpeg() {
+        // format を足す前の版が書いた設定ファイル。これまでと同じ JPEG で
+        // 保存され、他の項目も保持されなければならない。
+        // without_key を使わないのは [video] にも format があるため
+        let config = FULL_CONFIG.replace(
+            "format = \"png\"
+",
+            "",
+        );
+        assert!(
+            !config.contains("format = \"png\""),
+            "テスト用の設定から screenshot の format が消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("format が欠けていても読めなければならない");
+
+        assert_eq!(settings.screenshot.format, ScreenshotFormat::Jpeg);
+        assert_eq!(settings.screenshot.jpeg_quality, 60);
+        assert_eq!(settings.screenshot.hotkey, Some("Ctrl+S".to_string()));
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_missing_jpeg_quality_key_uses_default_quality() {
+        let config = without_key(FULL_CONFIG, "jpeg_quality");
+        assert!(
+            !config.contains("jpeg_quality ="),
+            "テスト用の設定から jpeg_quality が消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("jpeg_quality が欠けていても読めなければならない");
+
+        assert_eq!(settings.screenshot.jpeg_quality, 90);
+        assert_eq!(settings.screenshot.format, ScreenshotFormat::Png);
+    }
+
+    #[test]
+    fn app_settings_unknown_format_value_falls_back_to_jpeg_without_losing_settings() {
+        // 手で書き換えて綴りを誤った場合。保存形式だけが既定へ倒れ、
+        // 無関係な項目は保持されなければならない
+        let config = FULL_CONFIG.replace(r#"format = "png""#, r#"format = "webp""#);
+        assert!(config.contains(r#"format = "webp""#));
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("知らない保存形式でも読めなければならない");
+
+        assert_eq!(settings.screenshot.format, ScreenshotFormat::Jpeg);
+        assert_eq!(settings.screenshot.jpeg_quality, 60);
+        assert_eq!(settings.screenshot.hotkey, Some("Ctrl+S".to_string()));
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_out_of_range_jpeg_quality_is_clamped_without_losing_settings() {
+        // 手で書き換えて u8 に収まらない値を入れた場合。品質だけが範囲に
+        // 収まり、無関係な項目は保持されなければならない
+        let config = FULL_CONFIG.replace("jpeg_quality = 60", "jpeg_quality = 256");
+        assert!(config.contains("jpeg_quality = 256"));
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("範囲外の品質でも読めなければならない");
+
+        assert_eq!(settings.screenshot.jpeg_quality, 100);
+        assert_eq!(settings.screenshot.format, ScreenshotFormat::Png);
+        assert_eq!(settings.screenshot.hotkey, Some("Ctrl+S".to_string()));
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_negative_jpeg_quality_is_clamped_to_minimum() {
+        let config = FULL_CONFIG.replace("jpeg_quality = 60", "jpeg_quality = -5");
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("負の品質でも読めなければならない");
+
+        assert_eq!(settings.screenshot.jpeg_quality, 1);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn screenshot_format_from_str_accepts_known_spellings() {
+        assert_eq!(
+            screenshot_format_from_str("jpeg"),
+            Some(ScreenshotFormat::Jpeg)
+        );
+        assert_eq!(
+            screenshot_format_from_str("JPG"),
+            Some(ScreenshotFormat::Jpeg)
+        );
+        assert_eq!(
+            screenshot_format_from_str(" png "),
+            Some(ScreenshotFormat::Png)
+        );
+        assert_eq!(screenshot_format_from_str(""), None);
+        assert_eq!(screenshot_format_from_str("bmp"), None);
     }
 
     #[test]
