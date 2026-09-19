@@ -43,6 +43,9 @@ const LINE_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f";
 /// 残すログファイルの数。今回の起動で作るものを含むので、直近 10 回分の起動が残る
 const MAX_LOG_FILES: usize = 10;
 
+/// 同じ秒に起動が重なったときに、名前の連番を進めて試す回数
+const MAX_NAME_COLLISIONS: u32 = 9;
+
 /// ログ基盤を初期化し、書き出し先のパスを返す。
 ///
 /// 失敗しても panic しない。ログが無くてもアプリ自体は動くため、
@@ -58,14 +61,7 @@ pub fn init() -> Result<PathBuf, String> {
     // 削除できなかったものはロガーの登録後に警告として書き出す
     let undeleted = remove_obsolete_logs(&dir, MAX_LOG_FILES.saturating_sub(1));
 
-    let path = dir.join(log_file_name(Local::now()));
-    // 同じ秒に 2 つ起動するとファイル名が衝突する。追記で開いて、
-    // 先に起動したほうのログを切り捨てないようにする
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("ログファイル {} を開けない: {}", path.display(), e))?;
+    let (path, file) = create_log_file(&dir, Local::now())?;
 
     let logger = FileLogger {
         level,
@@ -126,14 +122,54 @@ fn level_from_env(value: Option<&str>) -> LevelFilter {
     }
 }
 
-/// この起動で使うログファイルの名前を決める
-fn log_file_name(now: DateTime<Local>) -> String {
+/// この起動で使うログファイルの名前を決める。
+///
+/// `collision` は同じ秒に起動が重なったときの連番。0 のときは付けない。
+/// 区切りに `_` を使っているのは、`.log` の `.`（0x2E）より大きい文字なら
+/// 連番付きの名前が元の名前より後ろに並び、辞書順と時刻順の一致が崩れないため。
+fn log_file_name(now: DateTime<Local>, collision: u32) -> String {
+    let suffix = if collision == 0 {
+        String::new()
+    } else {
+        format!("_{}", collision)
+    };
+
     format!(
-        "{}{}{}",
+        "{}{}{}{}",
         FILE_PREFIX,
         now.format(FILE_TIMESTAMP_FORMAT),
+        suffix,
         FILE_SUFFIX
     )
+}
+
+/// この起動用のログファイルを作り、パスと一緒に返す。
+///
+/// `create_new` で開くので、既にあるファイルは掴まない。同じ秒に 2 つ起動しても
+/// 互いのログが 1 つのファイルに混ざらず、「1 回の起動 = 1 ファイル」を保てる。
+/// 衝突したら連番を進めて作り直す。
+fn create_log_file(dir: &Path, now: DateTime<Local>) -> Result<(PathBuf, File), String> {
+    for collision in 0..=MAX_NAME_COLLISIONS {
+        let path = dir.join(log_file_name(now, collision));
+        match OpenOptions::new().create_new(true).append(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            // 同じ秒に起動した別のプロセスが先に作っている。次の連番を試す
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(format!(
+                    "ログファイル {} を作成できない: {}",
+                    path.display(),
+                    e
+                ))
+            }
+        }
+    }
+
+    Err(format!(
+        "ログファイルを作成できない。{} に同じ時刻の名前が {} 個ある",
+        dir.display(),
+        MAX_NAME_COLLISIONS + 1
+    ))
 }
 
 /// 削除する対象のファイル名を、古い順に選ぶ。
@@ -257,7 +293,68 @@ mod tests {
     #[test]
     fn log_file_name_uses_sortable_timestamp() {
         let now = Local.with_ymd_and_hms(2026, 9, 19, 1, 2, 3).unwrap();
-        assert_eq!(log_file_name(now), "capturecard_viewer-20260919-010203.log");
+        assert_eq!(
+            log_file_name(now, 0),
+            "capturecard_viewer-20260919-010203.log"
+        );
+    }
+
+    #[test]
+    fn log_file_name_with_collision_sorts_after_the_original() {
+        let now = Local.with_ymd_and_hms(2026, 9, 19, 1, 2, 3).unwrap();
+        let first = log_file_name(now, 0);
+        let second = log_file_name(now, 1);
+
+        assert_eq!(second, "capturecard_viewer-20260919-010203_1.log");
+        // 世代の削除は名前の昇順に頼っているので、後から作ったほうが後ろに来ること
+        assert!(first < second, "連番付きの名前が元の名前より後ろに並ぶ");
+    }
+
+    #[test]
+    fn create_log_file_same_second_creates_separate_files() {
+        // 同じ秒に 2 つ起動しても、互いのログが 1 つのファイルに混ざらないこと
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作れる");
+        let now = Local.with_ymd_and_hms(2026, 9, 19, 1, 2, 3).unwrap();
+
+        let (first_path, _first) = create_log_file(dir.path(), now).expect("1 つ目を作れる");
+        let (second_path, _second) = create_log_file(dir.path(), now).expect("2 つ目を作れる");
+
+        assert_eq!(
+            first_path,
+            dir.path().join("capturecard_viewer-20260919-010203.log")
+        );
+        assert_eq!(
+            second_path,
+            dir.path().join("capturecard_viewer-20260919-010203_1.log")
+        );
+        assert!(first_path.exists());
+        assert!(second_path.exists());
+    }
+
+    #[test]
+    fn create_log_file_existing_file_is_not_truncated() {
+        // 既にあるファイルを掴まないこと。掴むと先に起動したほうのログが混ざる
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作れる");
+        let now = Local.with_ymd_and_hms(2026, 9, 19, 1, 2, 3).unwrap();
+        let existing = dir.path().join("capturecard_viewer-20260919-010203.log");
+        fs::write(&existing, b"before").expect("テスト用のファイルを作れる");
+
+        let (path, _file) = create_log_file(dir.path(), now).expect("別名で作れる");
+
+        assert_ne!(path, existing);
+        assert_eq!(fs::read(&existing).expect("読める"), b"before");
+    }
+
+    #[test]
+    fn create_log_file_all_names_taken_returns_error() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作れる");
+        let now = Local.with_ymd_and_hms(2026, 9, 19, 1, 2, 3).unwrap();
+        for collision in 0..=MAX_NAME_COLLISIONS {
+            fs::write(dir.path().join(log_file_name(now, collision)), b"x")
+                .expect("テスト用のファイルを作れる");
+        }
+
+        assert!(create_log_file(dir.path(), now).is_err());
     }
 
     #[test]
