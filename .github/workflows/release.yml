@@ -1,0 +1,114 @@
+# タグを push したら release ビルドを作り、zip を GitHub Release に添付する。
+#
+# 手順の全体は docs/RELEASE.md を参照。ここが受け持つのはタグ push 以降だけで、
+# バージョンの更新・CHANGELOG の整理・dev → main のマージは人が行う。
+#
+# ランナーは ci.yml と同じ理由で windows-latest 固定（rc.exe と Windows 専用の依存）。
+name: Release
+
+on:
+  push:
+    tags:
+      # 小文字の v で始まるタグだけを対象にする。1.0.6 以前の Ver1.0.6 形式では動かない
+      - "v*"
+
+# 同じタグに対する実行が重なっても、走り始めたものは打ち切らない。
+# Release の作成が途中で止まると、タグだけある状態が残るため。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# Release の作成と成果物の添付に書き込みが要る
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build / zip / release
+    runs-on: windows-latest
+
+    env:
+      # タグ名をシェルへ直接展開せず環境変数で渡す（式の埋め込みによる注入を避ける）
+      TAG: ${{ github.ref_name }}
+
+    steps:
+      # 第三者の Action はタグやブランチではなく不変のコミット SHA で固定する。
+      # 使っている SHA は ci.yml と揃えてあるので、更新するときは両方を直す。
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Release の作成には GH_TOKEN を使うため、認証情報を .git/config に残さない
+          persist-credentials: false
+
+      - name: Rust ツールチェインを用意する
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master (2026-09-12)
+        with:
+          toolchain: stable
+
+      - name: cargo のキャッシュを復元する
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # ビルドの前に落とす。タグを打ち直せば済む間違いを、Release を作る前に止めるため。
+      - name: タグと CHANGELOG の整合性を確認してリリースノートを作る
+        run: |
+          $tag = ${env:TAG}
+          if ($tag -notmatch '^v\d+\.\d+\.\d+') {
+            throw "タグ名 $tag が v<バージョン> の形式ではない"
+          }
+          $version = $tag.Substring(1)
+
+          # Cargo.toml を正として突き合わせる。--locked を付けているので、
+          # Cargo.lock を更新し忘れたコミットにタグを打った場合もここで落ちる
+          $manifest = (cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          if ($version -ne $manifest) {
+            throw "タグ $tag と Cargo.toml の version $manifest が一致しない"
+          }
+
+          # CHANGELOG.md から該当する版の節を抜き出して Release の説明にする。
+          # 見出しは `## [1.0.7] - 2026-09-19` の形。次の `## [` か `---` の手前までが本文
+          $lines = Get-Content -Path CHANGELOG.md -Encoding utf8
+          $heading = '^##\s*\[' + [regex]::Escape($version) + '\]'
+          $start = -1
+          for ($i = 0; $i -lt $lines.Length; $i++) {
+            if ($lines[$i] -match $heading) { $start = $i; break }
+          }
+          if ($start -lt 0) {
+            throw "CHANGELOG.md に $version の節が無い。未リリース節を版に切り忘れていないか"
+          }
+
+          $end = $lines.Length
+          for ($i = $start + 1; $i -lt $lines.Length; $i++) {
+            if ($lines[$i] -match '^##\s*\[' -or $lines[$i] -match '^---\s*$') { $end = $i; break }
+          }
+          if ($end -le $start + 1) {
+            throw "CHANGELOG.md の $version の節が空になっている"
+          }
+
+          $body = ($lines[($start + 1)..($end - 1)] -join "`n").Trim()
+          if ([string]::IsNullOrWhiteSpace($body)) {
+            throw "CHANGELOG.md の $version の節が空になっている"
+          }
+          Set-Content -Path release-notes.md -Value $body -Encoding utf8
+
+          Write-Host "リリースノート ($version):"
+          Write-Host $body
+
+      # --locked はコミット済みの Cargo.lock をそのまま使うため。
+      # 配布するバイナリなので、手元と違う依存で解決されては困る
+      - name: release ビルドする
+        run: cargo build --locked --release
+
+      # 配布物は exe 単体。icon.ico と sound/SS.mp3 は exe に埋め込み済みなので同梱しない
+      # （docs/BUILD.md の「配布時に同梱するもの」）
+      - name: zip に固める
+        run: |
+          $zip = "capturecard_viewer-${env:TAG}-windows-x64.zip"
+          Compress-Archive -Path target/release/capturecard_viewer.exe -DestinationPath $zip -Force
+          "ZIP=$zip" | Out-File -FilePath ${env:GITHUB_ENV} -Append -Encoding utf8
+
+      # 第三者の Action を増やさないよう、ランナーに入っている gh CLI を使う
+      - name: GitHub Release を作る
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${env:TAG} ${env:ZIP} --title ${env:TAG} --notes-file release-notes.md --verify-tag
