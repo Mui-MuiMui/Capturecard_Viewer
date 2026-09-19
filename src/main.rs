@@ -283,6 +283,7 @@ pub struct CaptureCardViewer {
     last_video_res: Option<(u32, u32)>,
     last_video_format: Option<String>,
     last_audio_device: Option<String>,
+    last_audio_output: Option<String>,
     last_audio_rate: Option<u32>,
     last_audio_channels: Option<u16>,
     last_fullscreen_toggle: Option<Instant>,
@@ -356,6 +357,7 @@ impl Default for CaptureCardViewer {
             last_video_res: None,
             last_video_format: None,
             last_audio_device: None,
+            last_audio_output: None,
             last_audio_rate: None,
             last_audio_channels: None,
             last_fullscreen_toggle: None,
@@ -1768,7 +1770,11 @@ impl CaptureCardViewer {
         match fallback_error {
             None => {
                 self.audio_retry.record_success();
+                // 既定のデバイスで繋がった場合も、設定に書かれている値を記録する。
+                // ここで実際に開いた値（None）を入れると、設定のデバイスが
+                // 現れても need_audio_restart が立たず繋ぎ直せなくなる
                 self.last_audio_device = settings.audio.input_device_name.clone();
+                self.last_audio_output = settings.audio.output_device_name.clone();
                 self.last_audio_rate = settings.audio.sample_rate;
                 self.last_audio_channels = settings.audio.channels;
             }
@@ -1826,7 +1832,10 @@ impl CaptureCardViewer {
                 audio.set_volume(self.volume);
             }
 
+            // 出力デバイスも比較する。入れないと、設定画面で出力先だけを
+            // 変えたときに要求が立たず、古い出力先のまま鳴り続ける
             let need_audio_restart = settings.audio.input_device_name != self.last_audio_device
+                || settings.audio.output_device_name != self.last_audio_output
                 || settings.audio.sample_rate != self.last_audio_rate
                 || settings.audio.channels != self.last_audio_channels
                 || initial; // 起動時は必ず接続試行
