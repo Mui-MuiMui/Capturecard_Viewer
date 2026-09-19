@@ -77,7 +77,7 @@ cargo test -- --ignored
 ```
 
 - `cargo fmt --check` は差分ゼロが前提。落ちたら自分の変更を `cargo fmt` で整形する。整形の基準はリポジトリ直下の `rustfmt.toml`
-- `cargo clippy` には既知の警告が残っている
+- `cargo clippy --all-targets` は警告ゼロが前提。`-- -D warnings` を付けて実行すれば警告の混入を検出できる
 - `--ignored` 付きのテストはキャプチャーデバイスを接続した状態で実行する
 
 開発フローに沿って進める場合は `/cv:review` がこれらをまとめて実行する。
