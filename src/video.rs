@@ -14,44 +14,59 @@ pub type FormatCapability = (String, Vec<(u32, u32, u32)>);
 /// デバイスが対応する全フォーマットの能力一覧。
 pub type DeviceCapabilities = Vec<FormatCapability>;
 
-// YUY2 -> RGB24 高速変換 (最適化版)
-fn yuy2_to_rgb_naive(width: usize, height: usize, src: &[u8]) -> Vec<u8> {
-    let mut out = vec![0u8; width * height * 3];
+/// YUY2 -> RGB24 の高速変換 (最適化版)。
+///
+/// 変換結果は `out` へ書き込む。`out` は呼び出し側が使い回す前提で、
+/// 毎フレームの確保・ゼロクリア・解放を避けるために `&mut Vec<u8>` で受け取る。
+///
+/// `width * height * 3` バイトへリサイズしたうえで全域を書き切る。
+/// 変換できなかった領域（幅が奇数で余る 1 画素、入力が足りない画素）は
+/// 使い回した Vec に残る前フレームの画素が見えないよう 0 で埋める。
+fn yuy2_to_rgb_naive(width: usize, height: usize, src: &[u8], out: &mut Vec<u8>) {
+    // 既に確保済みの容量はそのまま使う。0 埋めが走るのは伸ばした分だけ
+    out.resize(width * height * 3, 0);
 
     // 安全確保: 偶数幅前提 (YUYV ペア)
-    // 4 バイト / 6 バイトに満たない端数は変換せず、出力は 0 のまま残す
-    let (src_chunks, _) = src.as_chunks::<4>();
-    let (out_chunks, _) = out.as_chunks_mut::<6>();
+    // 4 バイト / 6 バイトに満たない端数は変換しない
+    let converted_len = {
+        let (src_chunks, _) = src.as_chunks::<4>();
+        let (out_chunks, _) = out.as_chunks_mut::<6>();
+        let pair_count = src_chunks.len().min(out_chunks.len());
 
-    for (src_chunk, out_chunk) in src_chunks.iter().zip(out_chunks.iter_mut()) {
-        let y0 = src_chunk[0] as i32;
-        let u = src_chunk[1] as i32;
-        let y1 = src_chunk[2] as i32;
-        let v = src_chunk[3] as i32;
+        for (src_chunk, out_chunk) in src_chunks.iter().zip(out_chunks.iter_mut()) {
+            let y0 = src_chunk[0] as i32;
+            let u = src_chunk[1] as i32;
+            let y1 = src_chunk[2] as i32;
+            let v = src_chunk[3] as i32;
 
-        // BT.601 変換 (整数演算で高速化)
-        let c0 = y0 - 16;
-        let c1 = y1 - 16;
-        let d = u - 128;
-        let e = v - 128;
+            // BT.601 変換 (整数演算で高速化)
+            let c0 = y0 - 16;
+            let c1 = y1 - 16;
+            let d = u - 128;
+            let e = v - 128;
 
-        // 係数を1024倍して整数演算に変換 (1.164 ≈ 1192/1024)
-        let r0 = (1192 * c0 + 1634 * e) >> 10;
-        let g0 = (1192 * c0 - 401 * d - 833 * e) >> 10;
-        let b0 = (1192 * c0 + 2066 * d) >> 10;
-        let r1 = (1192 * c1 + 1634 * e) >> 10;
-        let g1 = (1192 * c1 - 401 * d - 833 * e) >> 10;
-        let b1 = (1192 * c1 + 2066 * d) >> 10;
+            // 係数を1024倍して整数演算に変換 (1.164 ≈ 1192/1024)
+            let r0 = (1192 * c0 + 1634 * e) >> 10;
+            let g0 = (1192 * c0 - 401 * d - 833 * e) >> 10;
+            let b0 = (1192 * c0 + 2066 * d) >> 10;
+            let r1 = (1192 * c1 + 1634 * e) >> 10;
+            let g1 = (1192 * c1 - 401 * d - 833 * e) >> 10;
+            let b1 = (1192 * c1 + 2066 * d) >> 10;
 
-        out_chunk[0] = r0.clamp(0, 255) as u8;
-        out_chunk[1] = g0.clamp(0, 255) as u8;
-        out_chunk[2] = b0.clamp(0, 255) as u8;
-        out_chunk[3] = r1.clamp(0, 255) as u8;
-        out_chunk[4] = g1.clamp(0, 255) as u8;
-        out_chunk[5] = b1.clamp(0, 255) as u8;
-    }
+            out_chunk[0] = r0.clamp(0, 255) as u8;
+            out_chunk[1] = g0.clamp(0, 255) as u8;
+            out_chunk[2] = b0.clamp(0, 255) as u8;
+            out_chunk[3] = r1.clamp(0, 255) as u8;
+            out_chunk[4] = g1.clamp(0, 255) as u8;
+            out_chunk[5] = b1.clamp(0, 255) as u8;
+        }
 
-    out
+        pair_count * 6
+    };
+
+    // 変換しなかった領域は 0 で埋める。使い回した Vec では
+    // 前フレームの画素が残っているため、埋めないと画面に出てしまう
+    out[converted_len..].fill(0);
 }
 
 pub struct VideoFrame {
@@ -86,8 +101,17 @@ impl FrameBuffer {
             fallback_count: 0,
         }
     }
-    fn push_back(&mut self, frame: VideoFrame, decode_ms: f32, fast: bool) {
-        self.latest = Some(Arc::new(frame));
+    /// 新しいフレームを格納し、置き換えられた古いフレームを返す。
+    ///
+    /// 返した `Arc` の参照が呼び出し側だけになっていれば、中の `Vec` を
+    /// 次の変換先として回収できる。回収しない場合はそのまま捨ててよい。
+    fn push_back(
+        &mut self,
+        frame: VideoFrame,
+        decode_ms: f32,
+        fast: bool,
+    ) -> Option<Arc<VideoFrame>> {
+        let replaced = self.latest.replace(Arc::new(frame));
         self.generation += 1;
         self.last_decode_ms = decode_ms;
         if fast {
@@ -103,6 +127,7 @@ impl FrameBuffer {
             }
             self.frame_intervals.push_back(dt);
         }
+        replaced
     }
     /// 直近のフレームとその世代番号を返す。新着かどうかは問わない。
     ///
@@ -209,6 +234,11 @@ impl VideoCapture {
 
         let frame_callback = {
             let fb = self.frames.clone();
+            // 直前に置き換えられたフレーム。UI スレッドが手放していれば
+            // 中の Vec を次の変換先として回収し、毎フレームの確保を避ける。
+            // 1 世代ぶん遅らせて回収するのは、置き換えた直後のフレームは
+            // UI スレッドがテクスチャ化のために掴んでいることが多いため。
+            let mut recyclable: Option<Arc<VideoFrame>> = None;
             move |frame: nokhwa::Buffer| {
                 let start = Instant::now();
                 let res = frame.resolution();
@@ -226,7 +256,13 @@ impl VideoCapture {
                         // YUY2の高速パス
                         let raw_data = frame.buffer_bytes();
                         if raw_data.len() >= width * height * 2 {
-                            let rgb = yuy2_to_rgb_naive(width, height, &raw_data);
+                            // 回収できた Vec があれば使い回し、無ければ新規に確保する
+                            let mut rgb = recyclable
+                                .take()
+                                .and_then(|previous| Arc::try_unwrap(previous).ok())
+                                .map(|previous| previous.data)
+                                .unwrap_or_default();
+                            yuy2_to_rgb_naive(width, height, &raw_data, &mut rgb);
                             rgb_vec = Some(rgb);
                             used_fast = true;
                         }
@@ -247,7 +283,7 @@ impl VideoCapture {
                         data,
                     };
                     if let Ok(mut guard) = fb.lock() {
-                        guard.push_back(vf, decode_ms, used_fast);
+                        recyclable = guard.push_back(vf, decode_ms, used_fast);
                     }
                 }
             }
@@ -452,6 +488,14 @@ mod tests {
     const TEST_HEIGHT: usize = 2;
     const TEST_FRAME_LEN: usize = TEST_WIDTH * TEST_HEIGHT * 3;
 
+    /// 変換結果を新しい Vec で受け取るテスト用ヘルパー。
+    /// 出力先の使い回しそのものを見るテストは `yuy2_to_rgb_naive` を直接呼ぶ
+    fn convert_yuy2(width: usize, height: usize, src: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        yuy2_to_rgb_naive(width, height, src, &mut out);
+        out
+    }
+
     /// 識別しやすいように全画素を marker で埋めたフレームを作る
     fn test_frame(marker: u8) -> VideoFrame {
         VideoFrame {
@@ -569,14 +613,14 @@ mod tests {
     fn yuy2_to_rgb_naive_known_pattern_converts_two_pixels() {
         // Y0=81, U=90, Y1=145, V=240 (赤寄りの YUYV ペア)
         let src = [81u8, 90, 145, 240];
-        let out = yuy2_to_rgb_naive(2, 1, &src);
+        let out = convert_yuy2(2, 1, &src);
         assert_eq!(out, vec![254, 0, 0, 255, 73, 73]);
     }
 
     #[test]
     fn yuy2_to_rgb_naive_output_length_is_width_times_height_times_three() {
         let src = [235u8, 128, 235, 128, 235, 128, 235, 128];
-        let out = yuy2_to_rgb_naive(2, 2, &src);
+        let out = convert_yuy2(2, 2, &src);
         assert_eq!(out.len(), 2 * 2 * 3);
         assert_eq!(
             out,
@@ -588,7 +632,7 @@ mod tests {
     fn yuy2_to_rgb_naive_odd_width_leaves_last_pixel_black() {
         // 幅が奇数だと出力が 6 バイト単位で割り切れず、最後の 1 画素は変換されず 0 のまま残る
         let src = [235u8, 128, 235, 128, 0, 0];
-        let out = yuy2_to_rgb_naive(3, 1, &src);
+        let out = convert_yuy2(3, 1, &src);
         assert_eq!(out, vec![254, 254, 254, 254, 254, 254, 0, 0, 0]);
     }
 
@@ -596,7 +640,7 @@ mod tests {
     fn yuy2_to_rgb_naive_short_source_leaves_remaining_pixels_black() {
         // 入力が 1 ペア分しかない場合、残りの画素は 0 のまま (パニックしない)
         let src = [235u8, 128, 235, 128];
-        let out = yuy2_to_rgb_naive(4, 1, &src);
+        let out = convert_yuy2(4, 1, &src);
         assert_eq!(out, vec![254, 254, 254, 254, 254, 254, 0, 0, 0, 0, 0, 0]);
     }
 
@@ -604,7 +648,7 @@ mod tests {
     fn yuy2_to_rgb_naive_max_input_saturates_at_255() {
         // Y=255, U=255, V=255 では R と B が 255 を超えるため飽和する
         let src = [255u8, 255, 255, 255];
-        let out = yuy2_to_rgb_naive(2, 1, &src);
+        let out = convert_yuy2(2, 1, &src);
         assert_eq!(out, vec![255, 125, 255, 255, 125, 255]);
     }
 
@@ -612,13 +656,106 @@ mod tests {
     fn yuy2_to_rgb_naive_min_input_saturates_at_0() {
         // Y=0, U=0, V=0 では R と B が負になるため 0 に飽和する
         let src = [0u8, 0, 0, 0];
-        let out = yuy2_to_rgb_naive(2, 1, &src);
+        let out = convert_yuy2(2, 1, &src);
         assert_eq!(out, vec![0, 135, 0, 0, 135, 0]);
     }
 
     #[test]
     fn yuy2_to_rgb_naive_zero_size_returns_empty() {
-        let out = yuy2_to_rgb_naive(0, 0, &[]);
+        let out = convert_yuy2(0, 0, &[]);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_reused_buffer_clears_unconverted_area() {
+        // 使い回した Vec に前フレームの画素が残っていても、
+        // 変換されない領域は 0 になること
+        let mut out = vec![0xFFu8; 12];
+        let src = [235u8, 128, 235, 128];
+        yuy2_to_rgb_naive(4, 1, &src, &mut out);
+        assert_eq!(out, vec![254, 254, 254, 254, 254, 254, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_reused_buffer_shrinks_to_new_size() {
+        // 解像度が小さくなっても出力長が追従し、前の内容が残らないこと
+        let mut out = vec![0xFFu8; 24];
+        let src = [235u8, 128, 235, 128];
+        yuy2_to_rgb_naive(2, 1, &src, &mut out);
+        assert_eq!(out, vec![254, 254, 254, 254, 254, 254]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_reused_buffer_keeps_allocation() {
+        // 同じ解像度で呼び直したときに再確保が起きないこと（このタスクの本題）
+        let src = [81u8, 90, 145, 240, 81, 90, 145, 240];
+        let mut out = Vec::new();
+        yuy2_to_rgb_naive(2, 2, &src, &mut out);
+        let first_ptr = out.as_ptr();
+        let first_capacity = out.capacity();
+
+        yuy2_to_rgb_naive(2, 2, &src, &mut out);
+        assert_eq!(out.as_ptr(), first_ptr, "確保済みの領域を使い回す");
+        assert_eq!(out.capacity(), first_capacity);
+    }
+
+    #[test]
+    fn frame_buffer_push_back_returns_replaced_frame() {
+        // 置き換えられたフレームを受け取れること。
+        // コールバック側はこれを回収して変換先に使い回す
+        let mut buffer = FrameBuffer::new();
+        assert!(
+            buffer.push_back(test_frame(1), 1.0, true).is_none(),
+            "1 枚目は置き換える対象が無い"
+        );
+
+        let replaced = buffer
+            .push_back(test_frame(2), 1.0, true)
+            .expect("2 枚目は 1 枚目を置き換える");
+        assert_eq!(replaced.data, vec![1u8; TEST_FRAME_LEN]);
+        assert!(
+            Arc::try_unwrap(replaced).is_ok(),
+            "取り出し側が保持していなければ Vec を回収できる"
+        );
+    }
+
+    #[test]
+    #[ignore = "計測用"]
+    fn yuy2_to_rgb_naive_1080p_conversion_time() {
+        // 実行: cargo test --release -- --ignored --nocapture
+        // 毎フレームの新規確保と、確保済み Vec の使い回しを比べる
+        //
+        // 計測値の出力に println! を使う。アプリ本体では
+        // #![windows_subsystem = "windows"] のため標準出力はどこにも届かないが、
+        // テストバイナリの標準出力は cargo がパイプで受け取るため
+        // --nocapture を付ければ表示される（実測で確認済み）
+        const WIDTH: usize = 1920;
+        const HEIGHT: usize = 1080;
+        const FRAMES: usize = 120;
+
+        // 1080p 相当のダミー YUYV。定数畳み込みを避けるため画素ごとに値を変える
+        let src: Vec<u8> = (0..WIDTH * HEIGHT * 2).map(|i| (i % 251) as u8).collect();
+
+        let allocating_start = Instant::now();
+        for _ in 0..FRAMES {
+            let mut out = Vec::new();
+            yuy2_to_rgb_naive(WIDTH, HEIGHT, &src, &mut out);
+            std::hint::black_box(&out);
+        }
+        let allocating_ms = allocating_start.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
+
+        let mut out = Vec::new();
+        yuy2_to_rgb_naive(WIDTH, HEIGHT, &src, &mut out);
+        let reusing_start = Instant::now();
+        for _ in 0..FRAMES {
+            yuy2_to_rgb_naive(WIDTH, HEIGHT, &src, &mut out);
+            std::hint::black_box(&out);
+        }
+        let reusing_ms = reusing_start.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
+
+        println!(
+            "1080p YUY2->RGB {} frames: allocate={:.3} ms/frame, reuse={:.3} ms/frame",
+            FRAMES, allocating_ms, reusing_ms
+        );
     }
 }
