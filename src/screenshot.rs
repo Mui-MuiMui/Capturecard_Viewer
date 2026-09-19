@@ -35,7 +35,7 @@ pub enum SoundSource {
 // exists を引数で受けるのはテストのため。実行時は |path| path.exists() を渡す。
 pub fn resolve_sound_path(
     configured: &Path,
-    exe_dir: &Path,
+    exe_dir: Option<&Path>,
     exists: impl Fn(&Path) -> bool,
 ) -> SoundSource {
     // 空のパスを exe_dir.join() に通すと exe のディレクトリ自身になり、
@@ -47,7 +47,13 @@ pub fn resolve_sound_path(
     let candidate = if configured.is_absolute() {
         configured.to_path_buf()
     } else {
-        exe_dir.join(configured)
+        match exe_dir {
+            Some(dir) => dir.join(configured),
+            // exe の場所が分からない場合、基準にできるのはカレントディレクトリ
+            // しか残らない。そこを見に行くと修正前の挙動に戻るため、
+            // 相対パスの解決自体を諦めて埋め込み音へ倒す
+            None => return SoundSource::Embedded,
+        }
     };
 
     if exists(&candidate) {
@@ -57,13 +63,14 @@ pub fn resolve_sound_path(
     }
 }
 
-// 実行ファイルが置かれているディレクトリ。
-// 取得できない場合だけ、従来どおりカレントディレクトリ基準にフォールバックする。
-fn exe_dir() -> PathBuf {
+// 実行ファイルが置かれているディレクトリ。取得できない場合は None。
+//
+// カレントディレクトリへフォールバックしない。そうすると、この修正で
+// 取り除いたはずのカレントディレクトリ依存が黙って復活するため。
+fn exe_dir() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 pub struct ScreenshotManager {
@@ -167,7 +174,7 @@ impl ScreenshotManager {
     // Err を返すのは、解決したファイルが存在したのに読めなかった場合だけ。
     // このときも既定音を入れてあるので、鳴らないという結果にはならない。
     pub fn set_sound_file(&mut self, sound_path: &Path) -> Result<(), String> {
-        match resolve_sound_path(sound_path, &exe_dir(), |path| path.exists()) {
+        match resolve_sound_path(sound_path, exe_dir().as_deref(), |path| path.exists()) {
             SoundSource::Embedded => {
                 self.sound_data = Some(EMBEDDED_SOUND.to_vec());
                 Ok(())
@@ -424,7 +431,7 @@ mod tests {
         let configured = dir.path().join("custom.mp3");
         assert!(configured.is_absolute(), "テストの前提: 絶対パスであること");
 
-        let resolved = resolve_sound_path(&configured, Path::new(EXE_DIR), |_| true);
+        let resolved = resolve_sound_path(&configured, Some(Path::new(EXE_DIR)), |_| true);
 
         assert_eq!(resolved, SoundSource::File(configured));
     }
@@ -435,7 +442,7 @@ mod tests {
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let configured = dir.path().join("deleted.mp3");
 
-        let resolved = resolve_sound_path(&configured, Path::new(EXE_DIR), |_| false);
+        let resolved = resolve_sound_path(&configured, Some(Path::new(EXE_DIR)), |_| false);
 
         assert_eq!(resolved, SoundSource::Embedded);
     }
@@ -447,9 +454,11 @@ mod tests {
         // SoundSource::Embedded へ落ちる
         let expected = PathBuf::from("C:/Program Files/capturecard_viewer/sound/SS.mp3");
 
-        let resolved = resolve_sound_path(Path::new("sound/SS.mp3"), Path::new(EXE_DIR), |path| {
-            path == expected
-        });
+        let resolved = resolve_sound_path(
+            Path::new("sound/SS.mp3"),
+            Some(Path::new(EXE_DIR)),
+            |path| path == expected,
+        );
 
         assert_eq!(resolved, SoundSource::File(expected));
     }
@@ -457,7 +466,10 @@ mod tests {
     #[test]
     fn resolve_sound_path_relative_missing_falls_back_to_embedded() {
         // exe の隣にも sound/ が無い配布形態。埋め込みの既定音で鳴らす
-        let resolved = resolve_sound_path(Path::new("sound/SS.mp3"), Path::new(EXE_DIR), |_| false);
+        let resolved =
+            resolve_sound_path(Path::new("sound/SS.mp3"), Some(Path::new(EXE_DIR)), |_| {
+                false
+            });
 
         assert_eq!(resolved, SoundSource::Embedded);
     }
@@ -466,7 +478,7 @@ mod tests {
     fn resolve_sound_path_empty_falls_back_to_embedded() {
         // 設定に空文字が入っていた場合。exe のディレクトリ自身を
         // 効果音ファイルとして読もうとしないこと
-        let resolved = resolve_sound_path(Path::new(""), Path::new(EXE_DIR), |_| true);
+        let resolved = resolve_sound_path(Path::new(""), Some(Path::new(EXE_DIR)), |_| true);
 
         assert_eq!(resolved, SoundSource::Embedded);
     }
@@ -477,11 +489,35 @@ mod tests {
         // 状況を作り、そこを見に行かないことを確かめる
         let cwd_candidate = PathBuf::from("sound/SS.mp3");
 
-        let resolved = resolve_sound_path(Path::new("sound/SS.mp3"), Path::new(EXE_DIR), |path| {
-            path == cwd_candidate
-        });
+        let resolved = resolve_sound_path(
+            Path::new("sound/SS.mp3"),
+            Some(Path::new(EXE_DIR)),
+            |path| path == cwd_candidate,
+        );
 
         assert_eq!(resolved, SoundSource::Embedded);
+    }
+
+    #[test]
+    fn resolve_sound_path_relative_without_exe_dir_falls_back_to_embedded() {
+        // current_exe() が失敗して exe の場所が分からない場合。ここで
+        // カレントディレクトリを基準にすると修正前の挙動に戻るため、
+        // ファイルが存在していても埋め込み音へ倒す
+        let resolved = resolve_sound_path(Path::new("sound/SS.mp3"), None, |_| true);
+
+        assert_eq!(resolved, SoundSource::Embedded);
+    }
+
+    #[test]
+    fn resolve_sound_path_absolute_without_exe_dir_uses_that_file() {
+        // 絶対パスの指定は基準ディレクトリを必要としないため、
+        // exe の場所が分からなくてもそのまま使える
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let configured = dir.path().join("custom.mp3");
+
+        let resolved = resolve_sound_path(&configured, None, |_| true);
+
+        assert_eq!(resolved, SoundSource::File(configured));
     }
 
     #[test]
