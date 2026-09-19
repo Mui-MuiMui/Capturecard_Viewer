@@ -24,6 +24,7 @@ pub fn show_settings_dialog(
     show_settings: &mut bool,
     settings: &Arc<Mutex<AppSettings>>,
     show_hotkey_dialog: &mut bool,
+    video_devices: &[(String, String)],
     input_devices: &[String],
     output_devices: &[String],
 ) -> bool {
@@ -68,6 +69,7 @@ pub fn show_settings_dialog(
                             0 => show_device_settings_tab(
                                 ui,
                                 &mut settings,
+                                video_devices,
                                 input_devices,
                                 output_devices,
                             ),
@@ -139,6 +141,7 @@ pub fn show_settings_dialog(
 fn show_device_settings_tab(
     ui: &mut egui::Ui,
     settings: &mut AppSettings,
+    video_devices: &[(String, String)],
     input_devices: &[String],
     output_devices: &[String],
 ) {
@@ -154,7 +157,7 @@ fn show_device_settings_tab(
         ui.add_space(5.0);
 
         // ビデオデバイス選択
-        let video_devices = crate::video::VideoCapture::list_devices();
+        // 一覧は main.rs 側でキャッシュ済みのものを受け取る（毎フレームの列挙を避けるため）
         let selected_device = settings.video.device_name.clone().unwrap_or_default();
 
         let mut device_changed = false;
@@ -165,7 +168,7 @@ fn show_device_settings_tab(
                 &selected_device
             })
             .show_ui(ui, |ui| {
-                for (name, description) in &video_devices {
+                for (name, description) in video_devices {
                     let display_text = if description.is_empty() {
                         name.clone()
                     } else {

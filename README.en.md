@@ -44,7 +44,7 @@ To also remove the settings file, delete the following directory:
 1. Right-click → "詳細設定..." (Advanced settings) to open the settings window.
 2. Select video and audio devices in the **device settings** tab.
     - Changes take effect when you press 適用 (Apply) or OK. Settings are saved to disk only when you press OK.
-    - The device list is cached and refreshed every 5 seconds.
+    - The device lists (both video and audio) are cached and refreshed every 5 seconds.
 3. Configure the save location, sound effect, and hotkey in the **screenshot settings** tab.
 
 > **Note:** The application interface is currently Japanese only.
