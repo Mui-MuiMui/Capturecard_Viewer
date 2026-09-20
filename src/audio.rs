@@ -61,6 +61,12 @@ pub struct AudioCapture {
     /// コールバックが待たされ、バッファを埋め損ねて音が途切れうる。
     volume: Arc<AtomicU32>,
     audio_passthrough_enabled: Arc<AtomicBool>,
+    /// ミュート中か。
+    ///
+    /// **音量とは独立に持つ。** 音量 0% で代用すると、ミュートを解除したときに
+    /// 戻すべき値が残らない。出力コールバックから読むので、パススルーの旗と
+    /// 同じく `AtomicBool` にしてロックを避ける。
+    muted: Arc<AtomicBool>,
     // 稼働中のストリームでエラーが起きたことを表す旗。
     //
     // cpal のエラーコールバックはデバイスが消えた（`DeviceNotAvailable`）
@@ -109,6 +115,8 @@ impl AudioCapture {
             volume: Arc::new(AtomicU32::new(DEFAULT_VOLUME.to_bits())),
             // 既定では音声パススルーを有効にする（音が出る状態で起動する）
             audio_passthrough_enabled: Arc::new(AtomicBool::new(true)),
+            // 既定はミュート解除。設定から読んだ値は apply_settings が入れ直す
+            muted: Arc::new(AtomicBool::new(false)),
             stream_error: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -269,16 +277,18 @@ impl AudioCapture {
         .map_err(|e| format!("Failed to build input stream: {}", e))?;
 
         // 出力ストリーム
-        let vol_arc = self.volume.clone();
-        let passthrough_arc = self.audio_passthrough_enabled.clone();
+        let controls = OutputControls {
+            volume: self.volume.clone(),
+            passthrough_enabled: self.audio_passthrough_enabled.clone(),
+            muted: self.muted.clone(),
+        };
         let output_stream_config = output_config.config();
         let output_stream = match output_config.sample_format() {
             SampleFormat::F32 => build_output_stream_with::<f32>(
                 &output_device,
                 &output_stream_config,
                 consumer.clone(),
-                vol_arc,
-                passthrough_arc,
+                controls,
                 stream_error.clone(),
                 |sample| sample,
             ),
@@ -286,8 +296,7 @@ impl AudioCapture {
                 &output_device,
                 &output_stream_config,
                 consumer.clone(),
-                vol_arc,
-                passthrough_arc,
+                controls,
                 stream_error.clone(),
                 f32_to_i16,
             ),
@@ -295,8 +304,7 @@ impl AudioCapture {
                 &output_device,
                 &output_stream_config,
                 consumer.clone(),
-                vol_arc,
-                passthrough_arc,
+                controls,
                 stream_error.clone(),
                 f32_to_u16,
             ),
@@ -304,8 +312,7 @@ impl AudioCapture {
                 &output_device,
                 &output_stream_config,
                 consumer.clone(),
-                vol_arc,
-                passthrough_arc,
+                controls,
                 stream_error.clone(),
                 f32_to_i32,
             ),
@@ -385,6 +392,17 @@ impl AudioCapture {
         // 出力コールバック（リアルタイムスレッド）から読むため、ロックを取らない
         self.audio_passthrough_enabled
             .store(enabled, Ordering::Relaxed);
+    }
+
+    /// ミュートの入切を設定する。
+    ///
+    /// **音量には触らない。** ミュート中も `volume` は元の値のまま残り、
+    /// 解除するとその音量で鳴り始める。
+    pub fn set_muted(&mut self, muted: bool) {
+        // apply_settings から 2 秒ごとに呼ばれるため trace に落とす
+        trace!("ミュートを設定する: {}", muted);
+        // 出力コールバック（リアルタイムスレッド）から読むため、ロックを取らない
+        self.muted.store(muted, Ordering::Relaxed);
     }
 
     fn find_device_by_name(&self, name: &str, input: bool) -> Result<Device, String> {
@@ -502,6 +520,16 @@ where
     )
 }
 
+/// 出力コールバックが 1 回ごとに読む共有の値。
+///
+/// 個別の引数で渡していたが数が増えたのでまとめた。どれも `Arc` の複製を
+/// コールバックへ移すだけなので、束ねても寿命の扱いは変わらない。
+struct OutputControls {
+    volume: Arc<AtomicU32>,
+    passthrough_enabled: Arc<AtomicBool>,
+    muted: Arc<AtomicBool>,
+}
+
 /// 出力ストリームを組み立てる。
 ///
 /// `to_sample` はリングバッファの f32 をデバイスのサンプル型へ戻す。
@@ -509,8 +537,7 @@ fn build_output_stream_with<T>(
     device: &Device,
     config: &cpal::StreamConfig,
     consumer: Arc<Mutex<AudioConsumer>>,
-    volume: Arc<AtomicU32>,
-    passthrough_enabled: Arc<AtomicBool>,
+    controls: OutputControls,
     stream_error: Arc<AtomicBool>,
     to_sample: impl Fn(f32) -> T + Send + 'static,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
@@ -520,10 +547,13 @@ where
     device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-            let volume = load_volume(&volume);
-            let passthrough = passthrough_enabled.load(Ordering::Relaxed);
+            let volume = load_volume(&controls.volume);
+            let audible = output_is_audible(
+                controls.passthrough_enabled.load(Ordering::Relaxed),
+                controls.muted.load(Ordering::Relaxed),
+            );
             if let Ok(mut cons) = consumer.try_lock() {
-                render_output_samples(data, volume, passthrough, || cons.pop(), &to_sample);
+                render_output_samples(data, volume, audible, || cons.pop(), &to_sample);
             } else {
                 // 無音を表す値は型ごとに違う（u16 は 0 ではなく 32768）ので変換関数に通す
                 data.fill(to_sample(0.0));
@@ -580,28 +610,33 @@ fn f32_to_i32(sample: f32) -> i32 {
     (sample * I32_SCALE) as i32
 }
 
+/// 出力に音を書き込んでよいか。
+///
+/// パススルーの無効とミュートは理由も操作経路も別だが、出力コールバックから見れば
+/// どちらも「無音を書く」に落ちる。**片方だけを見る書き方にしないため**に、
+/// 判定をここへ 1 つにまとめてある。
+fn output_is_audible(passthrough_enabled: bool, muted: bool) -> bool {
+    passthrough_enabled && !muted
+}
+
 /// 出力コールバック 1 回分のサンプルを書き込む。
 ///
-/// `passthrough_enabled` が false のときは無音を書き込む。ストリームは止めない。
+/// `audible` が false のときは無音を書き込む。ストリームは止めない。
 ///
 /// `next_sample` はリングバッファから 1 サンプル取り出す。取り出せなければ `None`。
 /// `to_sample` は音量を掛けた f32 を出力ストリームのサンプル型へ変換する。
 fn render_output_samples<T>(
     data: &mut [T],
     volume: f32,
-    passthrough_enabled: bool,
+    audible: bool,
     mut next_sample: impl FnMut() -> Option<f32>,
     to_sample: impl Fn(f32) -> T,
 ) {
-    // パススルーが無効でもリングバッファは同じ数だけ消費する。
-    // 消費を止めるとバッファが溢れ、再度有効にしたときに古い音から再生されてしまう。
+    // 無音を書くときもリングバッファは同じ数だけ消費する。
+    // 消費を止めるとバッファが溢れ、再度鳴らしたときに古い音から再生されてしまう。
     for slot in data.iter_mut() {
         let sample = next_sample().unwrap_or(0.0);
-        let value = if passthrough_enabled {
-            sample * volume
-        } else {
-            0.0
-        };
+        let value = if audible { sample * volume } else { 0.0 };
         *slot = to_sample(value);
     }
 }
@@ -666,6 +701,16 @@ mod tests {
         assert_eq!(load_volume(&cell), 0.0);
         store_volume(&cell, 1.75);
         assert_eq!(load_volume(&cell), 1.75);
+    }
+
+    #[test]
+    fn output_is_audible_only_when_passthrough_on_and_not_muted() {
+        assert!(output_is_audible(true, false));
+        // ミュート中はパススルーが有効でも鳴らさない
+        assert!(!output_is_audible(true, true));
+        // パススルーが無効なら、ミュートを解除しても鳴らさない
+        assert!(!output_is_audible(false, false));
+        assert!(!output_is_audible(false, true));
     }
 
     #[test]

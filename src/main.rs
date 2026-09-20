@@ -484,6 +484,9 @@ pub struct CaptureCardViewer {
     // 常時表示の show_stats_overlay とは別物
     transient_overlay: TransientOverlay,
     volume: f32,
+    // ミュート中か。設定の ui.muted と対応する。音量とは独立で、
+    // ミュート中も volume は元の値を保つ
+    muted: bool,
     last_volume_sent: f32,
     last_settings_applied: Instant,
     // 設定に未保存の変更があるときの、最後に変更された時刻。
@@ -609,6 +612,7 @@ impl Default for CaptureCardViewer {
             show_stats_overlay,
             transient_overlay: TransientOverlay::default(),
             volume: 100.0,
+            muted: false,
             last_volume_sent: -1.0,
             last_settings_applied: Instant::now(),
             settings_dirty_since: None,
@@ -1047,6 +1051,7 @@ impl CaptureCardViewer {
             HotkeyAction::ReconnectDevices => self.reconnect_devices(),
             HotkeyAction::VolumeUp => self.adjust_volume(VOLUME_SCROLL_STEP),
             HotkeyAction::VolumeDown => self.adjust_volume(-VOLUME_SCROLL_STEP),
+            HotkeyAction::ToggleMute => self.toggle_mute(),
         }
     }
 
@@ -1221,6 +1226,8 @@ impl CaptureCardViewer {
                             ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
                     }
 
+                    self.handle_middle_click_mute(&response);
+
                     // 音量調整のためのスクロールを処理
                     if response.hovered() {
                         self.handle_volume_scroll(ctx);
@@ -1247,6 +1254,8 @@ impl CaptureCardViewer {
                         self.context_menu_pos =
                             ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
                     }
+
+                    self.handle_middle_click_mute(&response);
                 }
             });
     }
@@ -1307,6 +1316,8 @@ impl CaptureCardViewer {
                             ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
                     }
 
+                    self.handle_middle_click_mute(&response);
+
                     // マウススクロールでの音量調整（ウィンドウ版と同じ機能）
                     if response.hovered() {
                         self.handle_volume_scroll(ctx);
@@ -1333,6 +1344,8 @@ impl CaptureCardViewer {
                         self.context_menu_pos =
                             ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
                     }
+
+                    self.handle_middle_click_mute(&response);
                 }
             });
     }
@@ -1347,12 +1360,13 @@ impl CaptureCardViewer {
             return;
         }
 
-        let volume = if scroll_y > 0.0 {
-            (self.volume + VOLUME_SCROLL_STEP).min(MAX_VOLUME)
+        // 段の大きさ、上下限、ミュートの扱いを「音量を上げる / 下げる」の
+        // ホットキーと同じにするため、同じ経路へ寄せる
+        self.adjust_volume(if scroll_y > 0.0 {
+            VOLUME_SCROLL_STEP
         } else {
-            (self.volume - VOLUME_SCROLL_STEP).max(MIN_VOLUME)
-        };
-        self.set_volume_from_ui(volume);
+            -VOLUME_SCROLL_STEP
+        });
     }
 
     /// UI の操作で音量が変わったときの共通処理。
@@ -1372,13 +1386,24 @@ impl CaptureCardViewer {
         self.show_volume_overlay();
     }
 
-    /// いまの音量を OSD に出す。
+    /// いまの音量を OSD に出す。ミュート中はバーを灰色にして数字だけ残す。
     fn show_volume_overlay(&mut self) {
         self.transient_overlay.show(
-            volume_overlay_content(self.volume),
+            volume_overlay_content(self.volume, self.muted),
             VOLUME_OSD_DURATION,
             Instant::now(),
         );
+    }
+
+    /// 映像や空きエリアの上でのミドルクリックをミュートの切り替えへ回す。
+    ///
+    /// ウィンドウ表示とフルスクリーンの、映像あり / なしの 4 か所から呼ぶ。
+    /// 映像が出ていないときも切り替えられるようにしてあるのは、音だけ先に
+    /// 来ている状態でも黙らせられるようにするため。
+    fn handle_middle_click_mute(&mut self, response: &egui::Response) {
+        if response.middle_clicked() {
+            self.toggle_mute();
+        }
     }
 
     /// 映像の統計を左上へ半透明で重ねて描く。
@@ -1440,6 +1465,13 @@ impl CaptureCardViewer {
                     // 渡し直して設定への反映と OSD の表示だけを行わせる
                     if volume_response.changed() {
                         self.set_volume_from_ui(self.volume);
+                    }
+
+                    // ミュートはスライダーのすぐ下に置く。音量 0% にする代わりの
+                    // 操作なので、離すと探されない
+                    let mut muted = self.muted;
+                    if ui.checkbox(&mut muted, "ミュート").changed() {
+                        self.set_muted_from_ui(muted);
                     }
 
                     ui.separator();
@@ -1625,12 +1657,45 @@ fn format_stats_lines(stats: &FrameStats) -> Vec<String> {
 ///
 /// 数字は右クリックメニューの「音量: N%」と同じ `as i32` で作る。丸め方を
 /// 変えると、メニューのスライダーを動かしている間だけ OSD と 1% ずれて見える。
-fn volume_overlay_content(volume: f32) -> OverlayContent {
+///
+/// ミュート中はバーを灰色にし、文言に「（ミュート中）」を添える。**数字は消さない。**
+/// ミュートを解除したときに戻る音量がそのまま見えているほうが、操作の結果を
+/// 予想しやすいため。
+fn volume_overlay_content(volume: f32, muted: bool) -> OverlayContent {
+    let text = if muted {
+        format!("音量: {}%（ミュート中）", volume as i32)
+    } else {
+        format!("音量: {}%", volume as i32)
+    };
     OverlayContent::Bar {
-        text: format!("音量: {}%", volume as i32),
+        text,
         ratio: volume / MAX_VOLUME,
         marker_ratio: VOLUME_REFERENCE / MAX_VOLUME,
+        dimmed: muted,
     }
+}
+
+/// ミュートを切り替えたときに OSD へ出す内容を組み立てる。
+///
+/// 解除したときだけ音量を添える。ミュート中にスライダーで音量を変えている
+/// ことがあるため、「解除したら何%で鳴るのか」が分かるようにしている。
+fn mute_overlay_content(muted: bool, volume: f32) -> OverlayContent {
+    if muted {
+        OverlayContent::Text("ミュート".to_string())
+    } else {
+        OverlayContent::Text(format!("ミュート解除（音量: {}%）", volume as i32))
+    }
+}
+
+/// 映像上のホイール操作と「音量を上げる / 下げる」のホットキーで音量を変えたときの、
+/// 適用すべき `(音量, ミュート状態)`。
+///
+/// **ミュート中でも解除する。** これらの操作の近くにはミュートの表示が無く、
+/// 解除しないと「音量を上げたのに鳴らない」状態になって原因が分からない。
+/// 右クリックメニューのスライダーはすぐ下にミュートのチェックが見えているので、
+/// そちらは解除せず、灰色のバーで「効いていない」ことだけを示す。
+fn volume_change_result(current: f32, delta: f32) -> (f32, bool) {
+    ((current + delta).clamp(MIN_VOLUME, MAX_VOLUME), false)
 }
 
 /// 完了済みのスレッドハンドルを取り除く。
@@ -2386,6 +2451,10 @@ impl CaptureCardViewer {
                 // 音量を適用
                 self.volume = settings.ui.volume;
                 audio.set_volume(self.volume);
+
+                // ミュートも同じ扱い。ストリームの開き直しは伴わない
+                self.muted = settings.ui.muted;
+                audio.set_muted(self.muted);
             }
 
             // 設定ダイアログの「適用」「OK」で音量が変わったときも OSD を出す。
@@ -2914,8 +2983,48 @@ impl CaptureCardViewer {
     /// 右クリックメニューのスライダーと同じ経路を通すことで、設定への
     /// 反映も OSD の表示も同じになる。
     fn adjust_volume(&mut self, delta: f32) {
-        let volume = (self.volume + delta).clamp(MIN_VOLUME, MAX_VOLUME);
+        let (volume, muted) = volume_change_result(self.volume, delta);
+        if self.muted != muted {
+            // 解除の OSD は出さない。直後の音量 OSD が新しい状態を示す
+            self.apply_muted(muted);
+        }
         self.set_volume_from_ui(volume);
+    }
+
+    /// ミュートの状態を反映する。設定へ書き、音声へ伝えるところまで。
+    ///
+    /// **OSD はここでは出さない。** 音量変更に巻き込まれた解除では、
+    /// ミュートの OSD ではなく音量の OSD を出したいため。
+    ///
+    /// ロックは settings → audio の順に 1 つずつ取り、重ねない。
+    fn apply_muted(&mut self, muted: bool) {
+        self.muted = muted;
+        if let Ok(mut settings) = self.settings.lock() {
+            settings.ui.muted = muted;
+        }
+        if let Ok(mut audio) = self.audio_capture.lock() {
+            audio.set_muted(muted);
+        }
+        self.mark_settings_dirty();
+    }
+
+    /// UI の操作でミュートが変わったときの共通処理。反映して OSD を出す。
+    fn set_muted_from_ui(&mut self, muted: bool) {
+        self.apply_muted(muted);
+        info!("ミュートを{}にした", if muted { "オン" } else { "オフ" });
+        self.transient_overlay.show(
+            mute_overlay_content(muted, self.volume),
+            VOLUME_OSD_DURATION,
+            Instant::now(),
+        );
+    }
+
+    /// ミュートを切り替える。
+    ///
+    /// 右クリックメニューのチェック、映像上のミドルクリック、ホットキーが
+    /// すべてここを通る。
+    fn toggle_mute(&mut self) {
+        self.set_muted_from_ui(!self.muted);
     }
 
     /// デバイスを強制的に開き直す。右クリックメニューの「デバイス再接続」と同じ。
@@ -2971,13 +3080,29 @@ mod tests {
 
     /// 音量 OSD のバーの中身を取り出す。テキスト以外の形で返ってきたら落とす
     fn volume_bar(volume: f32) -> (String, f32, f32) {
-        match volume_overlay_content(volume) {
+        let (text, ratio, marker_ratio, _) = volume_bar_with_mute(volume, false);
+        (text, ratio, marker_ratio)
+    }
+
+    /// ミュート状態を指定して音量 OSD のバーの中身を取り出す。
+    /// 最後の要素は「灰色で描くか」
+    fn volume_bar_with_mute(volume: f32, muted: bool) -> (String, f32, f32, bool) {
+        match volume_overlay_content(volume, muted) {
             OverlayContent::Bar {
                 text,
                 ratio,
                 marker_ratio,
-            } => (text, ratio, marker_ratio),
+                dimmed,
+            } => (text, ratio, marker_ratio, dimmed),
             other => panic!("音量 OSD がバー付きになっていない: {:?}", other),
+        }
+    }
+
+    /// ミュート OSD の文言を取り出す。バーが付いていたら落とす
+    fn mute_text(muted: bool, volume: f32) -> String {
+        match mute_overlay_content(muted, volume) {
+            OverlayContent::Text(text) => text,
+            other => panic!("ミュート OSD がテキストになっていない: {:?}", other),
         }
     }
 
@@ -3018,6 +3143,72 @@ mod tests {
         let (text, _, _) = volume_bar(79.6);
 
         assert_eq!(text, "音量: 79%");
+    }
+
+    #[test]
+    fn volume_overlay_content_while_muted_is_dimmed_and_labelled() {
+        // ミュート中でも数字は残す。解除したときに戻る音量が見えているほうが
+        // 操作の結果を予想しやすい
+        let (text, ratio, _, dimmed) = volume_bar_with_mute(80.0, true);
+
+        assert_eq!(text, "音量: 80%（ミュート中）");
+        assert!((ratio - 0.4).abs() < 1e-6, "バーの長さが違う: {}", ratio);
+        assert!(dimmed);
+    }
+
+    #[test]
+    fn volume_overlay_content_without_mute_is_not_dimmed() {
+        let (_, _, _, dimmed) = volume_bar_with_mute(80.0, false);
+
+        assert!(!dimmed);
+    }
+
+    #[test]
+    fn mute_overlay_content_muted_shows_only_the_state() {
+        assert_eq!(mute_text(true, 80.0), "ミュート");
+    }
+
+    #[test]
+    fn mute_overlay_content_unmuted_shows_restored_volume() {
+        assert_eq!(mute_text(false, 80.0), "ミュート解除（音量: 80%）");
+    }
+
+    #[test]
+    fn mute_overlay_content_rounds_volume_like_the_volume_osd() {
+        // 音量 OSD と丸め方を揃える。食い違うと解除の前後で 1% ずれて見える
+        assert_eq!(mute_text(false, 79.6), "ミュート解除（音量: 79%）");
+    }
+
+    #[test]
+    fn volume_change_result_releases_mute() {
+        // ホイールや音量ホットキーで音量を変えたらミュートは解除する
+        let (volume, muted) = volume_change_result(50.0, VOLUME_SCROLL_STEP);
+
+        assert_eq!(volume, 60.0);
+        assert!(!muted);
+    }
+
+    #[test]
+    fn volume_change_result_clamps_to_maximum() {
+        let (volume, _) = volume_change_result(MAX_VOLUME, VOLUME_SCROLL_STEP);
+
+        assert_eq!(volume, MAX_VOLUME);
+    }
+
+    #[test]
+    fn volume_change_result_clamps_to_minimum() {
+        let (volume, _) = volume_change_result(MIN_VOLUME, -VOLUME_SCROLL_STEP);
+
+        assert_eq!(volume, MIN_VOLUME);
+    }
+
+    #[test]
+    fn volume_change_result_from_muted_state_still_releases_mute() {
+        // 下げる方向でも解除する。「鳴らないまま下げ続ける」状態を作らない
+        let (volume, muted) = volume_change_result(50.0, -VOLUME_SCROLL_STEP);
+
+        assert_eq!(volume, 40.0);
+        assert!(!muted);
     }
 
     #[test]
