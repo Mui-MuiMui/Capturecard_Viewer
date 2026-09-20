@@ -167,6 +167,62 @@ fn screenshot_format_from_str(raw: &str) -> Option<ScreenshotFormat> {
     }
 }
 
+// スクリーンショットの保存先の既定値。
+//
+// デスクトップ → %USERPROFILE% → 実行ファイルの置き場所 → 一時フォルダ の順に倒す。
+// **カレントディレクトリは使わない。** どこから起動したかで保存先が変わるうえ、
+// ショートカットやタスクスケジューラから起動すると C:\Windows\System32 のような
+// 書き込めない場所を指しうる。保存に失敗する理由が設定画面から見て分からない。
+fn default_screenshot_folder() -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+
+    screenshot_folder_from(
+        dirs::desktop_dir(),
+        dirs::home_dir(),
+        exe_dir,
+        std::env::temp_dir(),
+    )
+}
+
+// 保存先の候補から実際に使うものを選ぶ。
+//
+// 候補の取得は環境に依存するため、選ぶ部分だけを切り出してテストする。
+// last_resort は常に値がある候補（一時フォルダ）を想定している。
+fn screenshot_folder_from(
+    desktop: Option<PathBuf>,
+    home: Option<PathBuf>,
+    exe_dir: Option<PathBuf>,
+    last_resort: PathBuf,
+) -> PathBuf {
+    if let Some(desktop) = desktop {
+        return desktop;
+    }
+
+    if let Some(home) = home {
+        warn!(
+            "デスクトップの場所が分からないので、スクリーンショットの保存先を {} にする",
+            home.display()
+        );
+        return home;
+    }
+
+    if let Some(exe_dir) = exe_dir {
+        warn!(
+            "ユーザーフォルダの場所も分からないので、スクリーンショットの保存先を実行ファイルの場所 {} にする",
+            exe_dir.display()
+        );
+        return exe_dir;
+    }
+
+    warn!(
+        "実行ファイルの場所も分からないので、スクリーンショットの保存先を一時フォルダ {} にする",
+        last_resort.display()
+    );
+    last_resort
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiSettings {
@@ -206,7 +262,7 @@ impl Default for AudioSettings {
 impl Default for ScreenshotSettings {
     fn default() -> Self {
         Self {
-            save_folder: dirs::desktop_dir().unwrap_or_else(|| PathBuf::from(".")),
+            save_folder: default_screenshot_folder(),
             format: ScreenshotFormat::Jpeg,
             // image クレートの save() は JpegEncoder::new を通るため、
             // これまでの保存は品質 75 固定だった。ゲーム画面のように
@@ -735,6 +791,67 @@ show_stats_overlay = true
 
         assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
         assert!(outcome.may_write_defaults_on_startup());
+    }
+
+    // 保存先の候補。実在しないパスでよい。screenshot_folder_from は
+    // 候補の存在を確かめず、取れた順に選ぶだけ
+    const DESKTOP: &str = r"C:\Users\tester\Desktop";
+    const HOME: &str = r"C:\Users\tester";
+    const EXE_DIR: &str = r"C:\Program Files\capturecard_viewer";
+    const TEMP: &str = r"C:\Users\tester\AppData\Local\Temp";
+
+    #[test]
+    fn screenshot_folder_from_desktop_available_uses_desktop() {
+        let folder = screenshot_folder_from(
+            Some(PathBuf::from(DESKTOP)),
+            Some(PathBuf::from(HOME)),
+            Some(PathBuf::from(EXE_DIR)),
+            PathBuf::from(TEMP),
+        );
+
+        assert_eq!(folder, PathBuf::from(DESKTOP));
+    }
+
+    #[test]
+    fn screenshot_folder_from_no_desktop_falls_back_to_home() {
+        // デスクトップをリダイレクトしている環境などで desktop_dir() が None になる場合
+        let folder = screenshot_folder_from(
+            None,
+            Some(PathBuf::from(HOME)),
+            Some(PathBuf::from(EXE_DIR)),
+            PathBuf::from(TEMP),
+        );
+
+        assert_eq!(folder, PathBuf::from(HOME));
+    }
+
+    #[test]
+    fn screenshot_folder_from_no_user_folders_falls_back_to_exe_dir() {
+        let folder = screenshot_folder_from(
+            None,
+            None,
+            Some(PathBuf::from(EXE_DIR)),
+            PathBuf::from(TEMP),
+        );
+
+        assert_eq!(folder, PathBuf::from(EXE_DIR));
+    }
+
+    #[test]
+    fn screenshot_folder_from_nothing_available_falls_back_to_last_resort() {
+        let folder = screenshot_folder_from(None, None, None, PathBuf::from(TEMP));
+
+        assert_eq!(folder, PathBuf::from(TEMP));
+    }
+
+    #[test]
+    fn screenshot_folder_from_never_returns_current_dir() {
+        // 修正前の挙動の再現防止。どの候補も取れなくてもカレントディレクトリを
+        // 指さないこと。相対パスだと起動元によって保存先が変わる
+        let folder = screenshot_folder_from(None, None, None, PathBuf::from(TEMP));
+
+        assert_ne!(folder, PathBuf::from("."));
+        assert!(folder.is_absolute(), "保存先の既定値は絶対パスであること");
     }
 
     #[test]
