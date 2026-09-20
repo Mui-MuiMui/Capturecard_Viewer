@@ -39,7 +39,7 @@ To also remove the settings file, delete the following directory:
   - Toggle automatic device reconnection
   - Reconnect device
   - Advanced settings
-- **Mouse wheel**: Adjust volume (±10%)
+- **Mouse wheel**: Adjust volume (±10%). The current volume appears as a bar at the bottom of the screen and fades out after about 1.5 seconds (the same overlay appears when you change the volume from the context menu slider or the settings dialog)
 
 ### Hotkeys
 
@@ -55,6 +55,7 @@ The settings window → **screenshot settings** tab → ホットキー (Hotkeys
 | 音量を下げる (Volume down) | Lowers the volume by 10% | unassigned |
 
 - Press 設定... (Set) on a row to capture a key, or クリア (Clear) to remove the assignment. Changes take effect when you press 適用 (Apply) or OK.
+- A hotkey does exactly what the mouse does: changing the volume shows the volume bar at the bottom, toggling fullscreen shows the indicator at the top-left.
 - Assigning the same key to more than one action shows a warning. If you apply it anyway, only the action higher in the list stays active.
 - Keys already taken by another application cannot be registered; the reason is shown below the list.
 - Only the screenshot action has a key by default. Global hotkeys take a key away from every other application, so the rest are left unassigned.
@@ -120,6 +121,15 @@ If the query fails, the reason and a "再取得" (retry) button are shown and th
 
 - Format: YUY2
 - Frame rate: 60 fps
+- Color space (色空間): Auto (decided from the resolution)
+- Color range (色レンジ): Limited (16-235)
+
+Only change the color space and range when the picture looks wrong. Both take effect on the next frame; the device is not reopened.
+
+Both settings describe **what the incoming signal is**. When they disagree with the actual signal, the picture looks like this:
+
+- **Color space** — leave it on auto unless colors look off. Auto uses BT.709 when `width >= 1280 or height >= 720`, and BT.601 when both are below that. If **skin tones or reds look shifted**, the guess is probably wrong for your device, so pick BT.601 or BT.709 by hand.
+- **Color range** — pick "リミテッド" (limited, 16-235) when **blacks look washed out grey and whites look dull**, and "フル" (full, 0-255) when **shadows are crushed and highlights are blown out**. This mirrors the RGB range setting on your capture card or source device.
 
 **Audio**
 

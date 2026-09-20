@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 mod audio;
 mod hotkey;
 mod logging;
+mod overlay;
 mod screenshot;
 mod settings;
 mod ui;
@@ -26,8 +27,11 @@ mod video;
 
 use audio::AudioCapture;
 use hotkey::{HotkeyAction, HotkeyManager};
+use overlay::{OverlayContent, TransientOverlay};
 use screenshot::ScreenshotManager;
-use settings::{AppSettings, AutoSavePolicy, ScreenshotEncoding};
+use settings::{
+    AppSettings, AutoSavePolicy, ColorRange, ColorSpace, ScreenshotEncoding, MAX_VOLUME, MIN_VOLUME,
+};
 use video::{FrameStats, VideoCapture};
 
 /// デバイスリストのキャッシュを更新する間隔
@@ -42,16 +46,23 @@ const DEFAULT_WINDOW_SIZE: (f32, f32) = (1280.0, 720.0);
 const MIN_VISIBLE_WINDOW_WIDTH: f32 = 120.0;
 const MIN_VISIBLE_WINDOW_HEIGHT: f32 = 32.0;
 
-/// ホットキーやマウスホイールで音量を 1 回変えたときの変化量（%）
-const VOLUME_STEP: f32 = 10.0;
-
-/// 音量の上限（%）。映像側の音が小さいデバイス向けに 100% を超えて上げられる
-const VOLUME_MAX: f32 = 200.0;
-
 /// 設定をディスクへ書き出すまでに待つ時間。
 /// ウィンドウのドラッグ中や音量スクロール中は設定が毎フレーム変わるため、
 /// 最後の変更からこの時間が空くまで書き出しをまとめる
 const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// フルスクリーンを切り替えたときに OSD を出しておく時間
+const FULLSCREEN_OSD_DURATION: Duration = Duration::from_secs(1);
+
+/// 音量を変えたときに OSD を出しておく時間。
+/// ホイールを回している間は回すたびに延びるので、これは「手を止めてから」の長さ
+const VOLUME_OSD_DURATION: Duration = Duration::from_millis(1500);
+
+/// 音量の基準値。OSD のバーはこの位置に目盛りを引く
+const VOLUME_REFERENCE: f32 = 100.0;
+
+/// ホイール 1 段、またはホットキー 1 回で動かす音量
+const VOLUME_SCROLL_STEP: f32 = 10.0;
 
 /// デバイス能力の取得結果。`(問い合わせたデバイス名, 結果)`。
 /// 取得スレッドから UI スレッドへ、この形でチャネル越しに返す
@@ -400,6 +411,9 @@ pub struct CaptureCardViewer {
     maintain_aspect_ratio: bool,
     // 映像に統計を重ねて表示するか。設定の ui.show_stats_overlay と対応する
     show_stats_overlay: bool,
+    // フルスクリーン切替や音量変更のときだけ出て、数秒で消えるオーバーレイ。
+    // 常時表示の show_stats_overlay とは別物
+    transient_overlay: TransientOverlay,
     volume: f32,
     last_volume_sent: f32,
     last_settings_applied: Instant,
@@ -442,8 +456,11 @@ pub struct CaptureCardViewer {
     last_audio_output: Option<String>,
     last_audio_rate: Option<u32>,
     last_audio_channels: Option<u16>,
-    last_fullscreen_toggle: Option<Instant>,
     last_video_fps: Option<u32>,
+    // 最後に VideoCapture へ渡した色変換の設定。
+    // キャプチャの開き直しは伴わないが、2 秒ごとに video_capture の
+    // ロックを取らずに済むよう、他と同じく差分で判定する
+    last_color_conversion: Option<(ColorSpace, ColorRange)>,
     // 最後に適用したスクリーンショットの効果音。
     // apply_settings が 2 秒ごとに呼ばれるため、差分がないときは再適用しない。
     //
@@ -510,6 +527,7 @@ impl Default for CaptureCardViewer {
             is_fullscreen: false,
             maintain_aspect_ratio: true,
             show_stats_overlay,
+            transient_overlay: TransientOverlay::default(),
             volume: 100.0,
             last_volume_sent: -1.0,
             last_settings_applied: Instant::now(),
@@ -529,8 +547,8 @@ impl Default for CaptureCardViewer {
             last_audio_output: None,
             last_audio_rate: None,
             last_audio_channels: None,
-            last_fullscreen_toggle: None,
             last_video_fps: None,
+            last_color_conversion: None,
             last_sound_file: None,
 
             video_retry: ConnectRetry::default(),
@@ -824,26 +842,9 @@ impl eframe::App for CaptureCardViewer {
             self.show_context_menu(ctx);
         }
 
-        // フルスクリーン切替オーバーレイ (1秒表示)
-        if let Some(t) = self.last_fullscreen_toggle {
-            if t.elapsed().as_secs_f32() < 1.0 {
-                egui::Area::new("fullscreen_overlay")
-                    .order(egui::Order::Foreground)
-                    .fixed_pos(egui::pos2(20.0, 20.0))
-                    .show(ctx, |ui| {
-                        egui::Frame::none()
-                            .fill(egui::Color32::from_black_alpha(160))
-                            .rounding(5.0)
-                            .show(ui, |ui| {
-                                ui.label(if self.is_fullscreen {
-                                    "フルスクリーン ON"
-                                } else {
-                                    "フルスクリーン OFF"
-                                });
-                            });
-                    });
-            }
-        }
+        // 一時表示のオーバーレイ（フルスクリーン切替・音量）。
+        // 期限が来れば自分で消え、消える時刻の再描画も自分で予約する
+        self.transient_overlay.draw(ctx, Instant::now());
 
         // 保留中の設定変更を、操作が落ち着いたところでまとめて書き出す
         self.flush_settings_if_due(ctx);
@@ -938,8 +939,8 @@ impl CaptureCardViewer {
                 self.set_always_on_top(ctx, enabled);
             }
             HotkeyAction::ReconnectDevices => self.reconnect_devices(),
-            HotkeyAction::VolumeUp => self.adjust_volume(VOLUME_STEP),
-            HotkeyAction::VolumeDown => self.adjust_volume(-VOLUME_STEP),
+            HotkeyAction::VolumeUp => self.adjust_volume(VOLUME_SCROLL_STEP),
+            HotkeyAction::VolumeDown => self.adjust_volume(-VOLUME_SCROLL_STEP),
         }
     }
 
@@ -1097,23 +1098,7 @@ impl CaptureCardViewer {
 
                     // 音量調整のためのスクロールを処理
                     if response.hovered() {
-                        ctx.input(|i| {
-                            if i.raw_scroll_delta.y > 0.0 {
-                                self.volume = (self.volume + 10.0).min(200.0);
-                                // 設定に反映してリセットを防ぐ。書き出しはデバウンスする
-                                if let Ok(mut settings) = self.settings.lock() {
-                                    settings.ui.volume = self.volume;
-                                }
-                                self.mark_settings_dirty();
-                            } else if i.raw_scroll_delta.y < 0.0 {
-                                self.volume = (self.volume - 10.0).max(0.0);
-                                // 設定に反映してリセットを防ぐ。書き出しはデバウンスする
-                                if let Ok(mut settings) = self.settings.lock() {
-                                    settings.ui.volume = self.volume;
-                                }
-                                self.mark_settings_dirty();
-                            }
-                        });
+                        self.handle_volume_scroll(ctx);
                     }
                 } else {
                     let response =
@@ -1196,23 +1181,7 @@ impl CaptureCardViewer {
 
                     // マウススクロールでの音量調整（ウィンドウ版と同じ機能）
                     if response.hovered() {
-                        ctx.input(|i| {
-                            if i.raw_scroll_delta.y > 0.0 {
-                                self.volume = (self.volume + 10.0).min(200.0);
-                                // 設定に反映してリセットを防ぐ。書き出しはデバウンスする
-                                if let Ok(mut settings) = self.settings.lock() {
-                                    settings.ui.volume = self.volume;
-                                }
-                                self.mark_settings_dirty();
-                            } else if i.raw_scroll_delta.y < 0.0 {
-                                self.volume = (self.volume - 10.0).max(0.0);
-                                // 設定に反映してリセットを防ぐ。書き出しはデバウンスする
-                                if let Ok(mut settings) = self.settings.lock() {
-                                    settings.ui.volume = self.volume;
-                                }
-                                self.mark_settings_dirty();
-                            }
-                        });
+                        self.handle_volume_scroll(ctx);
                     }
                 } else {
                     // 映像信号がない場合
@@ -1238,6 +1207,50 @@ impl CaptureCardViewer {
                     }
                 }
             });
+    }
+
+    /// 映像の上でのホイール操作を音量へ反映する。
+    ///
+    /// ウィンドウ表示とフルスクリーンの両方から呼ぶ。以前は同じ処理が両方に
+    /// 写してあり、片方だけ直す事故が起きやすかった。
+    fn handle_volume_scroll(&mut self, ctx: &egui::Context) {
+        let scroll_y = ctx.input(|i| i.raw_scroll_delta.y);
+        if scroll_y == 0.0 {
+            return;
+        }
+
+        let volume = if scroll_y > 0.0 {
+            (self.volume + VOLUME_SCROLL_STEP).min(MAX_VOLUME)
+        } else {
+            (self.volume - VOLUME_SCROLL_STEP).max(MIN_VOLUME)
+        };
+        self.set_volume_from_ui(volume);
+    }
+
+    /// UI の操作で音量が変わったときの共通処理。
+    ///
+    /// 設定へ反映して OSD を出す。**ここでディスクへは書かない。**
+    /// ホイールを回している間は毎フレーム値が変わるため、書き出しは
+    /// `mark_settings_dirty` のデバウンスに任せる。
+    ///
+    /// 上限・下限に貼り付いたまま操作を続けた場合も OSD の期限は延びる。
+    /// 「これ以上は上がらない」ことが分かるほうがよいので、値が変わったかは見ない。
+    fn set_volume_from_ui(&mut self, volume: f32) {
+        self.volume = volume;
+        if let Ok(mut settings) = self.settings.lock() {
+            settings.ui.volume = volume;
+        }
+        self.mark_settings_dirty();
+        self.show_volume_overlay();
+    }
+
+    /// いまの音量を OSD に出す。
+    fn show_volume_overlay(&mut self) {
+        self.transient_overlay.show(
+            volume_overlay_content(self.volume),
+            VOLUME_OSD_DURATION,
+            Instant::now(),
+        );
     }
 
     /// 映像の統計を左上へ半透明で重ねて描く。
@@ -1290,15 +1303,15 @@ impl CaptureCardViewer {
                     ui.set_max_width(240.0);
 
                     ui.label(format!("音量: {}%", self.volume as i32));
-                    let volume_response =
-                        ui.add(egui::Slider::new(&mut self.volume, 0.0..=200.0).suffix("%"));
+                    let volume_response = ui.add(
+                        egui::Slider::new(&mut self.volume, MIN_VOLUME..=MAX_VOLUME).suffix("%"),
+                    );
 
-                    // 音量が変更された場合、設定に反映する（書き出しはデバウンス）
+                    // 音量が変更された場合、設定に反映する（書き出しはデバウンス）。
+                    // スライダーが self.volume を書き換えたあとなので、同じ値を
+                    // 渡し直して設定への反映と OSD の表示だけを行わせる
                     if volume_response.changed() {
-                        if let Ok(mut settings) = self.settings.lock() {
-                            settings.ui.volume = self.volume;
-                        }
-                        self.mark_settings_dirty();
+                        self.set_volume_from_ui(self.volume);
                     }
 
                     ui.separator();
@@ -1316,21 +1329,11 @@ impl CaptureCardViewer {
                     // 最前面表示のチェックボックス
                     let always_on_top_response = ui.checkbox(&mut self.always_on_top, "最前面表示");
 
-                    // 最前面表示設定が変更された場合
+                    // 最前面表示設定が変更された場合。
+                    // チェックボックスが self.always_on_top を書き換えたあとなので、
+                    // 同じ値を渡してウィンドウレベルの適用と保存だけを行わせる
                     if always_on_top_response.changed() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
-                            if self.always_on_top {
-                                egui::WindowLevel::AlwaysOnTop
-                            } else {
-                                egui::WindowLevel::Normal
-                            },
-                        ));
-
-                        // 設定に反映する（書き出しはデバウンス）
-                        if let Ok(mut settings) = self.settings.lock() {
-                            settings.ui.always_on_top = self.always_on_top;
-                        }
-                        self.mark_settings_dirty();
+                        self.set_always_on_top(ctx, self.always_on_top);
                     }
 
                     // フルスクリーン表示のチェックボックス
@@ -1485,6 +1488,21 @@ fn format_stats_lines(stats: &FrameStats) -> Vec<String> {
     }
 
     lines
+}
+
+/// 音量 OSD に出す内容を組み立てる。
+///
+/// バーは 0〜`MAX_VOLUME`% を全体とし、100% の位置に目盛りを引く。
+/// 上限が 200% なので、数字だけでは「上げすぎているのか」が分かりにくいため。
+///
+/// 数字は右クリックメニューの「音量: N%」と同じ `as i32` で作る。丸め方を
+/// 変えると、メニューのスライダーを動かしている間だけ OSD と 1% ずれて見える。
+fn volume_overlay_content(volume: f32) -> OverlayContent {
+    OverlayContent::Bar {
+        text: format!("音量: {}%", volume as i32),
+        ratio: volume / MAX_VOLUME,
+        marker_ratio: VOLUME_REFERENCE / MAX_VOLUME,
+    }
 }
 
 /// 完了済みのスレッドハンドルを取り除く。
@@ -2202,10 +2220,26 @@ impl CaptureCardViewer {
                 self.video_retry.request(video_target(&settings));
             }
 
+            // 色空間とレンジはデバイスの開き直しを伴わない。共有の Atomic へ
+            // 書くだけで次のフレームから効くので、ここで反映する。
+            // 2 秒ごとに video_capture のロックを取らないよう差分で判定する
+            let color_conversion = (settings.video.color_space, settings.video.color_range);
+            if Self::needs_reapply(initial, &color_conversion, &self.last_color_conversion) {
+                if let Ok(video) = self.video_capture.lock() {
+                    video.set_color_conversion(color_conversion.0, color_conversion.1);
+                    self.last_color_conversion = Some(color_conversion);
+                } else {
+                    // 次の適用タイミングで入れ直す
+                    warn!("色変換の設定で video_capture のロックを取得できない");
+                    self.last_color_conversion = None;
+                }
+            }
+
             // Audio
             //
             // 映像と同じく、ここでは要求を立てるだけ。パススルーの有効・無効と
             // 音量は開き直しを伴わないので、その場で反映する
+            let previous_volume = self.volume;
             if let Ok(mut audio) = self.audio_capture.lock() {
                 // パススルーと音量は、下の audio_retry.request より前に反映する。
                 // ストリームを開いたあとに反映すると、無効のまま（あるいは
@@ -2216,6 +2250,14 @@ impl CaptureCardViewer {
                 // 音量を適用
                 self.volume = settings.ui.volume;
                 audio.set_volume(self.volume);
+            }
+
+            // 設定ダイアログの「適用」「OK」で音量が変わったときも OSD を出す。
+            // ホイールや右クリックメニューでの変更は設定側も同時に更新しているため、
+            // 2 秒ごとの再適用ではここに入らず、OSD が出っぱなしにはならない。
+            // 起動時は変更ではないので出さない
+            if !initial && (self.volume - previous_volume).abs() > 0.01 {
+                self.show_volume_overlay();
             }
 
             // 出力デバイスも比較する。入れないと、設定画面で出力先だけを
@@ -2559,22 +2601,12 @@ impl CaptureCardViewer {
 
     /// 音量を `delta`%（負なら下げる）変える。
     ///
-    /// 映像上のホイール操作・右クリックメニューのスライダーと同じ扱いにする。
-    /// 設定へ反映し、書き出しはデバウンスに任せる。
+    /// 反映は `set_volume_from_ui` に任せる。映像上のホイール操作や
+    /// 右クリックメニューのスライダーと同じ経路を通すことで、設定への
+    /// 反映も OSD の表示も同じになる。
     fn adjust_volume(&mut self, delta: f32) {
-        let volume = (self.volume + delta).clamp(0.0, VOLUME_MAX);
-        if volume == self.volume {
-            // 上限・下限に張り付いている。設定は変わらないので保留も積まない
-            return;
-        }
-        self.volume = volume;
-
-        // 設定に反映してリセットを防ぐ。書き出しはデバウンスする
-        if let Ok(mut settings) = self.settings.lock() {
-            settings.ui.volume = volume;
-        }
-        debug!("音量を {}% にした", volume as i32);
-        self.mark_settings_dirty();
+        let volume = (self.volume + delta).clamp(MIN_VOLUME, MAX_VOLUME);
+        self.set_volume_from_ui(volume);
     }
 
     /// デバイスを強制的に開き直す。右クリックメニューの「デバイス再接続」と同じ。
@@ -2608,7 +2640,16 @@ impl CaptureCardViewer {
             self.is_fullscreen = false;
         }
 
-        self.last_fullscreen_toggle = Some(Instant::now());
+        let text = if self.is_fullscreen {
+            "フルスクリーン ON"
+        } else {
+            "フルスクリーン OFF"
+        };
+        self.transient_overlay.show(
+            OverlayContent::Text(text.to_string()),
+            FULLSCREEN_OSD_DURATION,
+            Instant::now(),
+        );
     }
 }
 
@@ -2618,6 +2659,57 @@ mod tests {
     use egui::Vec2;
     use tempfile::tempdir;
     use video::IntervalStats;
+
+    /// 音量 OSD のバーの中身を取り出す。テキスト以外の形で返ってきたら落とす
+    fn volume_bar(volume: f32) -> (String, f32, f32) {
+        match volume_overlay_content(volume) {
+            OverlayContent::Bar {
+                text,
+                ratio,
+                marker_ratio,
+            } => (text, ratio, marker_ratio),
+            other => panic!("音量 OSD がバー付きになっていない: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn volume_overlay_content_shows_percentage_and_ratio() {
+        let (text, ratio, marker_ratio) = volume_bar(80.0);
+
+        assert_eq!(text, "音量: 80%");
+        // 0〜200% を全体とするので 80% は 0.4、目盛りの 100% は 0.5
+        assert!((ratio - 0.4).abs() < 1e-6, "バーの長さが違う: {}", ratio);
+        assert!(
+            (marker_ratio - 0.5).abs() < 1e-6,
+            "目盛りの位置が違う: {}",
+            marker_ratio
+        );
+    }
+
+    #[test]
+    fn volume_overlay_content_at_minimum_is_empty_bar() {
+        let (text, ratio, _) = volume_bar(0.0);
+
+        assert_eq!(text, "音量: 0%");
+        assert_eq!(ratio, 0.0);
+    }
+
+    #[test]
+    fn volume_overlay_content_at_maximum_fills_bar() {
+        let (text, ratio, _) = volume_bar(200.0);
+
+        assert_eq!(text, "音量: 200%");
+        assert_eq!(ratio, 1.0);
+    }
+
+    #[test]
+    fn volume_overlay_content_rounds_down_like_context_menu() {
+        // 右クリックメニューの「音量: N%」と同じ丸め方であること。
+        // 食い違うと、スライダーを動かしている間だけ 1% ずれて見える
+        let (text, _, _) = volume_bar(79.6);
+
+        assert_eq!(text, "音量: 79%");
+    }
 
     #[test]
     fn format_stats_lines_without_frames_shows_no_numbers() {
