@@ -18,14 +18,18 @@ use std::time::{Duration, Instant};
 
 mod audio;
 mod logging;
+mod overlay;
 mod screenshot;
 mod settings;
 mod ui;
 mod video;
 
 use audio::AudioCapture;
+use overlay::{OverlayContent, TransientOverlay};
 use screenshot::ScreenshotManager;
-use settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace, ScreenshotEncoding};
+use settings::{
+    AppSettings, AutoSavePolicy, ColorRange, ColorSpace, ScreenshotEncoding, MAX_VOLUME, MIN_VOLUME,
+};
 use video::{FrameStats, VideoCapture};
 
 /// デバイスリストのキャッシュを更新する間隔
@@ -44,6 +48,19 @@ const MIN_VISIBLE_WINDOW_HEIGHT: f32 = 32.0;
 /// ウィンドウのドラッグ中や音量スクロール中は設定が毎フレーム変わるため、
 /// 最後の変更からこの時間が空くまで書き出しをまとめる
 const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// フルスクリーンを切り替えたときに OSD を出しておく時間
+const FULLSCREEN_OSD_DURATION: Duration = Duration::from_secs(1);
+
+/// 音量を変えたときに OSD を出しておく時間。
+/// ホイールを回している間は回すたびに延びるので、これは「手を止めてから」の長さ
+const VOLUME_OSD_DURATION: Duration = Duration::from_millis(1500);
+
+/// 音量の基準値。OSD のバーはこの位置に目盛りを引く
+const VOLUME_REFERENCE: f32 = 100.0;
+
+/// ホイール 1 段で動かす音量
+const VOLUME_SCROLL_STEP: f32 = 10.0;
 
 /// デバイス能力の取得結果。`(問い合わせたデバイス名, 結果)`。
 /// 取得スレッドから UI スレッドへ、この形でチャネル越しに返す
@@ -386,6 +403,9 @@ pub struct CaptureCardViewer {
     maintain_aspect_ratio: bool,
     // 映像に統計を重ねて表示するか。設定の ui.show_stats_overlay と対応する
     show_stats_overlay: bool,
+    // フルスクリーン切替や音量変更のときだけ出て、数秒で消えるオーバーレイ。
+    // 常時表示の show_stats_overlay とは別物
+    transient_overlay: TransientOverlay,
     volume: f32,
     last_volume_sent: f32,
     last_settings_applied: Instant,
@@ -417,7 +437,9 @@ pub struct CaptureCardViewer {
     // `take_stream_error` は読んだ時点で旗を下ろすため、見送ったエラーを
     // ここへ移しておかないと、そのまま音が戻らなくなる
     audio_stream_error_pending: bool,
-    pending_hotkey: Option<String>,
+    // ホットキーダイアログで確定した内容のうち、まだ実行時へ反映していないもの。
+    // 外側の None は「保留なし」、内側の None は「クリアされた（解除する）」
+    pending_hotkey: Option<Option<String>>,
     temp_hotkey: String, // ホットキーダイアログ用の一時保存
     // 最後に適用した実行時パラメータ（差分ベースの再起動回避用）
     last_video_device: Option<String>,
@@ -427,16 +449,21 @@ pub struct CaptureCardViewer {
     last_audio_output: Option<String>,
     last_audio_rate: Option<u32>,
     last_audio_channels: Option<u16>,
-    last_fullscreen_toggle: Option<Instant>,
     last_video_fps: Option<u32>,
     // 最後に VideoCapture へ渡した色変換の設定。
     // キャプチャの開き直しは伴わないが、2 秒ごとに video_capture の
     // ロックを取らずに済むよう、他と同じく差分で判定する
     last_color_conversion: Option<(ColorSpace, ColorRange)>,
     // 最後に適用したスクリーンショット関連の値
-    // apply_settings が 2 秒ごとに呼ばれるため、差分がないときは再適用しない
-    last_hotkey: Option<String>,
-    last_sound_file: Option<PathBuf>,
+    // apply_settings が 2 秒ごとに呼ばれるため、差分がないときは再適用しない。
+    //
+    // **設定と同じ `Option` を丸ごと包んでいる。** 外側の `None` は
+    // 「まだ適用できていない（次の適用でやり直す）」、内側の `None` は
+    // 「未設定を適用済み＝クリア済み」を表す。内側を潰して `Option<String>` に
+    // すると、クリア（設定が `None`）と未適用が同じ値になり、クリアを
+    // 差分として検出できない
+    last_hotkey: Option<Option<String>>,
+    last_sound_file: Option<Option<PathBuf>>,
 
     // デバイス接続の再試行。映像と音声で別々に持ち、片方が失敗しても
     // もう片方の再試行に引きずられないようにする
@@ -490,6 +517,7 @@ impl Default for CaptureCardViewer {
             is_fullscreen: false,
             maintain_aspect_ratio: true,
             show_stats_overlay,
+            transient_overlay: TransientOverlay::default(),
             volume: 100.0,
             last_volume_sent: -1.0,
             last_settings_applied: Instant::now(),
@@ -510,7 +538,6 @@ impl Default for CaptureCardViewer {
             last_audio_output: None,
             last_audio_rate: None,
             last_audio_channels: None,
-            last_fullscreen_toggle: None,
             last_video_fps: None,
             last_color_conversion: None,
             last_hotkey: None,
@@ -738,21 +765,30 @@ impl eframe::App for CaptureCardViewer {
                 self.temp_hotkey = current.unwrap_or_default();
             }
 
-            let hotkey_captured = ui::show_hotkey_capture_dialog(
+            let outcome = ui::show_hotkey_capture_dialog(
                 ctx,
                 &mut self.show_hotkey_dialog,
                 &mut self.temp_hotkey,
                 self.settings_dialog.hotkey_capture_mut(),
             );
 
-            // ホットキーがキャプチャされた場合、設定を更新
-            if hotkey_captured && !self.temp_hotkey.is_empty() {
+            // 確定またはクリアされた場合、設定を更新。
+            // クリアは「ホットキーを使わない」という明示の指定なので、
+            // 確定と同じ経路で `None` を書き込む
+            let new_hotkey = match outcome {
+                ui::HotkeyDialogOutcome::None => None,
+                ui::HotkeyDialogOutcome::Captured if self.temp_hotkey.is_empty() => None,
+                ui::HotkeyDialogOutcome::Captured => Some(Some(self.temp_hotkey.clone())),
+                ui::HotkeyDialogOutcome::Cleared => Some(None),
+            };
+
+            if let Some(hotkey) = new_hotkey {
                 // 設定ダイアログから開かれている場合はドラフトへ書く。
                 // 共有設定へ直接書くと、ダイアログの OK がドラフトの古い値で
                 // 上書きして、設定したホットキーが消える
                 let wrote_to_draft = match self.settings_dialog.draft_mut() {
                     Some(draft) => {
-                        draft.screenshot.hotkey = Some(self.temp_hotkey.clone());
+                        draft.screenshot.hotkey = hotkey.clone();
                         true
                     }
                     None => false,
@@ -760,12 +796,12 @@ impl eframe::App for CaptureCardViewer {
 
                 if !wrote_to_draft {
                     // 設定ダイアログが閉じられた状態でホットキーだけ確定した場合。
-                    // ドラフトが無いので共有設定へ直接書き、その場で登録する
+                    // ドラフトが無いので共有設定へ直接書き、その場で登録（解除）する
                     if let Ok(mut settings) = self.settings.lock() {
-                        settings.screenshot.hotkey = Some(self.temp_hotkey.clone());
+                        settings.screenshot.hotkey = hotkey.clone();
                     }
                     self.mark_settings_dirty();
-                    self.pending_hotkey = Some(self.temp_hotkey.clone());
+                    self.pending_hotkey = Some(hotkey);
                 }
                 // ドラフトへ書いた場合はここで登録しない。
                 // 登録すると、2 秒ごとの apply_settings が共有設定側の古い
@@ -784,44 +820,38 @@ impl eframe::App for CaptureCardViewer {
             self.show_context_menu(ctx);
         }
 
-        // フルスクリーン切替オーバーレイ (1秒表示)
-        if let Some(t) = self.last_fullscreen_toggle {
-            if t.elapsed().as_secs_f32() < 1.0 {
-                egui::Area::new("fullscreen_overlay")
-                    .order(egui::Order::Foreground)
-                    .fixed_pos(egui::pos2(20.0, 20.0))
-                    .show(ctx, |ui| {
-                        egui::Frame::none()
-                            .fill(egui::Color32::from_black_alpha(160))
-                            .rounding(5.0)
-                            .show(ui, |ui| {
-                                ui.label(if self.is_fullscreen {
-                                    "フルスクリーン ON"
-                                } else {
-                                    "フルスクリーン OFF"
-                                });
-                            });
-                    });
-            }
-        }
+        // 一時表示のオーバーレイ（フルスクリーン切替・音量）。
+        // 期限が来れば自分で消え、消える時刻の再描画も自分で予約する
+        self.transient_overlay.draw(ctx, Instant::now());
 
-        // 新しくキャプチャされたホットキーを即座に登録
-        if let Some(hk) = self.pending_hotkey.take() {
-            debug!("捕捉したホットキーを登録する: {}", hk);
+        // 新しくキャプチャされたホットキーを即座に登録（クリアなら解除）
+        if let Some(pending) = self.pending_hotkey.take() {
             if let Ok(mut ss) = self.screenshot_manager.lock() {
-                match ss.set_hotkey(&hk) {
-                    Ok(()) => {
-                        debug!("ホットキー {} の登録に成功した", hk);
-                        // apply_settings が同じホットキーを登録し直さないよう記録する
-                        self.last_hotkey = Some(hk.clone());
+                match pending {
+                    Some(hk) => {
+                        debug!("捕捉したホットキーを登録する: {}", hk);
+                        match ss.set_hotkey(&hk) {
+                            Ok(()) => {
+                                debug!("ホットキー {} の登録に成功した", hk);
+                                // apply_settings が同じホットキーを登録し直さないよう記録する
+                                self.last_hotkey = Some(Some(hk));
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "ホットキー {} を登録できないので次の適用で再試行する: {}",
+                                    hk, e
+                                );
+                                // 登録できていないので apply_settings 側で再試行させる
+                                self.last_hotkey = None;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        warn!(
-                            "ホットキー {} を登録できないので次の適用で再試行する: {}",
-                            hk, e
-                        );
-                        // 登録できていないので apply_settings 側で再試行させる
-                        self.last_hotkey = None;
+                    None => {
+                        debug!("ホットキーがクリアされたので登録を解除する");
+                        ss.clear_hotkey();
+                        // 解除済みであることを記録する。記録しないと 2 秒ごとに
+                        // 解除し直すことになる
+                        self.last_hotkey = Some(None);
                     }
                 }
             } else {
@@ -1069,23 +1099,7 @@ impl CaptureCardViewer {
 
                     // 音量調整のためのスクロールを処理
                     if response.hovered() {
-                        ctx.input(|i| {
-                            if i.raw_scroll_delta.y > 0.0 {
-                                self.volume = (self.volume + 10.0).min(200.0);
-                                // 設定に反映してリセットを防ぐ。書き出しはデバウンスする
-                                if let Ok(mut settings) = self.settings.lock() {
-                                    settings.ui.volume = self.volume;
-                                }
-                                self.mark_settings_dirty();
-                            } else if i.raw_scroll_delta.y < 0.0 {
-                                self.volume = (self.volume - 10.0).max(0.0);
-                                // 設定に反映してリセットを防ぐ。書き出しはデバウンスする
-                                if let Ok(mut settings) = self.settings.lock() {
-                                    settings.ui.volume = self.volume;
-                                }
-                                self.mark_settings_dirty();
-                            }
-                        });
+                        self.handle_volume_scroll(ctx);
                     }
                 } else {
                     let response =
@@ -1168,23 +1182,7 @@ impl CaptureCardViewer {
 
                     // マウススクロールでの音量調整（ウィンドウ版と同じ機能）
                     if response.hovered() {
-                        ctx.input(|i| {
-                            if i.raw_scroll_delta.y > 0.0 {
-                                self.volume = (self.volume + 10.0).min(200.0);
-                                // 設定に反映してリセットを防ぐ。書き出しはデバウンスする
-                                if let Ok(mut settings) = self.settings.lock() {
-                                    settings.ui.volume = self.volume;
-                                }
-                                self.mark_settings_dirty();
-                            } else if i.raw_scroll_delta.y < 0.0 {
-                                self.volume = (self.volume - 10.0).max(0.0);
-                                // 設定に反映してリセットを防ぐ。書き出しはデバウンスする
-                                if let Ok(mut settings) = self.settings.lock() {
-                                    settings.ui.volume = self.volume;
-                                }
-                                self.mark_settings_dirty();
-                            }
-                        });
+                        self.handle_volume_scroll(ctx);
                     }
                 } else {
                     // 映像信号がない場合
@@ -1210,6 +1208,50 @@ impl CaptureCardViewer {
                     }
                 }
             });
+    }
+
+    /// 映像の上でのホイール操作を音量へ反映する。
+    ///
+    /// ウィンドウ表示とフルスクリーンの両方から呼ぶ。以前は同じ処理が両方に
+    /// 写してあり、片方だけ直す事故が起きやすかった。
+    fn handle_volume_scroll(&mut self, ctx: &egui::Context) {
+        let scroll_y = ctx.input(|i| i.raw_scroll_delta.y);
+        if scroll_y == 0.0 {
+            return;
+        }
+
+        let volume = if scroll_y > 0.0 {
+            (self.volume + VOLUME_SCROLL_STEP).min(MAX_VOLUME)
+        } else {
+            (self.volume - VOLUME_SCROLL_STEP).max(MIN_VOLUME)
+        };
+        self.set_volume_from_ui(volume);
+    }
+
+    /// UI の操作で音量が変わったときの共通処理。
+    ///
+    /// 設定へ反映して OSD を出す。**ここでディスクへは書かない。**
+    /// ホイールを回している間は毎フレーム値が変わるため、書き出しは
+    /// `mark_settings_dirty` のデバウンスに任せる。
+    ///
+    /// 上限・下限に貼り付いたまま操作を続けた場合も OSD の期限は延びる。
+    /// 「これ以上は上がらない」ことが分かるほうがよいので、値が変わったかは見ない。
+    fn set_volume_from_ui(&mut self, volume: f32) {
+        self.volume = volume;
+        if let Ok(mut settings) = self.settings.lock() {
+            settings.ui.volume = volume;
+        }
+        self.mark_settings_dirty();
+        self.show_volume_overlay();
+    }
+
+    /// いまの音量を OSD に出す。
+    fn show_volume_overlay(&mut self) {
+        self.transient_overlay.show(
+            volume_overlay_content(self.volume),
+            VOLUME_OSD_DURATION,
+            Instant::now(),
+        );
     }
 
     /// 映像の統計を左上へ半透明で重ねて描く。
@@ -1262,15 +1304,15 @@ impl CaptureCardViewer {
                     ui.set_max_width(240.0);
 
                     ui.label(format!("音量: {}%", self.volume as i32));
-                    let volume_response =
-                        ui.add(egui::Slider::new(&mut self.volume, 0.0..=200.0).suffix("%"));
+                    let volume_response = ui.add(
+                        egui::Slider::new(&mut self.volume, MIN_VOLUME..=MAX_VOLUME).suffix("%"),
+                    );
 
-                    // 音量が変更された場合、設定に反映する（書き出しはデバウンス）
+                    // 音量が変更された場合、設定に反映する（書き出しはデバウンス）。
+                    // スライダーが self.volume を書き換えたあとなので、同じ値を
+                    // 渡し直して設定への反映と OSD の表示だけを行わせる
                     if volume_response.changed() {
-                        if let Ok(mut settings) = self.settings.lock() {
-                            settings.ui.volume = self.volume;
-                        }
-                        self.mark_settings_dirty();
+                        self.set_volume_from_ui(self.volume);
                     }
 
                     ui.separator();
@@ -1471,6 +1513,21 @@ fn format_stats_lines(stats: &FrameStats) -> Vec<String> {
     }
 
     lines
+}
+
+/// 音量 OSD に出す内容を組み立てる。
+///
+/// バーは 0〜`MAX_VOLUME`% を全体とし、100% の位置に目盛りを引く。
+/// 上限が 200% なので、数字だけでは「上げすぎているのか」が分かりにくいため。
+///
+/// 数字は右クリックメニューの「音量: N%」と同じ `as i32` で作る。丸め方を
+/// 変えると、メニューのスライダーを動かしている間だけ OSD と 1% ずれて見える。
+fn volume_overlay_content(volume: f32) -> OverlayContent {
+    OverlayContent::Bar {
+        text: format!("音量: {}%", volume as i32),
+        ratio: volume / MAX_VOLUME,
+        marker_ratio: VOLUME_REFERENCE / MAX_VOLUME,
+    }
 }
 
 /// 完了済みのスレッドハンドルを取り除く。
@@ -2088,6 +2145,15 @@ impl CaptureCardViewer {
             debug!("利用できる出力デバイス: {:?}", audio.list_output_devices());
         }
 
+        // **音量とパススルーの反映は、ストリームを開く前に必ず済ませる。**
+        // 開いたあとに反映すると、最初のバッファだけ AudioCapture の既定値
+        // （100%・パススルー有効）で鳴ってしまう。音量 0% を保存して
+        // 再起動したときに、起動直後だけ音が出るのがこの窓。
+        // apply_settings でも同じ値を入れているが、そちらは「接続の要求を
+        // 立てる」だけで実際に開くのはこの関数なので、開く直前でも入れておく
+        audio.set_volume(settings.ui.volume);
+        audio.set_audio_passthrough_enabled(settings.audio.passthrough_enabled);
+
         let result = audio.start_passthrough_with_settings(
             settings.audio.input_device_name.as_deref(),
             settings.audio.output_device_name.as_deref(),
@@ -2198,14 +2264,25 @@ impl CaptureCardViewer {
             //
             // 映像と同じく、ここでは要求を立てるだけ。パススルーの有効・無効と
             // 音量は開き直しを伴わないので、その場で反映する
+            let previous_volume = self.volume;
             if let Ok(mut audio) = self.audio_capture.lock() {
-                // ストリームを開始する前にパススルーの設定を反映する。
-                // 開始後に反映すると、無効のまま起動したときに最初のバッファが出力されてしまう。
+                // パススルーと音量は、下の audio_retry.request より前に反映する。
+                // ストリームを開いたあとに反映すると、無効のまま（あるいは
+                // 音量 0% で）起動したときに最初のバッファだけ出力されてしまう。
+                // 実際に開く try_connect_audio でも開く直前に入れ直している
                 audio.set_audio_passthrough_enabled(settings.audio.passthrough_enabled);
 
                 // 音量を適用
                 self.volume = settings.ui.volume;
                 audio.set_volume(self.volume);
+            }
+
+            // 設定ダイアログの「適用」「OK」で音量が変わったときも OSD を出す。
+            // ホイールや右クリックメニューでの変更は設定側も同時に更新しているため、
+            // 2 秒ごとの再適用ではここに入らず、OSD が出っぱなしにはならない。
+            // 起動時は変更ではないので出さない
+            if !initial && (self.volume - previous_volume).abs() > 0.01 {
+                self.show_volume_overlay();
             }
 
             // 出力デバイスも比較する。入れないと、設定画面で出力先だけを
@@ -2226,28 +2303,48 @@ impl CaptureCardViewer {
             self.show_stats_overlay = settings.ui.show_stats_overlay;
 
             // スクリーンショット設定
+            //
+            // **`None`（クリア）も差分として扱う。** 以前は `if let Some(..)` で
+            // 包んでいたため、設定画面で「クリア」してもそのセッション中は
+            // ホットキーが効き続け、効果音も鳴り続けていた
             if let Ok(mut ss) = self.screenshot_manager.lock() {
-                if let Some(hk) = &settings.screenshot.hotkey {
-                    // 無条件に登録し直すと、2 秒ごとに unregister → register が走って
-                    // その瞬間のキー入力を取りこぼし、リスナースレッドも作り直される
-                    if Self::needs_reapply(initial, hk, &self.last_hotkey) {
-                        match ss.set_hotkey(hk) {
-                            Ok(()) => self.last_hotkey = Some(hk.clone()),
+                // 無条件に登録し直すと、2 秒ごとに unregister → register が走って
+                // その瞬間のキー入力を取りこぼす
+                if Self::needs_reapply(initial, &settings.screenshot.hotkey, &self.last_hotkey) {
+                    match &settings.screenshot.hotkey {
+                        Some(hk) => match ss.set_hotkey(hk) {
+                            Ok(()) => self.last_hotkey = Some(Some(hk.clone())),
                             // 失敗すると古いホットキーは解除済みで何も登録されていない。
                             // last を空にして次の適用タイミングで再試行する
                             Err(_) => self.last_hotkey = None,
+                        },
+                        None => {
+                            ss.clear_hotkey();
+                            self.last_hotkey = Some(None);
                         }
                     }
                 }
-                if let Some(sf) = &settings.screenshot.sound_file {
-                    // 無条件に呼ぶと 2 秒ごとに効果音ファイル全体を読み直すことになる
-                    if Self::needs_reapply(initial, sf, &self.last_sound_file) {
-                        match ss.set_sound_file(sf) {
-                            Ok(()) => self.last_sound_file = Some(sf.clone()),
+
+                // 無条件に呼ぶと 2 秒ごとに効果音ファイル全体を読み直すことになる
+                if Self::needs_reapply(
+                    initial,
+                    &settings.screenshot.sound_file,
+                    &self.last_sound_file,
+                ) {
+                    match &settings.screenshot.sound_file {
+                        Some(sf) => match ss.set_sound_file(sf) {
+                            Ok(()) => self.last_sound_file = Some(Some(sf.clone())),
                             // 見つからない場合は埋め込みの既定音へ倒して Ok になる。
                             // ここへ来るのはファイルがあるのに読めなかった場合なので、
                             // last を空にして次の適用タイミングで読み直す
                             Err(_) => self.last_sound_file = None,
+                        },
+                        None => {
+                            // 未選択は「鳴らさない」の意味。set_sound_file は
+                            // 見つからないファイルを既定音へ倒すので、無音は
+                            // ここでしか表せない
+                            ss.clear_sound();
+                            self.last_sound_file = Some(None);
                         }
                     }
                 }
@@ -2509,7 +2606,16 @@ impl CaptureCardViewer {
             self.is_fullscreen = false;
         }
 
-        self.last_fullscreen_toggle = Some(Instant::now());
+        let text = if self.is_fullscreen {
+            "フルスクリーン ON"
+        } else {
+            "フルスクリーン OFF"
+        };
+        self.transient_overlay.show(
+            OverlayContent::Text(text.to_string()),
+            FULLSCREEN_OSD_DURATION,
+            Instant::now(),
+        );
     }
 }
 
@@ -2519,6 +2625,57 @@ mod tests {
     use egui::Vec2;
     use tempfile::tempdir;
     use video::IntervalStats;
+
+    /// 音量 OSD のバーの中身を取り出す。テキスト以外の形で返ってきたら落とす
+    fn volume_bar(volume: f32) -> (String, f32, f32) {
+        match volume_overlay_content(volume) {
+            OverlayContent::Bar {
+                text,
+                ratio,
+                marker_ratio,
+            } => (text, ratio, marker_ratio),
+            other => panic!("音量 OSD がバー付きになっていない: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn volume_overlay_content_shows_percentage_and_ratio() {
+        let (text, ratio, marker_ratio) = volume_bar(80.0);
+
+        assert_eq!(text, "音量: 80%");
+        // 0〜200% を全体とするので 80% は 0.4、目盛りの 100% は 0.5
+        assert!((ratio - 0.4).abs() < 1e-6, "バーの長さが違う: {}", ratio);
+        assert!(
+            (marker_ratio - 0.5).abs() < 1e-6,
+            "目盛りの位置が違う: {}",
+            marker_ratio
+        );
+    }
+
+    #[test]
+    fn volume_overlay_content_at_minimum_is_empty_bar() {
+        let (text, ratio, _) = volume_bar(0.0);
+
+        assert_eq!(text, "音量: 0%");
+        assert_eq!(ratio, 0.0);
+    }
+
+    #[test]
+    fn volume_overlay_content_at_maximum_fills_bar() {
+        let (text, ratio, _) = volume_bar(200.0);
+
+        assert_eq!(text, "音量: 200%");
+        assert_eq!(ratio, 1.0);
+    }
+
+    #[test]
+    fn volume_overlay_content_rounds_down_like_context_menu() {
+        // 右クリックメニューの「音量: N%」と同じ丸め方であること。
+        // 食い違うと、スライダーを動かしている間だけ 1% ずれて見える
+        let (text, _, _) = volume_bar(79.6);
+
+        assert_eq!(text, "音量: 79%");
+    }
 
     #[test]
     fn format_stats_lines_without_frames_shows_no_numbers() {
@@ -3179,6 +3336,39 @@ mod tests {
             false,
             &"F7".to_string(),
             &Some("F5".to_string())
+        ));
+    }
+
+    #[test]
+    fn needs_reapply_cleared_value_returns_true() {
+        // 設定画面で「クリア」した場合。設定は None になるが、実行中は
+        // 古いホットキーが登録されたまま。ここを差分として拾えないと、
+        // そのセッションの間ずっと解除されない
+        assert!(CaptureCardViewer::needs_reapply(
+            false,
+            &None::<String>,
+            &Some(Some("F5".to_string()))
+        ));
+    }
+
+    #[test]
+    fn needs_reapply_already_cleared_returns_false() {
+        // 解除済みの状態。2 秒ごとに解除し直さない
+        assert!(!CaptureCardViewer::needs_reapply(
+            false,
+            &None::<String>,
+            &Some(None)
+        ));
+    }
+
+    #[test]
+    fn needs_reapply_cleared_but_not_applied_yet_returns_true() {
+        // 未適用（外側の None）と解除済み（Some(None)）を区別する。
+        // 区別できないと、起動直後の 1 回が飛ぶ
+        assert!(CaptureCardViewer::needs_reapply(
+            false,
+            &None::<String>,
+            &None
         ));
     }
 

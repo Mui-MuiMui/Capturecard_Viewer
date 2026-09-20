@@ -1,7 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, SampleRate, SupportedStreamConfig, SupportedStreamConfigRange};
 use log::{debug, error, info, trace};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ringbuf::HeapRb;
@@ -11,11 +11,21 @@ use ringbuf::HeapRb;
 type AudioProducer = ringbuf::Producer<f32, Arc<HeapRb<f32>>>;
 type AudioConsumer = ringbuf::Consumer<f32, Arc<HeapRb<f32>>>;
 
+/// 音量の既定値（100%）。設定を読めなかった場合もここへ倒す。
+const DEFAULT_VOLUME: f32 = 1.0;
+
 pub struct AudioCapture {
     host: cpal::Host,
     input_stream: Option<cpal::Stream>,
     output_stream: Option<cpal::Stream>,
-    volume: Arc<Mutex<f32>>,
+    /// 出力に掛ける倍率。`0.0`〜`2.0`。
+    ///
+    /// **出力コールバック（リアルタイムスレッド）が 1 回ごとに読むので、
+    /// ロックを使わない。** f32 の値を直接持てる Atomic 型が無いため、
+    /// `to_bits` / `from_bits` でビット表現のまま出し入れする。
+    /// `Mutex` だと、UI スレッドが音量を書き換えている最中に
+    /// コールバックが待たされ、バッファを埋め損ねて音が途切れうる。
+    volume: Arc<AtomicU32>,
     audio_passthrough_enabled: Arc<AtomicBool>,
     // 稼働中のストリームでエラーが起きたことを表す旗。
     //
@@ -30,6 +40,28 @@ pub struct AudioCapture {
     stream_error: Arc<AtomicBool>,
 }
 
+/// 共有している音量へ書き込む。
+fn store_volume(cell: &AtomicU32, volume: f32) {
+    cell.store(volume.to_bits(), Ordering::Relaxed);
+}
+
+/// 共有している音量を読み出す。
+fn load_volume(cell: &AtomicU32) -> f32 {
+    f32::from_bits(cell.load(Ordering::Relaxed))
+}
+
+/// パーセント指定の音量を、出力サンプルに掛ける倍率へ直す。
+///
+/// 設定ファイルは手で編集できるため、範囲外の値や `nan` も入りうる。
+/// NaN をそのまま掛けると出力が全て NaN になり、デバイスによっては
+/// 耳障りな雑音になるので、有限でない値は既定値へ倒す。
+fn normalize_volume(volume_percent: f32) -> f32 {
+    if !volume_percent.is_finite() {
+        return DEFAULT_VOLUME;
+    }
+    (volume_percent / 100.0).clamp(0.0, 2.0)
+}
+
 impl AudioCapture {
     pub fn new() -> Self {
         let host = cpal::default_host();
@@ -39,7 +71,7 @@ impl AudioCapture {
             host,
             input_stream: None,
             output_stream: None,
-            volume: Arc::new(Mutex::new(1.0)),
+            volume: Arc::new(AtomicU32::new(DEFAULT_VOLUME.to_bits())),
             // 既定では音声パススルーを有効にする（音が出る状態で起動する）
             audio_passthrough_enabled: Arc::new(AtomicBool::new(true)),
             stream_error: Arc::new(AtomicBool::new(false)),
@@ -288,10 +320,10 @@ impl AudioCapture {
     }
 
     pub fn set_volume(&mut self, volume_percent: f32) {
-        let v = (volume_percent / 100.0).clamp(0.0, 2.0);
-        if let Ok(mut vol) = self.volume.lock() {
-            *vol = v;
-        }
+        // apply_settings から 2 秒ごとに呼ばれるため trace に落とす
+        trace!("音量を設定する: {}%", volume_percent);
+        // 出力コールバック（リアルタイムスレッド）から読むため、ロックを取らない
+        store_volume(&self.volume, normalize_volume(volume_percent));
     }
 
     pub fn set_audio_passthrough_enabled(&mut self, enabled: bool) {
@@ -424,7 +456,7 @@ fn build_output_stream_with<T>(
     device: &Device,
     config: &cpal::StreamConfig,
     consumer: Arc<Mutex<AudioConsumer>>,
-    volume: Arc<Mutex<f32>>,
+    volume: Arc<AtomicU32>,
     passthrough_enabled: Arc<AtomicBool>,
     stream_error: Arc<AtomicBool>,
     to_sample: impl Fn(f32) -> T + Send + 'static,
@@ -435,7 +467,7 @@ where
     device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-            let volume = volume.lock().map(|v| *v).unwrap_or(1.0);
+            let volume = load_volume(&volume);
             let passthrough = passthrough_enabled.load(Ordering::Relaxed);
             if let Ok(mut cons) = consumer.try_lock() {
                 render_output_samples(data, volume, passthrough, || cons.pop(), &to_sample);
@@ -549,6 +581,38 @@ mod tests {
             self.pop_count += 1;
             self.samples.pop_front()
         }
+    }
+
+    #[test]
+    fn normalize_volume_percent_maps_to_multiplier() {
+        assert_eq!(normalize_volume(0.0), 0.0);
+        assert_eq!(normalize_volume(100.0), 1.0);
+        assert_eq!(normalize_volume(200.0), 2.0);
+    }
+
+    #[test]
+    fn normalize_volume_out_of_range_is_clamped() {
+        // 設定ファイルを手で編集すれば UI の上限を超えた値も入る
+        assert_eq!(normalize_volume(-50.0), 0.0);
+        assert_eq!(normalize_volume(1000.0), 2.0);
+    }
+
+    #[test]
+    fn normalize_volume_non_finite_falls_back_to_default() {
+        // NaN を掛けると出力が全て NaN になるので既定値へ倒す
+        assert_eq!(normalize_volume(f32::NAN), DEFAULT_VOLUME);
+        assert_eq!(normalize_volume(f32::INFINITY), DEFAULT_VOLUME);
+    }
+
+    #[test]
+    fn store_volume_and_load_volume_round_trip() {
+        // 出力コールバックは f32 をビット表現のまま受け取る。
+        // 0.0 が別の値に化けると、音量 0% でも音が出てしまう
+        let cell = AtomicU32::new(DEFAULT_VOLUME.to_bits());
+        store_volume(&cell, 0.0);
+        assert_eq!(load_volume(&cell), 0.0);
+        store_volume(&cell, 1.75);
+        assert_eq!(load_volume(&cell), 1.75);
     }
 
     #[test]

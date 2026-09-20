@@ -1271,18 +1271,33 @@ fn build_hotkey_string(modifiers: &egui::Modifiers, keys_down: &[egui::Key]) -> 
     Some(parts.join("+"))
 }
 
+/// ホットキー入力ダイアログの結果。
+///
+/// 「クリア」を `Captured` と区別できるようにしてある。以前は
+/// 「確定したか」の `bool` だけを返しており、クリアしても呼び出し側は
+/// 何も受け取れず、設定のホットキーが `None` にならなかった。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyDialogOutcome {
+    /// 何も確定していない。開いたまま、キャンセル、× で閉じた場合
+    None,
+    /// `captured_hotkey` の値で確定した
+    Captured,
+    /// クリアされた。ホットキーを未設定にする
+    Cleared,
+}
+
 /// ホットキー入力ダイアログを描画する。
 ///
 /// `captured_hotkey` は呼び出し側が持つ確定済みのホットキー、
 /// `capture` は入力待機中の一時状態。両方とも呼び出し側が保持する。
-/// 戻り値は、このフレームでホットキーが確定したかどうか。
 pub fn show_hotkey_capture_dialog(
     ctx: &egui::Context,
     show_dialog: &mut bool,
     captured_hotkey: &mut String,
     capture: &mut HotkeyCaptureState,
-) -> bool {
+) -> HotkeyDialogOutcome {
     let mut close_dialog = false;
+    let mut outcome = HotkeyDialogOutcome::None;
 
     egui::Window::new("ホットキー設定")
         .open(show_dialog)
@@ -1354,6 +1369,11 @@ pub fn show_hotkey_capture_dialog(
                         if let Some(hotkey) = capture.take_captured() {
                             *captured_hotkey = hotkey;
                         }
+                        // 取り直していなくても確定として返す。呼び出し側は
+                        // 同じ値なら登録し直さないので、二重登録にはならない
+                        if !captured_hotkey.is_empty() {
+                            outcome = HotkeyDialogOutcome::Captured;
+                        }
                         close_dialog = true;
                     }
 
@@ -1365,19 +1385,28 @@ pub fn show_hotkey_capture_dialog(
                     if ui.button("クリア").clicked() {
                         captured_hotkey.clear();
                         capture.reset();
+                        // クリアしたことを呼び出し側へ伝える。伝えないと
+                        // 設定のホットキーが残ったままになり、そのキーが
+                        // 効き続ける
+                        outcome = HotkeyDialogOutcome::Cleared;
                         close_dialog = true;
                     }
                 });
             });
         });
 
-    let hotkey_captured = !captured_hotkey.is_empty() && close_dialog;
-
     if close_dialog {
         *show_dialog = false;
+    } else if !*show_dialog {
+        // × で閉じられた場合。`egui::Window::open` が `show_dialog` を
+        // false にするだけでボタンは押されないため、設定ダイアログの ×
+        // と同じくキャンセル扱いにして入力中の状態を捨てる。
+        // 捨てないと、次に開いたときに前回の取得結果が残ったままになり、
+        // 何も入力せず OK を押しただけでそのキーが確定してしまう
+        capture.reset();
     }
 
-    hotkey_captured
+    outcome
 }
 
 #[cfg(test)]
