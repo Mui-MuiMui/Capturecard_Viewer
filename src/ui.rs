@@ -1,5 +1,5 @@
 use crate::settings::{AppSettings, ScreenshotFormat, MAX_JPEG_QUALITY, MIN_JPEG_QUALITY};
-use crate::video::DeviceCapabilities;
+use crate::video::{DeviceCapabilities, VideoMode};
 use eframe::egui;
 use log::debug;
 use std::collections::HashMap;
@@ -364,13 +364,16 @@ pub fn select_default_video_mode(
     previous_fps: Option<u32>,
 ) -> Option<(String, (u32, u32), u32)> {
     // 組み合わせを持たないフォーマットを選ぶと、解像度の選択肢が空になる
-    let (format, modes) = caps.iter().find(|(_, modes)| !modes.is_empty())?;
+    let capability = caps
+        .iter()
+        .find(|capability| !capability.modes.is_empty())?;
 
-    let &(width, height, fps) = modes
+    let &mode = capability
+        .modes
         .iter()
         .min_by_key(|&&mode| video_mode_rank(mode, previous_resolution, previous_fps))?;
 
-    Some((format.clone(), (width, height), fps))
+    Some((capability.name.clone(), mode.resolution(), mode.fps))
 }
 
 /// `select_default_video_mode` の並べ替えキー。小さいほど「望ましい」。
@@ -389,7 +392,7 @@ pub fn select_default_video_mode(
 /// 同時に 1〜3 が並んだときの決着でもある。ここが無いと `HashMap` 由来の
 /// 順序でフレームごとに違う値が選ばれうる。
 fn video_mode_rank(
-    mode: (u32, u32, u32),
+    mode: VideoMode,
     previous_resolution: Option<(u32, u32)>,
     previous_fps: Option<u32>,
 ) -> (
@@ -399,18 +402,18 @@ fn video_mode_rank(
     std::cmp::Reverse<u64>,
     std::cmp::Reverse<u32>,
 ) {
-    let (width, height, fps) = mode;
-    let pixels = u64::from(width) * u64::from(height);
+    let pixels = mode.pixel_count();
 
     let (pixel_distance, dimension_distance) = match previous_resolution {
         Some((prev_width, prev_height)) => (
             pixels.abs_diff(u64::from(prev_width) * u64::from(prev_height)),
-            u64::from(width.abs_diff(prev_width)) + u64::from(height.abs_diff(prev_height)),
+            u64::from(mode.width.abs_diff(prev_width))
+                + u64::from(mode.height.abs_diff(prev_height)),
         ),
         None => (0, 0),
     };
     let fps_distance = match previous_fps {
-        Some(prev_fps) => u64::from(fps.abs_diff(prev_fps)),
+        Some(prev_fps) => u64::from(mode.fps.abs_diff(prev_fps)),
         None => 0,
     };
 
@@ -419,7 +422,7 @@ fn video_mode_rank(
         dimension_distance,
         fps_distance,
         std::cmp::Reverse(pixels),
-        std::cmp::Reverse(fps),
+        std::cmp::Reverse(mode.fps),
     )
 }
 
@@ -671,12 +674,12 @@ fn show_device_settings_tab(
                 .show_ui(ui, |ui| {
                     // キャッシュからフォーマット一覧を取得
                     if let Some(caps) = capabilities.ready(&selected_device) {
-                        for (format, _) in caps {
+                        for capability in caps {
                             if ui
                                 .selectable_value(
                                     &mut settings.video.format,
-                                    Some(format.clone()),
-                                    format,
+                                    Some(capability.name.clone()),
+                                    &capability.name,
                                 )
                                 .clicked()
                             {
@@ -709,11 +712,11 @@ fn show_device_settings_tab(
             if let Some(caps) = capabilities.ready(&selected_device) {
                 if let Some(current_format) = &settings.video.format {
                     // 現在のフォーマットに対応する最初の解像度を選択
-                    for (format, resolutions) in caps {
-                        if format == current_format {
-                            if let Some((w, h, fps)) = resolutions.first() {
-                                settings.video.resolution = Some((*w, *h));
-                                settings.video.fps = Some(*fps);
+                    for capability in caps {
+                        if &capability.name == current_format {
+                            if let Some(mode) = capability.modes.first() {
+                                settings.video.resolution = Some(mode.resolution());
+                                settings.video.fps = Some(mode.fps);
                             }
                             break;
                         }
@@ -736,10 +739,10 @@ fn show_device_settings_tab(
                             // 現在のフォーマットに対応する解像度一覧
                             let mut unique_resolutions =
                                 std::collections::HashSet::<(u32, u32)>::new();
-                            for (format, resolutions) in caps {
-                                if format == current_format {
-                                    for (w, h, _) in resolutions {
-                                        unique_resolutions.insert((*w, *h));
+                            for capability in caps {
+                                if &capability.name == current_format {
+                                    for mode in &capability.modes {
+                                        unique_resolutions.insert(mode.resolution());
                                     }
                                 }
                             }
@@ -793,11 +796,11 @@ fn show_device_settings_tab(
                 if let Some(current_format) = &settings.video.format {
                     if let Some((w, h)) = settings.video.resolution {
                         // 現在のフォーマットと解像度に対応する最初のFPSを選択
-                        for (format, resolutions) in caps {
-                            if format == current_format {
-                                for (res_w, res_h, fps) in resolutions {
-                                    if *res_w == w && *res_h == h {
-                                        settings.video.fps = Some(*fps);
+                        for capability in caps {
+                            if &capability.name == current_format {
+                                for mode in &capability.modes {
+                                    if mode.resolution() == (w, h) {
+                                        settings.video.fps = Some(mode.fps);
                                         break;
                                     }
                                 }
@@ -822,11 +825,11 @@ fn show_device_settings_tab(
                             if let Some((w, h)) = settings.video.resolution {
                                 // 現在のフォーマットと解像度に対応するFPS一覧
                                 let mut available_fps = Vec::new();
-                                for (format, resolutions) in caps {
-                                    if format == current_format {
-                                        for (res_w, res_h, fps) in resolutions {
-                                            if *res_w == w && *res_h == h {
-                                                available_fps.push(*fps);
+                                for capability in caps {
+                                    if &capability.name == current_format {
+                                        for mode in &capability.modes {
+                                            if mode.resolution() == (w, h) {
+                                                available_fps.push(mode.fps);
                                             }
                                         }
                                     }
@@ -1342,6 +1345,7 @@ pub fn show_hotkey_capture_dialog(
 mod tests {
     use super::*;
     use crate::settings::{AudioSettings, ScreenshotSettings, UiSettings, VideoSettings};
+    use crate::video::FormatCapability;
     use std::path::PathBuf;
 
     /// 既定値と全項目が異なる設定。どの項目が反映され、どの項目が
@@ -1886,8 +1890,14 @@ mod tests {
     /// 取得できたことにする能力。中身そのものは検証の対象ではないので最小限
     fn sample_capabilities() -> DeviceCapabilities {
         vec![
-            ("MJPEG".to_string(), vec![(1920, 1080, 30), (1280, 720, 60)]),
-            ("YUY2".to_string(), vec![(1280, 720, 60)]),
+            FormatCapability::new(
+                "MJPEG",
+                vec![
+                    VideoMode::new(1920, 1080, 30),
+                    VideoMode::new(1280, 720, 60),
+                ],
+            ),
+            FormatCapability::new("YUY2", vec![VideoMode::new(1280, 720, 60)]),
         ]
     }
 
@@ -2079,9 +2089,13 @@ mod tests {
     #[test]
     fn select_default_video_mode_without_previous_takes_largest_resolution_and_fps() {
         // 前の値が無いとき（初回など）は、対応する中で最大の解像度・最高の FPS
-        let caps: DeviceCapabilities = vec![(
-            "MJPEG".to_string(),
-            vec![(1280, 720, 60), (1920, 1080, 24), (1920, 1080, 30)],
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "MJPEG",
+            vec![
+                VideoMode::new(1280, 720, 60),
+                VideoMode::new(1920, 1080, 24),
+                VideoMode::new(1920, 1080, 30),
+            ],
         )];
 
         assert_eq!(
@@ -2093,9 +2107,13 @@ mod tests {
     #[test]
     fn select_default_video_mode_keeps_previous_when_supported() {
         // 新しいデバイスが同じ組み合わせに対応していれば、そのまま据え置く
-        let caps: DeviceCapabilities = vec![(
-            "YUY2".to_string(),
-            vec![(1920, 1080, 60), (1280, 720, 60), (640, 480, 30)],
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "YUY2",
+            vec![
+                VideoMode::new(1920, 1080, 60),
+                VideoMode::new(1280, 720, 60),
+                VideoMode::new(640, 480, 30),
+            ],
         )];
 
         assert_eq!(
@@ -2108,8 +2126,10 @@ mod tests {
     fn select_default_video_mode_keeps_previous_over_same_pixel_count_resolution() {
         // 960x960 と 1280x720 はどちらも 921,600 画素で、画素数の差だけでは並ぶ。
         // 完全一致する 1280x720 が一覧の後ろにあっても取りこぼさないこと
-        let caps: DeviceCapabilities =
-            vec![("YUY2".to_string(), vec![(960, 960, 60), (1280, 720, 60)])];
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "YUY2",
+            vec![VideoMode::new(960, 960, 60), VideoMode::new(1280, 720, 60)],
+        )];
 
         assert_eq!(
             select_default_video_mode(&caps, Some((1280, 720)), Some(60)),
@@ -2121,9 +2141,13 @@ mod tests {
     fn select_default_video_mode_picks_nearest_resolution() {
         // 1600x900（1,440,000 画素）に最も近いのは 1280x720（921,600 画素）。
         // 1920x1080 は 2,073,600 画素で差が大きい
-        let caps: DeviceCapabilities = vec![(
-            "YUY2".to_string(),
-            vec![(1920, 1080, 60), (1280, 720, 60), (640, 480, 30)],
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "YUY2",
+            vec![
+                VideoMode::new(1920, 1080, 60),
+                VideoMode::new(1280, 720, 60),
+                VideoMode::new(640, 480, 30),
+            ],
         )];
 
         assert_eq!(
@@ -2135,9 +2159,13 @@ mod tests {
     #[test]
     fn select_default_video_mode_prefers_resolution_over_fps() {
         // 解像度が先。FPS を合わせるために解像度を落とさない
-        let caps: DeviceCapabilities = vec![(
-            "YUY2".to_string(),
-            vec![(1920, 1080, 30), (640, 480, 60), (640, 480, 30)],
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "YUY2",
+            vec![
+                VideoMode::new(1920, 1080, 30),
+                VideoMode::new(640, 480, 60),
+                VideoMode::new(640, 480, 30),
+            ],
         )];
 
         assert_eq!(
@@ -2148,9 +2176,13 @@ mod tests {
 
     #[test]
     fn select_default_video_mode_picks_nearest_fps_within_same_resolution() {
-        let caps: DeviceCapabilities = vec![(
-            "YUY2".to_string(),
-            vec![(1280, 720, 60), (1280, 720, 30), (1280, 720, 24)],
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "YUY2",
+            vec![
+                VideoMode::new(1280, 720, 60),
+                VideoMode::new(1280, 720, 30),
+                VideoMode::new(1280, 720, 24),
+            ],
         )];
 
         assert_eq!(
@@ -2163,8 +2195,13 @@ mod tests {
     fn select_default_video_mode_equal_distance_takes_larger_resolution() {
         // 1,000,000 画素からの差がどちらも 200,000 で並ぶ。
         // 決着を付けないとフレームごとに違う値が選ばれうる
-        let caps: DeviceCapabilities =
-            vec![("YUY2".to_string(), vec![(800, 1000, 30), (1200, 1000, 30)])];
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "YUY2",
+            vec![
+                VideoMode::new(800, 1000, 30),
+                VideoMode::new(1200, 1000, 30),
+            ],
+        )];
 
         assert_eq!(
             select_default_video_mode(&caps, Some((1000, 1000)), Some(30)),
@@ -2175,9 +2212,13 @@ mod tests {
     #[test]
     fn select_default_video_mode_without_previous_fps_takes_highest_for_that_resolution() {
         // 解像度だけ分かっているとき。FPS は差で並ばないので最高のものになる
-        let caps: DeviceCapabilities = vec![(
-            "YUY2".to_string(),
-            vec![(1280, 720, 30), (1280, 720, 60), (1920, 1080, 60)],
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "YUY2",
+            vec![
+                VideoMode::new(1280, 720, 30),
+                VideoMode::new(1280, 720, 60),
+                VideoMode::new(1920, 1080, 60),
+            ],
         )];
 
         assert_eq!(
@@ -2189,9 +2230,13 @@ mod tests {
     #[test]
     fn select_default_video_mode_without_previous_resolution_takes_nearest_fps() {
         // FPS だけ分かっているとき。解像度は差で並ばないので、まず FPS が合う
-        let caps: DeviceCapabilities = vec![(
-            "YUY2".to_string(),
-            vec![(1920, 1080, 30), (1280, 720, 60), (640, 480, 60)],
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "YUY2",
+            vec![
+                VideoMode::new(1920, 1080, 30),
+                VideoMode::new(1280, 720, 60),
+                VideoMode::new(640, 480, 60),
+            ],
         )];
 
         assert_eq!(
@@ -2206,8 +2251,8 @@ mod tests {
         // 解像度と FPS はそのフォーマットが対応する中から選ぶので、
         // 他のフォーマットにもっと近い組み合わせがあっても移らない
         let caps: DeviceCapabilities = vec![
-            ("YUY2".to_string(), vec![(640, 480, 30)]),
-            ("MJPEG".to_string(), vec![(1920, 1080, 60)]),
+            FormatCapability::new("YUY2", vec![VideoMode::new(640, 480, 30)]),
+            FormatCapability::new("MJPEG", vec![VideoMode::new(1920, 1080, 60)]),
         ];
 
         assert_eq!(
@@ -2220,8 +2265,8 @@ mod tests {
     fn select_default_video_mode_skips_format_without_any_mode() {
         // 組み合わせを持たないフォーマットを選ぶと、解像度の選択肢が空になる
         let caps: DeviceCapabilities = vec![
-            ("YUY2".to_string(), vec![]),
-            ("MJPEG".to_string(), vec![(1280, 720, 60)]),
+            FormatCapability::new("YUY2", vec![]),
+            FormatCapability::new("MJPEG", vec![VideoMode::new(1280, 720, 60)]),
         ];
 
         assert_eq!(
@@ -2243,8 +2288,10 @@ mod tests {
 
     #[test]
     fn select_default_video_mode_returns_none_when_every_format_is_empty() {
-        let caps: DeviceCapabilities =
-            vec![("YUY2".to_string(), vec![]), ("MJPEG".to_string(), vec![])];
+        let caps: DeviceCapabilities = vec![
+            FormatCapability::new("YUY2", vec![]),
+            FormatCapability::new("MJPEG", vec![]),
+        ];
 
         assert_eq!(select_default_video_mode(&caps, None, None), None);
     }
