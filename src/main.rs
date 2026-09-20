@@ -18,12 +18,14 @@ use std::time::{Duration, Instant};
 
 mod audio;
 mod logging;
+mod overlay;
 mod screenshot;
 mod settings;
 mod ui;
 mod video;
 
 use audio::AudioCapture;
+use overlay::{OverlayContent, TransientOverlay};
 use screenshot::ScreenshotManager;
 use settings::{AppSettings, AutoSavePolicy, ScreenshotEncoding};
 use video::{FrameStats, VideoCapture};
@@ -44,6 +46,9 @@ const MIN_VISIBLE_WINDOW_HEIGHT: f32 = 32.0;
 /// ウィンドウのドラッグ中や音量スクロール中は設定が毎フレーム変わるため、
 /// 最後の変更からこの時間が空くまで書き出しをまとめる
 const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// フルスクリーンを切り替えたときに OSD を出しておく時間
+const FULLSCREEN_OSD_DURATION: Duration = Duration::from_secs(1);
 
 /// デバイス能力の取得結果。`(問い合わせたデバイス名, 結果)`。
 /// 取得スレッドから UI スレッドへ、この形でチャネル越しに返す
@@ -264,6 +269,9 @@ pub struct CaptureCardViewer {
     maintain_aspect_ratio: bool,
     // 映像に統計を重ねて表示するか。設定の ui.show_stats_overlay と対応する
     show_stats_overlay: bool,
+    // フルスクリーン切替や音量変更のときだけ出て、数秒で消えるオーバーレイ。
+    // 常時表示の show_stats_overlay とは別物
+    transient_overlay: TransientOverlay,
     volume: f32,
     last_volume_sent: f32,
     last_settings_applied: Instant,
@@ -288,7 +296,6 @@ pub struct CaptureCardViewer {
     last_audio_output: Option<String>,
     last_audio_rate: Option<u32>,
     last_audio_channels: Option<u16>,
-    last_fullscreen_toggle: Option<Instant>,
     last_video_fps: Option<u32>,
     // 最後に適用したスクリーンショット関連の値
     // apply_settings が 2 秒ごとに呼ばれるため、差分がないときは再適用しない
@@ -347,6 +354,7 @@ impl Default for CaptureCardViewer {
             is_fullscreen: false,
             maintain_aspect_ratio: true,
             show_stats_overlay,
+            transient_overlay: TransientOverlay::default(),
             volume: 100.0,
             last_volume_sent: -1.0,
             last_settings_applied: Instant::now(),
@@ -363,7 +371,6 @@ impl Default for CaptureCardViewer {
             last_audio_output: None,
             last_audio_rate: None,
             last_audio_channels: None,
-            last_fullscreen_toggle: None,
             last_video_fps: None,
             last_hotkey: None,
             last_sound_file: None,
@@ -632,26 +639,9 @@ impl eframe::App for CaptureCardViewer {
             self.show_context_menu(ctx);
         }
 
-        // フルスクリーン切替オーバーレイ (1秒表示)
-        if let Some(t) = self.last_fullscreen_toggle {
-            if t.elapsed().as_secs_f32() < 1.0 {
-                egui::Area::new("fullscreen_overlay")
-                    .order(egui::Order::Foreground)
-                    .fixed_pos(egui::pos2(20.0, 20.0))
-                    .show(ctx, |ui| {
-                        egui::Frame::none()
-                            .fill(egui::Color32::from_black_alpha(160))
-                            .rounding(5.0)
-                            .show(ui, |ui| {
-                                ui.label(if self.is_fullscreen {
-                                    "フルスクリーン ON"
-                                } else {
-                                    "フルスクリーン OFF"
-                                });
-                            });
-                    });
-            }
-        }
+        // 一時表示のオーバーレイ（フルスクリーン切替・音量）。
+        // 期限が来れば自分で消え、消える時刻の再描画も自分で予約する
+        self.transient_overlay.draw(ctx, Instant::now());
 
         // 新しくキャプチャされたホットキーを即座に登録
         if let Some(hk) = self.pending_hotkey.take() {
@@ -2138,7 +2128,16 @@ impl CaptureCardViewer {
             self.is_fullscreen = false;
         }
 
-        self.last_fullscreen_toggle = Some(Instant::now());
+        let text = if self.is_fullscreen {
+            "フルスクリーン ON"
+        } else {
+            "フルスクリーン OFF"
+        };
+        self.transient_overlay.show(
+            OverlayContent::Text(text.to_string()),
+            FULLSCREEN_OSD_DURATION,
+            Instant::now(),
+        );
     }
 }
 
