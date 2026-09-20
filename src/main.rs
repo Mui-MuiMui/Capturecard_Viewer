@@ -82,6 +82,20 @@ const CONNECT_BACKOFF_MAX: Duration = Duration::from_millis(5000);
 /// 永久に音が出ない。元の実装と同じ 3 回目に合わせてある。
 const AUDIO_DEFAULT_FALLBACK_AFTER: u32 = 3;
 
+/// フレームが途絶えてから「映像が切れた」と判断するまでの時間。
+///
+/// 60fps なら 1 枚あたり 16ms、30fps でも 33ms なので、3 秒は 100 枚近い
+/// 欠落にあたる。一時的なコマ落ちで表示が消えない程度に長く、ユーザーが
+/// 「固まった」と気付くより先に反応する程度に短い値として置いている。
+const VIDEO_SIGNAL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// ストリームのエラーを理由に音声を開き直すときの、最短の間隔。
+///
+/// 開いた直後に必ず落ちるデバイスでは、エラー → 開き直し → エラーの繰り返しに
+/// なる。音声を開く処理は実測で 300ms 前後かかり、その間 UI スレッドが止まる
+/// ため、下限を置いて毎フレーム開き直さないようにする。
+const AUDIO_ERROR_RECONNECT_MIN_INTERVAL: Duration = Duration::from_secs(5);
+
 /// 連続 `attempt` 回失敗したあとに待つ時間を返す。
 ///
 /// `CONNECT_BACKOFF_BASE` から倍々に伸ばし、`CONNECT_BACKOFF_MAX` で頭打ちにする。
@@ -112,6 +126,108 @@ fn should_retry_now(next_attempt_at: Option<Instant>, now: Instant) -> bool {
     match next_attempt_at {
         None => true,
         Some(deadline) => now >= deadline,
+    }
+}
+
+/// フレームの途絶を見たあと、そのフレームで何をするか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VideoLinkAction {
+    /// 何もしない。フレームが流れている、まだ 1 枚も届いていない、
+    /// またはストリームを開けていない
+    Keep,
+    /// 表示中のテクスチャを捨てて「映像信号がありません」に戻す
+    ClearTexture,
+    /// テクスチャを捨てたうえで、ストリームを閉じて開き直す
+    ClearTextureAndReconnect,
+}
+
+/// 映像が途絶えたかを判定する。
+///
+/// 判定をここへ切り出してあるのは、実機でしか作れない状況（USB を抜く、
+/// 入力信号を落とす）をテストで代替するため。時計もデバイスも触らない。
+///
+/// - **ストリームを開けていない場合は何もしない。** 接続は `ConnectRetry` の
+///   担当で、ここが二重に面倒を見ると起動時の接続と競合する
+/// - **1 枚も届いていない場合も何もしない。** 開けた直後は 1 枚目まで実測で
+///   0.8 秒かかるうえ、入力信号が無いデバイスは開けても永久にフレームを
+///   出さない。ここで切断と見なすと、開き直しを延々と繰り返すことになる
+/// - 期限ちょうどは切断とみなす側に倒す。1 フレーム待って得るものが無いため
+fn decide_video_link(
+    state: video::VideoLinkState,
+    auto_reconnect: bool,
+    timeout: Duration,
+) -> VideoLinkAction {
+    if !state.capturing {
+        return VideoLinkAction::Keep;
+    }
+    let Some(elapsed) = state.since_last_frame else {
+        return VideoLinkAction::Keep;
+    };
+    if elapsed < timeout {
+        return VideoLinkAction::Keep;
+    }
+    if auto_reconnect {
+        VideoLinkAction::ClearTextureAndReconnect
+    } else {
+        VideoLinkAction::ClearTexture
+    }
+}
+
+/// ストリームのエラーを理由に、いま音声を開き直してよいかを判定する。
+///
+/// `since_last_reconnect` は前回この理由で開き直してからの経過時間で、
+/// `None` は「まだ一度も開き直していない」を表す。
+fn should_reconnect_after_stream_error(since_last_reconnect: Option<Duration>) -> bool {
+    match since_last_reconnect {
+        None => true,
+        Some(elapsed) => elapsed >= AUDIO_ERROR_RECONNECT_MIN_INTERVAL,
+    }
+}
+
+/// 保留中の音声ストリームのエラーに対して、そのフレームで何をするか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioErrorAction {
+    /// 何もしない。保留しているエラーが無い
+    Idle,
+    /// 保留したまま待つ。自動再接続が無効か、開き直しの下限に達していない
+    Wait,
+    /// ストリームを閉じて開き直す
+    Reconnect,
+}
+
+/// 保留中の音声エラーの扱いを決める。
+///
+/// **見送るときも保留を落とさない（`Wait` で持ち越す）。** エラーの通知は
+/// `take_stream_error` が読んだ時点で消えるため、ここで捨てると誰も
+/// 開き直さないまま音が戻らなくなる。自動再接続を有効にし直したとき、
+/// または下限に達したときのフレームで `Reconnect` に変わる。
+fn decide_audio_reconnect(
+    error_pending: bool,
+    auto_reconnect: bool,
+    since_last_reconnect: Option<Duration>,
+) -> AudioErrorAction {
+    if !error_pending {
+        return AudioErrorAction::Idle;
+    }
+    if !auto_reconnect {
+        return AudioErrorAction::Wait;
+    }
+    if !should_reconnect_after_stream_error(since_last_reconnect) {
+        return AudioErrorAction::Wait;
+    }
+    AudioErrorAction::Reconnect
+}
+
+/// 映像が出ていないときに画面へ出す文言を決める。
+///
+/// 「デバイスは開けているが信号が来ていない」と「デバイスそのものが消えた」は
+/// ユーザーの取るべき行動が違う（入力機器の電源を見るのか、ケーブルを挿し直すのか）
+/// ため、同じ文言にしない。
+fn video_placeholder_message(capturing: bool, reconnecting: bool) -> &'static str {
+    match (capturing, reconnecting) {
+        (true, _) => "映像信号がありません",
+        (false, true) => "デバイスが接続されていません（再接続を試しています）",
+        (false, false) => "デバイスが接続されていません",
     }
 }
 
@@ -217,6 +333,12 @@ impl<T: PartialEq> ConnectRetry<T> {
         self.target.is_some() && should_retry_now(self.next_attempt_at, now)
     }
 
+    /// 接続を追いかけている最中か。繋がると `false` に戻る。
+    /// 「再接続を試しています」という表示の出し分けに使う
+    fn is_active(&self) -> bool {
+        self.target.is_some()
+    }
+
     /// 連続して失敗した回数。
     fn attempts(&self) -> u32 {
         self.attempts
@@ -296,7 +418,26 @@ pub struct CaptureCardViewer {
     video_texture: Option<egui::TextureHandle>,
     // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
     last_frame_generation: u64,
-    pending_hotkey: Option<String>,
+    // フレームの途絶に対して最後に行った処置。
+    // 毎フレーム同じ判定に当たるため、同じ処置を繰り返さないための番人。
+    // 判定が変わったとき（自動再接続を有効にし直したとき）は動けるように、
+    // 真偽値ではなく「何をしたか」で持つ。新しいフレームが届いた時点で
+    // `Keep` へ戻す
+    last_video_link_action: VideoLinkAction,
+    // 直近に観測した「映像ストリームを開けているか」。
+    // 描画のたびに video_capture のロックを取らずに済ませるため、
+    // 毎フレームの監視で拾った値をここに写しておく
+    video_capturing: bool,
+    // ストリームのエラーを理由に音声を開き直した時刻。
+    // 開いた直後に必ず落ちるデバイスで、毎フレーム開き直さないための下限
+    last_audio_error_reconnect: Option<Instant>,
+    // 未処理の音声ストリームのエラーがあるか。
+    // `take_stream_error` は読んだ時点で旗を下ろすため、見送ったエラーを
+    // ここへ移しておかないと、そのまま音が戻らなくなる
+    audio_stream_error_pending: bool,
+    // ホットキーダイアログで確定した内容のうち、まだ実行時へ反映していないもの。
+    // 外側の None は「保留なし」、内側の None は「クリアされた（解除する）」
+    pending_hotkey: Option<Option<String>>,
     temp_hotkey: String, // ホットキーダイアログ用の一時保存
     // 最後に適用した実行時パラメータ（差分ベースの再起動回避用）
     last_video_device: Option<String>,
@@ -308,9 +449,15 @@ pub struct CaptureCardViewer {
     last_audio_channels: Option<u16>,
     last_video_fps: Option<u32>,
     // 最後に適用したスクリーンショット関連の値
-    // apply_settings が 2 秒ごとに呼ばれるため、差分がないときは再適用しない
-    last_hotkey: Option<String>,
-    last_sound_file: Option<PathBuf>,
+    // apply_settings が 2 秒ごとに呼ばれるため、差分がないときは再適用しない。
+    //
+    // **設定と同じ `Option` を丸ごと包んでいる。** 外側の `None` は
+    // 「まだ適用できていない（次の適用でやり直す）」、内側の `None` は
+    // 「未設定を適用済み＝クリア済み」を表す。内側を潰して `Option<String>` に
+    // すると、クリア（設定が `None`）と未適用が同じ値になり、クリアを
+    // 差分として検出できない
+    last_hotkey: Option<Option<String>>,
+    last_sound_file: Option<Option<PathBuf>>,
 
     // デバイス接続の再試行。映像と音声で別々に持ち、片方が失敗しても
     // もう片方の再試行に引きずられないようにする
@@ -372,6 +519,10 @@ impl Default for CaptureCardViewer {
             autosave: AutoSavePolicy::from_load_outcome(load_outcome),
             video_texture: None,
             last_frame_generation: 0,
+            last_video_link_action: VideoLinkAction::Keep,
+            video_capturing: false,
+            last_audio_error_reconnect: None,
+            audio_stream_error_pending: false,
             pending_hotkey: None,
             temp_hotkey: String::new(),
             last_video_device: None,
@@ -491,6 +642,10 @@ impl eframe::App for CaptureCardViewer {
         // ビデオフレームを更新
         self.update_video_texture(ctx);
 
+        // フレームの途絶と音声ストリームのエラーを見て、必要なら開き直しを要求する。
+        // 実際に開くのは次のフレームの poll_device_connection
+        self.monitor_device_health();
+
         // グローバルホットキーを処理
         self.handle_hotkeys();
 
@@ -603,21 +758,30 @@ impl eframe::App for CaptureCardViewer {
                 self.temp_hotkey = current.unwrap_or_default();
             }
 
-            let hotkey_captured = ui::show_hotkey_capture_dialog(
+            let outcome = ui::show_hotkey_capture_dialog(
                 ctx,
                 &mut self.show_hotkey_dialog,
                 &mut self.temp_hotkey,
                 self.settings_dialog.hotkey_capture_mut(),
             );
 
-            // ホットキーがキャプチャされた場合、設定を更新
-            if hotkey_captured && !self.temp_hotkey.is_empty() {
+            // 確定またはクリアされた場合、設定を更新。
+            // クリアは「ホットキーを使わない」という明示の指定なので、
+            // 確定と同じ経路で `None` を書き込む
+            let new_hotkey = match outcome {
+                ui::HotkeyDialogOutcome::None => None,
+                ui::HotkeyDialogOutcome::Captured if self.temp_hotkey.is_empty() => None,
+                ui::HotkeyDialogOutcome::Captured => Some(Some(self.temp_hotkey.clone())),
+                ui::HotkeyDialogOutcome::Cleared => Some(None),
+            };
+
+            if let Some(hotkey) = new_hotkey {
                 // 設定ダイアログから開かれている場合はドラフトへ書く。
                 // 共有設定へ直接書くと、ダイアログの OK がドラフトの古い値で
                 // 上書きして、設定したホットキーが消える
                 let wrote_to_draft = match self.settings_dialog.draft_mut() {
                     Some(draft) => {
-                        draft.screenshot.hotkey = Some(self.temp_hotkey.clone());
+                        draft.screenshot.hotkey = hotkey.clone();
                         true
                     }
                     None => false,
@@ -625,12 +789,12 @@ impl eframe::App for CaptureCardViewer {
 
                 if !wrote_to_draft {
                     // 設定ダイアログが閉じられた状態でホットキーだけ確定した場合。
-                    // ドラフトが無いので共有設定へ直接書き、その場で登録する
+                    // ドラフトが無いので共有設定へ直接書き、その場で登録（解除）する
                     if let Ok(mut settings) = self.settings.lock() {
-                        settings.screenshot.hotkey = Some(self.temp_hotkey.clone());
+                        settings.screenshot.hotkey = hotkey.clone();
                     }
                     self.mark_settings_dirty();
-                    self.pending_hotkey = Some(self.temp_hotkey.clone());
+                    self.pending_hotkey = Some(hotkey);
                 }
                 // ドラフトへ書いた場合はここで登録しない。
                 // 登録すると、2 秒ごとの apply_settings が共有設定側の古い
@@ -653,23 +817,34 @@ impl eframe::App for CaptureCardViewer {
         // 期限が来れば自分で消え、消える時刻の再描画も自分で予約する
         self.transient_overlay.draw(ctx, Instant::now());
 
-        // 新しくキャプチャされたホットキーを即座に登録
-        if let Some(hk) = self.pending_hotkey.take() {
-            debug!("捕捉したホットキーを登録する: {}", hk);
+        // 新しくキャプチャされたホットキーを即座に登録（クリアなら解除）
+        if let Some(pending) = self.pending_hotkey.take() {
             if let Ok(mut ss) = self.screenshot_manager.lock() {
-                match ss.set_hotkey(&hk) {
-                    Ok(()) => {
-                        debug!("ホットキー {} の登録に成功した", hk);
-                        // apply_settings が同じホットキーを登録し直さないよう記録する
-                        self.last_hotkey = Some(hk.clone());
+                match pending {
+                    Some(hk) => {
+                        debug!("捕捉したホットキーを登録する: {}", hk);
+                        match ss.set_hotkey(&hk) {
+                            Ok(()) => {
+                                debug!("ホットキー {} の登録に成功した", hk);
+                                // apply_settings が同じホットキーを登録し直さないよう記録する
+                                self.last_hotkey = Some(Some(hk));
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "ホットキー {} を登録できないので次の適用で再試行する: {}",
+                                    hk, e
+                                );
+                                // 登録できていないので apply_settings 側で再試行させる
+                                self.last_hotkey = None;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        warn!(
-                            "ホットキー {} を登録できないので次の適用で再試行する: {}",
-                            hk, e
-                        );
-                        // 登録できていないので apply_settings 側で再試行させる
-                        self.last_hotkey = None;
+                    None => {
+                        debug!("ホットキーがクリアされたので登録を解除する");
+                        ss.clear_hotkey();
+                        // 解除済みであることを記録する。記録しないと 2 秒ごとに
+                        // 解除し直すことになる
+                        self.last_hotkey = Some(None);
                     }
                 }
             } else {
@@ -711,6 +886,12 @@ impl CaptureCardViewer {
 
         if let Some((frame, generation)) = new_frame {
             self.last_frame_generation = generation;
+
+            // 途絶から戻ってきた。次の途絶をもう一度検出できるように番人を戻す
+            if self.last_video_link_action != VideoLinkAction::Keep {
+                info!("映像フレームが再び届き始めたので表示を再開する");
+                self.last_video_link_action = VideoLinkAction::Keep;
+            }
 
             // 最適化: テクスチャオプションをNearest（補間なし）に設定し、性能向上
             let texture_options = egui::TextureOptions {
@@ -851,6 +1032,10 @@ impl CaptureCardViewer {
     }
 
     fn show_windowed_ui(&mut self, ctx: &egui::Context) {
+        // 映像が無いときの文言は描画に入る前に決める。
+        // 描画のクロージャの中でロックを取らないため
+        let placeholder =
+            video_placeholder_message(self.video_capturing, self.video_retry.is_active());
         egui::CentralPanel::default()
             .frame(egui::Frame::none().inner_margin(egui::Margin::same(2.0))) // マージンを2pxに設定
             .show(ctx, |ui| {
@@ -913,7 +1098,7 @@ impl CaptureCardViewer {
                     let response =
                         ui.allocate_response(available_size, egui::Sense::click_and_drag());
                     ui.centered_and_justified(|ui| {
-                        ui.label("映像信号がありません");
+                        ui.label(placeholder);
                     });
 
                     // 空エリアでのウィンドウドラッグを処理（設定が有効な場合のみ）
@@ -936,6 +1121,9 @@ impl CaptureCardViewer {
     }
 
     fn show_fullscreen_ui(&mut self, ctx: &egui::Context) {
+        // ウィンドウ表示と同じ理由で、描画に入る前に文言を決める
+        let placeholder =
+            video_placeholder_message(self.video_capturing, self.video_retry.is_active());
         // フルスクリーンUI（装飾なし、ウィンドウ版と同等の機能）
         egui::CentralPanel::default()
             .frame(egui::Frame::none().inner_margin(egui::Margin::same(0.0))) // フルスクリーンはマージン0
@@ -994,7 +1182,7 @@ impl CaptureCardViewer {
                     let response =
                         ui.allocate_response(available_size, egui::Sense::click_and_drag());
                     ui.centered_and_justified(|ui| {
-                        ui.label("映像信号がありません");
+                        ui.label(placeholder);
                     });
 
                     // フルスクリーンではドラッグ移動を完全に無効化
@@ -1190,11 +1378,48 @@ impl CaptureCardViewer {
                         self.mark_settings_dirty();
                     }
 
+                    // デバイスの自動再接続のチェックボックス。
+                    // 設定は VideoSettings に持たせているが、音声ストリームの
+                    // エラーからの復帰にも効く（利用者から見て 1 つの機能なので
+                    // スイッチも 1 つにしてある）
+                    let auto_reconnect = if let Ok(settings) = self.settings.lock() {
+                        settings.video.auto_reconnect
+                    } else {
+                        true
+                    };
+                    let mut temp_auto_reconnect = auto_reconnect;
+                    let auto_reconnect_response = ui
+                        .checkbox(&mut temp_auto_reconnect, "デバイスの自動再接続")
+                        .on_hover_text(
+                            "映像が途切れたり音声デバイスが消えたときに、自動でデバイスを開き直します",
+                        );
+
+                    // 自動再接続の設定が変更された場合（書き出しはデバウンス）
+                    if auto_reconnect_response.changed() {
+                        if let Ok(mut settings) = self.settings.lock() {
+                            settings.video.auto_reconnect = temp_auto_reconnect;
+                        }
+                        info!(
+                            "デバイスの自動再接続を{}にした",
+                            if temp_auto_reconnect {
+                                "有効"
+                            } else {
+                                "無効"
+                            }
+                        );
+                        self.mark_settings_dirty();
+                    }
+
                     ui.separator();
                     if ui.button("デバイス再接続").clicked() {
                         // 強制的にデバイス再接続（last_*をクリアして強制再接続）
                         self.last_video_device = None;
                         self.last_audio_device = None;
+                        // 途絶の記録も落とす。開き直したあとの途絶を、改めて
+                        // 検出してログに残せるようにする
+                        self.last_video_link_action = VideoLinkAction::Keep;
+                        // 保留していた音声のエラーも、ここで開き直すので落とす
+                        self.audio_stream_error_pending = false;
                         // ユーザーが明示的にやり直しを求めているので、
                         // バックオフの待ち時間を飛ばして次のフレームで試す
                         if let Ok(settings) = self.settings.lock() {
@@ -1681,6 +1906,160 @@ impl CaptureCardViewer {
         }
     }
 
+    /// 稼働中のデバイスが生きているかを見る。`update()` から毎フレーム呼ぶ。
+    ///
+    /// 起動時の接続は `poll_device_connection` の担当で、ここは「一度繋がった
+    /// あとに消えた」場合だけを扱う。判断がついたら `ConnectRetry` へ要求を
+    /// 積むところまでで、実際に開き直すのは次のフレームの
+    /// `poll_device_connection`。開く処理を 2 か所に持たないため。
+    ///
+    /// ロックは settings → video → audio の順に 1 つずつ取り、重ねない。
+    fn monitor_device_health(&mut self) {
+        // 設定からは真偽値を 1 つ読むだけで手放す。ここで設定を丸ごと複製すると
+        // デバイス名の String が毎フレーム複製される
+        let auto_reconnect = match self.settings.lock() {
+            Ok(settings) => settings.video.auto_reconnect,
+            Err(_) => {
+                warn!("デバイスの監視で settings のロックを取得できない");
+                return;
+            }
+        };
+
+        self.monitor_video_link(auto_reconnect);
+        self.monitor_audio_stream(auto_reconnect);
+    }
+
+    /// フレームの途絶を見て、表示を落とし、必要なら映像を開き直す。
+    fn monitor_video_link(&mut self, auto_reconnect: bool) {
+        let state = match self.video_capture.lock() {
+            Ok(video) => video.link_state(),
+            Err(_) => {
+                warn!("デバイスの監視で video_capture のロックを取得できない");
+                return;
+            }
+        };
+        // 描画側が参照する値をここで更新する。ロックは既に手放している
+        self.video_capturing = state.capturing;
+
+        let action = decide_video_link(state, auto_reconnect, VIDEO_SIGNAL_TIMEOUT);
+        if action == VideoLinkAction::Keep {
+            // 途絶が解消した（開き直した、ストリームを閉じた）。記録も戻して、
+            // 次の途絶をもう一度検出できるようにする
+            self.last_video_link_action = action;
+            return;
+        }
+        // 途絶は毎フレーム同じ判定に当たる。同じ扱いが続く間は 1 度だけ動く。
+        // **「動いたかどうか」ではなく「何をしたか」で見る。** 自動再接続を
+        // 切ったまま途絶（ClearTexture）したあとに有効化すると判定が
+        // ClearTextureAndReconnect へ変わるので、そこで開き直せる
+        if action == self.last_video_link_action {
+            return;
+        }
+        self.last_video_link_action = action;
+
+        let elapsed_ms = state
+            .since_last_frame
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or_default();
+        info!(
+            "映像フレームが {} ms 途絶えたので、表示を落として切断として扱う",
+            elapsed_ms
+        );
+        // 最後のフレームが残り続けると、止まっているのか映っているのか判らない。
+        // テクスチャを捨てて「映像信号がありません」の表示へ戻す
+        self.video_texture = None;
+
+        if action != VideoLinkAction::ClearTextureAndReconnect {
+            debug!("自動再接続が無効なので映像は開き直さない");
+            return;
+        }
+
+        // 開き直しの対象は設定から取り直す
+        let target = match self.settings.lock() {
+            Ok(settings) => video_target(&settings),
+            Err(_) => {
+                warn!("映像の再接続で settings のロックを取得できない");
+                return;
+            }
+        };
+
+        // ストリームを閉じてから要求する。閉じておくと表示が
+        // 「デバイスが接続されていません」へ変わり、信号だけが無い状態と区別できる
+        match self.video_capture.lock() {
+            Ok(mut video) => video.stop_capture(),
+            Err(_) => {
+                warn!("映像の再接続で video_capture のロックを取得できない");
+                return;
+            }
+        }
+        self.video_capturing = false;
+
+        // 既存のバックオフへ乗せる。**ここでデバイスを列挙しない。**
+        // 対象が戻っているかは `start_capture` の中の列挙（実測 1〜3ms）が
+        // 確かめる。再試行の間隔は最大 5 秒で頭打ちなので、
+        // MediaFoundation への問い合わせもその頻度を超えない
+        self.last_video_device = None;
+        self.video_retry.request_now(target);
+        info!("映像デバイスの再接続を要求した");
+    }
+
+    /// 音声ストリームのエラーを拾って、必要なら開き直す。
+    ///
+    /// cpal のエラーコールバックはストリームのスレッドから呼ばれるため、
+    /// そこでは旗を立てるだけにしてある（`audio::AudioCapture::take_stream_error`）。
+    fn monitor_audio_stream(&mut self, auto_reconnect: bool) {
+        let errored = match self.audio_capture.lock() {
+            Ok(audio) => audio.take_stream_error(),
+            Err(_) => {
+                warn!("デバイスの監視で audio_capture のロックを取得できない");
+                return;
+            }
+        };
+        if errored {
+            // エラーの内容自体は audio.rs が error! で残している
+            warn!("音声ストリームのエラーを検出したので切断として扱う");
+            // **旗は読んだ時点で下りている。** ここへ移しておかないと、
+            // 自動再接続が無効な間や下限に達していない間のエラーが消え、
+            // 誰も開き直さないまま音が戻らなくなる
+            self.audio_stream_error_pending = true;
+        }
+
+        let since_last = self
+            .last_audio_error_reconnect
+            .map(|reconnected_at| reconnected_at.elapsed());
+        match decide_audio_reconnect(self.audio_stream_error_pending, auto_reconnect, since_last) {
+            // 保留しているエラーが無い
+            AudioErrorAction::Idle => return,
+            // 保留したまま待つ。自動再接続を有効にし直したとき、または
+            // 下限に達したときのフレームでここを抜ける。
+            // 毎フレーム通るのでログは出さない
+            AudioErrorAction::Wait => return,
+            AudioErrorAction::Reconnect => {}
+        }
+
+        let target = match self.settings.lock() {
+            Ok(settings) => audio_target(&settings),
+            Err(_) => {
+                warn!("音声の再接続で settings のロックを取得できない");
+                return;
+            }
+        };
+
+        match self.audio_capture.lock() {
+            Ok(mut audio) => audio.stop_capture(),
+            Err(_) => {
+                warn!("音声の再接続で audio_capture のロックを取得できない");
+                return;
+            }
+        }
+
+        self.audio_stream_error_pending = false;
+        self.last_audio_error_reconnect = Some(Instant::now());
+        self.last_audio_device = None;
+        self.audio_retry.request_now(target);
+        info!("音声デバイスの再接続を要求した");
+    }
+
     /// 映像デバイスへの接続を 1 回だけ試す。
     fn try_connect_video(&mut self, settings: &AppSettings, now: Instant) {
         let Some(device_name) = settings.video.device_name.clone() else {
@@ -1758,6 +2137,15 @@ impl CaptureCardViewer {
             debug!("利用できる入力デバイス: {:?}", audio.list_input_devices());
             debug!("利用できる出力デバイス: {:?}", audio.list_output_devices());
         }
+
+        // **音量とパススルーの反映は、ストリームを開く前に必ず済ませる。**
+        // 開いたあとに反映すると、最初のバッファだけ AudioCapture の既定値
+        // （100%・パススルー有効）で鳴ってしまう。音量 0% を保存して
+        // 再起動したときに、起動直後だけ音が出るのがこの窓。
+        // apply_settings でも同じ値を入れているが、そちらは「接続の要求を
+        // 立てる」だけで実際に開くのはこの関数なので、開く直前でも入れておく
+        audio.set_volume(settings.ui.volume);
+        audio.set_audio_passthrough_enabled(settings.audio.passthrough_enabled);
 
         let result = audio.start_passthrough_with_settings(
             settings.audio.input_device_name.as_deref(),
@@ -1856,8 +2244,10 @@ impl CaptureCardViewer {
             // 音量は開き直しを伴わないので、その場で反映する
             let previous_volume = self.volume;
             if let Ok(mut audio) = self.audio_capture.lock() {
-                // ストリームを開始する前にパススルーの設定を反映する。
-                // 開始後に反映すると、無効のまま起動したときに最初のバッファが出力されてしまう。
+                // パススルーと音量は、下の audio_retry.request より前に反映する。
+                // ストリームを開いたあとに反映すると、無効のまま（あるいは
+                // 音量 0% で）起動したときに最初のバッファだけ出力されてしまう。
+                // 実際に開く try_connect_audio でも開く直前に入れ直している
                 audio.set_audio_passthrough_enabled(settings.audio.passthrough_enabled);
 
                 // 音量を適用
@@ -1891,28 +2281,48 @@ impl CaptureCardViewer {
             self.show_stats_overlay = settings.ui.show_stats_overlay;
 
             // スクリーンショット設定
+            //
+            // **`None`（クリア）も差分として扱う。** 以前は `if let Some(..)` で
+            // 包んでいたため、設定画面で「クリア」してもそのセッション中は
+            // ホットキーが効き続け、効果音も鳴り続けていた
             if let Ok(mut ss) = self.screenshot_manager.lock() {
-                if let Some(hk) = &settings.screenshot.hotkey {
-                    // 無条件に登録し直すと、2 秒ごとに unregister → register が走って
-                    // その瞬間のキー入力を取りこぼし、リスナースレッドも作り直される
-                    if Self::needs_reapply(initial, hk, &self.last_hotkey) {
-                        match ss.set_hotkey(hk) {
-                            Ok(()) => self.last_hotkey = Some(hk.clone()),
+                // 無条件に登録し直すと、2 秒ごとに unregister → register が走って
+                // その瞬間のキー入力を取りこぼす
+                if Self::needs_reapply(initial, &settings.screenshot.hotkey, &self.last_hotkey) {
+                    match &settings.screenshot.hotkey {
+                        Some(hk) => match ss.set_hotkey(hk) {
+                            Ok(()) => self.last_hotkey = Some(Some(hk.clone())),
                             // 失敗すると古いホットキーは解除済みで何も登録されていない。
                             // last を空にして次の適用タイミングで再試行する
                             Err(_) => self.last_hotkey = None,
+                        },
+                        None => {
+                            ss.clear_hotkey();
+                            self.last_hotkey = Some(None);
                         }
                     }
                 }
-                if let Some(sf) = &settings.screenshot.sound_file {
-                    // 無条件に呼ぶと 2 秒ごとに効果音ファイル全体を読み直すことになる
-                    if Self::needs_reapply(initial, sf, &self.last_sound_file) {
-                        match ss.set_sound_file(sf) {
-                            Ok(()) => self.last_sound_file = Some(sf.clone()),
+
+                // 無条件に呼ぶと 2 秒ごとに効果音ファイル全体を読み直すことになる
+                if Self::needs_reapply(
+                    initial,
+                    &settings.screenshot.sound_file,
+                    &self.last_sound_file,
+                ) {
+                    match &settings.screenshot.sound_file {
+                        Some(sf) => match ss.set_sound_file(sf) {
+                            Ok(()) => self.last_sound_file = Some(Some(sf.clone())),
                             // 見つからない場合は埋め込みの既定音へ倒して Ok になる。
                             // ここへ来るのはファイルがあるのに読めなかった場合なので、
                             // last を空にして次の適用タイミングで読み直す
                             Err(_) => self.last_sound_file = None,
+                        },
+                        None => {
+                            // 未選択は「鳴らさない」の意味。set_sound_file は
+                            // 見つからないファイルを既定音へ倒すので、無音は
+                            // ここでしか表せない
+                            ss.clear_sound();
+                            self.last_sound_file = Some(None);
                         }
                     }
                 }
@@ -2545,6 +2955,217 @@ mod tests {
     }
 
     #[test]
+    fn connect_retry_new_is_not_active() {
+        // 要求していない状態を「再接続中」と表示しないこと
+        let retry = ConnectRetry::<&str>::default();
+        assert!(!retry.is_active());
+    }
+
+    #[test]
+    fn connect_retry_is_active_until_it_succeeds() {
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+        assert!(retry.is_active());
+
+        retry.record_failure(Instant::now(), "Device 'A' not found".to_string());
+        // 失敗しても追いかけ続けている間は「再接続中」
+        assert!(retry.is_active());
+
+        retry.record_success();
+        assert!(!retry.is_active());
+    }
+
+    /// 映像リンクの観測値を組み立てる補助。
+    fn link_state(capturing: bool, since_last_frame: Option<Duration>) -> video::VideoLinkState {
+        video::VideoLinkState {
+            capturing,
+            since_last_frame,
+        }
+    }
+
+    #[test]
+    fn decide_video_link_not_capturing_keeps_current_state() {
+        // ストリームを開けていない間の面倒は ConnectRetry が見る。
+        // ここで手を出すと起動時の接続と二重になる
+        let state = link_state(false, Some(Duration::from_secs(60)));
+        assert_eq!(
+            decide_video_link(state, true, VIDEO_SIGNAL_TIMEOUT),
+            VideoLinkAction::Keep
+        );
+    }
+
+    #[test]
+    fn decide_video_link_no_frame_yet_keeps_current_state() {
+        // 開いた直後は 1 枚目まで実測で 0.8 秒かかる。入力信号が無いデバイスは
+        // 開けても永久にフレームを出さないので、切断と見なすと開き直しが止まらない
+        let state = link_state(true, None);
+        assert_eq!(
+            decide_video_link(state, true, VIDEO_SIGNAL_TIMEOUT),
+            VideoLinkAction::Keep
+        );
+    }
+
+    #[test]
+    fn decide_video_link_just_before_timeout_keeps_current_state() {
+        let state = link_state(true, Some(Duration::from_millis(2999)));
+        assert_eq!(
+            decide_video_link(state, true, VIDEO_SIGNAL_TIMEOUT),
+            VideoLinkAction::Keep
+        );
+    }
+
+    #[test]
+    fn decide_video_link_exactly_at_timeout_disconnects() {
+        // 境界は切断とみなす側に倒す
+        let state = link_state(true, Some(Duration::from_secs(3)));
+        assert_eq!(
+            decide_video_link(state, true, VIDEO_SIGNAL_TIMEOUT),
+            VideoLinkAction::ClearTextureAndReconnect
+        );
+    }
+
+    #[test]
+    fn decide_video_link_after_timeout_without_auto_reconnect_only_clears() {
+        // 自動再接続を切っていても、止まった画を残し続けない
+        let state = link_state(true, Some(Duration::from_secs(10)));
+        assert_eq!(
+            decide_video_link(state, false, VIDEO_SIGNAL_TIMEOUT),
+            VideoLinkAction::ClearTexture
+        );
+    }
+
+    #[test]
+    fn decide_video_link_zero_timeout_disconnects_on_any_gap() {
+        // 閾値を 0 にした場合、経過が 0 でも切断側へ倒れる（境界の確認）
+        let state = link_state(true, Some(Duration::ZERO));
+        assert_eq!(
+            decide_video_link(state, true, Duration::ZERO),
+            VideoLinkAction::ClearTextureAndReconnect
+        );
+    }
+
+    #[test]
+    fn video_placeholder_message_capturing_says_no_signal() {
+        // デバイスは開けている。ユーザーが見るべきは入力機器側
+        assert_eq!(
+            video_placeholder_message(true, false),
+            "映像信号がありません"
+        );
+        // 開けている間は再接続の有無で文言を変えない
+        assert_eq!(
+            video_placeholder_message(true, true),
+            "映像信号がありません"
+        );
+    }
+
+    #[test]
+    fn video_placeholder_message_not_capturing_says_device_is_gone() {
+        assert_eq!(
+            video_placeholder_message(false, false),
+            "デバイスが接続されていません"
+        );
+        assert_eq!(
+            video_placeholder_message(false, true),
+            "デバイスが接続されていません（再接続を試しています）"
+        );
+    }
+
+    #[test]
+    fn decide_video_link_action_changes_when_auto_reconnect_is_turned_on() {
+        // 自動再接続を切ったまま途絶したあとに有効化した場合。
+        // 呼び出し側は「何をしたか」と比べて動くので、判定が変われば
+        // 開き直しへ進める（真偽値のラッチだと遮られてしまう）
+        let state = link_state(true, Some(Duration::from_secs(10)));
+        let before = decide_video_link(state, false, VIDEO_SIGNAL_TIMEOUT);
+        let after = decide_video_link(state, true, VIDEO_SIGNAL_TIMEOUT);
+
+        assert_eq!(before, VideoLinkAction::ClearTexture);
+        assert_eq!(after, VideoLinkAction::ClearTextureAndReconnect);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn decide_audio_reconnect_without_pending_error_is_idle() {
+        assert_eq!(
+            decide_audio_reconnect(false, true, None),
+            AudioErrorAction::Idle
+        );
+        // 保留が無ければ、間隔の下限に達していても何もしない
+        assert_eq!(
+            decide_audio_reconnect(false, true, Some(Duration::from_secs(600))),
+            AudioErrorAction::Idle
+        );
+    }
+
+    #[test]
+    fn decide_audio_reconnect_pending_error_reconnects() {
+        assert_eq!(
+            decide_audio_reconnect(true, true, None),
+            AudioErrorAction::Reconnect
+        );
+    }
+
+    #[test]
+    fn decide_audio_reconnect_without_auto_reconnect_waits() {
+        // 見送るだけで、保留は呼び出し側に残る。捨てると音が戻らなくなる
+        assert_eq!(
+            decide_audio_reconnect(true, false, None),
+            AudioErrorAction::Wait
+        );
+    }
+
+    #[test]
+    fn decide_audio_reconnect_within_minimum_interval_waits() {
+        assert_eq!(
+            decide_audio_reconnect(true, true, Some(Duration::from_millis(4999))),
+            AudioErrorAction::Wait
+        );
+    }
+
+    #[test]
+    fn decide_audio_reconnect_after_minimum_interval_reconnects() {
+        // 下限に達したフレームで、保留していたエラーが処理される
+        assert_eq!(
+            decide_audio_reconnect(true, true, Some(Duration::from_secs(5))),
+            AudioErrorAction::Reconnect
+        );
+    }
+
+    #[test]
+    fn should_reconnect_after_stream_error_first_time_returns_true() {
+        // 一度も開き直していないなら待たせない
+        assert!(should_reconnect_after_stream_error(None));
+    }
+
+    #[test]
+    fn should_reconnect_after_stream_error_just_reconnected_returns_false() {
+        assert!(!should_reconnect_after_stream_error(Some(
+            Duration::from_millis(10)
+        )));
+    }
+
+    #[test]
+    fn should_reconnect_after_stream_error_just_before_interval_returns_false() {
+        assert!(!should_reconnect_after_stream_error(Some(
+            Duration::from_millis(4999)
+        )));
+    }
+
+    #[test]
+    fn should_reconnect_after_stream_error_at_interval_returns_true() {
+        assert!(should_reconnect_after_stream_error(Some(
+            Duration::from_secs(5)
+        )));
+    }
+
+    #[test]
+    fn should_reconnect_after_stream_error_long_after_returns_true() {
+        assert!(should_reconnect_after_stream_error(Some(
+            Duration::from_secs(600)
+        )));
+    }
+
+    #[test]
     fn should_refresh_device_list_never_updated_returns_true() {
         // 一度も列挙していない状態では必ず取得する
         assert!(CaptureCardViewer::should_refresh_device_list(None));
@@ -2693,6 +3314,39 @@ mod tests {
             false,
             &"F7".to_string(),
             &Some("F5".to_string())
+        ));
+    }
+
+    #[test]
+    fn needs_reapply_cleared_value_returns_true() {
+        // 設定画面で「クリア」した場合。設定は None になるが、実行中は
+        // 古いホットキーが登録されたまま。ここを差分として拾えないと、
+        // そのセッションの間ずっと解除されない
+        assert!(CaptureCardViewer::needs_reapply(
+            false,
+            &None::<String>,
+            &Some(Some("F5".to_string()))
+        ));
+    }
+
+    #[test]
+    fn needs_reapply_already_cleared_returns_false() {
+        // 解除済みの状態。2 秒ごとに解除し直さない
+        assert!(!CaptureCardViewer::needs_reapply(
+            false,
+            &None::<String>,
+            &Some(None)
+        ));
+    }
+
+    #[test]
+    fn needs_reapply_cleared_but_not_applied_yet_returns_true() {
+        // 未適用（外側の None）と解除済み（Some(None)）を区別する。
+        // 区別できないと、起動直後の 1 回が飛ぶ
+        assert!(CaptureCardViewer::needs_reapply(
+            false,
+            &None::<String>,
+            &None
         ));
     }
 

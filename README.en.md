@@ -36,6 +36,7 @@ To also remove the settings file, delete the following directory:
   - Toggle fullscreen
   - Toggle window dragging
   - Toggle the stats overlay (shows FPS and more over the video)
+  - Toggle automatic device reconnection
   - Reconnect device
   - Advanced settings
 - **Mouse wheel**: Adjust volume (±10%). The current volume appears as a bar at the bottom of the screen and fades out after about 1.5 seconds (the same overlay appears when you change the volume from the context menu slider or the settings dialog)
@@ -123,6 +124,15 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 - If the device is not found, the application keeps retrying until it connects. The interval starts at 0.2 s and widens up to 5 s.
   - This also covers plugging the capture card in after the application has started; just wait and it will connect.
   - Retrying no longer freezes the window for seconds at a time. To retry right away, use Right-click → "デバイス再接続" (Reconnect device).
+
+**Devices that disappear while running**
+
+- When the video stops for 3 seconds, the stale frame is dropped from the screen and the device is reopened. Plugging the USB cable back in restores video and audio without any interaction (it can take up to about 5 seconds).
+- Audio disconnection is detected through errors on the input/output streams.
+- The on-screen message tells the two cases apart.
+  - **映像信号がありません** (No video signal) — the device is still open. Check the power and the HDMI cable of the source.
+  - **デバイスが接続されていません（再接続を試しています）** (Device is not connected; reconnecting) — the device itself is gone. Check the USB connection.
+- This behaviour can be turned off with Right-click → "デバイスの自動再接続" (Automatic device reconnection). Even when it is off, a stale frame is never left on screen; only the reopening is skipped.
 
 **Settings that are not yet implemented**
 

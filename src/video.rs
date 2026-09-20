@@ -6,11 +6,58 @@ use nokhwa::utils::{
 use nokhwa::CallbackCamera;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// デバイスを開ける映像モード 1 件。解像度とフレームレートの組み合わせ。
+///
+/// 以前は `(u32, u32, u32)` のタプルだったが、どの要素が幅・高さ・fps なのかが
+/// 型からは分からず、並べ替えや比較のたびに `.0` / `.1` / `.2` を読み解く必要が
+/// あった。名前付きにして取り違えをコンパイル時に防ぐ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VideoMode {
+    /// 幅（ピクセル）
+    pub width: u32,
+    /// 高さ（ピクセル）
+    pub height: u32,
+    /// フレームレート（fps）
+    pub fps: u32,
+}
+
+impl VideoMode {
+    pub const fn new(width: u32, height: u32, fps: u32) -> Self {
+        Self { width, height, fps }
+    }
+
+    /// 画素数。解像度の大小を比べるのに使う。
+    /// `u32` 同士の積が溢れないよう `u64` で返す
+    pub fn pixel_count(self) -> u64 {
+        u64::from(self.width) * u64::from(self.height)
+    }
+
+    /// 解像度だけを取り出す。設定の `video.resolution` が `(幅, 高さ)` のため
+    pub fn resolution(self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+}
 
 /// 1 つのビデオフォーマットが対応する能力。
-/// `(フォーマット名, [(幅, 高さ, fps)])` の組で、フォーマット名は "YUY2" / "MJPEG" / "RGB24"。
-pub type FormatCapability = (String, Vec<(u32, u32, u32)>);
+/// フォーマット名は "YUY2" / "MJPEG" / "RGB24"。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormatCapability {
+    /// フォーマット名
+    pub name: String,
+    /// そのフォーマットで開ける映像モードの一覧
+    pub modes: Vec<VideoMode>,
+}
+
+impl FormatCapability {
+    pub fn new(name: impl Into<String>, modes: Vec<VideoMode>) -> Self {
+        Self {
+            name: name.into(),
+            modes,
+        }
+    }
+}
 
 /// デバイスが対応する全フォーマットの能力一覧。
 pub type DeviceCapabilities = Vec<FormatCapability>;
@@ -362,6 +409,11 @@ impl FrameBuffer {
             .map(|frame| (Arc::clone(frame), self.generation))
     }
 
+    /// 最後にフレームが届いてからの経過時間。1 枚も届いていなければ `None`。
+    fn since_last_frame(&self) -> Option<Duration> {
+        self.last_frame_instant.map(|at| at.elapsed())
+    }
+
     /// 保持しているフレームと統計を捨てる。キャプチャの停止時に呼ぶ。
     ///
     /// 世代番号は巻き戻さない。巻き戻すと、再接続後の最初のフレームが
@@ -394,6 +446,18 @@ impl FrameBuffer {
                 .map(|at| at.elapsed().as_secs_f32() * 1000.0),
         }
     }
+}
+
+/// 映像リンクの観測値。切断の判定に使う。
+///
+/// `FrameStats` と分けてあるのは、こちらが毎フレーム読まれるため。
+/// 間隔の集計（最大 120 要素の走査）を伴わない 2 つの値だけを持たせている。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoLinkState {
+    /// 映像ストリームを開けているか。`start_capture` が成功した状態
+    pub capturing: bool,
+    /// 最後にフレームが届いてからの経過時間。1 枚も届いていなければ `None`
+    pub since_last_frame: Option<Duration>,
 }
 
 pub struct VideoCapture {
@@ -739,6 +803,19 @@ impl VideoCapture {
             .unwrap_or_default()
     }
 
+    /// ストリームが開いているかと、フレームの途絶時間を返す。
+    ///
+    /// 切断の監視のために毎フレーム呼ばれる。ロックの中で行うのは
+    /// `Instant` の減算だけで、フレームコールバックをほとんど待たせない。
+    /// ロックを取れなかった場合は「まだ 1 枚も届いていない」として返す。
+    /// 途絶時間が取れない状態で切断と判断させないため
+    pub fn link_state(&self) -> VideoLinkState {
+        VideoLinkState {
+            capturing: self.camera.is_some(),
+            since_last_frame: self.frames.lock().ok().and_then(|fb| fb.since_last_frame()),
+        }
+    }
+
     /// 世代番号が `last_generation` と異なるフレームがある場合だけ、
     /// フレームと世代番号を返す。
     ///
@@ -810,12 +887,12 @@ impl VideoCapture {
         for (format_name, frame_format) in formats {
             match camera.compatible_list_by_resolution(frame_format) {
                 Ok(resolution_map) => {
-                    let mut resolutions_with_fps: Vec<(u32, u32, u32)> = Vec::new();
+                    let mut modes: Vec<VideoMode> = Vec::new();
 
                     for (resolution, fps_list) in resolution_map.iter() {
                         // 各解像度に対して利用可能な全FPSを記録
                         for fps in fps_list.iter() {
-                            resolutions_with_fps.push((
+                            modes.push(VideoMode::new(
                                 resolution.width_x,
                                 resolution.height_y,
                                 *fps,
@@ -823,27 +900,24 @@ impl VideoCapture {
                         }
                     }
 
-                    // 重複を削除してユニークな組み合わせのみ保持
-                    resolutions_with_fps.sort();
-                    resolutions_with_fps.dedup();
+                    // 重複を削除してユニークな組み合わせのみ保持。
+                    // dedup は隣接する重複しか落とさないので、先に並べておく
+                    modes.sort_by_key(|mode| (mode.width, mode.height, mode.fps));
+                    modes.dedup();
 
                     // 解像度でソート（大きい順）、同じ解像度ならFPSでソート（大きい順）
-                    resolutions_with_fps.sort_by(|a, b| {
-                        let size_a = a.0 * a.1;
-                        let size_b = b.0 * b.1;
-                        match size_b.cmp(&size_a) {
-                            std::cmp::Ordering::Equal => b.2.cmp(&a.2),
-                            other => other,
-                        }
+                    modes.sort_by(|a, b| match b.pixel_count().cmp(&a.pixel_count()) {
+                        std::cmp::Ordering::Equal => b.fps.cmp(&a.fps),
+                        other => other,
                     });
 
                     debug!(
                         "{} の対応する組み合わせを {} 件取得した",
                         format_name,
-                        resolutions_with_fps.len()
+                        modes.len()
                     );
-                    if !resolutions_with_fps.is_empty() {
-                        result.push((format_name.to_string(), resolutions_with_fps));
+                    if !modes.is_empty() {
+                        result.push(FormatCapability::new(format_name, modes));
                     }
                 }
                 Err(e) => {
@@ -853,14 +927,20 @@ impl VideoCapture {
                         "{} の対応する組み合わせを取得できないので既定値を使う: {}",
                         format_name, e
                     );
-                    let default_resolutions = match format_name {
-                        "YUY2" => vec![(1280, 720, 60), (640, 480, 30)],
-                        "MJPEG" => vec![(1920, 1080, 30), (1280, 720, 60), (640, 480, 30)],
-                        "RGB24" => vec![(1280, 720, 30), (640, 480, 30)],
+                    let default_modes = match format_name {
+                        "YUY2" => vec![VideoMode::new(1280, 720, 60), VideoMode::new(640, 480, 30)],
+                        "MJPEG" => vec![
+                            VideoMode::new(1920, 1080, 30),
+                            VideoMode::new(1280, 720, 60),
+                            VideoMode::new(640, 480, 30),
+                        ],
+                        "RGB24" => {
+                            vec![VideoMode::new(1280, 720, 30), VideoMode::new(640, 480, 30)]
+                        }
                         _ => vec![],
                     };
-                    if !default_resolutions.is_empty() {
-                        result.push((format_name.to_string(), default_resolutions));
+                    if !default_modes.is_empty() {
+                        result.push(FormatCapability::new(format_name, default_modes));
                     }
                 }
             }
@@ -870,10 +950,17 @@ impl VideoCapture {
         if result.is_empty() {
             warn!("どのフォーマットの能力も取得できなかったので既定値を返す");
             result = vec![
-                ("YUY2".to_string(), vec![(1280, 720, 60), (640, 480, 30)]),
-                (
-                    "MJPEG".to_string(),
-                    vec![(1920, 1080, 30), (1280, 720, 60), (640, 480, 30)],
+                FormatCapability::new(
+                    "YUY2",
+                    vec![VideoMode::new(1280, 720, 60), VideoMode::new(640, 480, 30)],
+                ),
+                FormatCapability::new(
+                    "MJPEG",
+                    vec![
+                        VideoMode::new(1920, 1080, 30),
+                        VideoMode::new(1280, 720, 60),
+                        VideoMode::new(640, 480, 30),
+                    ],
                 ),
             ];
         }
@@ -886,7 +973,9 @@ impl VideoCapture {
             elapsed_ms(start),
             result
                 .iter()
-                .map(|(format_name, list)| format!("{}: {} 件", format_name, list.len()))
+                .map(|capability| {
+                    format!("{}: {} 件", capability.name, capability.modes.len())
+                })
                 .collect::<Vec<_>>()
                 .join("、")
         );

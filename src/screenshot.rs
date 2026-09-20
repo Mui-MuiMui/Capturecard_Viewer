@@ -277,25 +277,36 @@ fn spawn_listener(
                         event.state()
                     );
 
-                    let registered = match registered_id.lock() {
-                        Ok(registered) => *registered,
+                    // **ID の照合と押下フラグの書き込みを同じロックの中で行う。**
+                    // ロックを手放してからフラグを立てると、その隙に解除処理が
+                    // 「ID を空にする → フラグを落とす」を終えてしまい、
+                    // クリアしたはずのキーで 1 枚だけ撮れることがある。
+                    // ログはロックを手放してから出す（trace ではファイルへの
+                    // 書き出しが入るため、その間ロックを握らない）
+                    let outcome = match registered_id.lock() {
+                        Ok(registered) => {
+                            let accepted = accepts_event(*registered, event.id(), event.state());
+                            if accepted {
+                                pressed.store(true, Ordering::Release);
+                            }
+                            Some((accepted, *registered))
+                        }
                         Err(_) => {
                             // release ビルドは panic = "abort" なので毒されない
                             warn!(
                                 "登録中のホットキー ID のロックを取得できないのでイベントを捨てる"
                             );
-                            continue;
+                            None
                         }
                     };
 
-                    if accepts_event(registered, event.id(), event.state()) {
-                        pressed.store(true, Ordering::Release);
-                        trace!("ホットキーの押下フラグを立てた");
-                    } else {
-                        trace!(
+                    match outcome {
+                        Some((true, _)) => trace!("ホットキーの押下フラグを立てた"),
+                        Some((false, registered)) => trace!(
                             "対象外のイベントなので無視する（登録中の ID: {:?}）",
                             registered
-                        );
+                        ),
+                        None => {}
                     }
                 }
                 Err(e) if e.is_disconnected() => {
@@ -412,10 +423,46 @@ impl ScreenshotManager {
         Ok(())
     }
 
+    /// ホットキーの登録を解除し、以降どのキーにも反応しない状態にする。
+    ///
+    /// 設定画面でホットキーを「クリア」したときに呼ぶ。これが無いと、
+    /// 設定からホットキーが消えてもそのセッション中は古いキーが効き続け、
+    /// 再起動するまで解除されなかった。
+    ///
+    /// **リスナースレッドは止めない。** `GlobalHotKeyEvent::receiver()` が返す
+    /// チャネルはプロセスに 1 つしかなく、止めてから作り直すとどのスレッドが
+    /// イベントを取るか決まらなくなる。リスナーは `new()` で 1 本だけ起動して
+    /// `Drop` まで生かす設計なので、ここでは共有している ID を空にする。
+    /// 登録中の ID が無ければ、リスナーは受け取ったイベントを全て捨てる。
+    pub fn clear_hotkey(&mut self) {
+        if self.registered_hotkey.is_none() {
+            // 未登録のときに呼ばれてもログを出さない。設定の再適用は
+            // 2 秒ごとに走るため、同じ行が延々と積もる
+            return;
+        }
+        info!("ホットキーの登録を解除する");
+        self.unregister_current();
+    }
+
+    /// 効果音を捨て、以降スクリーンショットを無音にする。
+    ///
+    /// 設定画面で効果音を「クリア」したときに呼ぶ。`set_sound_file` は
+    /// ファイルが見つからなければ埋め込みの既定音へ倒すため、「鳴らさない」は
+    /// 設定を `None` にすることでしか表せない。その `None` をここで実行時へ
+    /// 反映する。
+    pub fn clear_sound(&mut self) {
+        if self.sound_data.is_none() {
+            return;
+        }
+        info!("効果音を破棄した。以降スクリーンショットは無音になる");
+        self.sound_data = None;
+    }
+
     /// 登録中のホットキーを解除する。登録していなければ何もしない。
     fn unregister_current(&mut self) {
         // 先に共有している ID を空にする。解除が終わるまでの間に届いた
-        // イベントを押下として扱わないため
+        // イベントを押下として扱わないため。保留中の押下フラグも
+        // ここで一緒に落ちる
         self.store_registered_id(None);
 
         let Some(old_hotkey) = self.registered_hotkey.take() else {
@@ -438,9 +485,19 @@ impl ScreenshotManager {
     }
 
     /// リスナースレッドと共有している「登録中のホットキー ID」を差し替える。
+    ///
+    /// `None`（＝解除）にするときは、**同じロックの中で押下フラグも落とす。**
+    /// リスナーも照合とフラグの書き込みを同じロックの中で行うので、
+    /// 解除の直前に届いた押下がフラグに残らない。別々のロックで行うと、
+    /// クリアした直後のフレームで 1 枚だけ撮れてしまう。
     fn store_registered_id(&self, id: Option<u32>) {
         match self.registered_id.lock() {
-            Ok(mut registered) => *registered = id,
+            Ok(mut registered) => {
+                *registered = id;
+                if id.is_none() {
+                    self.pressed.store(false, Ordering::Release);
+                }
+            }
             // release ビルドは panic = "abort" なので毒されること自体が起きない
             Err(_) => warn!("登録中のホットキー ID のロックを取得できない"),
         }
@@ -900,5 +957,61 @@ mod tests {
         );
         // イベントを受け取っていないので押下フラグは立たない
         assert!(!pressed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn clear_sound_discards_loaded_sound() {
+        // 設定の効果音を「クリア」したセッションで鳴り続けていた不具合の再現。
+        // 空パスは埋め込みの既定音へ倒れるので、実ファイルは要らない
+        let mut manager = ScreenshotManager::new();
+        manager
+            .set_sound_file(Path::new(""))
+            .expect("埋め込みの既定音は必ず読める");
+        assert!(manager.sound_data.is_some());
+
+        manager.clear_sound();
+
+        assert!(manager.sound_data.is_none());
+    }
+
+    #[test]
+    fn clear_hotkey_without_registration_is_noop() {
+        // 起動時からホットキーが未設定のまま再適用が回るため、
+        // 未登録の状態で呼ばれてもパニックせず何も変えないこと
+        let mut manager = ScreenshotManager::new();
+
+        manager.clear_hotkey();
+
+        assert!(manager.registered_hotkey.is_none());
+        assert_eq!(
+            *manager
+                .registered_id
+                .lock()
+                .expect("ロックが毒されていないこと"),
+            None
+        );
+    }
+
+    #[test]
+    fn unregister_current_drops_pending_press() {
+        // 解除の直前に届いた押下を残すと、クリアした直後に 1 枚だけ撮れてしまう
+        let mut manager = ScreenshotManager::new();
+        manager.pressed.store(true, Ordering::Release);
+
+        manager.unregister_current();
+
+        assert!(!manager.pressed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn store_registered_id_some_keeps_pending_press() {
+        // 落とすのは解除のときだけ。登録し直すだけで押下を捨てると、
+        // 同じキーを再登録する経路で入力を取りこぼす
+        let manager = ScreenshotManager::new();
+        manager.pressed.store(true, Ordering::Release);
+
+        manager.store_registered_id(Some(42));
+
+        assert!(manager.pressed.load(Ordering::Acquire));
     }
 }
