@@ -2,6 +2,7 @@ use crate::hotkey::{HotkeyAction, HotkeyError};
 use crate::settings::{
     AppSettings, ColorRange, ColorSpace, ScreenshotFormat, MAX_JPEG_QUALITY, MIN_JPEG_QUALITY,
 };
+use crate::status::{ConnectionStatus, ErrorSource, LinkStatus};
 use crate::video::{DeviceCapabilities, VideoMode};
 use eframe::egui;
 use log::debug;
@@ -28,11 +29,17 @@ pub enum SettingsDialogAction {
 }
 
 /// 設定ダイアログのタブ。
+///
+/// 「接続状態」を最後に置き、既定は「デバイス設定」のままにしてある。
+/// ダイアログを開く主な目的は設定の変更で、状態の確認は調べたいときだけ
+/// だからで、先頭に置くと毎回そこを通ることになる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
     #[default]
     Device,
     Screenshot,
+    /// 映像と音声が実際に何へ繋がっているか、直近の失敗は何か
+    Status,
 }
 
 /// デバイス能力の取得状態。
@@ -494,13 +501,16 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
     }
 }
 
-/// 設定ダイアログに渡すデバイス一覧。
+/// 設定ダイアログへ渡すデバイスの一覧。
 ///
-/// 3 つまとめて受け取るのは、引数の数を抑えるためだけの入れ物。
-/// 中身は `CaptureCardViewer` がキャッシュしているものをそのまま指す。
-#[derive(Debug, Clone, Copy)]
+/// 3 本の借用を個別に渡していたが、引数が増えすぎたのでまとめた。
+/// 入力デバイスと出力デバイスはどちらも `&[String]` で、順番を取り違えても
+/// コンパイルが通ってしまうため、名前で区別できる形にする意味もある。
+///
+/// 中身は `CaptureCardViewer` がキャッシュしているもの。デバイスの列挙は
+/// 重いので、ダイアログ側からは列挙しない。
 pub struct DeviceLists<'a> {
-    /// ビデオデバイスの `(デバイス名, 説明)`
+    /// ビデオデバイス `(名前, 説明)`
     pub video: &'a [(String, String)],
     /// オーディオ入力デバイス名
     pub input: &'a [String],
@@ -518,7 +528,8 @@ pub fn show_settings_dialog(
     show_settings: &mut bool,
     dialog: &mut SettingsDialogState,
     show_hotkey_dialog: &mut bool,
-    devices: DeviceLists<'_>,
+    devices: &DeviceLists<'_>,
+    connection: &ConnectionStatus,
     hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
 ) -> SettingsDialogAction {
     // フィールドごとに分解して受ける。ドラフトを編集しながら
@@ -553,6 +564,7 @@ pub fn show_settings_dialog(
                     SettingsTab::Screenshot,
                     "スクリーンショット設定",
                 );
+                ui.selectable_value(selected_tab, SettingsTab::Status, "接続状態");
             });
 
             ui.separator();
@@ -570,6 +582,7 @@ pub fn show_settings_dialog(
                         button = SettingsDialogAction::TestSound;
                     }
                 }
+                SettingsTab::Status => show_status_tab(ui, connection),
             });
 
             ui.separator();
@@ -597,14 +610,8 @@ fn show_device_settings_tab(
     ui: &mut egui::Ui,
     settings: &mut AppSettings,
     capabilities: &mut CapabilityCache,
-    devices: DeviceLists<'_>,
+    devices: &DeviceLists<'_>,
 ) {
-    let DeviceLists {
-        video: video_devices,
-        input: input_devices,
-        output: output_devices,
-    } = devices;
-
     ui.heading("デバイス設定");
     ui.add_space(10.0);
 
@@ -625,7 +632,7 @@ fn show_device_settings_tab(
                 &current_device
             })
             .show_ui(ui, |ui| {
-                for (name, description) in video_devices {
+                for (name, description) in devices.video {
                     let display_text = if description.is_empty() {
                         name.clone()
                     } else {
@@ -958,7 +965,7 @@ fn show_device_settings_tab(
                 &current_input_device
             })
             .show_ui(ui, |ui| {
-                for device_name in input_devices {
+                for device_name in devices.input {
                     ui.selectable_value(
                         &mut settings.audio.input_device_name,
                         Some(device_name.clone()),
@@ -982,7 +989,7 @@ fn show_device_settings_tab(
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut settings.audio.output_device_name, None, "デフォルト");
-                for device_name in output_devices {
+                for device_name in devices.output {
                     ui.selectable_value(
                         &mut settings.audio.output_device_name,
                         Some(device_name.clone()),
@@ -1059,6 +1066,61 @@ fn show_device_settings_tab(
             ui.label("初期音量:");
             ui.add(egui::Slider::new(&mut settings.ui.volume, 0.0..=200.0).suffix("%"));
         });
+    });
+}
+
+/// 接続状態タブを描画する。
+///
+/// **ここでは何も編集しない。** 映像と音声が実際に何へ繋がっているかと、
+/// 直近の失敗を読むためのタブで、値は呼び出し側が複製して渡す
+/// （描画中に `video_capture` / `audio_capture` のロックを取らないため）。
+fn show_status_tab(ui: &mut egui::Ui, connection: &ConnectionStatus) {
+    ui.heading("接続状態");
+    ui.add_space(10.0);
+
+    show_link_status(ui, "映像", &connection.video);
+    ui.add_space(15.0);
+    show_link_status(ui, "音声", &connection.audio);
+
+    ui.add_space(15.0);
+    ui.label("この内容は表示だけで、「適用」や「OK」では変わりません。");
+    ui.label("詳しい経過はログファイルに残っています（%AppData%\\capturecard_viewer\\logs）。");
+}
+
+/// 映像か音声、片方の接続状態を 1 つの枠に描く。
+fn show_link_status(ui: &mut egui::Ui, title: &str, status: &LinkStatus) {
+    ui.group(|ui| {
+        ui.strong(title);
+        ui.add_space(5.0);
+
+        ui.horizontal(|ui| {
+            ui.label("状態:");
+            if status.connected {
+                ui.colored_label(egui::Color32::LIGHT_GREEN, status.headline());
+            } else {
+                ui.colored_label(egui::Color32::YELLOW, status.headline());
+            }
+        });
+
+        for line in &status.details {
+            ui.label(line);
+        }
+
+        // 繋がっている間は再試行していないので、回数を出しても 0 が並ぶだけ
+        if !status.connected && status.attempts > 0 {
+            ui.label(format!("連続失敗: {} 回", status.attempts));
+        }
+
+        match &status.error {
+            Some((message, time)) => {
+                // 長いエラー文でダイアログの幅が広がらないよう折り返す
+                ui.colored_label(egui::Color32::YELLOW, format!("⚠ {}", message));
+                ui.label(format!("発生時刻: {}", time));
+            }
+            None => {
+                ui.label("直近のエラー: なし");
+            }
+        }
     });
 }
 
@@ -1283,11 +1345,15 @@ fn show_hotkey_assignments(
             );
         }
 
-        // 登録に失敗したものを、理由とともに出す。ログにしか出ていないと
-        // 「設定したのに効かない」が何も手掛かりのない症状になる
+        // 登録に失敗したものを、理由とともに出す。トーストは気付かせるための
+        // もので流れて消えるため、どのアクションが失敗しているかはここで見る。
+        // 見出しは status.rs の定型文をそのまま使い、通知と表現を揃える
         if !hotkey_errors.is_empty() {
             ui.add_space(5.0);
-            ui.colored_label(egui::Color32::LIGHT_RED, "登録できなかったホットキー:");
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                format!("{}:", ErrorSource::Hotkey.headline()),
+            );
             for (action, error) in hotkey_errors {
                 ui.colored_label(
                     egui::Color32::LIGHT_RED,

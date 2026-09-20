@@ -57,7 +57,7 @@ The settings window → **screenshot settings** tab → ホットキー (Hotkeys
 - Press 設定... (Set) on a row to capture a key, or クリア (Clear) to remove the assignment. Changes take effect when you press 適用 (Apply) or OK.
 - A hotkey does exactly what the mouse does: changing the volume shows the volume bar at the bottom, toggling fullscreen shows the indicator at the top-left.
 - Assigning the same key to more than one action shows a warning. If you apply it anyway, only the action higher in the list stays active.
-- Keys already taken by another application cannot be registered; the reason is shown below the list.
+- Keys already taken by another application cannot be registered. A notification appears and the reason is also listed below the table. Closing the other application makes the key work again without any action on your part.
 - Only the screenshot action has a key by default. Global hotkeys take a key away from every other application, so the rest are left unassigned.
 
 ### Stats overlay
@@ -152,6 +152,9 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 - If the device is not found, the application keeps retrying until it connects. The interval starts at 0.2 s and widens up to 5 s.
   - This also covers plugging the capture card in after the application has started; just wait and it will connect.
   - Retrying no longer freezes the window for seconds at a time. To retry right away, use Right-click → "デバイス再接続" (Reconnect device).
+- The reason for the failure is shown on screen. It appears at the bottom centre for a few seconds, and stays as a second line under the placeholder for as long as there is no video.
+  - While the same reason keeps repeating, the bottom-centre message is throttled to at most once every 60 seconds.
+  - What the application is actually connected to (the resolution, format, sample rate and channel count it really opened) and the most recent error are always available under 設定 (Settings) → 接続状態 (Connection status).
 
 **Devices that disappear while running**
 
