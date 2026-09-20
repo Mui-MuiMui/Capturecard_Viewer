@@ -581,11 +581,13 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
 /// PC で書き出したファイルを読むと、画面の外にウィンドウが飛ぶ。
 ///
 /// 他の `ui` の項目（`always_on_top` / `enable_drag_move` / `show_stats_overlay` /
-/// `muted`）を持ち込まないのは、**`commit_draft` がそれらを反映しないため。**
-/// 右クリックメニューで切り替えるものなので、ドラフトへ入れても「適用」で
-/// 消えるだけで、ユーザーから見れば読み込めていない項目になる。
+/// `muted`）と `video.auto_reconnect` を持ち込まないのは、**`commit_draft` が
+/// それらを反映しないため。** どれも右クリックメニューで切り替えるもので、
+/// ドラフトへ入れても「適用」で実行中の値へ戻る。読めたように見えて反映
+/// されない項目を作るより、最初から触らないほうが分かりやすい。
 ///
-/// **`commit_draft` が反映する `ui` の項目を増やすときは、ここにも足すこと。**
+/// **`commit_draft` が反映しない項目を増やすときは、ここでも `current` の値を
+/// 保つこと。逆に反映する項目を増やすときは、ここでも `imported` から採ること。**
 /// 2 つが食い違うと、読み込んだのに反映されない項目が生まれる。
 pub fn draft_from_imported(imported: AppSettings, current: &AppSettings) -> AppSettings {
     let mut draft = imported;
@@ -595,13 +597,15 @@ pub fn draft_from_imported(imported: AppSettings, current: &AppSettings) -> AppS
     draft.ui = current.ui.clone();
     draft.ui.volume = volume;
     draft.ui.maintain_aspect_ratio = maintain_aspect_ratio;
+    draft.video.auto_reconnect = current.video.auto_reconnect;
     draft
 }
 
 /// 初期化でドラフトを作る。
 ///
 /// 既定値を読み込んだのと同じ扱いにしてある。ウィンドウの位置とサイズが
-/// 保たれるのも、`ui` の他の項目が現状のまま残るのも読み込みと同じ。
+/// 保たれるのも、`ui` の他の項目と `video.auto_reconnect` が現状のまま残るのも
+/// 読み込みと同じ。
 ///
 /// 初期化でウィンドウが既定の大きさに戻らないのは意図した動作。位置と
 /// サイズは設定ダイアログで触れる項目ではなく、初期化したい対象でもない。
@@ -2124,10 +2128,36 @@ mod tests {
 
         assert_eq!(draft.video.device_name, imported.video.device_name);
         assert_eq!(draft.video.resolution, imported.video.resolution);
-        assert_eq!(draft.video.auto_reconnect, imported.video.auto_reconnect);
+        assert_eq!(draft.video.color_space, imported.video.color_space);
         assert_eq!(draft.audio.sample_rate, imported.audio.sample_rate);
         assert_eq!(draft.screenshot.format, imported.screenshot.format);
         assert_eq!(draft.hotkeys, imported.hotkeys);
+    }
+
+    #[test]
+    fn draft_from_imported_keeps_auto_reconnect() {
+        // auto_reconnect は右クリックメニューで切り替えるもので、
+        // commit_draft が実行中の値を残す。ドラフトへ入れても「適用」で
+        // 戻るだけなので、読み込みの対象から外してある
+        let imported = sample_settings();
+        let current = AppSettings::default();
+        assert_ne!(imported.video.auto_reconnect, current.video.auto_reconnect);
+
+        let draft = draft_from_imported(imported, &current);
+
+        assert_eq!(draft.video.auto_reconnect, current.video.auto_reconnect);
+    }
+
+    #[test]
+    fn draft_from_defaults_keeps_auto_reconnect() {
+        // 初期化も同じ。自動再接続を切っている人が初期化しても、
+        // 「適用」の前後で表示と実際の動作が食い違わないようにする
+        let mut current = sample_settings();
+        current.video.auto_reconnect = false;
+
+        let draft = draft_from_defaults(&current);
+
+        assert!(!draft.video.auto_reconnect);
     }
 
     #[test]
@@ -2225,6 +2255,33 @@ mod tests {
             imported.ui.maintain_aspect_ratio
         );
         // ウィンドウの位置とサイズは動かない
+        assert_eq!(target.ui.last_window_size, original.ui.last_window_size);
+        assert_eq!(target.ui.last_window_pos, original.ui.last_window_pos);
+        // commit_draft が反映しない項目は、ドラフトにも実行中の値が入っている。
+        // 「読み込んだのに反映されない」項目が生まれていないこと
+        assert_eq!(target.video.auto_reconnect, original.video.auto_reconnect);
+        assert_eq!(draft.video.auto_reconnect, original.video.auto_reconnect);
+        assert_eq!(target.ui.always_on_top, original.ui.always_on_top);
+        assert_eq!(draft.ui.always_on_top, original.ui.always_on_top);
+    }
+
+    #[test]
+    fn reset_draft_reaches_the_shared_settings_on_commit() {
+        // 初期化 →「適用」の一連。自動再接続を切っている状態で初期化しても、
+        // 「適用」の前後でドラフトと実行中の設定が食い違わないこと
+        let mut target = sample_settings();
+        target.video.auto_reconnect = false;
+        let original = target.clone();
+        let defaults = AppSettings::default();
+
+        let draft = draft_from_defaults(&original);
+        commit_draft(&mut target, &draft, &original);
+
+        assert_eq!(target.video.resolution, defaults.video.resolution);
+        assert_eq!(target.hotkeys, defaults.hotkeys);
+        assert_eq!(target.ui.volume, defaults.ui.volume);
+        assert!(!target.video.auto_reconnect);
+        assert!(!draft.video.auto_reconnect);
         assert_eq!(target.ui.last_window_size, original.ui.last_window_size);
         assert_eq!(target.ui.last_window_pos, original.ui.last_window_pos);
     }
