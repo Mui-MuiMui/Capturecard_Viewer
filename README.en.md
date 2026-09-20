@@ -187,7 +187,7 @@ They are meant for per-device quirks that remain after the color space and range
 - **コントラスト (contrast)** — widens (+) or narrows (-) the gap between dark and bright. -100 gives a flat mid grey
 - **彩度 (saturation)** — strengthens (+) or weakens (-) the colors. -100 gives black and white
 
-The adjustments are folded into the YUY2 -> RGB coefficients, so **the CPU cost is the same as with no adjustment**. Like the color space and range, they take effect on the next frame and the device is not reopened.
+The adjustments are folded into the YUY2 -> RGB coefficients, so **the CPU cost barely changes**. The per-pixel work is exactly the same as with no adjustment; what is added is a handful of coefficient multiplications once per frame (no measurable difference at 1080p). Like the color space and range, they take effect on the next frame and the device is not reopened.
 
 > **The color space, color range and picture adjustments can all be inactive.**
 > They work by swapping the coefficients used when this app converts YUY2 frames itself. If the device delivers something other than YUY2 (MJPEG, for example), the conversion is left to the decoder and none of these settings apply. When that happens the log contains a line about falling back to the decoder.
