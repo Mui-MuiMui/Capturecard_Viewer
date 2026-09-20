@@ -68,7 +68,8 @@ body:
     attributes:
       label: 設定ファイルの内容
       description: |
-        `%AppData%\capturecard_viewer\config\default-config.toml` の内容を貼り付けてください。
+        設定画面の「その他」タブ →「設定を書き出す...」で保存したファイルの内容を貼り付けてください。
+        `%AppData%\capturecard_viewer\config\default-config.toml` を直接開いても同じ内容です。
         フォーマット・解像度・フレームレート・オーディオデバイス名が含まれており、原因の絞り込みに直結します。
 
         保存先のパスにユーザー名が含まれます。気になる場合は伏せてください。

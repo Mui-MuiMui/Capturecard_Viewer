@@ -90,6 +90,7 @@ Turning on "情報表示" (Show stats) in the context menu overlays the followin
 2. Select video and audio devices in the **device settings** tab.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
 3. Configure the save location, file format, sound effect, and the per-action hotkeys in the **screenshot settings** tab.
+4. Export, import or reset the settings in the **その他 (Other)** tab.
 
 Edits in the settings window are kept as a draft and do not affect the running application until you press a button.
 
@@ -104,6 +105,22 @@ Edits in the settings window are kept as a draft and do not affect the running a
 - Hotkey and sound file changes also take effect only after you press 適用 or OK. The sound "テスト再生" (test playback) button plays the current sound effect at the volume you are editing.
 
 > **Note:** The application interface is currently Japanese only.
+
+### Exporting, importing and resetting settings
+
+These live in the **その他 (Other)** tab of the settings window. Use them when moving to another PC, backing up your settings, or attaching your configuration to a bug report.
+
+| Button | Behavior |
+|---|---|
+| 設定を書き出す... (Export settings) | Saves the current settings as a TOML file. The default file name is `capturecard_viewer-settings-YYYYMMDD.toml` |
+| 設定を読み込む... (Import settings) | Reads an exported file into the settings you are currently editing |
+| 設定を初期化... (Reset settings) | Resets the settings you are editing to their defaults. Nothing happens until you press the confirmation button |
+
+- **Export writes the running settings, not the draft.** Press 適用 first if you want your current edits included.
+- **Import and reset only change the draft.** Like every other edit, they reach the running application when you press 適用 or OK, and キャンセル discards them.
+- **Window position and size are never imported.** A file exported on a machine with a different display layout will not move your window off-screen. Reset leaves the position and size alone as well.
+- Items toggled from the right-click menu (always on top, drag to move, stats overlay, mute) are not imported either. They cannot be changed from the settings window, so importing them would have no effect.
+- If a value cannot be understood, only that item falls back to its default and the rest is imported. If the file is not valid TOML, nothing changes and the reason is shown.
 
 ### Screenshots
 
@@ -121,7 +138,7 @@ Settings are saved in the following directory:
 
 > %AppData%\capturecard_viewer
 
-Deleting it will recreate the settings with default values on the next launch.
+Deleting it will recreate the settings with default values on the next launch. 設定を初期化... (Reset settings) in the **その他 (Other)** tab does the same thing, except that the window position and size are kept.
 
 ## Recommended settings
 

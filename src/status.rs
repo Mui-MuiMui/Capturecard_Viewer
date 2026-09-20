@@ -58,6 +58,12 @@ pub enum ErrorSource {
     /// 登録できないものが 1 つでも残っていれば通知し、すべて登録できたら
     /// `ErrorCenter::clear` で取り下げる
     Hotkey,
+    /// 設定ダイアログの「その他」タブから行う設定ファイルの書き出しと読み込み。
+    ///
+    /// **`%AppData%` の設定ファイルの保存はここに含めない。** そちらは
+    /// ユーザーが場所を選ぶものではなく、失敗してもログに残す扱いのまま。
+    /// ここで扱うのはユーザーが選んだファイルに対する操作だけ
+    Settings,
 }
 
 impl ErrorSource {
@@ -68,6 +74,7 @@ impl ErrorSource {
             ErrorSource::Audio => "音声デバイスに接続できません",
             ErrorSource::Screenshot => "スクリーンショットを保存できません",
             ErrorSource::Hotkey => "ホットキーを登録できません",
+            ErrorSource::Settings => "設定ファイルを読み書きできません",
         }
     }
 
@@ -78,12 +85,13 @@ impl ErrorSource {
             ErrorSource::Audio => 1,
             ErrorSource::Screenshot => 2,
             ErrorSource::Hotkey => 3,
+            ErrorSource::Settings => 4,
         }
     }
 }
 
 /// `ErrorSource` の種類数。`ErrorCenter` の配列長。
-const SOURCE_COUNT: usize = 4;
+const SOURCE_COUNT: usize = 5;
 
 /// 記録した失敗 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,6 +469,10 @@ mod tests {
         assert_eq!(
             format_message(ErrorSource::Hotkey, "F5 is in use"),
             "ホットキーを登録できません: F5 is in use"
+        );
+        assert_eq!(
+            format_message(ErrorSource::Settings, "bad toml data"),
+            "設定ファイルを読み書きできません: bad toml data"
         );
     }
 

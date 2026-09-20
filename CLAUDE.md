@@ -223,6 +223,26 @@ toggle_fullscreen = "Ctrl+F11"
 
 「テスト再生」は `SettingsDialogAction::TestSound` として呼び出し側へ返し、`CaptureCardViewer` が鳴らす。ダイアログは閉じず、設定も保存もしない。
 
+### 設定の書き出し・読み込み・初期化は「その他」タブ
+
+`SettingsTab::Other`（`ui::show_other_tab`）に 3 つのボタンを置いてある。下部の「OK / キャンセル / 適用」の並びへ足さなかったのは、**「初期化」が「OK」の隣に来る並びを作らないため。** 説明をボタンの真下に書けることも理由。
+
+`ui.rs` は何も実行しない。`SettingsDialogAction::ExportSettings` / `ImportSettings` / `ResetDraft` を返し、`CaptureCardViewer` がファイルダイアログとファイル I/O を行う。
+
+| 操作 | 対象 | 反映のタイミング |
+|---|---|---|
+| 設定を書き出す | **実行中の設定**（ドラフトではない） | — |
+| 設定を読み込む | ドラフト | 「適用」「OK」 |
+| 設定を初期化 | ドラフト | 「適用」「OK」 |
+
+- **書き出すのは実行中の設定。** 未確定のドラフトをファイルとして配ると、手元で動いている設定と中身が食い違う
+- **読み込みと初期化はドラフトを差し替えるだけ。** その場で反映すると「キャンセル」で取り消せない
+- `rfd` のファイルダイアログは UI スレッドを止めるモーダル。出している間は映像の更新も止まる（効果音ファイル選択と同じ割り切り）。**`settings` のロックを握ったまま出さないこと**
+- 読み書きは `settings::export_to` / `settings::import_from`。中身は confy の `store_path` / `load_path` で、`%AppData%` の設定ファイルと書式を揃えている。**`load_path` はファイルが無いと既定値で新しく作る**ため、`import_from` が先に存在を確かめている
+- 読み込んだ内容からドラフトを作るのは `ui::draft_from_imported`、初期化は `ui::draft_from_defaults`（既定値を読み込んだのと同じ扱い）。**`ui` セクションは `commit_draft` が反映する 2 項目（`volume` / `maintain_aspect_ratio`）だけを採り、残りは現在の値を保つ。** ウィンドウの位置とサイズを持ち込むと別の画面構成で画面外に飛ぶこと、他の項目（`always_on_top` など）は `commit_draft` が反映しないので入れても「適用」で消えるだけ、という 2 つの理由。**`commit_draft` が反映する `ui` の項目を増やすときは `draft_from_imported` にも足すこと**
+- 結果は `SettingsDialogState::management_message` に入れてタブ内に 1 行で出す。失敗は `ErrorSource::Settings` としてトーストにも出す（トーストは画面下部に出るためダイアログに隠れることがある）。メッセージはドラフトについての説明なので、`begin_edit` / `end_edit` と「適用」で捨てる
+- 「初期化」は 1 段目のボタンで `reset_confirm` を立て、2 段目の「初期化する」で確定する 2 段階。押し間違いで設定が消えないようにするため
+
 ### 失敗はログだけで終わらせない
 
 デバイスの接続やスクリーンショットの保存に失敗したら、`error!` / `warn!` を出すのに加えて `CaptureCardViewer::report_error(ErrorSource::_, 理由)` を呼ぶ。ログは残るが、ユーザーは見ない。

@@ -2531,8 +2531,12 @@ impl CaptureCardViewer {
     /// ドラフトの反映・保存・クローズをここで行うのは、UI 側に状態と副作用を
     /// 持たせないため（`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
     fn handle_settings_dialog_action(&mut self, action: ui::SettingsDialogAction) {
-        if action == ui::SettingsDialogAction::TestSound {
-            self.play_test_sound();
+        match action {
+            ui::SettingsDialogAction::TestSound => self.play_test_sound(),
+            ui::SettingsDialogAction::ExportSettings => self.export_settings_to_file(),
+            ui::SettingsDialogAction::ImportSettings => self.import_settings_into_draft(),
+            ui::SettingsDialogAction::ResetDraft => self.reset_draft_to_defaults(),
+            _ => {}
         }
 
         let transition = ui::SettingsDialogState::transition_for(action);
@@ -2543,6 +2547,9 @@ impl CaptureCardViewer {
             }
             // 反映した内容でデバイスを開き直す
             self.apply_settings(false);
+            // 「読み込みました。適用してください」の類の案内は役目を終えている。
+            // 残すと、反映済みなのにまだ何かする必要があるように読める
+            self.settings_dialog.clear_management_message();
         }
 
         if transition.save_to_file {
@@ -2615,6 +2622,122 @@ impl CaptureCardViewer {
         if let Ok(ss) = self.screenshot_manager.lock() {
             ss.play_screenshot_sound(volume);
         }
+    }
+
+    /// 設定ダイアログの「設定を書き出す」。
+    ///
+    /// 書き出すのは**実行中の設定**で、編集中のドラフトではない。ドラフトは
+    /// まだ「適用」されていない下書きなので、それをファイルとして配ると、
+    /// 手元で動いている設定と中身が食い違う。
+    ///
+    /// `rfd` の保存ダイアログは UI スレッドを止めるモーダルで、出している間は
+    /// 映像の更新も止まる。既存の効果音ファイル選択と同じ割り切り。
+    /// **設定のロックは先に手放す。** 握ったままダイアログを出すと、
+    /// ユーザーが閉じるまで設定に触る全ての経路が止まる。
+    fn export_settings_to_file(&mut self) {
+        // ロックの結果を先に畳んでから self を可変で借りる。match の中で
+        // 失敗を報告しようとすると、MutexGuard の一時値が生きたままになる
+        let settings = self.settings.lock().ok().map(|settings| settings.clone());
+        let Some(settings) = settings else {
+            warn!("設定の書き出しで settings のロックを取得できない");
+            self.report_settings_error("設定を読み取れない".to_string());
+            return;
+        };
+
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(&settings::export_file_name(&Local::now()))
+            .add_filter("設定ファイル", &["toml"])
+            .save_file()
+        else {
+            debug!("設定の書き出しがキャンセルされた");
+            return;
+        };
+
+        match settings::export_to(&path, &settings) {
+            Ok(()) => {
+                info!("設定を {} へ書き出した", path.display());
+                self.settings_dialog
+                    .set_management_message(format!("{} へ書き出しました", path.display()), false);
+            }
+            Err(e) => {
+                error!("設定を {} へ書き出せない: {}", path.display(), e);
+                self.report_settings_error(e);
+            }
+        }
+    }
+
+    /// 設定ダイアログの「設定を読み込む」。
+    ///
+    /// 読めた内容は**ドラフトへ入れるだけ**で、実行中の設定には触らない。
+    /// 読み込んだ瞬間に反映すると「キャンセル」で取り消せないため、
+    /// 他の編集と同じく「適用」「OK」を通す。
+    ///
+    /// 読めなかった場合はドラフトを一切動かさない。半分だけ読み込んだ状態を
+    /// 作ると、どこまでが元の値か分からなくなる。
+    fn import_settings_into_draft(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("設定ファイル", &["toml"])
+            .pick_file()
+        else {
+            debug!("設定の読み込みがキャンセルされた");
+            return;
+        };
+
+        let imported = match settings::import_from(&path) {
+            Ok(imported) => imported,
+            Err(e) => {
+                error!("設定ファイル {} を読み込めない: {}", path.display(), e);
+                self.report_settings_error(e);
+                return;
+            }
+        };
+
+        // この操作が返るのはダイアログを描画しているときだけなので、ドラフトは必ずある
+        let Some(draft) = self.settings_dialog.draft_mut() else {
+            warn!("ドラフトが無い状態で設定の読み込みが要求された");
+            return;
+        };
+        let merged = ui::draft_from_imported(imported, draft);
+        *draft = merged;
+
+        info!("設定ファイル {} を編集中の設定へ読み込んだ", path.display());
+        self.settings_dialog.set_management_message(
+            format!(
+                "{} を読み込みました。「適用」または「OK」で反映します",
+                path.display()
+            ),
+            false,
+        );
+    }
+
+    /// 設定ダイアログの「設定を初期化」。
+    ///
+    /// 読み込みと同じくドラフトを差し替えるだけ。確認は `show_other_tab` の
+    /// 2 段階ボタンで済んでいるので、ここでは聞き直さない。
+    fn reset_draft_to_defaults(&mut self) {
+        // 読み込みと同じく、返るのはダイアログを描画しているときだけ
+        let Some(draft) = self.settings_dialog.draft_mut() else {
+            warn!("ドラフトが無い状態で設定の初期化が要求された");
+            return;
+        };
+        let defaults = ui::draft_from_defaults(draft);
+        *draft = defaults;
+
+        info!("編集中の設定を初期値へ戻した");
+        self.settings_dialog.set_management_message(
+            "初期値に戻しました。「適用」または「OK」で反映します".to_string(),
+            false,
+        );
+    }
+
+    /// 設定ファイルの読み書きの失敗を、トーストとダイアログの両方へ出す。
+    ///
+    /// トーストは画面下部に出るため、設定ダイアログの位置によっては隠れる。
+    /// 操作したその場にも理由が残るようにする。
+    fn report_settings_error(&mut self, reason: String) {
+        self.settings_dialog
+            .set_management_message(status::format_message(ErrorSource::Settings, &reason), true);
+        self.report_error(ErrorSource::Settings, reason);
     }
 
     /// 設定に未保存の変更があることを記録する。
