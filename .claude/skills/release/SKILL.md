@@ -54,7 +54,7 @@ description: 版を切って GitHub Release を出すときの進め方。バー
 
 ### 7. 後片付け
 
-`docs/RELEASE.md` の手順 6（`main` を `dev` へ戻す）と、Asana の「リリース・保守」セクションの更新（`~/.claude/skills/asana/SKILL.md`）。
+`docs/RELEASE.md` の手順 6（`main` を `dev` へ戻す）と、`area:release` ラベルの付いた Issue の更新（`~/.claude/skills/github-issues/SKILL.md`）。
 
 ## やらないこと
 
