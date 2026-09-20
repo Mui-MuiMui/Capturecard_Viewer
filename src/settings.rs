@@ -167,6 +167,62 @@ fn screenshot_format_from_str(raw: &str) -> Option<ScreenshotFormat> {
     }
 }
 
+// スクリーンショットの保存先の既定値。
+//
+// デスクトップ → %USERPROFILE% → 実行ファイルの置き場所 → 一時フォルダ の順に倒す。
+// **カレントディレクトリは使わない。** どこから起動したかで保存先が変わるうえ、
+// ショートカットやタスクスケジューラから起動すると C:\Windows\System32 のような
+// 書き込めない場所を指しうる。保存に失敗する理由が設定画面から見て分からない。
+fn default_screenshot_folder() -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+
+    screenshot_folder_from(
+        dirs::desktop_dir(),
+        dirs::home_dir(),
+        exe_dir,
+        std::env::temp_dir(),
+    )
+}
+
+// 保存先の候補から実際に使うものを選ぶ。
+//
+// 候補の取得は環境に依存するため、選ぶ部分だけを切り出してテストする。
+// last_resort は常に値がある候補（一時フォルダ）を想定している。
+fn screenshot_folder_from(
+    desktop: Option<PathBuf>,
+    home: Option<PathBuf>,
+    exe_dir: Option<PathBuf>,
+    last_resort: PathBuf,
+) -> PathBuf {
+    if let Some(desktop) = desktop {
+        return desktop;
+    }
+
+    if let Some(home) = home {
+        warn!(
+            "デスクトップの場所が分からないので、スクリーンショットの保存先を {} にする",
+            home.display()
+        );
+        return home;
+    }
+
+    if let Some(exe_dir) = exe_dir {
+        warn!(
+            "ユーザーフォルダの場所も分からないので、スクリーンショットの保存先を実行ファイルの場所 {} にする",
+            exe_dir.display()
+        );
+        return exe_dir;
+    }
+
+    warn!(
+        "実行ファイルの場所も分からないので、スクリーンショットの保存先を一時フォルダ {} にする",
+        last_resort.display()
+    );
+    last_resort
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiSettings {
@@ -206,7 +262,7 @@ impl Default for AudioSettings {
 impl Default for ScreenshotSettings {
     fn default() -> Self {
         Self {
-            save_folder: dirs::desktop_dir().unwrap_or_else(|| PathBuf::from(".")),
+            save_folder: default_screenshot_folder(),
             format: ScreenshotFormat::Jpeg,
             // image クレートの save() は JpegEncoder::new を通るため、
             // これまでの保存は品質 75 固定だった。ゲーム画面のように
@@ -263,6 +319,49 @@ impl LoadOutcome {
     // 書き戻さなければ壊れたファイルは手元に残り、次回以降も退避を試みられる。
     pub fn may_write_defaults_on_startup(self) -> bool {
         !matches!(self, LoadOutcome::BrokenFileLeftBehind)
+    }
+}
+
+// 設定の自動保存（デバウンス保存と終了時保存）を許してよいかを持つ。
+//
+// 読めなかった設定ファイルを退避できなかった場合、ディスクには壊れたファイルが
+// そのまま残っている。起動時の書き戻しだけを止めても、ウィンドウを動かせば
+// 2 秒後のデバウンス保存が、何もしなくても終了時の保存が、同じファイルを
+// 既定値で上書きしてしまう。そのため壊れたファイルが残っている間は
+// 自動保存そのものを止める。
+//
+// 止めている間はウィンドウの位置・サイズや音量も永続化されない。設定を
+// 取り戻す手段を残すほうを優先する、という判断。
+//
+// 設定ダイアログの「適用」「OK」による保存はユーザーの明示的な操作なので
+// 止めない。それが成功した時点で壊れたファイルはユーザーの意思で置き換わって
+// いるため、以降の自動保存も解禁する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoSavePolicy {
+    allowed: bool,
+}
+
+impl AutoSavePolicy {
+    // 設定の読み込み結果から初期状態を決める。
+    pub fn from_load_outcome(outcome: LoadOutcome) -> Self {
+        Self {
+            allowed: !matches!(outcome, LoadOutcome::BrokenFileLeftBehind),
+        }
+    }
+
+    // 自動保存してよいか。
+    pub fn is_allowed(self) -> bool {
+        self.allowed
+    }
+
+    // 明示的な保存操作の結果を反映する。`saved` は実際に書き出せたか。
+    //
+    // 失敗した場合に解禁しないのは、壊れたファイルがまだ残っているため。
+    // 解禁してしまうと、次のウィンドウ操作で自動保存が走って上書きしうる。
+    pub fn note_explicit_save(&mut self, saved: bool) {
+        if saved {
+            self.allowed = true;
+        }
     }
 }
 
@@ -692,6 +791,122 @@ show_stats_overlay = true
 
         assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
         assert!(outcome.may_write_defaults_on_startup());
+    }
+
+    // 保存先の候補。実在しないパスでよい。screenshot_folder_from は
+    // 候補の存在を確かめず、取れた順に選ぶだけ
+    const DESKTOP: &str = r"C:\Users\tester\Desktop";
+    const HOME: &str = r"C:\Users\tester";
+    const EXE_DIR: &str = r"C:\Program Files\capturecard_viewer";
+    const TEMP: &str = r"C:\Users\tester\AppData\Local\Temp";
+
+    #[test]
+    fn screenshot_folder_from_desktop_available_uses_desktop() {
+        let folder = screenshot_folder_from(
+            Some(PathBuf::from(DESKTOP)),
+            Some(PathBuf::from(HOME)),
+            Some(PathBuf::from(EXE_DIR)),
+            PathBuf::from(TEMP),
+        );
+
+        assert_eq!(folder, PathBuf::from(DESKTOP));
+    }
+
+    #[test]
+    fn screenshot_folder_from_no_desktop_falls_back_to_home() {
+        // デスクトップをリダイレクトしている環境などで desktop_dir() が None になる場合
+        let folder = screenshot_folder_from(
+            None,
+            Some(PathBuf::from(HOME)),
+            Some(PathBuf::from(EXE_DIR)),
+            PathBuf::from(TEMP),
+        );
+
+        assert_eq!(folder, PathBuf::from(HOME));
+    }
+
+    #[test]
+    fn screenshot_folder_from_no_user_folders_falls_back_to_exe_dir() {
+        let folder = screenshot_folder_from(
+            None,
+            None,
+            Some(PathBuf::from(EXE_DIR)),
+            PathBuf::from(TEMP),
+        );
+
+        assert_eq!(folder, PathBuf::from(EXE_DIR));
+    }
+
+    #[test]
+    fn screenshot_folder_from_nothing_available_falls_back_to_last_resort() {
+        let folder = screenshot_folder_from(None, None, None, PathBuf::from(TEMP));
+
+        assert_eq!(folder, PathBuf::from(TEMP));
+    }
+
+    #[test]
+    fn screenshot_folder_from_never_returns_current_dir() {
+        // 修正前の挙動の再現防止。どの候補も取れなくてもカレントディレクトリを
+        // 指さないこと。相対パスだと起動元によって保存先が変わる
+        let folder = screenshot_folder_from(None, None, None, PathBuf::from(TEMP));
+
+        assert_ne!(folder, PathBuf::from("."));
+        assert!(folder.is_absolute(), "保存先の既定値は絶対パスであること");
+    }
+
+    #[test]
+    fn auto_save_policy_broken_file_left_behind_blocks_autosave() {
+        // 退避できなかった場合。ウィンドウを動かすか終了するだけで
+        // 壊れたファイルが既定値で潰れるのを防ぐため、自動保存を止める
+        let policy = AutoSavePolicy::from_load_outcome(LoadOutcome::BrokenFileLeftBehind);
+
+        assert!(!policy.is_allowed());
+    }
+
+    #[test]
+    fn auto_save_policy_loaded_allows_autosave() {
+        assert!(AutoSavePolicy::from_load_outcome(LoadOutcome::Loaded).is_allowed());
+    }
+
+    #[test]
+    fn auto_save_policy_fell_back_to_defaults_allows_autosave() {
+        // 退避できていれば元の内容は .bak に残っている。守る相手がいないので
+        // ウィンドウ位置や音量を通常どおり保存してよい
+        assert!(AutoSavePolicy::from_load_outcome(LoadOutcome::FellBackToDefaults).is_allowed());
+    }
+
+    #[test]
+    fn auto_save_policy_successful_explicit_save_unblocks_autosave() {
+        // 設定画面の「適用」「OK」で保存できた時点で、壊れたファイルは
+        // ユーザーの意思で置き換わっている。以降は自動保存を止めない
+        let mut policy = AutoSavePolicy::from_load_outcome(LoadOutcome::BrokenFileLeftBehind);
+
+        policy.note_explicit_save(true);
+
+        assert!(policy.is_allowed());
+    }
+
+    #[test]
+    fn auto_save_policy_failed_explicit_save_keeps_autosave_blocked() {
+        // 保存に失敗した場合は壊れたファイルがまだ残っているため、
+        // 止めたままにする
+        let mut policy = AutoSavePolicy::from_load_outcome(LoadOutcome::BrokenFileLeftBehind);
+
+        policy.note_explicit_save(false);
+
+        assert!(!policy.is_allowed());
+    }
+
+    #[test]
+    fn auto_save_policy_failed_explicit_save_does_not_block_allowed_policy() {
+        // もともと許可されている状態は、保存の失敗で止まらない。
+        // 一時的な書き込み失敗で以降の保存が全部止まると、
+        // 復旧したあとも設定が残らなくなる
+        let mut policy = AutoSavePolicy::from_load_outcome(LoadOutcome::Loaded);
+
+        policy.note_explicit_save(false);
+
+        assert!(policy.is_allowed());
     }
 
     #[test]
