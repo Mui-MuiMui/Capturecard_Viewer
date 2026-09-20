@@ -39,7 +39,7 @@ To also remove the settings file, delete the following directory:
   - Toggle automatic device reconnection
   - Reconnect device
   - Advanced settings
-- **Mouse wheel**: Adjust volume (±10%)
+- **Mouse wheel**: Adjust volume (±10%). The current volume appears as a bar at the bottom of the screen and fades out after about 1.5 seconds (the same overlay appears when you change the volume from the context menu slider or the settings dialog)
 
 ### Stats overlay
 
