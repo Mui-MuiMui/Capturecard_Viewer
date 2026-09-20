@@ -124,6 +124,9 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 - If the device is not found, the application keeps retrying until it connects. The interval starts at 0.2 s and widens up to 5 s.
   - This also covers plugging the capture card in after the application has started; just wait and it will connect.
   - Retrying no longer freezes the window for seconds at a time. To retry right away, use Right-click → "デバイス再接続" (Reconnect device).
+- The reason for the failure is shown on screen. It appears at the bottom centre for a few seconds, and stays as a second line under the placeholder for as long as there is no video.
+  - While the same reason keeps repeating, the bottom-centre message is throttled to at most once every 60 seconds.
+  - What the application is actually connected to (the resolution, format, sample rate and channel count it really opened) and the most recent error are always available under 設定 (Settings) → 接続状態 (Connection status).
 
 **Devices that disappear while running**
 

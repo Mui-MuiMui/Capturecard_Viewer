@@ -32,6 +32,7 @@ cargo build --release
 | `src/settings.rs` | `AppSettings` とその serde 定義、confy による読み書き、保存パスの決定 |
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |
 | `src/ui.rs` | 設定ダイアログとホットキー設定ダイアログの描画 |
+| `src/status.rs` | 失敗の記録（`ErrorCenter`）とトーストの間引き判定、設定ダイアログへ渡す接続状態（`ConnectionStatus`）、日本語の定型文 |
 
 ### 映像パイプライン
 
@@ -70,6 +71,8 @@ cargo build --release
 **cpal のコールバックスレッドから再接続を始めない。** ストリームのエラーコールバックはそのストリーム自身のスレッドから呼ばれるため、そこで開き直すと自分を drop することになる。`AudioCapture` の `stream_error`（`AtomicBool`）へ旗を立てるだけにして、UI スレッドの `monitor_device_health` が毎フレーム回収する。**旗はストリームを開き直すたびに新しい `Arc` へ差し替える。** 使い回すと、閉じたストリームのエラーコールバックが後から旗を立て、開き直した直後の正常なストリームを切断と誤判定する。
 
 デバイス能力の取得状態（`ui::CapabilityCache`）は `SettingsDialogState` の中にあり、**UI スレッドだけが触る。** 取得スレッドは結果をチャネルへ送るだけで、キャッシュには触れない。`update()` の先頭の `drain_capability_results()` が受け取って反映する。
+
+スクリーンショットの保存結果も同じ形で戻す。保存スレッドは成功（保存先のパス）も失敗（理由）も mpsc で送るだけで、ログ出力と画面への表示は `update()` の先頭の `drain_screenshot_results()` が行う。**保存スレッドから直接 `error!` を出さない。** 失敗を画面に出せるのは UI スレッドだけなので、判断の場所を 1 つにしてある。
 
 ### ロック順序
 
@@ -189,6 +192,27 @@ cargo build --release
 タブ選択・デバイス能力キャッシュ・ホットキー入力も `SettingsDialogState` が持つ。これらは設定の中身ではないので「キャンセル」や `end_edit` では捨てず、ダイアログを開き直しても引き継ぐ。**`ui.rs` に `static` を追加しないこと。** ダイアログの新しい状態は `SettingsDialogState` へ追加する。
 
 「テスト再生」は `SettingsDialogAction::TestSound` として呼び出し側へ返し、`CaptureCardViewer` が鳴らす。ダイアログは閉じず、設定も保存もしない。
+
+### 失敗はログだけで終わらせない
+
+デバイスの接続やスクリーンショットの保存に失敗したら、`error!` / `warn!` を出すのに加えて `CaptureCardViewer::report_error(ErrorSource::_, 理由)` を呼ぶ。ログは残るが、ユーザーは見ない。
+
+- `src/status.rs` の `ErrorCenter` が**発生源ごとに直近の 1 件だけ**を持つ。履歴は積まない（再試行のたびに同じ失敗が来るため）
+- 新しい失敗は `TransientOverlay`（音量 OSD と同じヘルパー）に 4 秒出す。**同じ発生源で同じ文言が続く間は 60 秒間引く。** 接続の再試行は最大 5 秒間隔で無限に続くため、間引かないと出っぱなしになる
+- 同じフレームで複数の発生源が失敗したら**後勝ち**。`TransientOverlay` は 1 件しか持たない。優先度は付けていない。消えたほうもログと「接続状態」タブに残り、次の再試行でまた記録されるため
+- 接続に成功したら `errors.clear(..)` を呼ぶ。**呼ばないと繋がったあとも古い失敗が画面に残る**
+- **日本語化は `status.rs` で行う。** `video.rs` / `audio.rs` / `screenshot.rs` が返すのは `Result<_, String>` のままにして、定型文（`ErrorSource::headline`）と元のエラー文の連結を UI 層に閉じる
+- **ホットキーの登録失敗はまだ繋いでいない。** `ErrorSource::Hotkey` と `report_error` は用意してあるので、登録処理側から呼べば出る。呼び始めたら `ErrorSource::Hotkey` の `expect(dead_code)` を外すこと
+
+映像のプレースホルダー（`video_placeholder_text`）に添える理由は、**ストリームを開けていないときだけ**出す。開けていて信号だけが来ていない状態に接続エラーを出すと、入力機器ではなく USB を疑わせる。
+
+### 接続状態は設定ダイアログのタブに出す
+
+映像・音声が実際に何へ繋がっているかは、設定ダイアログの「接続状態」タブ（`SettingsTab::Status`）に出す。**タブは最後に置き、既定は「デバイス設定」のまま。** ダイアログを開く主な目的は設定の変更で、状態の確認は調べたいときだけだから。
+
+値は `CaptureCardViewer::connection_status()` が作って `ui::ConnectionStatus` で渡す。**描画中に `video_capture` / `audio_capture` のロックを取らない。** `stats()` / `link_state()` と同じく、小さな構造体の複製だけをロックの中で行う（`video::ActiveVideo` / `audio::ActiveAudio`）。集めるのは**ダイアログを開いている間だけ**で、閉じている間は毎フレームのロックが増えない。
+
+出すのは設定に書かれた値ではなく**デバイスが確定させた値**。設定画面では対応していない組み合わせも選べるため、要求した値と食い違う。例外はフレームレートで、nokhwa のバインディングが実際の値を取れないため要求した値を「要求フレームレート」として出している（`video.rs` の `start_capture` のコメント）。
 
 ### UI にあるが動作していない設定がある
 
