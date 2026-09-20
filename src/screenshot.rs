@@ -412,11 +412,50 @@ impl ScreenshotManager {
         Ok(())
     }
 
+    /// ホットキーの登録を解除し、以降どのキーにも反応しない状態にする。
+    ///
+    /// 設定画面でホットキーを「クリア」したときに呼ぶ。これが無いと、
+    /// 設定からホットキーが消えてもそのセッション中は古いキーが効き続け、
+    /// 再起動するまで解除されなかった。
+    ///
+    /// **リスナースレッドは止めない。** `GlobalHotKeyEvent::receiver()` が返す
+    /// チャネルはプロセスに 1 つしかなく、止めてから作り直すとどのスレッドが
+    /// イベントを取るか決まらなくなる。リスナーは `new()` で 1 本だけ起動して
+    /// `Drop` まで生かす設計なので、ここでは共有している ID を空にする。
+    /// 登録中の ID が無ければ、リスナーは受け取ったイベントを全て捨てる。
+    pub fn clear_hotkey(&mut self) {
+        if self.registered_hotkey.is_none() {
+            // 未登録のときに呼ばれてもログを出さない。設定の再適用は
+            // 2 秒ごとに走るため、同じ行が延々と積もる
+            return;
+        }
+        info!("ホットキーの登録を解除する");
+        self.unregister_current();
+    }
+
+    /// 効果音を捨て、以降スクリーンショットを無音にする。
+    ///
+    /// 設定画面で効果音を「クリア」したときに呼ぶ。`set_sound_file` は
+    /// ファイルが見つからなければ埋め込みの既定音へ倒すため、「鳴らさない」は
+    /// 設定を `None` にすることでしか表せない。その `None` をここで実行時へ
+    /// 反映する。
+    pub fn clear_sound(&mut self) {
+        if self.sound_data.is_none() {
+            return;
+        }
+        info!("効果音を破棄した。以降スクリーンショットは無音になる");
+        self.sound_data = None;
+    }
+
     /// 登録中のホットキーを解除する。登録していなければ何もしない。
     fn unregister_current(&mut self) {
         // 先に共有している ID を空にする。解除が終わるまでの間に届いた
         // イベントを押下として扱わないため
         self.store_registered_id(None);
+
+        // 解除の直前に届いていた押下を捨てる。残しておくと、クリアした
+        // 直後のフレームで 1 枚だけ撮れてしまう
+        self.pressed.store(false, Ordering::Release);
 
         let Some(old_hotkey) = self.registered_hotkey.take() else {
             return;
@@ -900,5 +939,49 @@ mod tests {
         );
         // イベントを受け取っていないので押下フラグは立たない
         assert!(!pressed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn clear_sound_discards_loaded_sound() {
+        // 設定の効果音を「クリア」したセッションで鳴り続けていた不具合の再現。
+        // 空パスは埋め込みの既定音へ倒れるので、実ファイルは要らない
+        let mut manager = ScreenshotManager::new();
+        manager
+            .set_sound_file(Path::new(""))
+            .expect("埋め込みの既定音は必ず読める");
+        assert!(manager.sound_data.is_some());
+
+        manager.clear_sound();
+
+        assert!(manager.sound_data.is_none());
+    }
+
+    #[test]
+    fn clear_hotkey_without_registration_is_noop() {
+        // 起動時からホットキーが未設定のまま再適用が回るため、
+        // 未登録の状態で呼ばれてもパニックせず何も変えないこと
+        let mut manager = ScreenshotManager::new();
+
+        manager.clear_hotkey();
+
+        assert!(manager.registered_hotkey.is_none());
+        assert_eq!(
+            *manager
+                .registered_id
+                .lock()
+                .expect("ロックが毒されていないこと"),
+            None
+        );
+    }
+
+    #[test]
+    fn unregister_current_drops_pending_press() {
+        // 解除の直前に届いた押下を残すと、クリアした直後に 1 枚だけ撮れてしまう
+        let mut manager = ScreenshotManager::new();
+        manager.pressed.store(true, Ordering::Release);
+
+        manager.unregister_current();
+
+        assert!(!manager.pressed.load(Ordering::Acquire));
     }
 }

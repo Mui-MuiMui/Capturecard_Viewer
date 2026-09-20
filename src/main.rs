@@ -276,7 +276,9 @@ pub struct CaptureCardViewer {
     video_texture: Option<egui::TextureHandle>,
     // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
     last_frame_generation: u64,
-    pending_hotkey: Option<String>,
+    // ホットキーダイアログで確定した内容のうち、まだ実行時へ反映していないもの。
+    // 外側の None は「保留なし」、内側の None は「クリアされた（解除する）」
+    pending_hotkey: Option<Option<String>>,
     temp_hotkey: String, // ホットキーダイアログ用の一時保存
     // 最後に適用した実行時パラメータ（差分ベースの再起動回避用）
     last_video_device: Option<String>,
@@ -289,9 +291,15 @@ pub struct CaptureCardViewer {
     last_fullscreen_toggle: Option<Instant>,
     last_video_fps: Option<u32>,
     // 最後に適用したスクリーンショット関連の値
-    // apply_settings が 2 秒ごとに呼ばれるため、差分がないときは再適用しない
-    last_hotkey: Option<String>,
-    last_sound_file: Option<PathBuf>,
+    // apply_settings が 2 秒ごとに呼ばれるため、差分がないときは再適用しない。
+    //
+    // **設定と同じ `Option` を丸ごと包んでいる。** 外側の `None` は
+    // 「まだ適用できていない（次の適用でやり直す）」、内側の `None` は
+    // 「未設定を適用済み＝クリア済み」を表す。内側を潰して `Option<String>` に
+    // すると、クリア（設定が `None`）と未適用が同じ値になり、クリアを
+    // 差分として検出できない
+    last_hotkey: Option<Option<String>>,
+    last_sound_file: Option<Option<PathBuf>>,
 
     // デバイス接続の再試行。映像と音声で別々に持ち、片方が失敗しても
     // もう片方の再試行に引きずられないようにする
@@ -589,21 +597,30 @@ impl eframe::App for CaptureCardViewer {
                 self.temp_hotkey = current.unwrap_or_default();
             }
 
-            let hotkey_captured = ui::show_hotkey_capture_dialog(
+            let outcome = ui::show_hotkey_capture_dialog(
                 ctx,
                 &mut self.show_hotkey_dialog,
                 &mut self.temp_hotkey,
                 self.settings_dialog.hotkey_capture_mut(),
             );
 
-            // ホットキーがキャプチャされた場合、設定を更新
-            if hotkey_captured && !self.temp_hotkey.is_empty() {
+            // 確定またはクリアされた場合、設定を更新。
+            // クリアは「ホットキーを使わない」という明示の指定なので、
+            // 確定と同じ経路で `None` を書き込む
+            let new_hotkey = match outcome {
+                ui::HotkeyDialogOutcome::None => None,
+                ui::HotkeyDialogOutcome::Captured if self.temp_hotkey.is_empty() => None,
+                ui::HotkeyDialogOutcome::Captured => Some(Some(self.temp_hotkey.clone())),
+                ui::HotkeyDialogOutcome::Cleared => Some(None),
+            };
+
+            if let Some(hotkey) = new_hotkey {
                 // 設定ダイアログから開かれている場合はドラフトへ書く。
                 // 共有設定へ直接書くと、ダイアログの OK がドラフトの古い値で
                 // 上書きして、設定したホットキーが消える
                 let wrote_to_draft = match self.settings_dialog.draft_mut() {
                     Some(draft) => {
-                        draft.screenshot.hotkey = Some(self.temp_hotkey.clone());
+                        draft.screenshot.hotkey = hotkey.clone();
                         true
                     }
                     None => false,
@@ -611,12 +628,12 @@ impl eframe::App for CaptureCardViewer {
 
                 if !wrote_to_draft {
                     // 設定ダイアログが閉じられた状態でホットキーだけ確定した場合。
-                    // ドラフトが無いので共有設定へ直接書き、その場で登録する
+                    // ドラフトが無いので共有設定へ直接書き、その場で登録（解除）する
                     if let Ok(mut settings) = self.settings.lock() {
-                        settings.screenshot.hotkey = Some(self.temp_hotkey.clone());
+                        settings.screenshot.hotkey = hotkey.clone();
                     }
                     self.mark_settings_dirty();
-                    self.pending_hotkey = Some(self.temp_hotkey.clone());
+                    self.pending_hotkey = Some(hotkey);
                 }
                 // ドラフトへ書いた場合はここで登録しない。
                 // 登録すると、2 秒ごとの apply_settings が共有設定側の古い
@@ -656,23 +673,34 @@ impl eframe::App for CaptureCardViewer {
             }
         }
 
-        // 新しくキャプチャされたホットキーを即座に登録
-        if let Some(hk) = self.pending_hotkey.take() {
-            debug!("捕捉したホットキーを登録する: {}", hk);
+        // 新しくキャプチャされたホットキーを即座に登録（クリアなら解除）
+        if let Some(pending) = self.pending_hotkey.take() {
             if let Ok(mut ss) = self.screenshot_manager.lock() {
-                match ss.set_hotkey(&hk) {
-                    Ok(()) => {
-                        debug!("ホットキー {} の登録に成功した", hk);
-                        // apply_settings が同じホットキーを登録し直さないよう記録する
-                        self.last_hotkey = Some(hk.clone());
+                match pending {
+                    Some(hk) => {
+                        debug!("捕捉したホットキーを登録する: {}", hk);
+                        match ss.set_hotkey(&hk) {
+                            Ok(()) => {
+                                debug!("ホットキー {} の登録に成功した", hk);
+                                // apply_settings が同じホットキーを登録し直さないよう記録する
+                                self.last_hotkey = Some(Some(hk));
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "ホットキー {} を登録できないので次の適用で再試行する: {}",
+                                    hk, e
+                                );
+                                // 登録できていないので apply_settings 側で再試行させる
+                                self.last_hotkey = None;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        warn!(
-                            "ホットキー {} を登録できないので次の適用で再試行する: {}",
-                            hk, e
-                        );
-                        // 登録できていないので apply_settings 側で再試行させる
-                        self.last_hotkey = None;
+                    None => {
+                        debug!("ホットキーがクリアされたので登録を解除する");
+                        ss.clear_hotkey();
+                        // 解除済みであることを記録する。記録しないと 2 秒ごとに
+                        // 解除し直すことになる
+                        self.last_hotkey = Some(None);
                     }
                 }
             } else {
@@ -1851,28 +1879,48 @@ impl CaptureCardViewer {
             self.show_stats_overlay = settings.ui.show_stats_overlay;
 
             // スクリーンショット設定
+            //
+            // **`None`（クリア）も差分として扱う。** 以前は `if let Some(..)` で
+            // 包んでいたため、設定画面で「クリア」してもそのセッション中は
+            // ホットキーが効き続け、効果音も鳴り続けていた
             if let Ok(mut ss) = self.screenshot_manager.lock() {
-                if let Some(hk) = &settings.screenshot.hotkey {
-                    // 無条件に登録し直すと、2 秒ごとに unregister → register が走って
-                    // その瞬間のキー入力を取りこぼし、リスナースレッドも作り直される
-                    if Self::needs_reapply(initial, hk, &self.last_hotkey) {
-                        match ss.set_hotkey(hk) {
-                            Ok(()) => self.last_hotkey = Some(hk.clone()),
+                // 無条件に登録し直すと、2 秒ごとに unregister → register が走って
+                // その瞬間のキー入力を取りこぼす
+                if Self::needs_reapply(initial, &settings.screenshot.hotkey, &self.last_hotkey) {
+                    match &settings.screenshot.hotkey {
+                        Some(hk) => match ss.set_hotkey(hk) {
+                            Ok(()) => self.last_hotkey = Some(Some(hk.clone())),
                             // 失敗すると古いホットキーは解除済みで何も登録されていない。
                             // last を空にして次の適用タイミングで再試行する
                             Err(_) => self.last_hotkey = None,
+                        },
+                        None => {
+                            ss.clear_hotkey();
+                            self.last_hotkey = Some(None);
                         }
                     }
                 }
-                if let Some(sf) = &settings.screenshot.sound_file {
-                    // 無条件に呼ぶと 2 秒ごとに効果音ファイル全体を読み直すことになる
-                    if Self::needs_reapply(initial, sf, &self.last_sound_file) {
-                        match ss.set_sound_file(sf) {
-                            Ok(()) => self.last_sound_file = Some(sf.clone()),
+
+                // 無条件に呼ぶと 2 秒ごとに効果音ファイル全体を読み直すことになる
+                if Self::needs_reapply(
+                    initial,
+                    &settings.screenshot.sound_file,
+                    &self.last_sound_file,
+                ) {
+                    match &settings.screenshot.sound_file {
+                        Some(sf) => match ss.set_sound_file(sf) {
+                            Ok(()) => self.last_sound_file = Some(Some(sf.clone())),
                             // 見つからない場合は埋め込みの既定音へ倒して Ok になる。
                             // ここへ来るのはファイルがあるのに読めなかった場合なので、
                             // last を空にして次の適用タイミングで読み直す
                             Err(_) => self.last_sound_file = None,
+                        },
+                        None => {
+                            // 未選択は「鳴らさない」の意味。set_sound_file は
+                            // 見つからないファイルを既定音へ倒すので、無音は
+                            // ここでしか表せない
+                            ss.clear_sound();
+                            self.last_sound_file = Some(None);
                         }
                     }
                 }
@@ -2571,6 +2619,39 @@ mod tests {
             false,
             &"F7".to_string(),
             &Some("F5".to_string())
+        ));
+    }
+
+    #[test]
+    fn needs_reapply_cleared_value_returns_true() {
+        // 設定画面で「クリア」した場合。設定は None になるが、実行中は
+        // 古いホットキーが登録されたまま。ここを差分として拾えないと、
+        // そのセッションの間ずっと解除されない
+        assert!(CaptureCardViewer::needs_reapply(
+            false,
+            &None::<String>,
+            &Some(Some("F5".to_string()))
+        ));
+    }
+
+    #[test]
+    fn needs_reapply_already_cleared_returns_false() {
+        // 解除済みの状態。2 秒ごとに解除し直さない
+        assert!(!CaptureCardViewer::needs_reapply(
+            false,
+            &None::<String>,
+            &Some(None)
+        ));
+    }
+
+    #[test]
+    fn needs_reapply_cleared_but_not_applied_yet_returns_true() {
+        // 未適用（外側の None）と解除済み（Some(None)）を区別する。
+        // 区別できないと、起動直後の 1 回が飛ぶ
+        assert!(CaptureCardViewer::needs_reapply(
+            false,
+            &None::<String>,
+            &None
         ));
     }
 
