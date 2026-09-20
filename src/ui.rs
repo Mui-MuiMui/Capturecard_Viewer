@@ -1314,7 +1314,7 @@ fn show_choice_note(ui: &mut egui::Ui, source: ChoiceSource, label: &str) {
             ui.colored_label(
                 egui::Color32::YELLOW,
                 format!(
-                    "⚠ 入力と出力で共通の{}がありません。それぞれ最も近い値で開くため、音が崩れます",
+                    "⚠ 入力と出力で共通の{}がありません。それぞれ最も近い値で開き、変換して出力します（音質がわずかに落ちます）",
                     label
                 ),
             );
