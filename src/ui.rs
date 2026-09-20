@@ -376,26 +376,38 @@ pub fn select_default_video_mode(
 /// `select_default_video_mode` の並べ替えキー。小さいほど「望ましい」。
 ///
 /// 1. 前の解像度との画素数の差（前の値が無ければ全て 0 で並ばない）
-/// 2. 前の FPS との差（同上）
-/// 3. 画素数の降順
-/// 4. FPS の降順
+/// 2. 前の解像度との幅・高さの差の和（同上）
+/// 3. 前の FPS との差（同上）
+/// 4. 画素数の降順
+/// 5. FPS の降順
 ///
-/// 3 と 4 は「前の値が無いときは最大の解像度・最高の FPS」という既定であり、
-/// 同時に 1 と 2 が並んだときの決着でもある。ここが無いと `HashMap` 由来の
+/// 2 が要るのは、画素数だけでは縦横比の違う同面積の解像度が並んでしまうため。
+/// 1280x720 と 960x960 はどちらも 921,600 画素なので、前の解像度に完全一致
+/// する側が一覧の後ろにあると取りこぼす。
+///
+/// 4 と 5 は「前の値が無いときは最大の解像度・最高の FPS」という既定であり、
+/// 同時に 1〜3 が並んだときの決着でもある。ここが無いと `HashMap` 由来の
 /// 順序でフレームごとに違う値が選ばれうる。
 fn video_mode_rank(
     mode: (u32, u32, u32),
     previous_resolution: Option<(u32, u32)>,
     previous_fps: Option<u32>,
-) -> (u64, u64, std::cmp::Reverse<u64>, std::cmp::Reverse<u32>) {
+) -> (
+    u64,
+    u64,
+    u64,
+    std::cmp::Reverse<u64>,
+    std::cmp::Reverse<u32>,
+) {
     let (width, height, fps) = mode;
     let pixels = u64::from(width) * u64::from(height);
 
-    let resolution_distance = match previous_resolution {
-        Some((prev_width, prev_height)) => {
-            pixels.abs_diff(u64::from(prev_width) * u64::from(prev_height))
-        }
-        None => 0,
+    let (pixel_distance, dimension_distance) = match previous_resolution {
+        Some((prev_width, prev_height)) => (
+            pixels.abs_diff(u64::from(prev_width) * u64::from(prev_height)),
+            u64::from(width.abs_diff(prev_width)) + u64::from(height.abs_diff(prev_height)),
+        ),
+        None => (0, 0),
     };
     let fps_distance = match previous_fps {
         Some(prev_fps) => u64::from(fps.abs_diff(prev_fps)),
@@ -403,7 +415,8 @@ fn video_mode_rank(
     };
 
     (
-        resolution_distance,
+        pixel_distance,
+        dimension_distance,
         fps_distance,
         std::cmp::Reverse(pixels),
         std::cmp::Reverse(fps),
@@ -2084,6 +2097,19 @@ mod tests {
             "YUY2".to_string(),
             vec![(1920, 1080, 60), (1280, 720, 60), (640, 480, 30)],
         )];
+
+        assert_eq!(
+            select_default_video_mode(&caps, Some((1280, 720)), Some(60)),
+            Some(("YUY2".to_string(), (1280, 720), 60))
+        );
+    }
+
+    #[test]
+    fn select_default_video_mode_keeps_previous_over_same_pixel_count_resolution() {
+        // 960x960 と 1280x720 はどちらも 921,600 画素で、画素数の差だけでは並ぶ。
+        // 完全一致する 1280x720 が一覧の後ろにあっても取りこぼさないこと
+        let caps: DeviceCapabilities =
+            vec![("YUY2".to_string(), vec![(960, 960, 60), (1280, 720, 60)])];
 
         assert_eq!(
             select_default_video_mode(&caps, Some((1280, 720)), Some(60)),
