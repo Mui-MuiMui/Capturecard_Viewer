@@ -482,6 +482,10 @@ fn video_mode_rank(
 /// 切り替える。丸ごと上書きすると、ダイアログを開いている間の切り替えが
 /// 開いた時点のスナップショットで巻き戻るため、実行中の値を残す。
 ///
+/// `ui` の `muted` もダイアログに無い（右クリックメニュー・ミドルクリック・
+/// ホットキーで切り替える）。ここで触らないので、ダイアログを開いている間の
+/// 切り替えはそのまま残る。
+///
 /// **ダイアログに `ui` セクションの項目を足すときは、ここにも足すこと。**
 /// **逆に、ダイアログの外だけで変える項目を足すときは、ここで残すこと。**
 pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &AppSettings) {
@@ -1705,6 +1709,7 @@ mod tests {
             },
             ui: UiSettings {
                 volume: 80.0,
+                muted: false,
                 maintain_aspect_ratio: false,
                 last_window_size: Some((800.0, 600.0)),
                 last_window_pos: Some((10.0, 20.0)),
@@ -2021,6 +2026,21 @@ mod tests {
         assert_eq!(shared.ui.last_window_pos, Some((100.0, 200.0)));
         assert!(!shared.ui.always_on_top);
         assert!(shared.ui.enable_drag_move);
+    }
+
+    #[test]
+    fn commit_draft_keeps_mute_changed_outside_dialog() {
+        // ミュートはダイアログに無い。ダイアログを開いたまま切り替えて
+        // 「適用」を押しても、開いた時点の値へ巻き戻ってはいけない
+        let original = sample_settings();
+        let draft = original.clone();
+        let mut shared = original.clone();
+
+        shared.ui.muted = !original.ui.muted;
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.ui.muted, !original.ui.muted);
     }
 
     #[test]
