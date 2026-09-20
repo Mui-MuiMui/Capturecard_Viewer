@@ -110,7 +110,7 @@ cargo build --release
 
 - 接続処理を足すときは `apply_settings` で開かず、`ConnectRetry::request()` で要求だけ立てる。実際に開くのは `poll_device_connection()`
 - ユーザーが明示的にやり直しを求める経路（右クリック → デバイス再接続）は `request_now()` を使い、待ち時間を飛ばす
-- 最後の失敗理由は `ConnectRetry` が保持している。画面へ出すのは Asana の「エラー通知 UI」タスクの範囲
+- 最後の失敗理由は `ConnectRetry` が保持している。画面へ出すのは「エラー通知 UI」の Issue の範囲
 
 ## 作業時の注意点
 
@@ -274,12 +274,39 @@ toggle_fullscreen = "Ctrl+F11"
 
 ## タスク管理
 
-改善バックログは Asana プロジェクト「Capturecard_Viewer」で管理している。
-https://app.asana.com/1/1218412078016612/project/1218457296782693/list
+改善バックログは **GitHub Issues** で管理している。進行状況は GitHub Project「Capturecard_Viewer」で見る。
 
-- セクションは 開発基盤・CI / ドキュメント整備 / バグ修正 / パフォーマンス改善 / リファクタリング / 機能拡充 / リリース・保守 の 7 つ
-- 各タスクの説明冒頭に `[P1]`〜`[P3]` の優先度、本文に `file:line` 形式で該当箇所を記載
-- PR を作るときは説明に対応する Asana タスクの URL を書き、Asana タスク側にも PR の URL をコメントすること
+- Issues: https://github.com/Mui-MuiMui/Capturecard_Viewer/issues
+- Project: https://github.com/users/Mui-MuiMui/projects/2
+
+2026-09-20 に Asana から移行した。移行済みの Issue には本文末尾に移行元の Asana タスクの URL が残っている。**過去の PR 本文や `CHANGELOG.md` に残る Asana の URL は書き換えていない。** 当時の記録なので、そのまま読めばよい。
+
+### 分類
+
+| 軸 | 表し方 |
+|---|---|
+| 分野 | `area:` ラベル（`ci` / `docs` / `bug` / `perf` / `refactor` / `feature` / `release`）。Asana のセクションに 1 対 1 で対応する |
+| 優先度 | `P1` / `P2` / `P3` ラベル。本文冒頭の `[P1]` 表記も残してある |
+| 進行状況 | Project の Status（未着手 / 作業中 / レビュー待ち / 人間確認待ち / 完了） |
+
+Project を開かずに判断したい場面のために `status:人間確認待ち` ラベルも併用している。**Status とラベルのどちらかしか見ない経路があるので、人間確認待ちに入れるときは両方付けること。**
+
+各 Issue の本文には `file:line` 形式で該当箇所を書く。**この記述は起票時点のスナップショットなので、着手前に実コードで裏を取ること。**
+
+### PR と Issue のリンク
+
+**PR 本文には `Refs #<番号>` を書く。`Closes` / `Fixes` は使わない。**
+
+GitHub の既定では `Closes #n` を書いた PR がマージされると Issue が自動で閉じる。このリポジトリではそれを避ける。**実装が `dev` に入った時点ではまだ実機確認が済んでいないため。** キャプチャーデバイス依存の不具合が多く、CI で確かめられる範囲が狭い。自動で閉じると「人間確認待ち」の一覧から消えてしまい、確認されないまま埋もれる。
+
+したがって流れはこうなる。
+
+1. PR を作るとき本文に `Refs #<番号>` を書く
+2. Issue 側にも PR の URL と「人間が確認すること」をコメントする
+3. マージされたら Status を「人間確認待ち」にし、`status:人間確認待ち` ラベルを付ける
+4. **Issue を閉じるのは人が実機で確認したとき。** Claude は閉じない
+
+部分実装の PR なら、Issue にその旨と残りのスコープを書いて Status は「作業中」のままにする。
 
 ## 開発フロー
 
@@ -287,10 +314,10 @@ https://app.asana.com/1/1218412078016612/project/1218457296782693/list
 
 | コマンド | 段階 |
 |---|---|
-| `/cv:plan <Asana タスク URL または説明>` | 計画。コードは書かず、方針を提示して承認を待つ |
+| `/cv:plan <Issue 番号・URL または説明>` | 計画。コードは書かず、方針を提示して承認を待つ |
 | `/cv:implement` | 承認済みの計画に従って worktree を切り実装する。まとまった単位でコミットする |
 | `/cv:review` | 検証コマンドを走らせ、観点に沿ってセルフレビューする |
-| `/cv:pr` | push、PR 作成、Asana との相互リンク。レビュー指摘への対応にも使う |
+| `/cv:pr` | push、PR 作成、Issue との相互リンク。レビュー指摘への対応にも使う |
 
 `cv:` の名前空間を付けているのは、`/plan` や `/review` が組み込みコマンドや他のプラグインと衝突するのを避けるため。
 
