@@ -29,6 +29,12 @@ pub struct VideoSettings {
     pub resolution: Option<(u32, u32)>,
     pub format: Option<String>,
     pub fps: Option<u32>,
+    // 稼働中にフレームが途絶えたとき、自動でデバイスを開き直すか。
+    //
+    // 映像だけでなく音声のストリームエラーにも効く。右クリックメニューの
+    // 「デバイスの自動再接続」が 1 つのスイッチで両方を切り替えるため、
+    // 設定の置き場所も 1 か所にまとめてある
+    pub auto_reconnect: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +193,9 @@ impl Default for VideoSettings {
             resolution: Some((1280, 720)),    // 720pで安定性を優先
             format: Some("YUY2".to_string()), // YUY2フォーマット
             fps: Some(60),                    // 60fps目標
+            // 既定は有効。USB を挿し直したときに何もしなくても復帰するほうが、
+            // 「映像が止まったまま気付かない」よりも害が少ない
+            auto_reconnect: true,
         }
     }
 }
@@ -406,6 +415,7 @@ device_name = "Capture Device"
 resolution = [1920, 1080]
 format = "MJPEG"
 fps = 30
+auto_reconnect = false
 
 [audio]
 input_device_name = "Line In"
@@ -504,6 +514,36 @@ show_stats_overlay = true
         assert_eq!(settings.ui.volume, 80.0);
         assert!(settings.ui.always_on_top);
         assert!(!settings.ui.enable_drag_move);
+    }
+
+    #[test]
+    fn app_settings_missing_auto_reconnect_defaults_to_enabled() {
+        // 自動再接続の項目を足した版へ上げた直後、既存ユーザーの設定ファイルには
+        // このキーが無い。欠けていても他の項目が保持され、既定の有効になること。
+        let config = without_key(FULL_CONFIG, "auto_reconnect");
+        assert!(
+            !config.contains("auto_reconnect ="),
+            "テスト用の設定から auto_reconnect が消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("auto_reconnect が欠けていても読めなければならない");
+
+        assert!(settings.video.auto_reconnect); // 既定値は true
+        assert_eq!(settings.video.fps, Some(30));
+        assert_eq!(
+            settings.video.device_name,
+            Some("Capture Device".to_string())
+        );
+    }
+
+    #[test]
+    fn app_settings_auto_reconnect_false_is_kept() {
+        // 明示的に無効にした設定が、既定値（true）で上書きされないこと。
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("全項目そろった設定は読めなければならない");
+
+        assert!(!settings.video.auto_reconnect);
     }
 
     #[test]

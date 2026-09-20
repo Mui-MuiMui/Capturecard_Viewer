@@ -17,6 +17,17 @@ pub struct AudioCapture {
     output_stream: Option<cpal::Stream>,
     volume: Arc<Mutex<f32>>,
     audio_passthrough_enabled: Arc<AtomicBool>,
+    // 稼働中のストリームでエラーが起きたことを表す旗。
+    //
+    // cpal のエラーコールバックはデバイスが消えた（`DeviceNotAvailable`）
+    // ときにも呼ばれるが、呼ばれるのは cpal のストリームスレッドなので
+    // そこから再接続を始められない。旗を立てるだけにして、UI スレッドが
+    // 毎フレーム回収する。
+    //
+    // **ストリームを開き直すたびに新しい `Arc` へ差し替える。** 使い回すと、
+    // 閉じたストリームのエラーコールバックが後から旗を立て、開き直した直後の
+    // 正常なストリームを切断と誤判定する
+    stream_error: Arc<AtomicBool>,
 }
 
 impl AudioCapture {
@@ -31,6 +42,7 @@ impl AudioCapture {
             volume: Arc::new(Mutex::new(1.0)),
             // 既定では音声パススルーを有効にする（音が出る状態で起動する）
             audio_passthrough_enabled: Arc::new(AtomicBool::new(true)),
+            stream_error: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -151,6 +163,9 @@ impl AudioCapture {
 
         debug!("リングバッファを作成した（{} サンプル）", buffer_size * 2);
 
+        // このストリーム専用のエラー旗。開き直すたびに作り直す
+        let stream_error = Arc::new(AtomicBool::new(false));
+
         // 入力ストリーム。デバイスのサンプル型ごとに正規化の仕方が違うので明示的に分ける
         let input_stream_config = input_config.config();
         let input_stream = match input_config.sample_format() {
@@ -158,24 +173,28 @@ impl AudioCapture {
                 &input_device,
                 &input_stream_config,
                 producer.clone(),
+                stream_error.clone(),
                 |sample| sample,
             ),
             SampleFormat::I16 => build_input_stream_with::<i16>(
                 &input_device,
                 &input_stream_config,
                 producer.clone(),
+                stream_error.clone(),
                 i16_to_f32,
             ),
             SampleFormat::U16 => build_input_stream_with::<u16>(
                 &input_device,
                 &input_stream_config,
                 producer.clone(),
+                stream_error.clone(),
                 u16_to_f32,
             ),
             SampleFormat::I32 => build_input_stream_with::<i32>(
                 &input_device,
                 &input_stream_config,
                 producer.clone(),
+                stream_error.clone(),
                 i32_to_f32,
             ),
             other => return Err(unsupported_sample_format_error("入力", other)),
@@ -193,6 +212,7 @@ impl AudioCapture {
                 consumer.clone(),
                 vol_arc,
                 passthrough_arc,
+                stream_error.clone(),
                 |sample| sample,
             ),
             SampleFormat::I16 => build_output_stream_with::<i16>(
@@ -201,6 +221,7 @@ impl AudioCapture {
                 consumer.clone(),
                 vol_arc,
                 passthrough_arc,
+                stream_error.clone(),
                 f32_to_i16,
             ),
             SampleFormat::U16 => build_output_stream_with::<u16>(
@@ -209,6 +230,7 @@ impl AudioCapture {
                 consumer.clone(),
                 vol_arc,
                 passthrough_arc,
+                stream_error.clone(),
                 f32_to_u16,
             ),
             SampleFormat::I32 => build_output_stream_with::<i32>(
@@ -217,6 +239,7 @@ impl AudioCapture {
                 consumer.clone(),
                 vol_arc,
                 passthrough_arc,
+                stream_error.clone(),
                 f32_to_i32,
             ),
             other => return Err(unsupported_sample_format_error("出力", other)),
@@ -235,6 +258,8 @@ impl AudioCapture {
 
         self.input_stream = Some(input_stream);
         self.output_stream = Some(output_stream);
+        // 監視の対象を、いま開いたストリームの旗へ差し替える
+        self.stream_error = stream_error;
 
         info!("音声パススルーを開始した");
         Ok(())
@@ -247,6 +272,19 @@ impl AudioCapture {
         if let Some(s) = self.output_stream.take() {
             let _ = s.pause();
         }
+        // 閉じたストリームのエラーコールバックが後から立てる旗を読まないよう、
+        // 監視対象を新しいものへ差し替える
+        self.stream_error = Arc::new(AtomicBool::new(false));
+    }
+
+    /// 稼働中のストリームでエラーが起きていたかを返し、旗を下ろす。
+    ///
+    /// デバイスが消えたときの `DeviceNotAvailable` もここに現れる。
+    /// 読んだ側が再接続を要求する責任を持つため、読み取りと同時に下ろす。
+    /// `&self` なのは、UI スレッドが `Mutex` の可変借用を取らずに
+    /// 毎フレーム確認できるようにするため
+    pub fn take_stream_error(&self) -> bool {
+        self.stream_error.swap(false, Ordering::Relaxed)
     }
 
     pub fn set_volume(&mut self, volume_percent: f32) {
@@ -354,6 +392,7 @@ fn build_input_stream_with<T>(
     device: &Device,
     config: &cpal::StreamConfig,
     producer: Arc<Mutex<AudioProducer>>,
+    stream_error: Arc<AtomicBool>,
     to_f32: impl Fn(T) -> f32 + Send + 'static,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
@@ -368,7 +407,12 @@ where
                 }
             }
         },
-        |e| error!("入力ストリームのエラー: {}", e),
+        move |e| {
+            error!("入力ストリームのエラー: {}", e);
+            // 呼ばれるのは cpal のストリームスレッド。ここで開き直すと
+            // ストリーム自身を drop することになるので、旗を立てるだけにする
+            stream_error.store(true, Ordering::Relaxed);
+        },
         None,
     )
 }
@@ -382,6 +426,7 @@ fn build_output_stream_with<T>(
     consumer: Arc<Mutex<AudioConsumer>>,
     volume: Arc<Mutex<f32>>,
     passthrough_enabled: Arc<AtomicBool>,
+    stream_error: Arc<AtomicBool>,
     to_sample: impl Fn(f32) -> T + Send + 'static,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
@@ -399,7 +444,11 @@ where
                 data.fill(to_sample(0.0));
             }
         },
-        |e| error!("出力ストリームのエラー: {}", e),
+        move |e| {
+            error!("出力ストリームのエラー: {}", e);
+            // 入力側と同じ理由で、旗を立てるだけにする
+            stream_error.store(true, Ordering::Relaxed);
+        },
         None,
     )
 }
