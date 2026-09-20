@@ -141,7 +141,9 @@ git push origin dev
 
 早送りで済む場合はこの操作自体が不要になる。`git log --oneline dev..main` が空なら何もしなくてよい。
 
-あわせて Asana の「リリース・保守」セクションにあるタスクの状態を更新する。
+あわせて `area:release` ラベルの付いた Issue の状態を更新する。
+
+https://github.com/Mui-MuiMui/Capturecard_Viewer/labels/area%3Arelease
 
 ## ワークフローが失敗したとき
 
