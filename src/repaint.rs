@@ -170,8 +170,19 @@ impl RepaintWaker {
     /// 最小化中に `false` にするのは、eframe が最小化されたウィンドウの
     /// 再描画要求を捨てるため。要求してもイベントループを起こすだけで
     /// 何も描かれず、フレームの到着ごとにこれをやると無駄が残る。
+    ///
+    /// **`false` → `true` の切り替えでは、その場で 1 回再描画を予約する。**
+    /// 呼び出し側（`update()` の末尾）がフレームバッファを読んでからここへ
+    /// 来るまでの間に届いたフレームは、まだ `false` なので捨てられている。
+    /// 拾い直さないと、その 1 枚が `IDLE_INTERVAL` ぶん遅れて出る。
+    /// 切り替えは映像が途切れたときなどに起きるだけなので、費用は無視できる。
     pub fn set_enabled(&self, enabled: bool) {
-        self.inner.enabled.store(enabled, Ordering::Relaxed);
+        let was_enabled = self.inner.enabled.swap(enabled, Ordering::Relaxed);
+        if enabled && !was_enabled {
+            if let Some(ctx) = self.inner.ctx.get() {
+                ctx.request_repaint_after(WAKE_DELAY);
+            }
+        }
     }
 
     /// UI スレッドを起こす。結びつく前や、止められている間は何もしない。
@@ -345,5 +356,97 @@ mod tests {
         // 起動直後は最小化かどうかが分からない。起こす側に倒す
         let waker = RepaintWaker::new();
         assert!(waker.inner.enabled.load(Ordering::Relaxed));
+    }
+
+    /// 何も要求していない状態の `egui::Context` を作る。
+    ///
+    /// 生成直後の `Context` は最初の描画を要求した状態なので、2 回空回しして
+    /// 落ち着かせる。画面も入力も無い状態で回せるので、実機は要らない。
+    fn settled_context() -> egui::Context {
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |_| {});
+        }
+        assert!(
+            !ctx.has_requested_repaint(),
+            "前提が崩れている: 何も要求していないのに再描画が予約されている"
+        );
+        ctx
+    }
+
+    #[test]
+    fn repaint_waker_re_enabling_requests_a_repaint() {
+        // 止めている間に届いたフレームは捨てられている。再開のときに
+        // 拾い直さないと、その 1 枚が IDLE_INTERVAL ぶん遅れて出る
+        let ctx = settled_context();
+        let waker = RepaintWaker::new();
+        waker.bind(&ctx);
+
+        waker.set_enabled(false);
+        assert!(!ctx.has_requested_repaint(), "止めるときに予約している");
+
+        waker.set_enabled(true);
+        assert!(ctx.has_requested_repaint(), "再開のときに予約していない");
+    }
+
+    #[test]
+    fn repaint_waker_enabling_while_already_enabled_requests_nothing() {
+        // 間隔を広げている間は毎フレーム set_enabled(true) が呼ばれる。
+        // そのたびに予約すると、広げた意味が無くなる
+        let ctx = settled_context();
+        let waker = RepaintWaker::new();
+        waker.bind(&ctx);
+
+        waker.set_enabled(true);
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        assert!(!ctx.has_requested_repaint(), "前提が崩れている");
+
+        waker.set_enabled(true);
+        assert!(
+            !ctx.has_requested_repaint(),
+            "同じ値を入れ直しただけで予約している"
+        );
+    }
+
+    #[test]
+    fn repaint_waker_wake_while_disabled_requests_nothing() {
+        let ctx = settled_context();
+        let waker = RepaintWaker::new();
+        waker.bind(&ctx);
+        waker.set_enabled(false);
+
+        waker.wake();
+        assert!(!ctx.has_requested_repaint(), "止めているのに起こしている");
+    }
+
+    #[test]
+    fn repaint_waker_wake_while_enabled_requests_a_repaint() {
+        let ctx = settled_context();
+        let waker = RepaintWaker::new();
+        waker.bind(&ctx);
+
+        waker.wake();
+        assert!(ctx.has_requested_repaint(), "起こす要求が届いていない");
+    }
+
+    #[test]
+    fn repaint_waker_binds_only_once() {
+        // update() の先頭で毎フレーム呼ぶので、2 回目以降が無視されること。
+        // 差し替わると、フレームコールバックが握っている複製の向き先も変わる
+        let first = settled_context();
+        let second = settled_context();
+        let waker = RepaintWaker::new();
+        waker.bind(&first);
+        waker.bind(&second);
+
+        waker.wake();
+        assert!(
+            first.has_requested_repaint(),
+            "最初の Context へ届いていない"
+        );
+        assert!(
+            !second.has_requested_repaint(),
+            "あとから渡した Context へ差し替わっている"
+        );
     }
 }
