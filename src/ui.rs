@@ -1,4 +1,6 @@
-use crate::settings::{AppSettings, ScreenshotFormat, MAX_JPEG_QUALITY, MIN_JPEG_QUALITY};
+use crate::settings::{
+    AppSettings, ColorRange, ColorSpace, ScreenshotFormat, MAX_JPEG_QUALITY, MIN_JPEG_QUALITY,
+};
 use crate::status::{ConnectionStatus, LinkStatus};
 use crate::video::{DeviceCapabilities, VideoMode};
 use eframe::egui;
@@ -879,6 +881,36 @@ fn show_device_settings_tab(
                     }
                 });
         });
+
+        // 色空間の選択。デバイスは入力信号の色空間を通知してこないので、
+        // 通常は解像度から推定する（自動）。推定が外れる機種のために固定できる
+        ui.horizontal(|ui| {
+            ui.label("色空間:");
+            egui::ComboBox::from_id_source("color_space_combo")
+                .selected_text(settings.video.color_space.label())
+                .show_ui(ui, |ui| {
+                    for space in ColorSpace::ALL {
+                        ui.selectable_value(&mut settings.video.color_space, space, space.label());
+                    }
+                })
+                .response
+                .on_hover_text("色がずれて見える場合に切り替えます。通常は自動のままで構いません");
+        });
+
+        // 輝度レンジの選択。フルレンジで出すかどうかはデバイス側の設定次第で、
+        // 信号からも解像度からも判別できないため手で選ばせる
+        ui.horizontal(|ui| {
+            ui.label("色レンジ:");
+            egui::ComboBox::from_id_source("color_range_combo")
+                .selected_text(settings.video.color_range.label())
+                .show_ui(ui, |ui| {
+                    for range in ColorRange::ALL {
+                        ui.selectable_value(&mut settings.video.color_range, range, range.label());
+                    }
+                })
+                .response
+                .on_hover_text("黒が灰色に浮く、または黒潰れ・白飛びする場合に切り替えます");
+        });
     });
 
     ui.add_space(15.0);
@@ -1466,6 +1498,9 @@ mod tests {
                 fps: Some(30),
                 // 既定値（true）と異なる値にして、反映の有無を見分けられるようにする
                 auto_reconnect: false,
+                // 色空間とレンジも既定値と異なる値にしておく
+                color_space: ColorSpace::Bt709,
+                color_range: ColorRange::Full,
             },
             audio: AudioSettings {
                 input_device_name: Some("Line In".to_string()),

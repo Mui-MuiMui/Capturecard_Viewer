@@ -5,7 +5,10 @@ use nokhwa::utils::{
 };
 use nokhwa::CallbackCamera;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+
+use crate::settings::{ColorRange, ColorSpace};
 use std::time::{Duration, Instant};
 
 /// デバイスを開ける映像モード 1 件。解像度とフレームレートの組み合わせ。
@@ -64,23 +67,32 @@ pub type DeviceCapabilities = Vec<FormatCapability>;
 
 /// YCbCr -> RGB 変換の係数。
 ///
-/// リミテッドレンジ（Y 16〜235、Cb/Cr 16〜240）の信号をフルレンジ RGB（0〜255）へ
-/// 展開する行列を、1024 倍の固定小数点（`>> 10` で戻す）で保持する。
+/// 入力の信号を フルレンジ RGB（0〜255）へ展開する行列を、1024 倍の
+/// 固定小数点（`>> 10` で戻す）で保持する。
 ///
 /// 各係数の導出は以下。Kr / Kb は色空間ごとの輝度の重み、Kg = 1 - Kr - Kb。
+/// `sy` / `sc` は入力レンジをフルレンジへ伸ばすスケール。
 ///
 /// ```text
-/// y   = 255/219                        (Y のレンジ 219 段を 255 段へ伸ばす)
-/// r_v = 255/224 * 2 * (1 - Kr)
-/// g_u = 255/224 * 2 * Kb * (1 - Kb) / Kg
-/// g_v = 255/224 * 2 * Kr * (1 - Kr) / Kg
-/// b_u = 255/224 * 2 * (1 - Kb)
+/// リミテッドレンジ (Y 16〜235、Cb/Cr 16〜240): sy = 255/219、sc = 255/224
+/// フルレンジ       (Y 0〜255、Cb/Cr 0〜255)  : sy = 1、      sc = 1
+///
+/// y   = sy
+/// r_v = sc * 2 * (1 - Kr)
+/// g_u = sc * 2 * Kb * (1 - Kb) / Kg
+/// g_v = sc * 2 * Kr * (1 - Kr) / Kg
+/// b_u = sc * 2 * (1 - Kb)
 /// ```
 ///
 /// `g_u` と `g_v` は減算に使うため、符号を除いた大きさを持つ。
+/// Cb/Cr から引くオフセットはどちらのレンジでも 128 なので、表には持たせていない。
 #[derive(Debug, PartialEq, Eq)]
 struct ColorMatrix {
-    /// Y - 16 に掛ける係数
+    /// ログに出す名前。どの表で変換したかを後から追えるようにする
+    name: &'static str,
+    /// Y から引くオフセット。リミテッドは 16、フルは 0
+    y_offset: i32,
+    /// Y - y_offset に掛ける係数
     y: i32,
     /// R への Cr - 128 の寄与
     r_v: i32,
@@ -92,12 +104,14 @@ struct ColorMatrix {
     b_u: i32,
 }
 
-/// BT.601（SD 向け。Kr = 0.299、Kb = 0.114）。
+/// BT.601 リミテッドレンジ（SD 向け。Kr = 0.299、Kb = 0.114）。
 ///
 /// 1.164 / 1.596 / 0.392 / 0.813 / 2.017 に相当する。
 /// `g_v` だけは上式の丸め（832）ではなく 833 を使っている。古くから出回っている
 /// 整数版の定数をそのまま引き継いだもので、1/1024 の差しかないため変えていない。
 static BT601: ColorMatrix = ColorMatrix {
+    name: "BT.601 リミテッド",
+    y_offset: 16,
     y: 1192,
     r_v: 1634,
     g_u: 401,
@@ -105,16 +119,48 @@ static BT601: ColorMatrix = ColorMatrix {
     b_u: 2066,
 };
 
-/// BT.709（HD 向け。Kr = 0.2126、Kb = 0.0722）。
+/// BT.709 リミテッドレンジ（HD 向け。Kr = 0.2126、Kb = 0.0722）。
 ///
 /// 上式に代入すると 1.16438 / 1.79274 / 0.21325 / 0.53291 / 2.11240 となり、
 /// 1024 倍して四捨五入すると 1192 / 1836 / 218 / 546 / 2163 になる。
 static BT709: ColorMatrix = ColorMatrix {
+    name: "BT.709 リミテッド",
+    y_offset: 16,
     y: 1192,
     r_v: 1836,
     g_u: 218,
     g_v: 546,
     b_u: 2163,
+};
+
+/// BT.601 フルレンジ。
+///
+/// スケールを 1 にして Kr = 0.299、Kb = 0.114 を代入すると
+/// 1.0 / 1.402 / 0.34414 / 0.71414 / 1.772 となり、1024 倍して四捨五入すると
+/// 1024 / 1436 / 352 / 731 / 1815 になる。
+static BT601_FULL: ColorMatrix = ColorMatrix {
+    name: "BT.601 フル",
+    y_offset: 0,
+    y: 1024,
+    r_v: 1436,
+    g_u: 352,
+    g_v: 731,
+    b_u: 1815,
+};
+
+/// BT.709 フルレンジ。
+///
+/// 同じくスケールを 1 にして Kr = 0.2126、Kb = 0.0722 を代入すると
+/// 1.0 / 1.5748 / 0.18732 / 0.46812 / 1.8556 となり、1024 倍して四捨五入すると
+/// 1024 / 1613 / 192 / 479 / 1900 になる。
+static BT709_FULL: ColorMatrix = ColorMatrix {
+    name: "BT.709 フル",
+    y_offset: 0,
+    y: 1024,
+    r_v: 1613,
+    g_u: 192,
+    g_v: 479,
+    b_u: 1900,
 };
 
 /// HD とみなす境界。これ以上なら BT.709 を使う。
@@ -125,16 +171,31 @@ static BT709: ColorMatrix = ColorMatrix {
 const HD_MIN_WIDTH: usize = 1280;
 const HD_MIN_HEIGHT: usize = 720;
 
-/// 解像度から色空間を推定して係数を選ぶ。
+/// 設定とフレームの解像度から係数の表を選ぶ。
 ///
-/// 幅と高さのどちらかが HD の境界に達していれば BT.709 とみなす。
-/// 1440x1080 のようにアスペクト比が 1:1 でない HD 形式があるため、
-/// 片方だけを見ると取りこぼす。
-fn color_matrix_for(width: usize, height: usize) -> &'static ColorMatrix {
-    if width >= HD_MIN_WIDTH || height >= HD_MIN_HEIGHT {
-        &BT709
-    } else {
-        &BT601
+/// `space` が `Auto` のときだけ解像度から推定する。幅と高さのどちらかが
+/// HD の境界に達していれば BT.709 とみなす。1440x1080 のようにアスペクト比が
+/// 1:1 でない HD 形式があるため、片方だけを見ると取りこぼす。
+///
+/// レンジは推定できない。フルレンジで出すかどうかはデバイス側の設定次第で、
+/// 信号からも解像度からも判別できないため、設定の値をそのまま使う。
+fn color_matrix_for(
+    width: usize,
+    height: usize,
+    space: ColorSpace,
+    range: ColorRange,
+) -> &'static ColorMatrix {
+    let is_bt709 = match space {
+        ColorSpace::Auto => width >= HD_MIN_WIDTH || height >= HD_MIN_HEIGHT,
+        ColorSpace::Bt601 => false,
+        ColorSpace::Bt709 => true,
+    };
+
+    match (is_bt709, range) {
+        (false, ColorRange::Limited) => &BT601,
+        (false, ColorRange::Full) => &BT601_FULL,
+        (true, ColorRange::Limited) => &BT709,
+        (true, ColorRange::Full) => &BT709_FULL,
     }
 }
 
@@ -164,11 +225,13 @@ fn yuy2_to_rgb_naive(
     let converted_len = {
         // ループの外に出して、毎画素の間接参照を避ける
         let ColorMatrix {
+            y_offset,
             y: cy,
             r_v,
             g_u,
             g_v,
             b_u,
+            ..
         } = *matrix;
 
         let (src_chunks, _) = src.as_chunks::<4>();
@@ -181,9 +244,10 @@ fn yuy2_to_rgb_naive(
             let y1 = src_chunk[2] as i32;
             let v = src_chunk[3] as i32;
 
-            // リミテッドレンジの原点へ寄せる (整数演算で高速化)
-            let c0 = y0 - 16;
-            let c1 = y1 - 16;
+            // 入力レンジの原点へ寄せる (整数演算で高速化)
+            // リミテッドなら 16、フルなら 0 を引く
+            let c0 = y0 - y_offset;
+            let c1 = y1 - y_offset;
             let d = u - 128;
             let e = v - 128;
 
@@ -502,11 +566,76 @@ impl ActiveVideo {
     }
 }
 
+/// 色空間とレンジの設定を、UI スレッドとフレームコールバックスレッドで共有する箱。
+///
+/// フレームコールバックは 1080p60 なら毎秒 60 回呼ばれる。ここで `Mutex` を
+/// 取ると、設定を読むためだけに毎フレームのロックが増える。値は 2 つの
+/// 列挙だけなので、`AtomicU8` に詰めて読み書きする。
+///
+/// 色空間とレンジを別々の Atomic にしてあるため、片方だけ書き換えた瞬間に
+/// コールバックが読むと新旧が混ざりうる。混ざっても有効な組み合わせに
+/// しかならず、次のフレームで揃うので、まとめて更新する仕組みは持たせていない。
+#[derive(Debug)]
+struct SharedColorConversion {
+    space: AtomicU8,
+    range: AtomicU8,
+}
+
+/// `ColorSpace` を `AtomicU8` へ詰めるときの値。
+/// 数値そのものは設定ファイルにもログにも出ないので、順序に意味はない。
+const SPACE_AUTO: u8 = 0;
+const SPACE_BT601: u8 = 1;
+const SPACE_BT709: u8 = 2;
+
+/// `ColorRange` を `AtomicU8` へ詰めるときの値。
+const RANGE_LIMITED: u8 = 0;
+const RANGE_FULL: u8 = 1;
+
+impl SharedColorConversion {
+    fn new() -> Self {
+        Self {
+            space: AtomicU8::new(SPACE_AUTO),
+            range: AtomicU8::new(RANGE_LIMITED),
+        }
+    }
+
+    fn store(&self, space: ColorSpace, range: ColorRange) {
+        let space = match space {
+            ColorSpace::Auto => SPACE_AUTO,
+            ColorSpace::Bt601 => SPACE_BT601,
+            ColorSpace::Bt709 => SPACE_BT709,
+        };
+        let range = match range {
+            ColorRange::Limited => RANGE_LIMITED,
+            ColorRange::Full => RANGE_FULL,
+        };
+        self.space.store(space, Ordering::Relaxed);
+        self.range.store(range, Ordering::Relaxed);
+    }
+
+    fn load(&self) -> (ColorSpace, ColorRange) {
+        // store 側が詰めた値しか入らないので、既定へ倒す分岐は保険
+        let space = match self.space.load(Ordering::Relaxed) {
+            SPACE_BT601 => ColorSpace::Bt601,
+            SPACE_BT709 => ColorSpace::Bt709,
+            _ => ColorSpace::Auto,
+        };
+        let range = match self.range.load(Ordering::Relaxed) {
+            RANGE_FULL => ColorRange::Full,
+            _ => ColorRange::Limited,
+        };
+        (space, range)
+    }
+}
+
 pub struct VideoCapture {
     camera: Option<CallbackCamera>,
     frames: Arc<Mutex<FrameBuffer>>,
     /// いま開いているストリームの内容。閉じているときは `None`
     active: Option<ActiveVideo>,
+    // フレームコールバックと共有する色変換の設定。
+    // キャプチャを開き直さずに切り替えられるよう、開始時に固定せず共有する
+    color_conversion: Arc<SharedColorConversion>,
 }
 
 impl VideoCapture {
@@ -515,7 +644,21 @@ impl VideoCapture {
             camera: None,
             frames: Arc::new(Mutex::new(FrameBuffer::new())),
             active: None,
+            color_conversion: Arc::new(SharedColorConversion::new()),
         }
+    }
+
+    /// 色変換に使う色空間とレンジを差し替える。
+    ///
+    /// キャプチャ中でも次のフレームから効く。デバイスを開き直さないのは、
+    /// 開き直しがリトライの待ちを含めて秒単位かかり、色を見比べながら
+    /// 設定を選ぶ操作に耐えないため。
+    pub fn set_color_conversion(&self, space: ColorSpace, range: ColorRange) {
+        self.color_conversion.store(space, range);
+        info!(
+            "色変換の設定を反映した（色空間: {:?}、レンジ: {:?}）",
+            space, range
+        );
     }
 
     pub fn list_devices() -> Vec<(String, String)> {
@@ -642,6 +785,7 @@ impl VideoCapture {
 
         let frame_callback = {
             let fb = self.frames.clone();
+            let color_conversion = self.color_conversion.clone();
             // 直前に置き換えられたフレーム。UI スレッドが手放していれば
             // 中の Vec を次の変換先として回収し、毎フレームの確保を避ける。
             // 1 世代ぶん遅らせて回収するのは、置き換えた直後のフレームは
@@ -662,6 +806,9 @@ impl VideoCapture {
                 let height = res.height_y as usize;
                 // YUY2 高速パス (naive) 試行
                 let mut used_fast = false;
+                // 高速パスで使った係数の表。デコーダへ倒れた場合は
+                // 色空間を選べないので、そのことが分かる文字列を残す
+                let mut matrix_name = "（デコーダ任せ）";
                 #[allow(unused_mut)]
                 let mut rgb_vec: Option<Vec<u8>> = None;
                 // フレームフォーマットを取得して適切な処理を行う
@@ -690,8 +837,11 @@ impl VideoCapture {
                                 .and_then(|previous| Arc::try_unwrap(previous).ok())
                                 .map(|previous| previous.data)
                                 .unwrap_or_default();
-                            // 入力信号の色空間は通知されないため解像度から推定する
-                            let matrix = color_matrix_for(width, height);
+                            // 入力信号の色空間は通知されないため、設定が「自動」なら
+                            // 解像度から推定する。レンジは常に設定の値を使う
+                            let (space, range) = color_conversion.load();
+                            let matrix = color_matrix_for(width, height, space, range);
+                            matrix_name = matrix.name;
                             yuy2_to_rgb_naive(width, height, &raw_data, matrix, &mut rgb);
                             rgb_vec = Some(rgb);
                             used_fast = true;
@@ -735,12 +885,13 @@ impl VideoCapture {
                                 // 「接続した」と「映像が出ている」は別物なので、
                                 // 最初の 1 枚が届いたことだけは info で残す
                                 info!(
-                                    "最初のフレームが届いた（{}x{}、フォーマット: {:?}、変換 {:.2}ms、経路: {}）",
+                                    "最初のフレームが届いた（{}x{}、フォーマット: {:?}、変換 {:.2}ms、経路: {}、色変換: {}）",
                                     width,
                                     height,
                                     source_format,
                                     decode_ms,
-                                    if used_fast { "高速パス" } else { "デコーダ" }
+                                    if used_fast { "高速パス" } else { "デコーダ" },
+                                    matrix_name
                                 );
                             } else {
                                 trace!(
@@ -1526,37 +1677,193 @@ mod tests {
     #[test]
     fn color_matrix_for_sd_resolution_returns_bt601() {
         // 640x480 (VGA)、720x480 (NTSC)、720x576 (PAL) はいずれも SD
-        assert_eq!(color_matrix_for(640, 480), &BT601);
-        assert_eq!(color_matrix_for(720, 480), &BT601);
-        assert_eq!(color_matrix_for(720, 576), &BT601);
+        assert_eq!(
+            color_matrix_for(640, 480, ColorSpace::Auto, ColorRange::Limited),
+            &BT601
+        );
+        assert_eq!(
+            color_matrix_for(720, 480, ColorSpace::Auto, ColorRange::Limited),
+            &BT601
+        );
+        assert_eq!(
+            color_matrix_for(720, 576, ColorSpace::Auto, ColorRange::Limited),
+            &BT601
+        );
     }
 
     #[test]
     fn color_matrix_for_hd_resolution_returns_bt709() {
-        assert_eq!(color_matrix_for(1280, 720), &BT709);
-        assert_eq!(color_matrix_for(1920, 1080), &BT709);
-        assert_eq!(color_matrix_for(3840, 2160), &BT709);
+        assert_eq!(
+            color_matrix_for(1280, 720, ColorSpace::Auto, ColorRange::Limited),
+            &BT709
+        );
+        assert_eq!(
+            color_matrix_for(1920, 1080, ColorSpace::Auto, ColorRange::Limited),
+            &BT709
+        );
+        assert_eq!(
+            color_matrix_for(3840, 2160, ColorSpace::Auto, ColorRange::Limited),
+            &BT709
+        );
     }
 
     #[test]
     fn color_matrix_for_just_below_hd_threshold_returns_bt601() {
         // 幅・高さの両方が境界に届かない場合だけ BT.601
-        assert_eq!(color_matrix_for(1279, 719), &BT601);
+        assert_eq!(
+            color_matrix_for(1279, 719, ColorSpace::Auto, ColorRange::Limited),
+            &BT601
+        );
     }
 
     #[test]
     fn color_matrix_for_either_dimension_at_threshold_returns_bt709() {
         // 1440x1080 のようにアスペクト比が 1:1 でない HD 形式を取りこぼさないため、
         // 幅と高さのどちらかが境界に達していれば BT.709 とみなす
-        assert_eq!(color_matrix_for(1280, 719), &BT709);
-        assert_eq!(color_matrix_for(1279, 720), &BT709);
-        assert_eq!(color_matrix_for(1440, 1080), &BT709);
+        assert_eq!(
+            color_matrix_for(1280, 719, ColorSpace::Auto, ColorRange::Limited),
+            &BT709
+        );
+        assert_eq!(
+            color_matrix_for(1279, 720, ColorSpace::Auto, ColorRange::Limited),
+            &BT709
+        );
+        assert_eq!(
+            color_matrix_for(1440, 1080, ColorSpace::Auto, ColorRange::Limited),
+            &BT709
+        );
     }
 
     #[test]
     fn color_matrix_for_zero_size_returns_bt601() {
         // 解像度が取れない異常系。どちらかに倒すしかないので SD 側へ倒す
-        assert_eq!(color_matrix_for(0, 0), &BT601);
+        assert_eq!(
+            color_matrix_for(0, 0, ColorSpace::Auto, ColorRange::Limited),
+            &BT601
+        );
+    }
+
+    #[test]
+    fn color_matrix_for_explicit_space_ignores_resolution() {
+        // SD で BT.709、HD で BT.601 を出すデバイスのために手で固定できる。
+        // 固定したら解像度からの推定は働かない
+        assert_eq!(
+            color_matrix_for(640, 480, ColorSpace::Bt709, ColorRange::Limited),
+            &BT709
+        );
+        assert_eq!(
+            color_matrix_for(1920, 1080, ColorSpace::Bt601, ColorRange::Limited),
+            &BT601
+        );
+    }
+
+    #[test]
+    fn color_matrix_for_full_range_selects_full_range_table() {
+        // レンジは解像度からも色空間の指定からも独立して効く
+        assert_eq!(
+            color_matrix_for(640, 480, ColorSpace::Auto, ColorRange::Full),
+            &BT601_FULL
+        );
+        assert_eq!(
+            color_matrix_for(1920, 1080, ColorSpace::Auto, ColorRange::Full),
+            &BT709_FULL
+        );
+        assert_eq!(
+            color_matrix_for(640, 480, ColorSpace::Bt709, ColorRange::Full),
+            &BT709_FULL
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_full_range_maps_y_endpoints_to_black_and_white() {
+        // フルレンジでは Y=0 が黒、Y=255 が白にそのまま対応する。
+        // Cb = Cr = 128 なので色差の寄与は 0
+        let src = [0u8, 128, 255, 128];
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &BT601_FULL),
+            vec![0, 0, 0, 255, 255, 255]
+        );
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &BT709_FULL),
+            vec![0, 0, 0, 255, 255, 255]
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_full_range_keeps_mid_gray_at_128() {
+        // Y=128、Cb=Cr=128 は中間グレー。スケールが 1 倍なので値が変わらない
+        let src = [128u8, 128, 128, 128];
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &BT601_FULL),
+            vec![128, 128, 128, 128, 128, 128]
+        );
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &BT709_FULL),
+            vec![128, 128, 128, 128, 128, 128]
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_full_range_does_not_crush_limited_range_endpoints() {
+        // この設定を足した理由そのもの。フルレンジの信号にリミテッドの係数を
+        // 当てると、Y=16 が 0 へ潰れ Y=235 が 254 まで持ち上がる。
+        // フルレンジの表ならどちらも入力の値のまま残る
+        let src = [16u8, 128, 235, 128];
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &BT601_FULL),
+            vec![16, 16, 16, 235, 235, 235]
+        );
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &BT601),
+            vec![0, 0, 0, 254, 254, 254],
+            "リミテッドの表では両端が黒と白へ張り付く"
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_full_range_known_pattern_converts_two_pixels() {
+        // リミテッドのテストと同じ入力。Y0=81, U=90, Y1=145, V=240
+        let src = [81u8, 90, 145, 240];
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &BT601_FULL),
+            vec![238, 14, 13, 255, 78, 77]
+        );
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &BT709_FULL),
+            vec![255, 35, 10, 255, 99, 74]
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_full_range_min_input_saturates_at_0() {
+        // Y=0, U=0, V=0。Cb/Cr のオフセットはフルレンジでも 128 なので
+        // 色差は負に振れ、R と B が 0 へ飽和する
+        let src = [0u8, 0, 0, 0];
+        let out = convert_yuy2(2, 1, &src, &BT601_FULL);
+        assert_eq!(out, vec![0, 135, 0, 0, 135, 0]);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_full_range_max_input_saturates_at_255() {
+        // Y=255, U=255, V=255 では R と B が 255 を超えて飽和する
+        let src = [255u8, 255, 255, 255];
+        let out = convert_yuy2(2, 1, &src, &BT601_FULL);
+        assert_eq!(out, vec![255, 120, 255, 255, 120, 255]);
+    }
+
+    #[test]
+    fn shared_color_conversion_round_trips_every_combination() {
+        // フレームコールバックが読む側。詰め直しで色空間とレンジが
+        // 入れ替わらないことを全組み合わせで確かめる
+        let shared = SharedColorConversion::new();
+        assert_eq!(shared.load(), (ColorSpace::Auto, ColorRange::Limited));
+
+        for space in ColorSpace::ALL {
+            for range in ColorRange::ALL {
+                shared.store(space, range);
+                assert_eq!(shared.load(), (space, range));
+            }
+        }
     }
 
     #[test]
