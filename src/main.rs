@@ -448,6 +448,12 @@ pub struct CaptureCardViewer {
     // ホットキー入力ダイアログで編集中の内容。
     // 確定した文字列で、まだ設定（ドラフトまたは共有設定）へ書いていないもの
     temp_hotkey: String,
+    // `temp_hotkey` がどのアクションのものか。
+    //
+    // 入力ダイアログはモーダルではないので、開いたまま一覧の別の行の
+    // 「設定...」を押せる。編集対象が変わったことをここで検出して
+    // `temp_hotkey` を捨てないと、前のアクションのキーが残ったまま確定する
+    temp_hotkey_action: Option<HotkeyAction>,
     // 最後に適用した実行時パラメータ（差分ベースの再起動回避用）
     last_video_device: Option<String>,
     last_video_res: Option<(u32, u32)>,
@@ -540,6 +546,7 @@ impl Default for CaptureCardViewer {
             last_audio_error_reconnect: None,
             audio_stream_error_pending: false,
             temp_hotkey: String::new(),
+            temp_hotkey_action: None,
             last_video_device: None,
             last_video_res: None,
             last_video_format: None,
@@ -772,6 +779,17 @@ impl eframe::App for CaptureCardViewer {
                 .editing()
                 .unwrap_or(HotkeyAction::Screenshot);
 
+            // 編集対象が変わったら、前のアクションで見せていた値を捨てる。
+            //
+            // ホットキー入力ダイアログはモーダルではないため、開いたまま
+            // 一覧の別の行の「設定...」を押せる。捨てないと、前のアクションの
+            // キーが表示に残ったまま OK で確定し、押した覚えのないキーが
+            // 新しいアクションへ入る
+            if self.temp_hotkey_action != Some(action) {
+                self.temp_hotkey_action = Some(action);
+                self.temp_hotkey.clear();
+            }
+
             // ダイアログが開かれた時に現在の設定値をtemp_hotkeyに設定。
             // 設定ダイアログから開かれた場合は、編集中のドラフトの値を見せる
             if self.temp_hotkey.is_empty() {
@@ -834,6 +852,7 @@ impl eframe::App for CaptureCardViewer {
             // ダイアログが閉じられた時にtemp_hotkeyをクリア
             if !self.show_hotkey_dialog {
                 self.temp_hotkey.clear();
+                self.temp_hotkey_action = None;
             }
         }
 
