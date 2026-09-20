@@ -10,7 +10,6 @@ use chrono::Local;
 use eframe::egui;
 use image::GenericImageView;
 use log::{debug, error, info, trace, warn};
-use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -26,7 +25,7 @@ mod video;
 
 use audio::AudioCapture;
 use screenshot::ScreenshotManager;
-use settings::{AppSettings, ScreenshotEncoding};
+use settings::{AppSettings, AutoSavePolicy, ScreenshotEncoding};
 use video::{FrameStats, VideoCapture};
 
 /// デバイスリストのキャッシュを更新する間隔
@@ -271,6 +270,9 @@ pub struct CaptureCardViewer {
     // 設定に未保存の変更があるときの、最後に変更された時刻。
     // None は保留中の変更が無いことを表す
     settings_dirty_since: Option<Instant>,
+    // 自動保存（デバウンス保存と終了時保存）を許してよいか。
+    // 読めなかった設定ファイルを退避できなかった場合は止める
+    autosave: AutoSavePolicy,
 
     // 映像表示関連
     video_texture: Option<egui::TextureHandle>,
@@ -357,6 +359,7 @@ impl Default for CaptureCardViewer {
             last_volume_sent: -1.0,
             last_settings_applied: Instant::now(),
             settings_dirty_since: None,
+            autosave: AutoSavePolicy::from_load_outcome(load_outcome),
             video_texture: None,
             last_frame_generation: 0,
             pending_hotkey: None,
@@ -417,6 +420,10 @@ impl Default for CaptureCardViewer {
                 // 潰れ、ユーザーが設定を取り戻す最後の手段が消える。
                 if load_outcome.may_write_defaults_on_startup() {
                     s.save();
+                } else {
+                    warn!(
+                        "読めなかった設定ファイルが残っているため、設定の自動保存を止める。設定画面の「適用」か「OK」で保存すると再開する"
+                    );
                 }
             }
         }
@@ -461,15 +468,11 @@ impl eframe::App for CaptureCardViewer {
 
             // ウィンドウレベルは always_on_top を設定から取り込んだあとに適用する。
             // 順序を入れ替えると、既定値の false で 1 度適用されてしまう
-            if let Err(e) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
-                    egui::WindowLevel::AlwaysOnTop
-                } else {
-                    egui::WindowLevel::Normal
-                }));
-            })) {
-                warn!("ウィンドウレベルの設定でパニックが起きた: {:?}", e);
-            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            }));
         }
 
         // 期限が来ているデバイスの接続を 1 回だけ試す。
@@ -484,13 +487,7 @@ impl eframe::App for CaptureCardViewer {
 
         // 定期的に実行時設定が保存設定と一致することを確認（外部変更に対応）
         if self.last_settings_applied.elapsed().as_secs_f32() > 2.0 {
-            if let Err(e) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                self.apply_settings(false);
-            })) {
-                warn!("設定の適用でパニックが起きた: {:?}", e);
-                // タイマーをリセットして連続的なエラー出力を防止
-                self.last_settings_applied = Instant::now();
-            }
+            self.apply_settings(false);
         }
 
         // 音量が変更された場合、オーディオバックエンドに伝播
@@ -713,9 +710,16 @@ impl eframe::App for CaptureCardViewer {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // 終了時は必ず書き出す。デバウンスの待ち時間中に終了しても、
-        // ウィンドウのサイズ・位置や音量の変更を取りこぼさないようにする
-        self.save_settings_now();
+        // 終了時は書き出す。デバウンスの待ち時間中に終了しても、
+        // ウィンドウのサイズ・位置や音量の変更を取りこぼさないようにする。
+        //
+        // 例外は、読めなかった設定ファイルを退避できずディスクに残している場合。
+        // ここで書き出すと、起動時の書き戻しを止めた意味が無くなる
+        if self.autosave.is_allowed() {
+            self.save_settings_now();
+        } else {
+            warn!("読めなかった設定ファイルを残しているため、終了時の保存を行わない");
+        }
 
         // 撮った直後に閉じても最後の 1 枚が残るように、保存の完了を待ってから抜ける。
         // ここで待たないと、main が返った時点でプロセスごと落ちて
@@ -1964,8 +1968,12 @@ impl CaptureCardViewer {
 
         if transition.save_to_file {
             // 「適用」と「OK」はユーザーの明示的な保存操作なので、
-            // デバウンスを待たずに書き出す
-            self.save_settings_now();
+            // デバウンスを待たずに書き出す。読めなかった設定ファイルが
+            // 残っている場合も、上書きするかはユーザーが決めることなので止めない
+            let saved = self.save_settings_now();
+            // 明示的な保存が通ったなら、守るべき壊れたファイルはもう無い。
+            // 以降はウィンドウ位置や音量の自動保存も通常どおり行う
+            self.autosave.note_explicit_save(saved);
         }
 
         if transition.close {
@@ -1997,23 +2005,34 @@ impl CaptureCardViewer {
     /// 設定に未保存の変更があることを記録する。
     /// 実際の書き出しは `flush_settings_if_due` がまとめて行う。
     fn mark_settings_dirty(&mut self) {
+        // 自動保存を止めている間は保留として積まない。積むと
+        // flush_settings_if_due が書き出す時刻へ再描画を予約し続け、
+        // 書き出さないまま 2 秒ごとに起こされることになる
+        if !self.autosave.is_allowed() {
+            trace!("自動保存を止めているので設定の変更を保留しない");
+            return;
+        }
         self.settings_dirty_since = Some(Instant::now());
     }
 
     /// 保留の有無にかかわらず、いま設定をディスクへ書き出す。
-    fn save_settings_now(&mut self) {
+    /// 書き出せたかを返す。
+    fn save_settings_now(&mut self) -> bool {
         // ロックが取れなかった場合は保留のままにして、次の機会に書き出す
         let Ok(settings) = self.settings.lock() else {
-            return;
+            warn!("設定の保存で settings のロックを取得できない");
+            return false;
         };
 
         if settings.save() {
             self.settings_dirty_since = None;
+            true
         } else {
             // 書き出せなかった変更を保存済みとして捨てず、保留のまま残す。
             // 時刻を入れ直しているのは、失敗が続いたときに毎フレーム
             // 書き込みを試みる状態へ戻さないため
             self.settings_dirty_since = Some(Instant::now());
+            false
         }
     }
 
@@ -2033,6 +2052,13 @@ impl CaptureCardViewer {
     /// ため UI スレッドで行っている。ウィンドウのドラッグや音量の連続操作のように
     /// 毎フレーム値が変わる間は、変更が止まるまで 1 度も書き出さない。
     fn flush_settings_if_due(&mut self, ctx: &egui::Context) {
+        // 読めなかった設定ファイルが残っている間は書き出さない。
+        // mark_settings_dirty 側でも積まないようにしてあるが、
+        // 保留を直接立てる経路が増えても止まるようにここでも見る
+        if !self.autosave.is_allowed() {
+            return;
+        }
+
         let elapsed = self.settings_dirty_since.map(|since| since.elapsed());
         if !Self::should_flush_settings(elapsed) {
             // 書き出す時刻に再描画を予約する。映像が来ていないときは再描画が

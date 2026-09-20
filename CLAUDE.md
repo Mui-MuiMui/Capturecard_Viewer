@@ -121,9 +121,13 @@ cargo build --release
 
 **デバイス起因の不具合を調べるときは `.claude/skills/device-debug/SKILL.md` の手順に従う。** ログの読み方、正常時の所要時間の目安、症状ごとの確認順をまとめてある。
 
-### catch_unwind は機能しない
+### catch_unwind は使わない
 
-`Cargo.toml` の `[profile.release]` に `panic = "abort"` があるため、`main.rs` 内の `std::panic::catch_unwind` は release ビルドで一切機能しない。
+`Cargo.toml` の `[profile.release]` に `panic = "abort"` があるため、`std::panic::catch_unwind` は release ビルドで一切機能しない。パニックが起きればプロセスごと落ちる。
+
+以前は `update()` の中で `ViewportCommand` の送出と `apply_settings` を `catch_unwind` で囲み、失敗を警告に落としているように見えていた。**実際には守っておらず、読む側に「ここはパニックしても続く」と誤解させるだけなので削除した。** 代わりに、囲んでいた処理がパニックしないことを確認してある（`unwrap` / `expect` / 添字が無く、`Mutex::lock()` の失敗も `if let Ok` で受けている）。
+
+**パニックしうる処理を書かない側で担保すること。** `Option` と `Result` は `unwrap` せずに分岐し、ロックの失敗はログに残して諦める。`catch_unwind` を足しても release では効かない。
 
 ### 設定構造体の `#[serde(default)]` を外さない
 
@@ -135,11 +139,19 @@ cargo build --release
 
 ### 設定の保存はデバウンスされる
 
-ウィンドウの移動・リサイズ、音量スクロール、コンテキストメニューの各操作は、その場ではディスクへ書かない。`mark_settings_dirty()` で変更を記録し、`update()` の末尾の `flush_settings_if_due()` が最後の変更から 2 秒空いたところでまとめて書き出す。終了時は `on_exit` が保留の有無にかかわらず必ず書き出す。
+ウィンドウの移動・リサイズ、音量スクロール、コンテキストメニューの各操作は、その場ではディスクへ書かない。`mark_settings_dirty()` で変更を記録し、`update()` の末尾の `flush_settings_if_due()` が最後の変更から 2 秒空いたところでまとめて書き出す。終了時は `on_exit` が保留の有無にかかわらず書き出す。
 
 **設定を書き換える処理を足すときは `AppSettings::save()` を直接呼ばず `mark_settings_dirty()` を使うこと。** 直接呼ぶと、ウィンドウをドラッグしている間ずっと毎フレーム TOML を書き出す元の問題に戻る。
 
 例外は 2 つ。起動時の書き戻し（`may_write_defaults_on_startup()` で守られている）と、設定ダイアログの「適用」「OK」（`main.rs` の `handle_settings_dialog_action`）。後者はユーザーの明示的な保存操作なので即座に書き出す。
+
+#### 壊れた設定ファイルが残っている間は自動保存しない
+
+読み込みに失敗した設定ファイルを `.bak` へ退避できなかった場合（`LoadOutcome::BrokenFileLeftBehind`）、読めなかったファイルがディスクに残る。**起動時の書き戻しだけを止めても足りない。** ウィンドウを動かせば 2 秒後のデバウンス保存が、何もしなくても `on_exit` が、同じファイルを既定値で上書きしてしまう。
+
+そのため `CaptureCardViewer` は `settings::AutoSavePolicy` を持ち、`mark_settings_dirty` / `flush_settings_if_due` / `on_exit` をこれで守っている。止めている間は**ウィンドウの位置・サイズや音量も永続化されない。** 設定を取り戻す手段を残すほうを優先している。
+
+解除するのは設定ダイアログの「適用」「OK」で保存に成功したときだけ（`AutoSavePolicy::note_explicit_save`）。その時点で壊れたファイルはユーザーの意思で置き換わっているため、守る対象がもう無い。**自動保存の経路を足すときは `AutoSavePolicy::is_allowed()` を通すこと。**
 
 ### 設定ダイアログはドラフトを編集する
 
