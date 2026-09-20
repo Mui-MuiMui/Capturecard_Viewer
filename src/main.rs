@@ -10,7 +10,6 @@ use chrono::Local;
 use eframe::egui;
 use image::GenericImageView;
 use log::{debug, error, info, trace, warn};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -255,16 +254,6 @@ fn audio_target(settings: &AppSettings) -> AudioTarget {
         settings.audio.sample_rate,
         settings.audio.channels,
     )
-}
-
-/// 設定から、アクションごとのホットキー割り当てを取り出す。
-fn desired_hotkeys(settings: &AppSettings) -> BTreeMap<HotkeyAction, String> {
-    settings
-        .screenshot
-        .hotkey
-        .iter()
-        .map(|hotkey| (HotkeyAction::Screenshot, hotkey.clone()))
-        .collect()
 }
 
 /// デバイス接続の再試行を、UI スレッドを止めずに回すための状態。
@@ -756,12 +745,12 @@ impl eframe::App for CaptureCardViewer {
             // 設定ダイアログから開かれた場合は、編集中のドラフトの値を見せる
             if self.temp_hotkey.is_empty() {
                 let current = match self.settings_dialog.draft() {
-                    Some(draft) => draft.screenshot.hotkey.clone(),
-                    None => self
-                        .settings
-                        .lock()
-                        .ok()
-                        .and_then(|settings| settings.screenshot.hotkey.clone()),
+                    Some(draft) => draft.hotkey(HotkeyAction::Screenshot).map(str::to_string),
+                    None => self.settings.lock().ok().and_then(|settings| {
+                        settings
+                            .hotkey(HotkeyAction::Screenshot)
+                            .map(str::to_string)
+                    }),
                 };
                 self.temp_hotkey = current.unwrap_or_default();
             }
@@ -789,7 +778,7 @@ impl eframe::App for CaptureCardViewer {
                 // 上書きして、設定したホットキーが消える
                 let wrote_to_draft = match self.settings_dialog.draft_mut() {
                     Some(draft) => {
-                        draft.screenshot.hotkey = hotkey.clone();
+                        draft.set_hotkey(HotkeyAction::Screenshot, hotkey.clone());
                         true
                     }
                     None => false,
@@ -799,7 +788,7 @@ impl eframe::App for CaptureCardViewer {
                     // 設定ダイアログが閉じられた状態でホットキーだけ確定した場合。
                     // ドラフトが無いので共有設定へ直接書き、その場で登録（解除）する
                     if let Ok(mut settings) = self.settings.lock() {
-                        settings.screenshot.hotkey = hotkey.clone();
+                        settings.set_hotkey(HotkeyAction::Screenshot, hotkey.clone());
                     }
                     self.mark_settings_dirty();
                     self.apply_hotkeys_now();
@@ -2237,7 +2226,7 @@ impl CaptureCardViewer {
             // 差分は `HotkeyManager::apply` が取る。無条件に登録し直すと、
             // 2 秒ごとに unregister → register が走ってその瞬間のキー入力を
             // 取りこぼす
-            self.hotkey_manager.apply(&desired_hotkeys(&settings));
+            self.hotkey_manager.apply(&settings.hotkeys);
 
             // スクリーンショットの効果音
             //
@@ -2319,7 +2308,7 @@ impl CaptureCardViewer {
         // 登録はデバイスを開くような重い処理ではないが、`apply` の中で
         // ログを出すため settings のロックは先に手放しておく
         let desired = match self.settings.lock() {
-            Ok(settings) => desired_hotkeys(&settings),
+            Ok(settings) => settings.hotkeys.clone(),
             Err(_) => {
                 warn!("ホットキーの適用で settings のロックを取得できない");
                 return;

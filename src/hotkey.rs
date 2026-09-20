@@ -3,7 +3,7 @@ use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use log::{debug, error, info, trace, warn};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -87,21 +87,16 @@ impl HotkeyAction {
 }
 
 // 設定では BTreeMap<HotkeyAction, String> のキーとして使う。TOML のキーは
-// 文字列でなければならないため、derive ではなく文字列として読み書きする。
+// 文字列でなければならないため、derive ではなく文字列として書き出す。
 // derive の単位バリアントはシリアライザによってキーとして受け付けられない
 // ことがあり、そこに寄りかかると TOML 側の都合で保存できなくなる。
+//
+// 読むほうは `Deserialize` を実装していない。知らないアクション名が書かれて
+// いても設定ファイル全体を失わないよう、`settings::migrate_hotkeys` が
+// 文字列のまま受けて `from_key` で振り分ける。
 impl Serialize for HotkeyAction {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for HotkeyAction {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        HotkeyAction::from_key(&raw).ok_or_else(|| {
-            serde::de::Error::custom(format!("知らないホットキーのアクション: {}", raw))
-        })
     }
 }
 

@@ -1,3 +1,4 @@
+use crate::hotkey::HotkeyAction;
 use crate::settings::{AppSettings, ScreenshotFormat, MAX_JPEG_QUALITY, MIN_JPEG_QUALITY};
 use crate::video::{DeviceCapabilities, VideoMode};
 use eframe::egui;
@@ -455,6 +456,8 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
     target.video.auto_reconnect = auto_reconnect;
     target.audio = draft.audio.clone();
     target.screenshot = draft.screenshot.clone();
+    // ホットキーの割り当てもダイアログの中だけで変わる
+    target.hotkeys = draft.hotkeys.clone();
 
     // ダイアログの「ユーザーインターフェース」グループが編集する 2 項目
     if draft.ui.maintain_aspect_ratio != original.ui.maintain_aspect_ratio {
@@ -1126,10 +1129,9 @@ fn show_screenshot_settings_tab(
         ui.horizontal(|ui| {
             ui.label("スクリーンショットホットキー:");
             let hotkey_str = settings
-                .screenshot
-                .hotkey
-                .clone()
-                .unwrap_or_else(|| "未設定".to_string());
+                .hotkey(HotkeyAction::Screenshot)
+                .unwrap_or("未設定")
+                .to_string();
 
             ui.label(&hotkey_str);
 
@@ -1138,10 +1140,10 @@ fn show_screenshot_settings_tab(
             }
         });
 
-        if settings.screenshot.hotkey.is_some() {
+        if settings.hotkey(HotkeyAction::Screenshot).is_some() {
             ui.horizontal(|ui| {
                 if ui.button("ホットキー解除").clicked() {
-                    settings.screenshot.hotkey = None;
+                    settings.set_hotkey(HotkeyAction::Screenshot, None);
                 }
             });
         }
@@ -1382,6 +1384,7 @@ mod tests {
     use super::*;
     use crate::settings::{AudioSettings, ScreenshotSettings, UiSettings, VideoSettings};
     use crate::video::FormatCapability;
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     /// 既定値と全項目が異なる設定。どの項目が反映され、どの項目が
@@ -1409,7 +1412,7 @@ mod tests {
                 jpeg_quality: 60,
                 sound_file: Some(PathBuf::from("sound/custom.mp3")),
                 sound_volume: 50.0,
-                hotkey: Some("Ctrl+S".to_string()),
+                legacy_hotkey: None,
             },
             ui: UiSettings {
                 volume: 80.0,
@@ -1420,6 +1423,10 @@ mod tests {
                 enable_drag_move: false,
                 show_stats_overlay: true,
             },
+            hotkeys: BTreeMap::from([
+                (HotkeyAction::Screenshot, "Ctrl+S".to_string()),
+                (HotkeyAction::ToggleFullscreen, "F11".to_string()),
+            ]),
         }
     }
 
@@ -1523,11 +1530,38 @@ mod tests {
         assert_eq!(shared.audio.sample_rate, Some(44100));
         assert_eq!(shared.audio.channels, Some(1));
         assert!(!shared.audio.passthrough_enabled);
-        assert_eq!(shared.screenshot.hotkey, Some("Ctrl+S".to_string()));
         assert_eq!(shared.screenshot.sound_volume, 50.0);
         // 保存形式と品質も screenshot セクションごと差し替わる
         assert_eq!(shared.screenshot.format, ScreenshotFormat::Png);
         assert_eq!(shared.screenshot.jpeg_quality, 60);
+    }
+
+    #[test]
+    fn commit_draft_replaces_hotkey_assignments() {
+        // ホットキーの割り当てはダイアログの中だけで変わるので、
+        // ドラフトの内容でまるごと差し替える
+        let mut shared = AppSettings::default();
+        let original = AppSettings::default();
+        let draft = sample_settings();
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
+        assert_eq!(shared.hotkey(HotkeyAction::ToggleFullscreen), Some("F11"));
+    }
+
+    #[test]
+    fn commit_draft_clearing_every_hotkey_reaches_the_shared_settings() {
+        // すべての割り当てを外した状態を、空のマップとして反映できること。
+        // 「ドラフトに何も無い＝変更なし」と扱うと、解除が反映されない
+        let mut shared = AppSettings::default();
+        let original = AppSettings::default();
+        let mut draft = AppSettings::default();
+        draft.hotkeys.clear();
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert!(shared.hotkeys.is_empty());
     }
 
     #[test]
