@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::repaint::RepaintWaker;
 use crate::settings::{ColorRange, ColorSpace};
 use std::time::{Duration, Instant};
 
@@ -636,6 +637,9 @@ pub struct VideoCapture {
     // フレームコールバックと共有する色変換の設定。
     // キャプチャを開き直さずに切り替えられるよう、開始時に固定せず共有する
     color_conversion: Arc<SharedColorConversion>,
+    // フレームが届いたことを UI スレッドへ知らせる窓口。
+    // `start_capture` のたびにフレームコールバックへ複製を渡す
+    repaint_waker: RepaintWaker,
 }
 
 impl VideoCapture {
@@ -645,7 +649,19 @@ impl VideoCapture {
             frames: Arc::new(Mutex::new(FrameBuffer::new())),
             active: None,
             color_conversion: Arc::new(SharedColorConversion::new()),
+            repaint_waker: RepaintWaker::default(),
         }
+    }
+
+    /// フレームの到着で UI スレッドを起こすための窓口を渡す。
+    ///
+    /// **`start_capture` より前に呼ぶこと。** フレームコールバックは開始時点の
+    /// 複製を持つので、開いたあとに差し替えても、そのストリームには届かない。
+    /// 既定の `RepaintWaker` は何もしないため、渡し忘れても映像は止まらない。
+    /// ただし `update()` の保険の間隔（`repaint::ACTIVE_FALLBACK_INTERVAL`）
+    /// でしか更新されず、10fps 程度まで落ちる。
+    pub fn set_repaint_waker(&mut self, waker: RepaintWaker) {
+        self.repaint_waker = waker;
     }
 
     /// 色変換に使う色空間とレンジを差し替える。
@@ -786,6 +802,9 @@ impl VideoCapture {
         let frame_callback = {
             let fb = self.frames.clone();
             let color_conversion = self.color_conversion.clone();
+            // フレームを置いたことを UI スレッドへ知らせる窓口。
+            // これが無いと、UI 側は保険の間隔でしか新着を見に来ない
+            let repaint_waker = self.repaint_waker.clone();
             // 直前に置き換えられたフレーム。UI スレッドが手放していれば
             // 中の Vec を次の変換先として回収し、毎フレームの確保を避ける。
             // 1 世代ぶん遅らせて回収するのは、置き換えた直後のフレームは
@@ -877,10 +896,15 @@ impl VideoCapture {
                         height,
                         data,
                     };
+                    // フレームバッファへ置けたか。置けたときだけ UI スレッドを
+                    // 起こす。**起こすのはロックを手放してから。** 握ったまま
+                    // 呼ぶと、egui 側の待ちの間このバッファも止まる
+                    let mut pushed = false;
                     match fb.lock() {
                         Ok(mut guard) => {
                             recyclable =
                                 guard.push_back(vf, start, decode_ms, used_fast, format_name);
+                            pushed = true;
                             if first_frame.take() {
                                 // 「接続した」と「映像が出ている」は別物なので、
                                 // 最初の 1 枚が届いたことだけは info で残す
@@ -909,6 +933,12 @@ impl VideoCapture {
                                 );
                             }
                         }
+                    }
+
+                    if pushed {
+                        // 届いたその場で UI スレッドを起こす。ここが映像の
+                        // 遅延を決めるので、重い処理を前に挟まないこと
+                        repaint_waker.wake();
                     }
                 }
             }

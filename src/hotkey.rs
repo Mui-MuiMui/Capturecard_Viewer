@@ -1,3 +1,4 @@
+use crate::repaint::RepaintWaker;
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
@@ -135,6 +136,15 @@ struct ListenerState {
     /// 集合にしてあるので、1 フレームの間に同じアクションが複数回届いても
     /// 1 回として扱う。
     pressed: HashSet<HotkeyAction>,
+    /// 押下を記録したあとに UI スレッドを起こす窓口。
+    ///
+    /// **押下は `update()` が `take_pressed` で取りに来るまで実行されない。**
+    /// 映像が届いていない間の `update()` は 250ms 間隔まで落ちるため、
+    /// 起こさないとホットキーの反応がそのぶん遅れる。
+    ///
+    /// 既定の `RepaintWaker` は何もしないので、渡さなくても動作は変わらない
+    /// （反応が遅くなるだけ）。
+    waker: RepaintWaker,
 }
 
 /// グローバルホットキーの登録と押下の検出。
@@ -324,12 +334,17 @@ fn spawn_listener(state: Arc<Mutex<ListenerState>>, shutdown: Arc<AtomicBool>) -
                     // クリアしたはずのキーで 1 回だけ実行されることがある。
                     // ログはロックを手放してから出す（trace ではファイルへの
                     // 書き出しが入るため、その間ロックを握らない）
+                    // 押下を記録したときに UI スレッドを起こすための複製。
+                    // **起こすのはロックを手放してから。** 握ったまま呼ぶと、
+                    // egui 側の待ちの間この共有状態も止まる
+                    let mut wake = None;
                     let outcome = match state.lock() {
                         Ok(mut state) => {
                             let action =
                                 accepted_action(&state.registered, event.id(), event.state());
                             if let Some(action) = action {
                                 state.pressed.insert(action);
+                                wake = Some(state.waker.clone());
                             }
                             Some(action)
                         }
@@ -339,6 +354,10 @@ fn spawn_listener(state: Arc<Mutex<ListenerState>>, shutdown: Arc<AtomicBool>) -
                             None
                         }
                     };
+
+                    if let Some(waker) = wake {
+                        waker.wake();
+                    }
 
                     match outcome {
                         Some(Some(action)) => {
@@ -388,6 +407,18 @@ impl HotkeyManager {
             last_trigger: HashMap::new(),
             listener_shutdown,
             listener: Some(listener),
+        }
+    }
+
+    /// 押下を検出したときに UI スレッドを起こすための窓口を渡す。
+    ///
+    /// リスナースレッドとは `ListenerState` を通して共有するので、
+    /// スレッドを起動したあとでも差し替えられる。
+    pub fn set_repaint_waker(&mut self, waker: RepaintWaker) {
+        match self.state.lock() {
+            Ok(mut state) => state.waker = waker,
+            // 起こせないだけで押下の検出は続く。反応が最大 250ms 遅れる
+            Err(_) => warn!("ホットキーの共有状態のロックを取得できないので再描画の窓口を渡せない"),
         }
     }
 
