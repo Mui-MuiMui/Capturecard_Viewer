@@ -1168,6 +1168,25 @@ fn show_device_settings_tab(
             }
         }
 
+        // 選択肢が 1 つしか無い値は、デバイスを切り替えていなくてもそこへ寄せる。
+        //
+        // **`repick` の目印はデバイスを選び直したときにしか立たない。** 設定ファイルに
+        // 古い値が残ったまま（Windows 側で既定デバイスの形式を変えた、設定ファイルを
+        // 手で書き換えた）起動すると、選べる値が 1 つしか無いのに違う値が残る。
+        // チャンネル数のコンボは 1 択のとき操作できないので、ユーザーが直す手段が無い
+        if let [only] = rates.values[..] {
+            if settings.audio.sample_rate != Some(only) {
+                debug!("サンプリングレートの選択肢が 1 つなので {} Hz に寄せた", only);
+                settings.audio.sample_rate = Some(only);
+            }
+        }
+        if let [only] = channel_choices.values[..] {
+            if settings.audio.channels != Some(only) {
+                debug!("チャンネル数の選択肢が 1 つなので {} ch に寄せた", only);
+                settings.audio.channels = Some(only);
+            }
+        }
+
         // サンプルレート
         ui.horizontal(|ui| {
             ui.label("サンプリングレート:");
