@@ -28,10 +28,14 @@ pub enum OverlayContent {
     /// `ratio` はバーの塗り具合、`marker_ratio` は目盛りを引く位置で、
     /// どちらも 0.0〜1.0 で表す。音量のように既定値（100%）が範囲の途中にある
     /// 値で、「いまどのあたりか」と「基準はどこか」を一目で分かるようにするためにある。
+    ///
+    /// `dimmed` はバーを灰色で描く。値としては有効だが、いま効いていない状態
+    /// （ミュート中の音量）を、数字を消さずに示すためにある。
     Bar {
         text: String,
         ratio: f32,
         marker_ratio: f32,
+        dimmed: bool,
     },
 }
 
@@ -104,9 +108,10 @@ impl TransientOverlay {
                             text,
                             ratio,
                             marker_ratio,
+                            dimmed,
                         } => {
                             draw_text(ui, text);
-                            draw_bar(ui, *ratio, *marker_ratio);
+                            draw_bar(ui, *ratio, *marker_ratio, *dimmed);
                         }
                     });
             });
@@ -122,11 +127,30 @@ fn draw_text(ui: &mut egui::Ui, text: &str) {
     );
 }
 
+/// バーの塗りの色を返す。`(基準まで, 基準を超えた分)`。
+///
+/// `dimmed` では 2 色とも同じ灰色にする。色で「基準より上げている」ことを
+/// 示す意味が、鳴っていない状態では無いため。
+fn bar_colors(dimmed: bool) -> (egui::Color32, egui::Color32) {
+    if dimmed {
+        let gray = egui::Color32::from_rgb(120, 120, 120);
+        (gray, gray)
+    } else {
+        (
+            egui::Color32::from_rgb(220, 220, 220),
+            egui::Color32::from_rgb(240, 160, 60),
+        )
+    }
+}
+
 /// 横バーを描く。基準位置（音量なら 100%）に目盛りを引き、
 /// そこを超えた分は色を変えて「基準より上げている」ことが分かるようにする。
-fn draw_bar(ui: &mut egui::Ui, ratio: f32, marker_ratio: f32) {
+///
+/// `dimmed` のときは全体を灰色で描く。
+fn draw_bar(ui: &mut egui::Ui, ratio: f32, marker_ratio: f32, dimmed: bool) {
     let ratio = normalized_ratio(ratio);
     let marker_ratio = normalized_ratio(marker_ratio);
+    let (base_color, over_color) = bar_colors(dimmed);
 
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(BAR_WIDTH, BAR_HEIGHT),
@@ -141,20 +165,12 @@ fn draw_bar(ui: &mut egui::Ui, ratio: f32, marker_ratio: f32) {
     // 基準までの塗り
     let base_end = ratio.min(marker_ratio);
     if base_end > 0.0 {
-        painter.rect_filled(
-            sub_rect(rect, 0.0, base_end),
-            2.0,
-            egui::Color32::from_rgb(220, 220, 220),
-        );
+        painter.rect_filled(sub_rect(rect, 0.0, base_end), 2.0, base_color);
     }
 
     // 基準を超えた分
     if ratio > marker_ratio {
-        painter.rect_filled(
-            sub_rect(rect, marker_ratio, ratio),
-            2.0,
-            egui::Color32::from_rgb(240, 160, 60),
-        );
+        painter.rect_filled(sub_rect(rect, marker_ratio, ratio), 2.0, over_color);
     }
 
     // 基準位置の目盛り
@@ -307,6 +323,23 @@ mod tests {
 
         assert!(overlay.remaining_at(start).is_some());
         assert_eq!(overlay.remaining_at(start + Duration::from_secs(1)), None);
+    }
+
+    #[test]
+    fn bar_colors_dimmed_uses_same_gray_for_both_parts() {
+        // ミュート中は「基準より上げている」ことを色で示す意味が無いので、
+        // 基準までと超えた分を同じ灰色にする
+        let (base, over) = bar_colors(true);
+
+        assert_eq!(base, over);
+        assert_eq!(base, egui::Color32::from_rgb(120, 120, 120));
+    }
+
+    #[test]
+    fn bar_colors_normal_separates_over_reference_part() {
+        let (base, over) = bar_colors(false);
+
+        assert_ne!(base, over);
     }
 
     #[test]
