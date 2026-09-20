@@ -119,7 +119,7 @@ These live in the **その他 (Other)** tab of the settings window. Use them whe
 - **Export writes the running settings, not the draft.** Press 適用 first if you want your current edits included.
 - **Import and reset only change the draft.** Like every other edit, they reach the running application when you press 適用 or OK, and キャンセル discards them.
 - **Window position and size are never imported.** A file exported on a machine with a different display layout will not move your window off-screen. Reset leaves the position and size alone as well.
-- Items toggled from the right-click menu (always on top, drag to move, stats overlay, mute, automatic device reconnection) are not imported either. They cannot be changed from the settings window, so importing them would have no effect.
+- Of the items toggled from the right-click menu, always on top, drag to move, stats overlay and mute are not imported. They cannot be changed from the settings window, so importing them would have no effect. Automatic device reconnection *is* imported.
 - If a value cannot be understood, only that item falls back to its default and the rest is imported. If the file is not valid TOML, nothing changes and the reason is shown.
 
 ### Screenshots
