@@ -1756,6 +1756,15 @@ impl CaptureCardViewer {
             debug!("利用できる出力デバイス: {:?}", audio.list_output_devices());
         }
 
+        // **音量とパススルーの反映は、ストリームを開く前に必ず済ませる。**
+        // 開いたあとに反映すると、最初のバッファだけ AudioCapture の既定値
+        // （100%・パススルー有効）で鳴ってしまう。音量 0% を保存して
+        // 再起動したときに、起動直後だけ音が出るのがこの窓。
+        // apply_settings でも同じ値を入れているが、そちらは「接続の要求を
+        // 立てる」だけで実際に開くのはこの関数なので、開く直前でも入れておく
+        audio.set_volume(settings.ui.volume);
+        audio.set_audio_passthrough_enabled(settings.audio.passthrough_enabled);
+
         let result = audio.start_passthrough_with_settings(
             settings.audio.input_device_name.as_deref(),
             settings.audio.output_device_name.as_deref(),
@@ -1852,8 +1861,10 @@ impl CaptureCardViewer {
             // 映像と同じく、ここでは要求を立てるだけ。パススルーの有効・無効と
             // 音量は開き直しを伴わないので、その場で反映する
             if let Ok(mut audio) = self.audio_capture.lock() {
-                // ストリームを開始する前にパススルーの設定を反映する。
-                // 開始後に反映すると、無効のまま起動したときに最初のバッファが出力されてしまう。
+                // パススルーと音量は、下の audio_retry.request より前に反映する。
+                // ストリームを開いたあとに反映すると、無効のまま（あるいは
+                // 音量 0% で）起動したときに最初のバッファだけ出力されてしまう。
+                // 実際に開く try_connect_audio でも開く直前に入れ直している
                 audio.set_audio_passthrough_enabled(settings.audio.passthrough_enabled);
 
                 // 音量を適用
