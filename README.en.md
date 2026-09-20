@@ -107,8 +107,10 @@ If the query fails, the reason and a "再取得" (retry) button are shown and th
 
 Only change the color space and range when the picture looks wrong. Both take effect on the next frame; the device is not reopened.
 
-- **Color space** — leave it on auto unless colors look off. HD (1280x720 and above) is converted with BT.709 and anything smaller with BT.601. If **skin tones or reds look shifted**, the guess is probably wrong for your device, so pick BT.601 or BT.709 by hand.
-- **Color range** — pick "フル" (full, 0-255) when **blacks look washed out grey**, and "リミテッド" (limited, 16-235) when **shadows are crushed and highlights are blown out**. This mirrors the RGB range setting on your capture card or source device.
+Both settings describe **what the incoming signal is**. When they disagree with the actual signal, the picture looks like this:
+
+- **Color space** — leave it on auto unless colors look off. Auto uses BT.709 when `width >= 1280 or height >= 720`, and BT.601 when both are below that. If **skin tones or reds look shifted**, the guess is probably wrong for your device, so pick BT.601 or BT.709 by hand.
+- **Color range** — pick "リミテッド" (limited, 16-235) when **blacks look washed out grey and whites look dull**, and "フル" (full, 0-255) when **shadows are crushed and highlights are blown out**. This mirrors the RGB range setting on your capture card or source device.
 
 **Audio**
 
