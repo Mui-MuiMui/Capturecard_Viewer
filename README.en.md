@@ -102,6 +102,13 @@ If the query fails, the reason and a "再取得" (retry) button are shown and th
 
 - Format: YUY2
 - Frame rate: 60 fps
+- Color space (色空間): Auto (decided from the resolution)
+- Color range (色レンジ): Limited (16-235)
+
+Only change the color space and range when the picture looks wrong. Both take effect on the next frame; the device is not reopened.
+
+- **Color space** — leave it on auto unless colors look off. HD (1280x720 and above) is converted with BT.709 and anything smaller with BT.601. If **skin tones or reds look shifted**, the guess is probably wrong for your device, so pick BT.601 or BT.709 by hand.
+- **Color range** — pick "フル" (full, 0-255) when **blacks look washed out grey**, and "リミテッド" (limited, 16-235) when **shadows are crushed and highlights are blown out**. This mirrors the RGB range setting on your capture card or source device.
 
 **Audio**
 
