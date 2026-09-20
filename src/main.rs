@@ -27,7 +27,7 @@ mod status;
 mod ui;
 mod video;
 
-use audio::AudioCapture;
+use audio::{AudioCapabilities, AudioCapture, AudioDirection, PassthroughRequest};
 use hotkey::{HotkeyAction, HotkeyError, HotkeyManager};
 use overlay::{OverlayContent, TransientOverlay};
 use screenshot::ScreenshotManager;
@@ -82,6 +82,21 @@ const VOLUME_SCROLL_STEP: f32 = 10.0;
 /// デバイス能力の取得結果。`(問い合わせたデバイス名, 結果)`。
 /// 取得スレッドから UI スレッドへ、この形でチャネル越しに返す
 type CapabilityResult = (String, Result<video::DeviceCapabilities, String>);
+
+/// オーディオデバイスの対応設定の取得結果。
+/// `(入力か出力か, 問い合わせたキャッシュのキー, 結果)`。
+///
+/// **向きを添えるのは、入力と出力でキャッシュを分けているため。** 同じ名前の
+/// デバイスが入力にも出力にもあると、キーだけではどちらへ入れるか決まらない
+type AudioCapabilityResult = (AudioDirection, String, Result<AudioCapabilities, String>);
+
+/// オーディオデバイスの対応設定を待つ上限。
+///
+/// 取得は別スレッドで走り、実測 300ms 前後で終わる。終わるまで音声を開かない
+/// のは、開く処理の中の列挙を UI スレッドで走らせないため。**ただし待ち続け
+/// ない。** cpal の列挙が返ってこない環境で音が一切出なくなるより、
+/// その場で列挙してでも繋ぐほうがよい
+const AUDIO_CAPABILITY_WAIT_LIMIT: Duration = Duration::from_secs(3);
 
 /// スクリーンショットの出力結果。`(撮影を始めた時刻, 何をしたか / 失敗なら理由)`。
 ///
@@ -526,6 +541,14 @@ pub struct CaptureCardViewer {
     capability_tx: Sender<CapabilityResult>,
     capability_rx: Receiver<CapabilityResult>,
 
+    // オーディオデバイスの対応設定を受け取るチャネル。ビデオと同じ仕組み。
+    // WASAPI の列挙は実測 300ms 前後かかるため、UI スレッドでは行わない
+    audio_capability_tx: Sender<AudioCapabilityResult>,
+    audio_capability_rx: Receiver<AudioCapabilityResult>,
+    // 対応設定が届くのを待ち始めた時刻。`AUDIO_CAPABILITY_WAIT_LIMIT` を
+    // 超えたら待つのをやめ、その場で列挙してでも音声を開く
+    audio_capability_wait_since: Option<Instant>,
+
     // スクリーンショットの保存結果を受け取るチャネル。
     // 保存は別スレッドで行うため、失敗をその場で画面に出せない。
     // 能力取得と同じく、UI スレッドが update() で try_recv するだけにする
@@ -663,6 +686,7 @@ impl Default for CaptureCardViewer {
         let audio_capture = Arc::new(Mutex::new(AudioCapture::new()));
         let screenshot_manager = Arc::new(Mutex::new(ScreenshotManager::new()));
         let (capability_tx, capability_rx) = std::sync::mpsc::channel();
+        let (audio_capability_tx, audio_capability_rx) = std::sync::mpsc::channel();
         let (screenshot_tx, screenshot_rx) = std::sync::mpsc::channel();
 
         let mut app = Self {
@@ -673,6 +697,9 @@ impl Default for CaptureCardViewer {
             hotkey_manager: HotkeyManager::new(),
             capability_tx,
             capability_rx,
+            audio_capability_tx,
+            audio_capability_rx,
+            audio_capability_wait_since: None,
             screenshot_tx,
             screenshot_rx,
             errors: ErrorCenter::default(),
@@ -786,8 +813,15 @@ impl Default for CaptureCardViewer {
             .and_then(|s| s.video.device_name.clone());
         if let Some(device) = saved_video_device {
             app.settings_dialog.capabilities_mut().request(&device);
-            app.dispatch_capability_requests();
         }
+
+        // 音声デバイスの対応設定も先に取りに行く。
+        //
+        // **設定画面のためだけではない。** 音声を開く `start_passthrough` は
+        // 対応設定の一覧を要るので、キャッシュが無いと UI スレッドで列挙する
+        // ことになる（実測 300ms）。最初の接続はこの結果が届くまで待つ
+        app.request_audio_capabilities();
+        app.dispatch_capability_requests();
 
         // 注: デバイスの接続は最初の update() で始まり、失敗したら
         // ConnectRetry のバックオフで繋がるまで再試行する
@@ -2314,9 +2348,63 @@ impl CaptureCardViewer {
         if video_due {
             self.try_connect_video(&snapshot, now);
         }
-        if audio_due {
+        if audio_due && self.audio_capabilities_ready(&snapshot, now) {
             self.try_connect_audio(&snapshot, now);
         }
+    }
+
+    /// 音声を開いてよいかを返す。対応設定の取得が終わっていなければ `false`。
+    ///
+    /// 開く処理（`start_passthrough`）は対応設定の一覧を要る。キャッシュが
+    /// 無ければその場で列挙することになり、**UI スレッドが 300ms 止まる。**
+    /// 取得は起動時とデバイス変更時に別スレッドへ投げてあるので、それが
+    /// 届くまでこのフレームは見送る。
+    ///
+    /// **失敗（`Failed`）は待たない。** 取得できないデバイスを待ち続けると
+    /// 音が一切出なくなる。`AUDIO_CAPABILITY_WAIT_LIMIT` を超えた場合も同じ。
+    ///
+    /// 見送っても `ConnectRetry` は失敗として数えない。バックオフが進むと、
+    /// 取得が終わったあとの接続まで遅れてしまう。
+    fn audio_capabilities_ready(&mut self, settings: &AppSettings, now: Instant) -> bool {
+        let input_key = audio::cache_key(settings.audio.input_device_name.as_deref());
+        let output_key = audio::cache_key(settings.audio.output_device_name.as_deref());
+
+        // 設定画面を通らずにデバイス名が変わった場合（設定ファイルの外部編集）
+        // でも取りに行けるよう、ここでも要求を積む
+        self.settings_dialog
+            .audio_input_capabilities_mut()
+            .request(&input_key);
+        self.settings_dialog
+            .audio_output_capabilities_mut()
+            .request(&output_key);
+        self.dispatch_capability_requests();
+
+        let pending = self
+            .settings_dialog
+            .audio_input_capabilities()
+            .is_pending(&input_key)
+            || self
+                .settings_dialog
+                .audio_output_capabilities()
+                .is_pending(&output_key);
+
+        if !pending {
+            self.audio_capability_wait_since = None;
+            return true;
+        }
+
+        let waiting_since = *self.audio_capability_wait_since.get_or_insert(now);
+        if now.duration_since(waiting_since) < AUDIO_CAPABILITY_WAIT_LIMIT {
+            trace!("音声の対応設定を待っているので、この回の接続は見送る");
+            return false;
+        }
+
+        warn!(
+            "音声の対応設定が {} 秒経っても届かないので、列挙しながら接続する",
+            AUDIO_CAPABILITY_WAIT_LIMIT.as_secs()
+        );
+        self.audio_capability_wait_since = None;
+        true
     }
 
     /// 稼働中のデバイスが生きているかを見る。`update()` から毎フレーム呼ぶ。
@@ -2537,6 +2625,22 @@ impl CaptureCardViewer {
             attempt, settings.audio.input_device_name, settings.audio.output_device_name
         );
 
+        // 対応設定は別スレッドで取ったものを渡す。ここで列挙すると UI が止まる。
+        // **ロックを取る前に複製する。** キャッシュは `settings_dialog` の中に
+        // あり、`audio_capture` のロックを握ったまま `self` を借りられない
+        let input_key = audio::cache_key(settings.audio.input_device_name.as_deref());
+        let output_key = audio::cache_key(settings.audio.output_device_name.as_deref());
+        let input_capabilities = self
+            .settings_dialog
+            .audio_input_capabilities()
+            .ready(&input_key)
+            .cloned();
+        let output_capabilities = self
+            .settings_dialog
+            .audio_output_capabilities()
+            .ready(&output_key)
+            .cloned();
+
         let audio_capture = Arc::clone(&self.audio_capture);
         let Ok(mut audio) = audio_capture.lock() else {
             let reason = "audio_capture のロックを取得できない".to_string();
@@ -2565,12 +2669,14 @@ impl CaptureCardViewer {
         audio.set_volume(settings.ui.volume);
         audio.set_audio_passthrough_enabled(settings.audio.passthrough_enabled);
 
-        let result = audio.start_passthrough_with_settings(
-            settings.audio.input_device_name.as_deref(),
-            settings.audio.output_device_name.as_deref(),
-            settings.audio.sample_rate,
-            settings.audio.channels,
-        );
+        let result = audio.start_passthrough(&PassthroughRequest {
+            input_device_name: settings.audio.input_device_name.as_deref(),
+            output_device_name: settings.audio.output_device_name.as_deref(),
+            sample_rate: settings.audio.sample_rate,
+            channels: settings.audio.channels,
+            input_capabilities: input_capabilities.as_ref(),
+            output_capabilities: output_capabilities.as_ref(),
+        });
 
         let error = match result {
             Ok(()) => {
@@ -2589,7 +2695,7 @@ impl CaptureCardViewer {
                 "設定のデバイスで {} 回続けて失敗したので、既定のデバイス（入力・出力とも Windows の既定、レートとチャンネル数もデバイス任せ）で試す",
                 attempt
             );
-            match audio.start_passthrough_with_settings(None, None, None, None) {
+            match audio.start_passthrough(&PassthroughRequest::defaults()) {
                 Ok(()) => {
                     info!("既定のデバイスで音声に接続した");
                     None
@@ -2621,6 +2727,15 @@ impl CaptureCardViewer {
             Some(reason) => {
                 self.audio_retry.record_failure(now);
                 self.report_error(ErrorSource::Audio, reason);
+                // **取得済みの対応設定を捨てて取り直す。** デバイスが挿し直された
+                // 場合、古い一覧でしか開けない設定を選び続けて失敗が繰り返される。
+                // 取り直しは別スレッドなので、次の再試行までには届く
+                self.settings_dialog
+                    .audio_input_capabilities_mut()
+                    .retry(&input_key);
+                self.settings_dialog
+                    .audio_output_capabilities_mut()
+                    .retry(&output_key);
                 debug!(
                     "音声デバイスへの再試行は {} ms 後",
                     backoff_delay(self.audio_retry.attempts()).as_millis()
@@ -2986,6 +3101,50 @@ impl CaptureCardViewer {
                 .capabilities_mut()
                 .apply_result(device, result);
         }
+        while let Ok((direction, key, result)) = self.audio_capability_rx.try_recv() {
+            match direction {
+                AudioDirection::Input => self
+                    .settings_dialog
+                    .audio_input_capabilities_mut()
+                    .apply_result(key, result),
+                AudioDirection::Output => self
+                    .settings_dialog
+                    .audio_output_capabilities_mut()
+                    .apply_result(key, result),
+            }
+        }
+    }
+
+    /// 設定に書かれているオーディオデバイスの対応設定を要求する。
+    ///
+    /// 既に取得済み・取得中なら何も起きない（`CapabilityCache::request`）。
+    /// 実際にスレッドへ渡すのは `dispatch_capability_requests`。
+    fn request_audio_capabilities(&mut self) {
+        let Some((input_key, output_key)) = self.audio_capability_keys() else {
+            return;
+        };
+        self.settings_dialog
+            .audio_input_capabilities_mut()
+            .request(&input_key);
+        self.settings_dialog
+            .audio_output_capabilities_mut()
+            .request(&output_key);
+    }
+
+    /// 設定に書かれている入出力デバイスの、能力キャッシュのキー。
+    /// settings のロックを取れなければ `None`。
+    fn audio_capability_keys(&self) -> Option<(String, String)> {
+        let settings = match self.settings.lock() {
+            Ok(settings) => settings,
+            Err(_) => {
+                warn!("音声の対応設定の要求で settings のロックを取得できない");
+                return None;
+            }
+        };
+        Some((
+            audio::cache_key(settings.audio.input_device_name.as_deref()),
+            audio::cache_key(settings.audio.output_device_name.as_deref()),
+        ))
     }
 
     /// 別スレッドから届いたスクリーンショットの保存結果を取り込む。
@@ -3177,6 +3336,66 @@ impl CaptureCardViewer {
                 // 「取得中...」が出続ける
                 self.settings_dialog.capabilities_mut().apply_result(
                     device,
+                    Err(format!("取得用のスレッドを起動できませんでした: {}", e)),
+                );
+            }
+        }
+
+        self.dispatch_audio_capability_requests(AudioDirection::Input);
+        self.dispatch_audio_capability_requests(AudioDirection::Output);
+    }
+
+    /// 溜まったオーディオデバイスの取得要求を、使い捨てのスレッドへ渡す。
+    ///
+    /// ビデオ側と同じ仕組み。`supported_*_configs()` は WASAPI で
+    /// 13 レート × 5 形式の `IsFormatSupported`（実測約 300ms）になるため、
+    /// UI スレッドでは呼ばない。
+    fn dispatch_audio_capability_requests(&mut self, direction: AudioDirection) {
+        let cache = match direction {
+            AudioDirection::Input => self.settings_dialog.audio_input_capabilities_mut(),
+            AudioDirection::Output => self.settings_dialog.audio_output_capabilities_mut(),
+        };
+
+        for key in cache.take_requests() {
+            let tx = self.audio_capability_tx.clone();
+            let thread_key = key.clone();
+            let spawned = std::thread::Builder::new()
+                .name("audio-capability-query".to_string())
+                .spawn(move || {
+                    let started = Instant::now();
+                    let result = audio::query_capabilities(
+                        direction,
+                        audio::device_name_from_key(&thread_key),
+                    );
+                    match &result {
+                        Ok(caps) => info!(
+                            "{}デバイスの対応設定を取得した: {}（{} 件、{} ms）",
+                            direction.label(),
+                            thread_key,
+                            caps.configs().len(),
+                            started.elapsed().as_millis()
+                        ),
+                        Err(e) => warn!(
+                            "{}デバイスの対応設定を取得できない: {}: {}",
+                            direction.label(),
+                            thread_key,
+                            e
+                        ),
+                    }
+                    if tx.send((direction, thread_key, result)).is_err() {
+                        debug!("音声の対応設定の送り先が既に無いので結果を捨てる");
+                    }
+                });
+
+            if let Err(e) = spawned {
+                warn!("音声の対応設定を取得するスレッドを起動できない: {}", e);
+                // Pending のまま残すと、音声の接続がここで待ち続けてしまう
+                let cache = match direction {
+                    AudioDirection::Input => self.settings_dialog.audio_input_capabilities_mut(),
+                    AudioDirection::Output => self.settings_dialog.audio_output_capabilities_mut(),
+                };
+                cache.apply_result(
+                    key,
                     Err(format!("取得用のスレッドを起動できませんでした: {}", e)),
                 );
             }
