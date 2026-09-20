@@ -186,7 +186,7 @@ Both settings describe **what the incoming signal is**. When they disagree with 
 The sample rate and channel options only list values that **both the input and the output device support**. As with video, the capabilities are queried on a worker thread, so switching devices does not freeze the window. A spinner is shown while the query runs; if it fails, the reason and a 再取得 (retry) button appear and the options fall back to a fixed list.
 
 - In Windows shared mode the channel count is fixed to the device mix format. When only one value is available the combo box is disabled and the reason is shown.
-- When the input and the output have no value in common (for example 48000 Hz input and 44100 Hz output), both sets are listed together with a warning. In that combination each side is opened at its own nearest value, so playback speed and pitch drift.
+- When the input and the output have no value in common (for example 48000 Hz input and 44100 Hz output), both sets are listed together with a warning. In that combination the sample rate is converted during playback, and mono/stereo is up- or down-mixed as needed. Playback speed and pitch stay correct, but the conversion costs a little quality, so matching values are still preferable.
 - If the saved value is not in the list (after hand-editing the config file, for instance), a warning names the value that is actually used.
 
 What was actually opened is shown under 設定 (Settings) → 接続状態 (Connection status).
