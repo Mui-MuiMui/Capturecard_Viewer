@@ -31,7 +31,7 @@ mod video;
 use audio::AudioCapture;
 use hotkey::{HotkeyAction, HotkeyError, HotkeyManager};
 use overlay::{OverlayContent, TransientOverlay};
-use repaint::{next_repaint_delay, RepaintCondition, RepaintWaker};
+use repaint::{next_repaint_delay, should_wake_on_event, RepaintCondition, RepaintWaker};
 use screenshot::ScreenshotManager;
 use settings::{
     AppSettings, AutoSavePolicy, ColorRange, ColorSpace, ScreenshotEncoding, MAX_VOLUME, MIN_VOLUME,
@@ -504,6 +504,10 @@ pub struct CaptureCardViewer {
     video_texture: Option<egui::TextureHandle>,
     // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
     last_frame_generation: u64,
+    // 最後に新しいフレームをテクスチャへ取り込んだ時刻。
+    // None は起動してから 1 枚も取り込んでいないことを表す。
+    // 再描画の間隔（`repaint::next_repaint_delay`）を決めるために持つ
+    last_new_frame_at: Option<Instant>,
     // フレームの途絶に対して最後に行った処置。
     // 毎フレーム同じ判定に当たるため、同じ処置を繰り返さないための番人。
     // 判定が変わったとき（自動再接続を有効にし直したとき）は動けるように、
@@ -639,6 +643,7 @@ impl Default for CaptureCardViewer {
             autosave: AutoSavePolicy::from_load_outcome(load_outcome),
             video_texture: None,
             last_frame_generation: 0,
+            last_new_frame_at: None,
             last_video_link_action: VideoLinkAction::Keep,
             video_capturing: false,
             last_audio_error_reconnect: None,
@@ -768,8 +773,10 @@ impl eframe::App for CaptureCardViewer {
         // 繋がっている間は bool を 2 つ見るだけで抜ける
         self.poll_device_connection();
 
-        // ビデオフレームを更新。新着があったかは末尾の再描画の予約で使う
-        let new_frame = self.update_video_texture(ctx);
+        // ビデオフレームを更新。新着の時刻は末尾の再描画の予約で使う
+        if self.update_video_texture(ctx) {
+            self.last_new_frame_at = Some(Instant::now());
+        }
 
         // フレームの途絶と音声ストリームのエラーを見て、必要なら開き直しを要求する。
         // 実際に開くのは次のフレームの poll_device_connection
@@ -799,10 +806,6 @@ impl eframe::App for CaptureCardViewer {
         // 最小化しているか。Windows では egui-winit が毎フレーム入れてくれる。
         // 取れない環境では「最小化していない」に倒す（描きすぎる側は安全）
         let minimized = viewport.minimized.unwrap_or(false);
-        // 最小化中はフレームが届いても起こさない。eframe は最小化された
-        // ウィンドウの再描画要求を捨てるため、起こしてもイベントループが
-        // 動くだけで何も描かれない
-        self.repaint_waker.set_enabled(!minimized);
 
         // サイズまたは位置が変更された場合、設定を更新。
         // フルスクリーン中は画面全体の矩形しか取れないため記録しない。
@@ -987,16 +990,19 @@ impl eframe::App for CaptureCardViewer {
         // 保留中の設定変更を、操作が落ち着いたところでまとめて書き出す
         self.flush_settings_if_due(ctx);
 
-        // 次の update() までに空けてよい時間を、このフレームの状態から決める。
+        // 次の update() をいつ呼ぶかを、このフレームの状態から 1 か所で決める。
         //
-        // **ここは上限であって、映像の滑らかさを決める値ではない。** 映像は
-        // フレームの到着が `RepaintWaker` 経由で起こす。もっと早く起きたい
-        // 処理（OSD の消滅、設定の書き出し）はそれぞれ自分で予約しており、
-        // egui は同じフレームで要求された中の最短を採るのでここが邪魔しない
-        ctx.request_repaint_after(next_repaint_delay(RepaintCondition {
+        // **ここは上限であって下限ではない。** もっと早く起きたい処理
+        // （OSD の消滅、設定の書き出し、フレームの到着）はそれぞれ自分で
+        // 予約しており、egui は同じフレームで要求された中の最短を採る
+        let condition = RepaintCondition {
             minimized,
-            new_frame,
-        }));
+            since_new_frame: self.last_new_frame_at.map(|at| at.elapsed()),
+        };
+        // 間隔を広げている間だけ、別スレッドからの通知で起こしてもらう
+        self.repaint_waker
+            .set_enabled(should_wake_on_event(condition));
+        ctx.request_repaint_after(next_repaint_delay(condition));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1026,10 +1032,9 @@ impl eframe::App for CaptureCardViewer {
 impl CaptureCardViewer {
     /// 新着フレームがあればテクスチャへ取り込む。取り込んだら `true`。
     ///
-    /// **ここで再描画を予約しない。** 予約は `update()` の末尾で 1 か所にまとめ、
-    /// 次のフレームの到着は `RepaintWaker` が知らせる。以前はここで無条件に
-    /// 16ms（60fps）の再描画を予約していたため、映像が来ていなくても
-    /// 描き続けていた（Issue #98）。
+    /// **ここで再描画を予約しない。** 予約は `update()` の末尾で 1 か所にまとめる。
+    /// 以前はここで無条件に 16ms（60fps）の再描画を予約していたため、映像が
+    /// 来ていなくても、最小化していても描き続けていた（Issue #98）。
     fn update_video_texture(&mut self, ctx: &egui::Context) -> bool {
         // 新着フレームが無ければ何もしない。既存のテクスチャをそのまま使い回す
         let new_frame = self
