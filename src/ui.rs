@@ -942,7 +942,7 @@ fn show_device_settings_tab(
         if !settings.audio.passthrough_enabled {
             ui.colored_label(
                 egui::Color32::YELLOW,
-                "⚠ 音声パススルーが無効です（ノイズ軽減のため）",
+                "⚠ 音声パススルーが無効です（音は出力されません）",
             );
         }
     });
