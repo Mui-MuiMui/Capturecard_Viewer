@@ -89,7 +89,7 @@ Turning on "情報表示" (Show stats) in the context menu overlays the followin
 1. Right-click → "詳細設定..." (Advanced settings) to open the settings window.
 2. Select video and audio devices in the **device settings** tab.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
-3. Configure the save location, file format, sound effect, and the per-action hotkeys in the **screenshot settings** tab.
+3. Configure the destination, save location, file format, sound effect, and the per-action hotkeys in the **screenshot settings** tab.
 
 Edits in the settings window are kept as a draft and do not affect the running application until you press a button.
 
@@ -108,12 +108,15 @@ Edits in the settings window are kept as a draft and do not affect the running a
 ### Screenshots
 
 - **Default key**: F5 (configurable; see "Hotkeys")
+- **Destination**: Save to a file (default) / copy to the clipboard / both
 - **Save location**: Desktop (configurable)
 - **File format**: JPEG (default, quality 1-100 selectable, 90 by default) or PNG
 - **File name**: `YYYY-MM-DD_HH-MM-SS-mmm.jpg` (`.png` when PNG is selected)
 - **Sound effect**: Custom audio files are supported, with adjustable volume
 
 JPEG keeps files small but blurs text and thin lines. Choose PNG when you want to keep game UI or subtitles exactly as rendered; PNG is lossless but produces files several times larger.
+
+Setting the destination to the clipboard (or to both) puts the captured frame straight onto the clipboard, ready to paste into Discord or a chat window. The clipboard copy is uncompressed, so the file format and JPEG quality settings apply only to the file that is written. When only the clipboard is selected, no file is created.
 
 ## Where settings are stored
 

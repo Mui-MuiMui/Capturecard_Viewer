@@ -71,7 +71,7 @@ const VOLUME_SCROLL_STEP: f32 = 10.0;
 /// 取得スレッドから UI スレッドへ、この形でチャネル越しに返す
 type CapabilityResult = (String, Result<video::DeviceCapabilities, String>);
 
-/// スクリーンショットの保存結果。`(撮影を始めた時刻, 成功なら保存先のパス / 失敗なら理由)`。
+/// スクリーンショットの出力結果。`(撮影を始めた時刻, 何をしたか / 失敗なら理由)`。
 ///
 /// 保存スレッドから UI スレッドへ、この形でチャネル越しに返す。
 /// **失敗だけでなく成功も送る。** 成功で直近の失敗の記録を消さないと、
@@ -82,8 +82,66 @@ type CapabilityResult = (String, Result<video::DeviceCapabilities, String>);
 /// 古い結果で新しい記録を上書きしないよう、受け取る側が時刻で弾く
 type ScreenshotResult = (Instant, ScreenshotOutcome);
 
-/// 1 回の撮影の結末。成功なら保存先のパス、失敗なら理由。
-type ScreenshotOutcome = Result<PathBuf, String>;
+/// 1 回の撮影の結末。成功なら何をしたかの文、失敗なら理由。
+///
+/// **出力先ごとの内訳ではなく、文字列 1 つに畳んである。** 受け取る UI
+/// スレッドがすることは「ログに出す」と「失敗ならトーストに出す」だけで、
+/// 出力先の種類で処理を分けないため。畳む規則は
+/// `summarize_screenshot_delivery` が持つ。
+type ScreenshotOutcome = Result<String, String>;
+
+/// 出力先が「両方」のときに、片方だけ失敗した場合の結果の作り方。
+///
+/// 失敗が 1 つでもあれば全体を失敗として扱い、理由を並べる。成功したほうを
+/// 黙って捨てないよう、文言には成功した出力先も残す。
+///
+/// 引数の `None` は「その出力先が設定に含まれていない」を表す。`Some` は
+/// 実際に試した結果。
+///
+/// アプリの状態に触れないのでそのまま別スレッドで実行でき、テストからも呼べる。
+fn summarize_screenshot_delivery(
+    clipboard: Option<Result<(), String>>,
+    file: Option<Result<PathBuf, String>>,
+) -> ScreenshotOutcome {
+    let (copied, clipboard_error) = match clipboard {
+        Some(Ok(())) => (true, None),
+        Some(Err(reason)) => (false, Some(reason)),
+        None => (false, None),
+    };
+    let (saved_to, file_error) = match file {
+        Some(Ok(path)) => (Some(path), None),
+        Some(Err(reason)) => (None, Some(reason)),
+        None => (None, None),
+    };
+
+    let succeeded = match (copied, &saved_to) {
+        (true, Some(path)) => Some(format!(
+            "クリップボードへコピーし、{} へ保存した",
+            path.display()
+        )),
+        (true, None) => Some("クリップボードへコピーした".to_string()),
+        (false, Some(path)) => Some(format!("{} へ保存した", path.display())),
+        (false, None) => None,
+    };
+
+    let failures: Vec<String> = [clipboard_error, file_error]
+        .into_iter()
+        .flatten()
+        .collect();
+    if !failures.is_empty() {
+        let mut reason = failures.join(" / ");
+        // 片方だけ失敗した場合に、成功したほうを黙って捨てない。
+        // 「クリップボードには入っているのか」が分からないと次の操作を選べない
+        if let Some(done) = succeeded {
+            reason = format!("{}（{}）", reason, done);
+        }
+        return Err(reason);
+    }
+
+    // 出力先の enum が必ずどちらかを含むので通常は起きない。
+    // 黙って成功にすると、何も出力していないのに撮れたように見える
+    succeeded.ok_or_else(|| "出力先が 1 つも設定されていません".to_string())
+}
 
 /// 届いた結果を画面の記録へ反映してよいかを判定する。
 ///
@@ -570,7 +628,8 @@ pub struct CaptureCardViewer {
     // ウィンドウ管理
     always_on_top: bool,
 
-    // 進行中のスクリーンショット保存スレッド。
+    // 進行中のスクリーンショット保存スレッド。クリップボードへの転送も
+    // このスレッドが行う。
     // 終了時に join して、書き出し途中の画像ファイルが残らないようにする
     screenshot_save_threads: Vec<JoinHandle<()>>,
 }
@@ -1055,33 +1114,46 @@ impl CaptureCardViewer {
         }
     }
 
-    /// いま表示しているフレームを、設定した形式（JPEG / PNG）で保存する。
+    /// いま表示しているフレームを、設定した出力先（ファイル / クリップボード /
+    /// 両方）へ出す。ファイルへは設定した形式（JPEG / PNG）で保存する。
     ///
     /// ロックは settings → video → screenshot の順に 1 つずつ取り、重ねない。
     /// エンコードと書き出しは別スレッドへ逃がす。1080p のエンコードは
     /// JPEG でも数十 ms かかり、UI スレッドで行うと映像が一瞬止まるため
-    /// （PNG は可逆圧縮のぶんさらに時間がかかる）
+    /// （PNG は可逆圧縮のぶんさらに時間がかかる）。クリップボードへの転送も
+    /// 同じスレッドで行う。こちらは他のアプリがクリップボードを掴んでいると
+    /// 待たされるため、UI スレッドに置けない
     fn take_screenshot(&mut self) {
-        debug!("スクリーンショットの保存を開始する");
+        debug!("スクリーンショットの出力を開始する");
 
         // この撮影を識別する時刻。結果が撮影順に届かないときの追い越し判定に使う。
         // ファイル名のタイムスタンプはミリ秒までなので同一ミリ秒で並びうるが、
         // `Instant` は単調増加するのでこちらは必ず順序が付く
         let started_at = Instant::now();
 
-        // 保存先と効果音の音量だけを取り出してロックを手放す。
+        // 出力先と効果音の音量だけを取り出してロックを手放す。
         // get_screenshot_path は連番を決めるためにファイルの有無を見るが、
         // ファイルを作るのは保存スレッドなので、ここでは何も書かない
         let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S-%3f").to_string();
         let save_params = self.settings.lock().ok().map(|settings| {
+            let destination = settings.screenshot.destination;
+            // クリップボードだけのときはファイル名を作らない。
+            // get_screenshot_path は連番を決めるために保存先フォルダを
+            // 走査するので、使わない名前のために I/O を走らせない
+            let file_target = destination.saves_file().then(|| {
+                (
+                    settings.get_screenshot_path(&timestamp),
+                    settings.screenshot.encoding(),
+                )
+            });
             (
-                settings.get_screenshot_path(&timestamp),
-                settings.screenshot.encoding(),
+                destination.copies_to_clipboard(),
+                file_target,
                 settings.screenshot.sound_volume,
             )
         });
-        let Some((path, encoding, sound_volume)) = save_params else {
-            warn!("スクリーンショットの保存で settings のロックを取得できない");
+        let Some((to_clipboard, file_target, sound_volume)) = save_params else {
+            warn!("スクリーンショットの出力で settings のロックを取得できない");
             return;
         };
 
@@ -1091,7 +1163,7 @@ impl CaptureCardViewer {
         let latest_frame = match self.video_capture.lock() {
             Ok(video) => video.get_latest_frame(),
             Err(_) => {
-                warn!("スクリーンショットの保存で video_capture のロックを取得できない");
+                warn!("スクリーンショットの出力で video_capture のロックを取得できない");
                 return;
             }
         };
@@ -1104,10 +1176,14 @@ impl CaptureCardViewer {
             return;
         };
         debug!(
-            "保存対象の映像フレームを取得した: {}x{}、保存先: {}",
+            "出力対象の映像フレームを取得した: {}x{}、クリップボード: {}、保存先: {}",
             frame.width,
             frame.height,
-            path.display()
+            to_clipboard,
+            file_target.as_ref().map_or_else(
+                || "なし".to_string(),
+                |(path, _)| path.display().to_string()
+            )
         );
 
         // 効果音は保存の完了を待たずに鳴らす。撮った手応えをその場で返すため。
@@ -1128,7 +1204,15 @@ impl CaptureCardViewer {
         // ログ出力も UI スレッド側（drain_screenshot_results）へ寄せてある
         let result_tx = self.screenshot_tx.clone();
         let handle = std::thread::spawn(move || {
-            let result = save_frame(&frame, &path, encoding).map(|()| path);
+            // 両方のときはクリップボードを先にする。撮ってすぐ貼る使い方で、
+            // ディスクへの書き出しを待たせないため。
+            // **片方が失敗しても他方は行う。** クリップボードを他のアプリが
+            // 掴んでいてコピーできなくても、ファイルは残したい
+            let clipboard = to_clipboard.then(|| screenshot::copy_frame_to_clipboard(&frame));
+            let file = file_target
+                .map(|(path, encoding)| save_frame(&frame, &path, encoding).map(|()| path));
+
+            let result = summarize_screenshot_delivery(clipboard, file);
             if result_tx.send((started_at, result)).is_err() {
                 // 受信側が無いのはアプリが終了したときだけ。結果は捨ててよい
                 debug!("スクリーンショットの結果の送り先が既に無いので捨てる");
@@ -1144,8 +1228,9 @@ impl CaptureCardViewer {
 
     /// 進行中のスクリーンショット保存がすべて終わるまで待つ。
     ///
-    /// 待ち時間はエンコードとディスクへの書き出しが終わるまでで、
-    /// 1080p の JPEG なら通常は数十 ms。終了時に呼ぶ
+    /// 待ち時間はエンコードとディスクへの書き出し（出力先にクリップボードが
+    /// 含まれる場合はその転送も）が終わるまでで、1080p の JPEG なら通常は
+    /// 数十 ms。終了時に呼ぶ
     fn join_screenshot_save_threads(&mut self) {
         let handles = std::mem::take(&mut self.screenshot_save_threads);
         if handles.is_empty() {
@@ -2755,8 +2840,8 @@ impl CaptureCardViewer {
     fn drain_screenshot_results(&mut self) {
         while let Ok((started_at, result)) = self.screenshot_rx.try_recv() {
             match &result {
-                Ok(path) => info!("スクリーンショットを {} へ保存した", path.display()),
-                Err(reason) => error!("スクリーンショットを保存できない: {}", reason),
+                Ok(done) => info!("スクリーンショットを{}", done),
+                Err(reason) => error!("スクリーンショットを出力できない: {}", reason),
             }
             self.apply_screenshot_outcome(started_at, result);
         }
@@ -3643,6 +3728,87 @@ mod tests {
         // 境界。取りこぼすより出すほうに倒す
         let now = Instant::now();
         assert!(screenshot_outcome_supersedes(Some(now), now));
+    }
+
+    #[test]
+    fn summarize_screenshot_delivery_file_only_reports_the_path() {
+        let outcome =
+            summarize_screenshot_delivery(None, Some(Ok(PathBuf::from(r"C:\shots\a.jpg"))));
+
+        assert_eq!(outcome, Ok(r"C:\shots\a.jpg へ保存した".to_string()));
+    }
+
+    #[test]
+    fn summarize_screenshot_delivery_clipboard_only_reports_the_copy() {
+        let outcome = summarize_screenshot_delivery(Some(Ok(())), None);
+
+        assert_eq!(outcome, Ok("クリップボードへコピーした".to_string()));
+    }
+
+    #[test]
+    fn summarize_screenshot_delivery_both_reports_the_copy_before_the_path() {
+        // 実際の処理順（クリップボード → ファイル）と同じ並びにする
+        let outcome =
+            summarize_screenshot_delivery(Some(Ok(())), Some(Ok(PathBuf::from(r"C:\shots\a.png"))));
+
+        assert_eq!(
+            outcome,
+            Ok(r"クリップボードへコピーし、C:\shots\a.png へ保存した".to_string())
+        );
+    }
+
+    #[test]
+    fn summarize_screenshot_delivery_clipboard_failure_keeps_the_saved_path_in_the_reason() {
+        // 片方だけ失敗した場合。全体は失敗だが、成功したほうも文言に残す。
+        // クリップボードに入っていないことと、ファイルは残っていることの
+        // 両方が分からないと、ユーザーは次に何をすればよいか決められない
+        let outcome = summarize_screenshot_delivery(
+            Some(Err("クリップボードを開けない: occupied".to_string())),
+            Some(Ok(PathBuf::from(r"C:\shots\a.jpg"))),
+        );
+
+        assert_eq!(
+            outcome,
+            Err(r"クリップボードを開けない: occupied（C:\shots\a.jpg へ保存した）".to_string())
+        );
+    }
+
+    #[test]
+    fn summarize_screenshot_delivery_file_failure_keeps_the_copy_in_the_reason() {
+        let outcome = summarize_screenshot_delivery(
+            Some(Ok(())),
+            Some(Err(
+                r"C:\shots\a.jpg を作成できない: access denied".to_string()
+            )),
+        );
+
+        assert_eq!(
+            outcome,
+            Err(
+                r"C:\shots\a.jpg を作成できない: access denied（クリップボードへコピーした）"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn summarize_screenshot_delivery_both_failures_are_joined() {
+        let outcome = summarize_screenshot_delivery(
+            Some(Err("クリップボードを開けない".to_string())),
+            Some(Err("書き込めない".to_string())),
+        );
+
+        assert_eq!(
+            outcome,
+            Err("クリップボードを開けない / 書き込めない".to_string())
+        );
+    }
+
+    #[test]
+    fn summarize_screenshot_delivery_without_any_destination_is_an_error() {
+        // 出力先の enum が必ずどちらかを含むので通常は起きないが、
+        // 何もしていないのに成功として扱わないこと
+        assert!(summarize_screenshot_delivery(None, None).is_err());
     }
 
     #[test]
