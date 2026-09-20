@@ -170,6 +170,40 @@ fn should_reconnect_after_stream_error(since_last_reconnect: Option<Duration>) -
     }
 }
 
+/// 保留中の音声ストリームのエラーに対して、そのフレームで何をするか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioErrorAction {
+    /// 何もしない。保留しているエラーが無い
+    Idle,
+    /// 保留したまま待つ。自動再接続が無効か、開き直しの下限に達していない
+    Wait,
+    /// ストリームを閉じて開き直す
+    Reconnect,
+}
+
+/// 保留中の音声エラーの扱いを決める。
+///
+/// **見送るときも保留を落とさない（`Wait` で持ち越す）。** エラーの通知は
+/// `take_stream_error` が読んだ時点で消えるため、ここで捨てると誰も
+/// 開き直さないまま音が戻らなくなる。自動再接続を有効にし直したとき、
+/// または下限に達したときのフレームで `Reconnect` に変わる。
+fn decide_audio_reconnect(
+    error_pending: bool,
+    auto_reconnect: bool,
+    since_last_reconnect: Option<Duration>,
+) -> AudioErrorAction {
+    if !error_pending {
+        return AudioErrorAction::Idle;
+    }
+    if !auto_reconnect {
+        return AudioErrorAction::Wait;
+    }
+    if !should_reconnect_after_stream_error(since_last_reconnect) {
+        return AudioErrorAction::Wait;
+    }
+    AudioErrorAction::Reconnect
+}
+
 /// 映像が出ていないときに画面へ出す文言を決める。
 ///
 /// 「デバイスは開けているが信号が来ていない」と「デバイスそのものが消えた」は
@@ -364,10 +398,12 @@ pub struct CaptureCardViewer {
     video_texture: Option<egui::TextureHandle>,
     // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
     last_frame_generation: u64,
-    // フレームの途絶を検出して表示を落としたか。
-    // 毎フレーム同じ判定に当たるため、ログと再接続の要求を 1 度だけにする番人。
-    // 新しいフレームが届いた時点で false へ戻す
-    video_signal_lost: bool,
+    // フレームの途絶に対して最後に行った処置。
+    // 毎フレーム同じ判定に当たるため、同じ処置を繰り返さないための番人。
+    // 判定が変わったとき（自動再接続を有効にし直したとき）は動けるように、
+    // 真偽値ではなく「何をしたか」で持つ。新しいフレームが届いた時点で
+    // `Keep` へ戻す
+    last_video_link_action: VideoLinkAction,
     // 直近に観測した「映像ストリームを開けているか」。
     // 描画のたびに video_capture のロックを取らずに済ませるため、
     // 毎フレームの監視で拾った値をここに写しておく
@@ -375,6 +411,10 @@ pub struct CaptureCardViewer {
     // ストリームのエラーを理由に音声を開き直した時刻。
     // 開いた直後に必ず落ちるデバイスで、毎フレーム開き直さないための下限
     last_audio_error_reconnect: Option<Instant>,
+    // 未処理の音声ストリームのエラーがあるか。
+    // `take_stream_error` は読んだ時点で旗を下ろすため、見送ったエラーを
+    // ここへ移しておかないと、そのまま音が戻らなくなる
+    audio_stream_error_pending: bool,
     pending_hotkey: Option<String>,
     temp_hotkey: String, // ホットキーダイアログ用の一時保存
     // 最後に適用した実行時パラメータ（差分ベースの再起動回避用）
@@ -450,9 +490,10 @@ impl Default for CaptureCardViewer {
             settings_dirty_since: None,
             video_texture: None,
             last_frame_generation: 0,
-            video_signal_lost: false,
+            last_video_link_action: VideoLinkAction::Keep,
             video_capturing: false,
             last_audio_error_reconnect: None,
+            audio_stream_error_pending: false,
             pending_hotkey: None,
             temp_hotkey: String::new(),
             last_video_device: None,
@@ -815,9 +856,9 @@ impl CaptureCardViewer {
             self.last_frame_generation = generation;
 
             // 途絶から戻ってきた。次の途絶をもう一度検出できるように番人を戻す
-            if self.video_signal_lost {
+            if self.last_video_link_action != VideoLinkAction::Keep {
                 info!("映像フレームが再び届き始めたので表示を再開する");
-                self.video_signal_lost = false;
+                self.last_video_link_action = VideoLinkAction::Keep;
             }
 
             // 最適化: テクスチャオプションをNearest（補間なし）に設定し、性能向上
@@ -1332,7 +1373,9 @@ impl CaptureCardViewer {
                         self.last_audio_device = None;
                         // 途絶の記録も落とす。開き直したあとの途絶を、改めて
                         // 検出してログに残せるようにする
-                        self.video_signal_lost = false;
+                        self.last_video_link_action = VideoLinkAction::Keep;
+                        // 保留していた音声のエラーも、ここで開き直すので落とす
+                        self.audio_stream_error_pending = false;
                         // ユーザーが明示的にやり直しを求めているので、
                         // バックオフの待ち時間を飛ばして次のフレームで試す
                         if let Ok(settings) = self.settings.lock() {
@@ -1841,13 +1884,19 @@ impl CaptureCardViewer {
 
         let action = decide_video_link(state, auto_reconnect, VIDEO_SIGNAL_TIMEOUT);
         if action == VideoLinkAction::Keep {
+            // 途絶が解消した（開き直した、ストリームを閉じた）。記録も戻して、
+            // 次の途絶をもう一度検出できるようにする
+            self.last_video_link_action = action;
             return;
         }
-        // 途絶は毎フレーム同じ判定に当たる。ログと要求は 1 度だけにする
-        if self.video_signal_lost {
+        // 途絶は毎フレーム同じ判定に当たる。同じ扱いが続く間は 1 度だけ動く。
+        // **「動いたかどうか」ではなく「何をしたか」で見る。** 自動再接続を
+        // 切ったまま途絶（ClearTexture）したあとに有効化すると判定が
+        // ClearTextureAndReconnect へ変わるので、そこで開き直せる
+        if action == self.last_video_link_action {
             return;
         }
-        self.video_signal_lost = true;
+        self.last_video_link_action = action;
 
         let elapsed_ms = state
             .since_last_frame
@@ -1907,25 +1956,26 @@ impl CaptureCardViewer {
                 return;
             }
         };
-        if !errored {
-            return;
-        }
-
-        // 旗は読んだ時点で下りているので、同じエラーで何度も要求することはない。
-        // エラーの内容自体は audio.rs が error! で残している
-        warn!("音声ストリームのエラーを検出したので切断として扱う");
-
-        if !auto_reconnect {
-            debug!("自動再接続が無効なので音声は開き直さない");
-            return;
+        if errored {
+            // エラーの内容自体は audio.rs が error! で残している
+            warn!("音声ストリームのエラーを検出したので切断として扱う");
+            // **旗は読んだ時点で下りている。** ここへ移しておかないと、
+            // 自動再接続が無効な間や下限に達していない間のエラーが消え、
+            // 誰も開き直さないまま音が戻らなくなる
+            self.audio_stream_error_pending = true;
         }
 
         let since_last = self
             .last_audio_error_reconnect
             .map(|reconnected_at| reconnected_at.elapsed());
-        if !should_reconnect_after_stream_error(since_last) {
-            debug!("直前に開き直したばかりなので、今回のエラーでは音声を開き直さない");
-            return;
+        match decide_audio_reconnect(self.audio_stream_error_pending, auto_reconnect, since_last) {
+            // 保留しているエラーが無い
+            AudioErrorAction::Idle => return,
+            // 保留したまま待つ。自動再接続を有効にし直したとき、または
+            // 下限に達したときのフレームでここを抜ける。
+            // 毎フレーム通るのでログは出さない
+            AudioErrorAction::Wait => return,
+            AudioErrorAction::Reconnect => {}
         }
 
         let target = match self.settings.lock() {
@@ -1944,6 +1994,7 @@ impl CaptureCardViewer {
             }
         }
 
+        self.audio_stream_error_pending = false;
         self.last_audio_error_reconnect = Some(Instant::now());
         self.last_audio_device = None;
         self.audio_retry.request_now(target);
@@ -2835,6 +2886,67 @@ mod tests {
         assert_eq!(
             video_placeholder_message(false, true),
             "デバイスが接続されていません（再接続を試しています）"
+        );
+    }
+
+    #[test]
+    fn decide_video_link_action_changes_when_auto_reconnect_is_turned_on() {
+        // 自動再接続を切ったまま途絶したあとに有効化した場合。
+        // 呼び出し側は「何をしたか」と比べて動くので、判定が変われば
+        // 開き直しへ進める（真偽値のラッチだと遮られてしまう）
+        let state = link_state(true, Some(Duration::from_secs(10)));
+        let before = decide_video_link(state, false, VIDEO_SIGNAL_TIMEOUT);
+        let after = decide_video_link(state, true, VIDEO_SIGNAL_TIMEOUT);
+
+        assert_eq!(before, VideoLinkAction::ClearTexture);
+        assert_eq!(after, VideoLinkAction::ClearTextureAndReconnect);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn decide_audio_reconnect_without_pending_error_is_idle() {
+        assert_eq!(
+            decide_audio_reconnect(false, true, None),
+            AudioErrorAction::Idle
+        );
+        // 保留が無ければ、間隔の下限に達していても何もしない
+        assert_eq!(
+            decide_audio_reconnect(false, true, Some(Duration::from_secs(600))),
+            AudioErrorAction::Idle
+        );
+    }
+
+    #[test]
+    fn decide_audio_reconnect_pending_error_reconnects() {
+        assert_eq!(
+            decide_audio_reconnect(true, true, None),
+            AudioErrorAction::Reconnect
+        );
+    }
+
+    #[test]
+    fn decide_audio_reconnect_without_auto_reconnect_waits() {
+        // 見送るだけで、保留は呼び出し側に残る。捨てると音が戻らなくなる
+        assert_eq!(
+            decide_audio_reconnect(true, false, None),
+            AudioErrorAction::Wait
+        );
+    }
+
+    #[test]
+    fn decide_audio_reconnect_within_minimum_interval_waits() {
+        assert_eq!(
+            decide_audio_reconnect(true, true, Some(Duration::from_millis(4999))),
+            AudioErrorAction::Wait
+        );
+    }
+
+    #[test]
+    fn decide_audio_reconnect_after_minimum_interval_reconnects() {
+        // 下限に達したフレームで、保留していたエラーが処理される
+        assert_eq!(
+            decide_audio_reconnect(true, true, Some(Duration::from_secs(5))),
+            AudioErrorAction::Reconnect
         );
     }
 
