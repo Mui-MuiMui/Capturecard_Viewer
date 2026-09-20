@@ -26,10 +26,10 @@ gh issue view <番号> --json title,body,labels,comments
 gh issue list --state open --search "<キーワード>" --limit 20
 ```
 
-引数が空なら、何に着手するかを尋ねて止まる。推測で始めない。候補を出すなら `status:人間確認待ち` が付いていない `P1` から見る。
+引数が空なら、何に着手するかを尋ねて止まる。推測で始めない。候補を出すなら `status:人間確認待ち` を除いた `P1` から見る。**除外を忘れると、実装済みで人の確認を待っているだけの Issue を選んで作り直すことになる。**
 
 ```bash
-gh issue list --state open --label P1 --limit 20
+gh issue list --state open --search 'label:P1 -label:"status:人間確認待ち"' --limit 20
 ```
 
 ### 2. Issue の記述が今も有効か確認する
