@@ -266,6 +266,49 @@ impl LoadOutcome {
     }
 }
 
+// 設定の自動保存（デバウンス保存と終了時保存）を許してよいかを持つ。
+//
+// 読めなかった設定ファイルを退避できなかった場合、ディスクには壊れたファイルが
+// そのまま残っている。起動時の書き戻しだけを止めても、ウィンドウを動かせば
+// 2 秒後のデバウンス保存が、何もしなくても終了時の保存が、同じファイルを
+// 既定値で上書きしてしまう。そのため壊れたファイルが残っている間は
+// 自動保存そのものを止める。
+//
+// 止めている間はウィンドウの位置・サイズや音量も永続化されない。設定を
+// 取り戻す手段を残すほうを優先する、という判断。
+//
+// 設定ダイアログの「適用」「OK」による保存はユーザーの明示的な操作なので
+// 止めない。それが成功した時点で壊れたファイルはユーザーの意思で置き換わって
+// いるため、以降の自動保存も解禁する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoSavePolicy {
+    allowed: bool,
+}
+
+impl AutoSavePolicy {
+    // 設定の読み込み結果から初期状態を決める。
+    pub fn from_load_outcome(outcome: LoadOutcome) -> Self {
+        Self {
+            allowed: !matches!(outcome, LoadOutcome::BrokenFileLeftBehind),
+        }
+    }
+
+    // 自動保存してよいか。
+    pub fn is_allowed(self) -> bool {
+        self.allowed
+    }
+
+    // 明示的な保存操作の結果を反映する。`saved` は実際に書き出せたか。
+    //
+    // 失敗した場合に解禁しないのは、壊れたファイルがまだ残っているため。
+    // 解禁してしまうと、次のウィンドウ操作で自動保存が走って上書きしうる。
+    pub fn note_explicit_save(&mut self, saved: bool) {
+        if saved {
+            self.allowed = true;
+        }
+    }
+}
+
 // 退避の結果から読み込み結果を決める。
 //
 // load() 自体は confy が %AppData% を直接読み書きするためテストできない。
@@ -692,6 +735,61 @@ show_stats_overlay = true
 
         assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
         assert!(outcome.may_write_defaults_on_startup());
+    }
+
+    #[test]
+    fn auto_save_policy_broken_file_left_behind_blocks_autosave() {
+        // 退避できなかった場合。ウィンドウを動かすか終了するだけで
+        // 壊れたファイルが既定値で潰れるのを防ぐため、自動保存を止める
+        let policy = AutoSavePolicy::from_load_outcome(LoadOutcome::BrokenFileLeftBehind);
+
+        assert!(!policy.is_allowed());
+    }
+
+    #[test]
+    fn auto_save_policy_loaded_allows_autosave() {
+        assert!(AutoSavePolicy::from_load_outcome(LoadOutcome::Loaded).is_allowed());
+    }
+
+    #[test]
+    fn auto_save_policy_fell_back_to_defaults_allows_autosave() {
+        // 退避できていれば元の内容は .bak に残っている。守る相手がいないので
+        // ウィンドウ位置や音量を通常どおり保存してよい
+        assert!(AutoSavePolicy::from_load_outcome(LoadOutcome::FellBackToDefaults).is_allowed());
+    }
+
+    #[test]
+    fn auto_save_policy_successful_explicit_save_unblocks_autosave() {
+        // 設定画面の「適用」「OK」で保存できた時点で、壊れたファイルは
+        // ユーザーの意思で置き換わっている。以降は自動保存を止めない
+        let mut policy = AutoSavePolicy::from_load_outcome(LoadOutcome::BrokenFileLeftBehind);
+
+        policy.note_explicit_save(true);
+
+        assert!(policy.is_allowed());
+    }
+
+    #[test]
+    fn auto_save_policy_failed_explicit_save_keeps_autosave_blocked() {
+        // 保存に失敗した場合は壊れたファイルがまだ残っているため、
+        // 止めたままにする
+        let mut policy = AutoSavePolicy::from_load_outcome(LoadOutcome::BrokenFileLeftBehind);
+
+        policy.note_explicit_save(false);
+
+        assert!(!policy.is_allowed());
+    }
+
+    #[test]
+    fn auto_save_policy_failed_explicit_save_does_not_block_allowed_policy() {
+        // もともと許可されている状態は、保存の失敗で止まらない。
+        // 一時的な書き込み失敗で以降の保存が全部止まると、
+        // 復旧したあとも設定が残らなくなる
+        let mut policy = AutoSavePolicy::from_load_outcome(LoadOutcome::Loaded);
+
+        policy.note_explicit_save(false);
+
+        assert!(policy.is_allowed());
     }
 
     #[test]
