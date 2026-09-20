@@ -1,7 +1,9 @@
+use crate::audio::{self, AudioCapabilities, ChoiceSource};
 use crate::hotkey::{HotkeyAction, HotkeyError};
 use crate::settings::{
-    AppSettings, ColorRange, ColorSpace, ScreenshotDestination, ScreenshotFormat, MAX_JPEG_QUALITY,
-    MAX_VIDEO_ADJUSTMENT, MIN_JPEG_QUALITY, MIN_VIDEO_ADJUSTMENT,
+    AppSettings, ColorRange, ColorSpace, ScreenshotDestination, ScreenshotFormat, DEFAULT_CHANNELS,
+    DEFAULT_SAMPLE_RATE, MAX_JPEG_QUALITY, MAX_VIDEO_ADJUSTMENT, MIN_JPEG_QUALITY,
+    MIN_VIDEO_ADJUSTMENT,
 };
 use crate::status::{ConnectionStatus, ErrorSource, LinkStatus};
 use crate::video::{DeviceCapabilities, VideoMode};
@@ -45,36 +47,54 @@ pub enum SettingsTab {
 
 /// デバイス能力の取得状態。
 ///
-/// 取得は `Camera::new` でデバイスを開いたうえで 3 フォーマット分の対応表を
-/// 引く重い処理なので、描画スレッドでは行わず使い捨てのスレッドへ投げる。
-/// ダイアログは進行状況をこの型で受け取って描き分ける。
+/// 取得はデバイスを開いて対応表を引く重い処理なので、描画スレッドでは行わず
+/// 使い捨てのスレッドへ投げる。ダイアログは進行状況をこの型で受け取って描き分ける。
+///
+/// 型引数はビデオ（`DeviceCapabilities`）とオーディオ（`AudioCapabilities`）で
+/// 中身が違うため。取得と受け渡しの手順は同じなので、キャッシュは共有する。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CapabilityState {
+pub enum CapabilityState<T> {
     /// 取得を要求済みで、結果を待っている
     Pending,
     /// 取得できた
-    Ready(DeviceCapabilities),
+    Ready(T),
     /// 取得に失敗した。文字列は画面に出す理由
     Failed(String),
 }
+
+/// ビデオデバイスの能力キャッシュ。
+pub type VideoCapabilityCache = CapabilityCache<DeviceCapabilities>;
+/// オーディオデバイスの能力キャッシュ。入力と出力で別に持つ。
+pub type AudioCapabilityCache = CapabilityCache<AudioCapabilities>;
 
 /// デバイス能力のキャッシュと、まだワーカーへ渡していない取得要求。
 ///
 /// 触るのは UI スレッド（`CaptureCardViewer`）だけなのでロックを持たない。
 /// 実際の取得は `CaptureCardViewer::dispatch_capability_requests` が別スレッドへ
 /// 投げ、結果はチャネル経由で `apply_result` に入る。
-#[derive(Default)]
-pub struct CapabilityCache {
+pub struct CapabilityCache<T> {
     /// デバイス名 → 取得状態
-    states: HashMap<String, CapabilityState>,
+    states: HashMap<String, CapabilityState<T>>,
     /// まだワーカーへ渡していないデバイス名
     requests: Vec<String>,
-    /// デバイスを切り替えた直後で、能力が届いたらフォーマットの既定値を
+    /// デバイスを切り替えた直後で、能力が届いたら選択肢の既定値を
     /// 選び直す対象のデバイス名
     awaiting_defaults: Option<String>,
 }
 
-impl CapabilityCache {
+// `#[derive(Default)]` は `T: Default` を要求してしまう。キャッシュの中身は
+// 空の HashMap なので、`T` に条件を付けずに実装する
+impl<T> Default for CapabilityCache<T> {
+    fn default() -> Self {
+        Self {
+            states: HashMap::new(),
+            requests: Vec::new(),
+            awaiting_defaults: None,
+        }
+    }
+}
+
+impl<T> CapabilityCache<T> {
     /// まだ一度も問い合わせていないデバイスなら、取得を要求して `Pending` にする。
     ///
     /// 既に `Pending` / `Ready` / `Failed` のいずれかなら何もしない。描画のたびに
@@ -97,7 +117,7 @@ impl CapabilityCache {
     /// 結果待ちの間に押されても投げ直さない。投げ直すと、先に飛ばした取得が
     /// あとから届いて新しい結果を上書きする。
     pub fn retry(&mut self, device: &str) -> bool {
-        if device.is_empty() || self.states.get(device) == Some(&CapabilityState::Pending) {
+        if device.is_empty() || self.is_pending(device) {
             return false;
         }
         self.states.remove(device);
@@ -110,7 +130,7 @@ impl CapabilityCache {
     }
 
     /// ワーカーから届いた結果を反映する。
-    pub fn apply_result(&mut self, device: String, result: Result<DeviceCapabilities, String>) {
+    pub fn apply_result(&mut self, device: String, result: Result<T, String>) {
         let state = match result {
             Ok(caps) => CapabilityState::Ready(caps),
             Err(reason) => CapabilityState::Failed(reason),
@@ -119,16 +139,24 @@ impl CapabilityCache {
     }
 
     /// 取得状態。まだ要求もしていなければ `None`。
-    pub fn state(&self, device: &str) -> Option<&CapabilityState> {
+    pub fn state(&self, device: &str) -> Option<&CapabilityState<T>> {
         self.states.get(device)
     }
 
     /// 取得できた能力。結果待ち・失敗・未要求はいずれも `None` になる。
-    pub fn ready(&self, device: &str) -> Option<&DeviceCapabilities> {
+    pub fn ready(&self, device: &str) -> Option<&T> {
         match self.states.get(device) {
             Some(CapabilityState::Ready(caps)) => Some(caps),
             _ => None,
         }
+    }
+
+    /// 結果待ちか。**まだ要求していない場合は `false`。**
+    ///
+    /// 音声の接続はこれが `false` になるまで待つ（`poll_device_connection`）。
+    /// 未要求を `true` にすると、要求を積む経路が無い状態で永久に待ってしまう。
+    pub fn is_pending(&self, device: &str) -> bool {
+        matches!(self.states.get(device), Some(CapabilityState::Pending))
     }
 
     /// デバイスが切り替わったことを記録する。能力が届いた時点でフォーマットの
@@ -263,7 +291,11 @@ pub struct SettingsDialogState {
     selected_tab: SettingsTab,
     // デバイス名 → そのデバイスが扱えるフォーマット・解像度・FPS の取得状態。
     // 取得はデバイスを開く重い処理なので別スレッドへ投げ、一度取ったら保持する
-    capabilities: CapabilityCache,
+    capabilities: VideoCapabilityCache,
+    // 音声デバイスの対応設定。入力と出力で別に持つ。
+    // **名前で引くので、入力と出力に同名のデバイスがあっても混ざらないよう分ける。**
+    audio_input_capabilities: AudioCapabilityCache,
+    audio_output_capabilities: AudioCapabilityCache,
     // ホットキー入力ダイアログの入力状態
     hotkey_capture: HotkeyCaptureState,
 }
@@ -315,8 +347,32 @@ impl SettingsDialogState {
     ///
     /// 取得要求の取り出しと結果の反映は `CaptureCardViewer` が行うため、
     /// ダイアログを開いていない間（起動時の先読み）も触られる。
-    pub fn capabilities_mut(&mut self) -> &mut CapabilityCache {
+    pub fn capabilities_mut(&mut self) -> &mut VideoCapabilityCache {
         &mut self.capabilities
+    }
+
+    /// オーディオ入力デバイスの対応設定。
+    ///
+    /// ビデオ側と同じく、取得要求の取り出しと結果の反映は `CaptureCardViewer`
+    /// が行う。音声の接続も開く直前にここを読むため、ダイアログを開いていない
+    /// 間も触られる。
+    pub fn audio_input_capabilities_mut(&mut self) -> &mut AudioCapabilityCache {
+        &mut self.audio_input_capabilities
+    }
+
+    /// オーディオ出力デバイスの対応設定。
+    pub fn audio_output_capabilities_mut(&mut self) -> &mut AudioCapabilityCache {
+        &mut self.audio_output_capabilities
+    }
+
+    /// オーディオ入力デバイスの対応設定（読み取り）。
+    pub fn audio_input_capabilities(&self) -> &AudioCapabilityCache {
+        &self.audio_input_capabilities
+    }
+
+    /// オーディオ出力デバイスの対応設定（読み取り）。
+    pub fn audio_output_capabilities(&self) -> &AudioCapabilityCache {
+        &self.audio_output_capabilities
     }
 
     /// ドラフトを実行中の設定へ反映する。ドラフトを持っていなければ何もしない。
@@ -544,9 +600,16 @@ pub fn show_settings_dialog(
         draft,
         selected_tab,
         capabilities,
+        audio_input_capabilities,
+        audio_output_capabilities,
         hotkey_capture,
         ..
     } = dialog;
+
+    let mut audio_capabilities = AudioCapabilityCaches {
+        input: audio_input_capabilities,
+        output: audio_output_capabilities,
+    };
 
     // ドラフトが用意できていなければ描画しない。呼び出し側が begin_edit を
     // 呼ぶまで待つ
@@ -575,7 +638,13 @@ pub fn show_settings_dialog(
             ui.separator();
 
             egui::ScrollArea::vertical().show(ui, |ui| match selected_tab {
-                SettingsTab::Device => show_device_settings_tab(ui, draft, capabilities, devices),
+                SettingsTab::Device => show_device_settings_tab(
+                    ui,
+                    draft,
+                    capabilities,
+                    &mut audio_capabilities,
+                    devices,
+                ),
                 SettingsTab::Screenshot => {
                     if show_screenshot_settings_tab(
                         ui,
@@ -611,6 +680,15 @@ pub fn show_settings_dialog(
     resolve_action(button, *show_settings)
 }
 
+/// オーディオの入力・出力の能力キャッシュをまとめて渡すための束。
+///
+/// 2 本の `&mut` を個別に引数へ並べると入れ替えても型が合ってしまうため、
+/// 名前で区別できる形にする（`DeviceLists` と同じ理由）。
+pub struct AudioCapabilityCaches<'a> {
+    pub input: &'a mut AudioCapabilityCache,
+    pub output: &'a mut AudioCapabilityCache,
+}
+
 /// 映像調整のスライダー 1 本。明るさ・コントラスト・彩度で見た目を揃える。
 ///
 /// 3 本とも範囲と既定値が同じなので、目盛りの刻みや中央の位置が
@@ -627,7 +705,8 @@ fn video_adjustment_slider(ui: &mut egui::Ui, value: &mut i32, label: &str, hint
 fn show_device_settings_tab(
     ui: &mut egui::Ui,
     settings: &mut AppSettings,
-    capabilities: &mut CapabilityCache,
+    capabilities: &mut VideoCapabilityCache,
+    audio_capabilities: &mut AudioCapabilityCaches<'_>,
     devices: &DeviceLists<'_>,
 ) {
     ui.heading("デバイス設定");
@@ -1012,6 +1091,7 @@ fn show_device_settings_tab(
         // オーディオ入力デバイス選択 - キャッシュリストを使用
         let current_input_device = settings.audio.input_device_name.clone().unwrap_or_default();
 
+        let mut input_changed = false;
         egui::ComboBox::from_label("オーディオ入力デバイス")
             .selected_text(if current_input_device.is_empty() {
                 "デバイスを選択..."
@@ -1020,11 +1100,17 @@ fn show_device_settings_tab(
             })
             .show_ui(ui, |ui| {
                 for device_name in devices.input {
-                    ui.selectable_value(
-                        &mut settings.audio.input_device_name,
-                        Some(device_name.clone()),
-                        device_name,
-                    );
+                    if ui
+                        .selectable_value(
+                            &mut settings.audio.input_device_name,
+                            Some(device_name.clone()),
+                            device_name,
+                        )
+                        .clicked()
+                        && current_input_device != *device_name
+                    {
+                        input_changed = true;
+                    }
                 }
             });
 
@@ -1035,6 +1121,7 @@ fn show_device_settings_tab(
             .clone()
             .unwrap_or_default();
 
+        let mut output_changed = false;
         egui::ComboBox::from_label("オーディオ出力デバイス")
             .selected_text(if current_output_device.is_empty() {
                 "デフォルト"
@@ -1042,45 +1129,180 @@ fn show_device_settings_tab(
                 &current_output_device
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut settings.audio.output_device_name, None, "デフォルト");
+                if ui
+                    .selectable_value(&mut settings.audio.output_device_name, None, "デフォルト")
+                    .clicked()
+                    && !current_output_device.is_empty()
+                {
+                    output_changed = true;
+                }
                 for device_name in devices.output {
-                    ui.selectable_value(
-                        &mut settings.audio.output_device_name,
-                        Some(device_name.clone()),
-                        device_name,
-                    );
+                    if ui
+                        .selectable_value(
+                            &mut settings.audio.output_device_name,
+                            Some(device_name.clone()),
+                            device_name,
+                        )
+                        .clicked()
+                        && current_output_device != *device_name
+                    {
+                        output_changed = true;
+                    }
                 }
             });
+
+        // 選択後のデバイス名から作るキャッシュのキー。ビデオ側と同じく、
+        // 切り替えたフレームで切り替え前の名前を見ると 1 フレームだけ
+        // 前のデバイスの選択肢が出てしまう
+        let input_key = audio::cache_key(settings.audio.input_device_name.as_deref());
+        let output_key = audio::cache_key(settings.audio.output_device_name.as_deref());
+
+        if input_changed {
+            audio_capabilities.input.expect_defaults(&input_key);
+        }
+        if output_changed {
+            audio_capabilities.output.expect_defaults(&output_key);
+        }
+
+        // 対応設定の取得を要求する。列挙は別スレッドなので UI は止まらない
+        audio_capabilities.input.request(&input_key);
+        audio_capabilities.output.request(&output_key);
+
+        show_audio_capability_progress(ui, audio_capabilities, &input_key, &output_key);
+
+        // 入出力の両方が対応する値だけを選択肢にする。取得できていない側は
+        // 制約にしない（片側だけ、どちらも無ければ固定の既定一覧）
+        let rates = audio::selectable_sample_rates(
+            audio_capabilities.input.ready(&input_key),
+            audio_capabilities.output.ready(&output_key),
+        );
+        let channel_choices = audio::selectable_channels(
+            audio_capabilities.input.ready(&input_key),
+            audio_capabilities.output.ready(&output_key),
+        );
+        // 設定に希望値が入っていないときの手掛かり。入力デバイスの既定を採る
+        // （入力が音の出どころなので、そちらへ揃えるほうが変換が減る）
+        let input_defaults = audio_capabilities
+            .input
+            .ready(&input_key)
+            .map(|caps| (caps.default_sample_rate(), caps.default_channels()));
+
+        // デバイスを切り替えたあとに能力が届いたら、対応する値へ寄せ直す。
+        // **`|` で書いて両方を必ず評価する。** `||` だと入力側が真のときに
+        // 出力側の目印が消えず、次のフレームでもう一度寄せ直してしまう
+        let repick = audio_capabilities.input.should_apply_defaults(&input_key)
+            | audio_capabilities.output.should_apply_defaults(&output_key);
+        if repick {
+            let desired_rate = settings
+                .audio
+                .sample_rate
+                .or(input_defaults.map(|(rate, _)| rate))
+                .unwrap_or(DEFAULT_SAMPLE_RATE);
+            if let Some(rate) = audio::nearest_sample_rate(&rates.values, desired_rate) {
+                if settings.audio.sample_rate != Some(rate) {
+                    debug!("オーディオデバイスの切り替えでサンプリングレートを {} Hz にした", rate);
+                }
+                settings.audio.sample_rate = Some(rate);
+            }
+            let desired_channels = settings
+                .audio
+                .channels
+                .or(input_defaults.map(|(_, channels)| channels))
+                .unwrap_or(DEFAULT_CHANNELS);
+            if let Some(channels) = audio::nearest_channels(&channel_choices.values, desired_channels)
+            {
+                if settings.audio.channels != Some(channels) {
+                    debug!("オーディオデバイスの切り替えでチャンネル数を {} ch にした", channels);
+                }
+                settings.audio.channels = Some(channels);
+            }
+        }
+
+        // 選択肢が 1 つしか無い値は、デバイスを切り替えていなくてもそこへ寄せる。
+        //
+        // **`repick` の目印はデバイスを選び直したときにしか立たない。** 設定ファイルに
+        // 古い値が残ったまま（Windows 側で既定デバイスの形式を変えた、設定ファイルを
+        // 手で書き換えた）起動すると、選べる値が 1 つしか無いのに違う値が残る。
+        // チャンネル数のコンボは 1 択のとき操作できないので、ユーザーが直す手段が無い
+        if let [only] = rates.values[..] {
+            if settings.audio.sample_rate != Some(only) {
+                debug!("サンプリングレートの選択肢が 1 つなので {} Hz に寄せた", only);
+                settings.audio.sample_rate = Some(only);
+            }
+        }
+        if let [only] = channel_choices.values[..] {
+            if settings.audio.channels != Some(only) {
+                debug!("チャンネル数の選択肢が 1 つなので {} ch に寄せた", only);
+                settings.audio.channels = Some(only);
+            }
+        }
 
         // サンプルレート
         ui.horizontal(|ui| {
             ui.label("サンプリングレート:");
-            let sample_rates = vec![8000, 16000, 22050, 32000, 44100, 48000, 96000];
-            let current_rate = settings.audio.sample_rate.unwrap_or(44100);
+            let current_rate = settings.audio.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE);
             egui::ComboBox::from_id_source("sample_rate_combo")
                 .selected_text(format!("{} Hz", current_rate))
                 .show_ui(ui, |ui| {
-                    for rate in sample_rates {
+                    for rate in &rates.values {
                         ui.selectable_value(
                             &mut settings.audio.sample_rate,
-                            Some(rate),
+                            Some(*rate),
                             format!("{} Hz", rate),
                         );
                     }
                 });
         });
+        show_choice_note(ui, rates.source, "サンプリングレート");
+        // 設定ファイルを手で書き換えた場合など、選択肢に無い値が残ることがある。
+        // 黙って別の値で開くと「選んだ値と違う」理由が分からない
+        if let Some(note) = out_of_range_note(
+            &rates.values,
+            settings.audio.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE),
+            " Hz",
+        ) {
+            ui.colored_label(egui::Color32::YELLOW, note);
+        }
 
         // チャンネル数
+        let single_channel_choice = channel_choices.values.len() == 1;
         ui.horizontal(|ui| {
             ui.label("チャンネル数:");
-            let current_channels = settings.audio.channels.unwrap_or(2);
-            egui::ComboBox::from_id_source("channels_combo")
-                .selected_text(format!("{}", current_channels))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut settings.audio.channels, Some(1), "1 (Mono)");
-                    ui.selectable_value(&mut settings.audio.channels, Some(2), "2 (Stereo)");
-                });
+            let current_channels = settings.audio.channels.unwrap_or(DEFAULT_CHANNELS);
+            // 選択肢が 1 つしか無いときは操作させない。開ける値が 1 つなのに
+            // 選べると、選んだ値と実際の値が食い違う
+            ui.add_enabled_ui(!single_channel_choice, |ui| {
+                egui::ComboBox::from_id_source("channels_combo")
+                    .selected_text(channel_label(current_channels))
+                    .show_ui(ui, |ui| {
+                        for channels in &channel_choices.values {
+                            ui.selectable_value(
+                                &mut settings.audio.channels,
+                                Some(*channels),
+                                channel_label(*channels),
+                            );
+                        }
+                    });
+            });
         });
+        if single_channel_choice && channel_choices.source != ChoiceSource::Fallback {
+            // WASAPI は共有モードのミックスフォーマットしか列挙しないため、
+            // Windows では実質ここに落ちる
+            ui.label("このデバイスの組み合わせでは 1 つしか選べません（Windows の共有モードではデバイスのミックスフォーマットに固定されます）");
+        }
+        show_choice_note(ui, channel_choices.source, "チャンネル数");
+        let channel_values: Vec<u32> = channel_choices
+            .values
+            .iter()
+            .map(|&channels| u32::from(channels))
+            .collect();
+        if let Some(note) = out_of_range_note(
+            &channel_values,
+            u32::from(settings.audio.channels.unwrap_or(DEFAULT_CHANNELS)),
+            " ch",
+        ) {
+            ui.colored_label(egui::Color32::YELLOW, note);
+        }
 
         ui.add_space(10.0);
 
@@ -1121,6 +1343,113 @@ fn show_device_settings_tab(
             ui.add(egui::Slider::new(&mut settings.ui.volume, 0.0..=200.0).suffix("%"));
         });
     });
+}
+
+/// チャンネル数の表示名。
+fn channel_label(channels: u16) -> String {
+    match channels {
+        1 => "1（モノラル）".to_string(),
+        2 => "2（ステレオ）".to_string(),
+        other => format!("{} ch", other),
+    }
+}
+
+/// 現在の設定値が選択肢に無いときに出す注意書き。選択肢にあれば `None`。
+///
+/// **実際に使われる値を併記する。** 黙って別の値で開くと、設定画面の表示と
+/// 「接続状態」タブの値が食い違う理由がユーザーに分からない。寄せ先は
+/// `audio::select_best_config` と同じ「最も近い値」で、同点なら小さいほう。
+///
+/// `values` が空のときは何も出さない。選択肢を作れていない状況なので、
+/// どの値へ寄るかをここで断定できない。
+pub fn out_of_range_note(values: &[u32], current: u32, unit: &str) -> Option<String> {
+    if values.is_empty() || values.contains(&current) {
+        return None;
+    }
+    let nearest = values.iter().copied().min_by_key(|v| v.abs_diff(current))?;
+    Some(format!(
+        "⚠ {current}{unit} はこの組み合わせでは使えません。最も近い {nearest}{unit} で開きます"
+    ))
+}
+
+/// 選択肢の出どころに応じた説明を添える。共通部分から作れているときは何も出さない。
+fn show_choice_note(ui: &mut egui::Ui, source: ChoiceSource, label: &str) {
+    match source {
+        // 入出力の両方が対応する値だけが並んでいる。説明は要らない
+        ChoiceSource::Common => {}
+        ChoiceSource::OneSided => {
+            ui.label(format!(
+                "{}の選択肢は、対応設定を取得できた側のデバイスだけから作っています",
+                label
+            ));
+        }
+        ChoiceSource::Disjoint => {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!(
+                    "⚠ 入力と出力で共通の{}がありません。それぞれ最も近い値で開くため、音が崩れます",
+                    label
+                ),
+            );
+        }
+        ChoiceSource::Fallback => {
+            ui.label(format!(
+                "{}の選択肢は既定の一覧です（デバイスの対応設定を取得できていません）",
+                label
+            ));
+        }
+    }
+}
+
+/// オーディオデバイスの対応設定の取得状況を描く。
+///
+/// 取得中はスピナー、失敗したら理由と「再取得」ボタン。ビデオ側と同じ扱いで、
+/// 黙って既定の一覧を出すと選択肢が実態と違う理由が分からない。
+fn show_audio_capability_progress(
+    ui: &mut egui::Ui,
+    caches: &mut AudioCapabilityCaches<'_>,
+    input_key: &str,
+    output_key: &str,
+) {
+    let retry_input = show_audio_capability_state(ui, caches.input.state(input_key), "入力");
+    let retry_output = show_audio_capability_state(ui, caches.output.state(output_key), "出力");
+
+    if retry_input {
+        caches.input.retry(input_key);
+    }
+    if retry_output {
+        caches.output.retry(output_key);
+    }
+}
+
+/// 片方向ぶんの取得状況を描く。「再取得」が押されたら `true`。
+fn show_audio_capability_state(
+    ui: &mut egui::Ui,
+    state: Option<&CapabilityState<AudioCapabilities>>,
+    label: &str,
+) -> bool {
+    let mut retry_requested = false;
+    match state {
+        Some(CapabilityState::Pending) => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(format!("{}デバイスの対応設定を取得中...", label));
+            });
+        }
+        Some(CapabilityState::Failed(reason)) => {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("⚠ {}デバイスの対応設定を取得できません: {}", label, reason),
+                );
+                if ui.button("再取得").clicked() {
+                    retry_requested = true;
+                }
+            });
+        }
+        _ => {}
+    }
+    retry_requested
 }
 
 /// 接続状態タブを描画する。
@@ -2505,8 +2834,69 @@ mod tests {
     }
 
     #[test]
+    fn out_of_range_note_is_none_when_the_value_is_selectable() {
+        assert_eq!(out_of_range_note(&[44100, 48000], 48000, " Hz"), None);
+    }
+
+    #[test]
+    fn out_of_range_note_names_the_value_actually_used() {
+        // 設定ファイルを手で書き換えた場合など、選択肢に無い値が残ることがある。
+        // 何で開かれるかを併記しないと、接続状態タブとの食い違いが分からない
+        let note = out_of_range_note(&[32000, 48000], 44100, " Hz").expect("注意書きが要る");
+
+        assert!(note.contains("44100 Hz"), "{note}");
+        assert!(note.contains("48000 Hz"), "{note}");
+    }
+
+    #[test]
+    fn out_of_range_note_tie_picks_the_smaller_value() {
+        // audio::nearest_sample_rate と同じ寄せ方でないと、実際に開く値と食い違う
+        let note = out_of_range_note(&[32000, 48000], 40000, " Hz").expect("注意書きが要る");
+
+        assert!(note.contains("32000 Hz"), "{note}");
+    }
+
+    #[test]
+    fn out_of_range_note_empty_choices_returns_none() {
+        // 選択肢を作れていない状況では、どの値へ寄るかを断定できない
+        assert_eq!(out_of_range_note(&[], 44100, " Hz"), None);
+    }
+
+    #[test]
+    fn channel_label_names_mono_and_stereo() {
+        assert_eq!(channel_label(1), "1（モノラル）");
+        assert_eq!(channel_label(2), "2（ステレオ）");
+        assert_eq!(channel_label(6), "6 ch");
+    }
+
+    #[test]
+    fn capability_cache_holds_audio_capabilities_too() {
+        // 型引数を変えただけで同じキャッシュが使えること
+        let mut cache = AudioCapabilityCache::default();
+
+        assert!(cache.request(crate::audio::DEFAULT_DEVICE_KEY));
+        assert!(cache.is_pending(crate::audio::DEFAULT_DEVICE_KEY));
+        assert!(cache.ready(crate::audio::DEFAULT_DEVICE_KEY).is_none());
+
+        cache.apply_result(
+            crate::audio::DEFAULT_DEVICE_KEY.to_string(),
+            Err("デバイスがありません".to_string()),
+        );
+
+        assert!(!cache.is_pending(crate::audio::DEFAULT_DEVICE_KEY));
+    }
+
+    #[test]
+    fn capability_cache_is_pending_is_false_for_an_unrequested_device() {
+        // 未要求を「待ち」と見なすと、音声の接続が永久に待ってしまう
+        let cache = VideoCapabilityCache::default();
+
+        assert!(!cache.is_pending("Capture Device"));
+    }
+
+    #[test]
     fn capability_cache_request_new_device_marks_pending_and_queues() {
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
 
         assert!(cache.request("Capture Device"));
         assert_eq!(
@@ -2519,7 +2909,7 @@ mod tests {
     #[test]
     fn capability_cache_request_twice_queues_only_once() {
         // 描画のたびに呼ばれるので、二重に投げるとデバイスを何度も開きに行く
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
 
         assert!(cache.request("Capture Device"));
         assert!(!cache.request("Capture Device"));
@@ -2529,7 +2919,7 @@ mod tests {
     #[test]
     fn capability_cache_request_empty_device_name_is_ignored() {
         // デバイス未選択のとき。空の名前で問い合わせても意味がない
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
 
         assert!(!cache.request(""));
         assert_eq!(cache.state(""), None);
@@ -2539,7 +2929,7 @@ mod tests {
     #[test]
     fn capability_cache_request_after_failure_does_not_queue_again() {
         // 失敗したデバイスを毎フレーム開きに行かない。投げ直すのは「再取得」だけ
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
         cache.request("Capture Device");
         cache.take_requests();
         cache.apply_result("Capture Device".to_string(), Err("開けません".to_string()));
@@ -2550,7 +2940,7 @@ mod tests {
 
     #[test]
     fn capability_cache_take_requests_empties_the_queue() {
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
         cache.request("A");
         cache.request("B");
 
@@ -2563,7 +2953,7 @@ mod tests {
 
     #[test]
     fn capability_cache_apply_result_ok_becomes_ready() {
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
         cache.request("Capture Device");
         cache.take_requests();
 
@@ -2575,7 +2965,7 @@ mod tests {
     #[test]
     fn capability_cache_apply_result_err_becomes_failed_with_reason() {
         // 理由は画面に出すので、握り潰さず保持する
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
         cache.request("Capture Device");
         cache.take_requests();
 
@@ -2595,7 +2985,7 @@ mod tests {
 
     #[test]
     fn capability_cache_ready_is_none_while_pending() {
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
         cache.request("Capture Device");
 
         assert_eq!(cache.ready("Capture Device"), None);
@@ -2603,7 +2993,7 @@ mod tests {
 
     #[test]
     fn capability_cache_retry_after_failure_queues_again() {
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
         cache.request("Capture Device");
         cache.take_requests();
         cache.apply_result("Capture Device".to_string(), Err("開けません".to_string()));
@@ -2619,7 +3009,7 @@ mod tests {
     #[test]
     fn capability_cache_retry_while_pending_does_not_queue() {
         // 投げ直すと、先の取得があとから届いて新しい結果を上書きする
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
         cache.request("Capture Device");
         cache.take_requests();
 
@@ -2629,7 +3019,7 @@ mod tests {
 
     #[test]
     fn capability_cache_retry_after_success_queues_again() {
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
         cache.request("Capture Device");
         cache.take_requests();
         cache.apply_result("Capture Device".to_string(), Ok(sample_capabilities()));
@@ -2644,7 +3034,7 @@ mod tests {
     #[test]
     fn capability_cache_should_apply_defaults_is_true_once_after_result_arrives() {
         // 目印を消さないと、ユーザーが選び直したフォーマットを毎フレーム戻してしまう
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
         cache.request("Capture Device");
         cache.take_requests();
         cache.expect_defaults("Capture Device");
@@ -2656,7 +3046,7 @@ mod tests {
 
     #[test]
     fn capability_cache_should_apply_defaults_is_false_while_pending() {
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
         cache.request("Capture Device");
         cache.expect_defaults("Capture Device");
 
@@ -2667,7 +3057,7 @@ mod tests {
     fn capability_cache_should_apply_defaults_is_false_for_another_device() {
         // 取得を待っている間にもう一度切り替えた場合。先に届いた別デバイスの
         // 能力で選択を書き換えない
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
         cache.request("A");
         cache.request("B");
         cache.take_requests();
@@ -2680,7 +3070,7 @@ mod tests {
     #[test]
     fn capability_cache_should_apply_defaults_is_false_when_failed() {
         // 失敗したときは選択を書き換えない。既定の選択肢のまま残す
-        let mut cache = CapabilityCache::default();
+        let mut cache = VideoCapabilityCache::default();
         cache.request("Capture Device");
         cache.take_requests();
         cache.expect_defaults("Capture Device");
