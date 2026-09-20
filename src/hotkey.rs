@@ -44,17 +44,20 @@ pub enum HotkeyAction {
     VolumeUp,
     /// 音量を下げる
     VolumeDown,
+    /// ミュートを切り替える
+    ToggleMute,
 }
 
 impl HotkeyAction {
     /// 設定画面と一覧の表示順。宣言順（`Ord`）と同じにしておく。
-    pub const ALL: [HotkeyAction; 6] = [
+    pub const ALL: [HotkeyAction; 7] = [
         HotkeyAction::Screenshot,
         HotkeyAction::ToggleFullscreen,
         HotkeyAction::ToggleAlwaysOnTop,
         HotkeyAction::ReconnectDevices,
         HotkeyAction::VolumeUp,
         HotkeyAction::VolumeDown,
+        HotkeyAction::ToggleMute,
     ];
 
     /// 設定ファイルに書かれるキー名。**変えると既存の設定を見失う。**
@@ -66,6 +69,7 @@ impl HotkeyAction {
             HotkeyAction::ReconnectDevices => "reconnect_devices",
             HotkeyAction::VolumeUp => "volume_up",
             HotkeyAction::VolumeDown => "volume_down",
+            HotkeyAction::ToggleMute => "toggle_mute",
         }
     }
 
@@ -83,6 +87,7 @@ impl HotkeyAction {
             HotkeyAction::ReconnectDevices => "デバイス再接続",
             HotkeyAction::VolumeUp => "音量を上げる",
             HotkeyAction::VolumeDown => "音量を下げる",
+            HotkeyAction::ToggleMute => "ミュート切替",
         }
     }
 }

@@ -1,6 +1,7 @@
 use crate::hotkey::{HotkeyAction, HotkeyError};
 use crate::settings::{
-    AppSettings, ColorRange, ColorSpace, ScreenshotFormat, MAX_JPEG_QUALITY, MIN_JPEG_QUALITY,
+    AppSettings, ColorRange, ColorSpace, ScreenshotDestination, ScreenshotFormat, MAX_JPEG_QUALITY,
+    MIN_JPEG_QUALITY,
 };
 use crate::status::{ConnectionStatus, ErrorSource, LinkStatus};
 use crate::video::{DeviceCapabilities, VideoMode};
@@ -480,6 +481,10 @@ fn video_mode_rank(
 /// `video` の `auto_reconnect` だけは例外で、ダイアログに無く右クリックメニューで
 /// 切り替える。丸ごと上書きすると、ダイアログを開いている間の切り替えが
 /// 開いた時点のスナップショットで巻き戻るため、実行中の値を残す。
+///
+/// `ui` の `muted` もダイアログに無い（右クリックメニュー・ミドルクリック・
+/// ホットキーで切り替える）。ここで触らないので、ダイアログを開いている間の
+/// 切り替えはそのまま残る。
 ///
 /// **ダイアログに `ui` セクションの項目を足すときは、ここにも足すこと。**
 /// **逆に、ダイアログの外だけで変える項目を足すときは、ここで残すこと。**
@@ -1140,68 +1145,107 @@ fn show_screenshot_settings_tab(
 
     let mut test_sound_requested = false;
 
-    // 保存フォルダー
+    // 出力先
     ui.group(|ui| {
-        ui.strong("保存場所");
-        ui.add_space(5.0);
-
-        ui.horizontal(|ui| {
-            ui.label("保存フォルダ:");
-            let mut folder_str = settings
-                .screenshot
-                .save_folder
-                .to_string_lossy()
-                .to_string();
-            ui.text_edit_singleline(&mut folder_str);
-            settings.screenshot.save_folder = std::path::PathBuf::from(folder_str);
-
-            if ui.button("参照...").clicked() {
-                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                    settings.screenshot.save_folder = folder;
-                }
-            }
-        });
-    });
-
-    ui.add_space(15.0);
-
-    // 保存形式
-    ui.group(|ui| {
-        ui.strong("保存形式");
+        ui.strong("出力先");
         ui.add_space(5.0);
 
         ui.horizontal(|ui| {
             ui.radio_value(
-                &mut settings.screenshot.format,
-                ScreenshotFormat::Jpeg,
-                "JPEG (.jpg)",
+                &mut settings.screenshot.destination,
+                ScreenshotDestination::File,
+                "ファイルに保存",
             );
             ui.radio_value(
-                &mut settings.screenshot.format,
-                ScreenshotFormat::Png,
-                "PNG (.png)",
+                &mut settings.screenshot.destination,
+                ScreenshotDestination::Clipboard,
+                "クリップボードにコピー",
             );
-        });
-
-        // 品質は JPEG のときだけ効く。PNG では触れないようにして、
-        // 変えても何も起きない項目を操作させない
-        let jpeg_selected = settings.screenshot.format == ScreenshotFormat::Jpeg;
-        ui.horizontal(|ui| {
-            ui.label("JPEG 品質:");
-            ui.add_enabled(
-                jpeg_selected,
-                egui::Slider::new(
-                    &mut settings.screenshot.jpeg_quality,
-                    MIN_JPEG_QUALITY..=MAX_JPEG_QUALITY,
-                ),
+            ui.radio_value(
+                &mut settings.screenshot.destination,
+                ScreenshotDestination::Both,
+                "両方",
             );
         });
 
         ui.add_space(5.0);
         ui.small(
-            "JPEG はファイルが小さくなりますが、文字や細い線ににじみが出ます。
-             PNG は元の画をそのまま保存できるかわりに、ファイルが数倍の大きさになります。",
+            "クリップボードへは圧縮せずそのままの画をコピーします。
+             保存場所と保存形式は、ファイルに保存するときだけ使われます。",
         );
+    });
+
+    ui.add_space(15.0);
+
+    // 保存場所と保存形式はファイルへ出すときだけ効く。クリップボードだけを
+    // 選んでいるときは触れないようにして、変えても何も起きない項目を操作させない
+    // （JPEG 品質を PNG のときに無効にしているのと同じ考え方）
+    let saves_file = settings.screenshot.destination.saves_file();
+
+    // 保存フォルダー
+    ui.add_enabled_ui(saves_file, |ui| {
+        ui.group(|ui| {
+            ui.strong("保存場所");
+            ui.add_space(5.0);
+
+            ui.horizontal(|ui| {
+                ui.label("保存フォルダ:");
+                let mut folder_str = settings
+                    .screenshot
+                    .save_folder
+                    .to_string_lossy()
+                    .to_string();
+                ui.text_edit_singleline(&mut folder_str);
+                settings.screenshot.save_folder = std::path::PathBuf::from(folder_str);
+
+                if ui.button("参照...").clicked() {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        settings.screenshot.save_folder = folder;
+                    }
+                }
+            });
+        });
+
+        ui.add_space(15.0);
+
+        // 保存形式
+        ui.group(|ui| {
+            ui.strong("保存形式");
+            ui.add_space(5.0);
+
+            ui.horizontal(|ui| {
+                ui.radio_value(
+                    &mut settings.screenshot.format,
+                    ScreenshotFormat::Jpeg,
+                    "JPEG (.jpg)",
+                );
+                ui.radio_value(
+                    &mut settings.screenshot.format,
+                    ScreenshotFormat::Png,
+                    "PNG (.png)",
+                );
+            });
+
+            // 品質は JPEG のときだけ効く。PNG では触れないようにして、
+            // 変えても何も起きない項目を操作させない
+            let jpeg_selected = settings.screenshot.format == ScreenshotFormat::Jpeg;
+            ui.horizontal(|ui| {
+                ui.label("JPEG 品質:");
+                ui.add_enabled(
+                    jpeg_selected,
+                    egui::Slider::new(
+                        &mut settings.screenshot.jpeg_quality,
+                        MIN_JPEG_QUALITY..=MAX_JPEG_QUALITY,
+                    ),
+                );
+            });
+
+            ui.add_space(5.0);
+            ui.small(
+                "JPEG はファイルが小さくなりますが、文字や細い線ににじみが出ます。
+                 PNG は元の画をそのまま保存できるかわりに、ファイルが数倍の大きさになります。",
+            );
+        });
     });
 
     ui.add_space(15.0);
@@ -1655,6 +1699,7 @@ mod tests {
                 passthrough_enabled: false,
             },
             screenshot: ScreenshotSettings {
+                destination: ScreenshotDestination::Both,
                 save_folder: PathBuf::from("C:/shots"),
                 format: ScreenshotFormat::Png,
                 jpeg_quality: 60,
@@ -1664,12 +1709,14 @@ mod tests {
             },
             ui: UiSettings {
                 volume: 80.0,
+                muted: false,
                 maintain_aspect_ratio: false,
                 last_window_size: Some((800.0, 600.0)),
                 last_window_pos: Some((10.0, 20.0)),
                 always_on_top: true,
                 enable_drag_move: false,
                 show_stats_overlay: true,
+                borderless: false,
             },
             hotkeys: BTreeMap::from([
                 (HotkeyAction::Screenshot, "Ctrl+S".to_string()),
@@ -1894,9 +1941,10 @@ mod tests {
         assert_eq!(shared.audio.channels, Some(1));
         assert!(!shared.audio.passthrough_enabled);
         assert_eq!(shared.screenshot.sound_volume, 50.0);
-        // 保存形式と品質も screenshot セクションごと差し替わる
+        // 保存形式・品質・出力先も screenshot セクションごと差し替わる
         assert_eq!(shared.screenshot.format, ScreenshotFormat::Png);
         assert_eq!(shared.screenshot.jpeg_quality, 60);
+        assert_eq!(shared.screenshot.destination, ScreenshotDestination::Both);
     }
 
     #[test]
@@ -1978,6 +2026,56 @@ mod tests {
         assert_eq!(shared.ui.last_window_size, Some((1280.0, 720.0)));
         assert_eq!(shared.ui.last_window_pos, Some((100.0, 200.0)));
         assert!(!shared.ui.always_on_top);
+        assert!(shared.ui.enable_drag_move);
+    }
+
+    #[test]
+    fn commit_draft_keeps_mute_changed_outside_dialog() {
+        // ミュートはダイアログに無い。ダイアログを開いたまま切り替えて
+        // 「適用」を押しても、開いた時点の値へ巻き戻ってはいけない
+        let original = sample_settings();
+        let draft = original.clone();
+        let mut shared = original.clone();
+
+        shared.ui.muted = !original.ui.muted;
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.ui.muted, !original.ui.muted);
+    }
+
+    #[test]
+    fn commit_draft_keeps_borderless_changed_outside_dialog() {
+        // タイトルバーの表示もダイアログに無い。ダイアログを開いたまま
+        // 右クリックメニューで隠して「適用」を押しても、装飾が戻ってはいけない
+        let original = sample_settings();
+        let draft = original.clone();
+        let mut shared = original.clone();
+
+        shared.ui.borderless = !original.ui.borderless;
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.ui.borderless, !original.ui.borderless);
+    }
+
+    #[test]
+    fn commit_draft_keeps_drag_move_enabled_by_the_borderless_guard() {
+        // 装飾を外すときのガードが有効にした「画面ドラッグ移動」も、
+        // ダイアログの「適用」で切られてはいけない。切られると
+        // タイトルバーもドラッグ移動も無い状態になり、ウィンドウを動かせなくなる
+        let mut original = sample_settings();
+        original.ui.enable_drag_move = false;
+        let draft = original.clone();
+        let mut shared = original.clone();
+
+        // 右クリックメニューで「タイトルバーを隠す」を押した状態
+        shared.ui.borderless = true;
+        shared.ui.enable_drag_move = true;
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert!(shared.ui.borderless);
         assert!(shared.ui.enable_drag_move);
     }
 

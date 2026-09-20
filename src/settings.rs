@@ -285,6 +285,11 @@ pub struct AudioSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScreenshotSettings {
+    // 撮った画をどこへ出すか。ファイル・クリップボード・両方の 3 択。
+    // 保存形式と JPEG 品質はファイルへ出すときだけ効く（クリップボードへは
+    // 圧縮せずそのまま渡す）
+    #[serde(deserialize_with = "deserialize_screenshot_destination")]
+    pub destination: ScreenshotDestination,
     pub save_folder: PathBuf,
     // 保存形式と JPEG の品質を別々の項目にしてある。品質を持つ enum を
     // 1 項目として持たせると TOML では [screenshot.format] のテーブルになり、
@@ -308,6 +313,37 @@ pub struct ScreenshotSettings {
     // 時点で `None` に戻るので、この項目を見て動く処理を足さないこと。
     #[serde(rename = "hotkey", skip_serializing)]
     pub legacy_hotkey: Option<String>,
+}
+
+// スクリーンショットの出力先。
+// 設定ファイルには destination = "file" / "clipboard" / "both" と書かれる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenshotDestination {
+    // 既存ユーザーの設定ファイルには destination が無い。既定をファイルに
+    // してあるので、これまでどおりフォルダへ保存されるだけで挙動は変わらない
+    #[default]
+    File,
+    Clipboard,
+    Both,
+}
+
+impl ScreenshotDestination {
+    // ファイルへ書き出すか。false のときは保存先のファイル名も作らない
+    pub fn saves_file(self) -> bool {
+        matches!(
+            self,
+            ScreenshotDestination::File | ScreenshotDestination::Both
+        )
+    }
+
+    // クリップボードへコピーするか
+    pub fn copies_to_clipboard(self) -> bool {
+        matches!(
+            self,
+            ScreenshotDestination::Clipboard | ScreenshotDestination::Both
+        )
+    }
 }
 
 // スクリーンショットの保存形式。設定ファイルには format = "jpeg" / "png" と書かれる。
@@ -390,6 +426,24 @@ where
     }))
 }
 
+// 設定ファイルの destination に知らない値が書かれていても、設定全体を失わせない。
+// 理由は deserialize_screenshot_format と同じ。
+fn deserialize_screenshot_destination<'de, D>(
+    deserializer: D,
+) -> Result<ScreenshotDestination, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(screenshot_destination_from_str(&raw).unwrap_or_else(|| {
+        warn!(
+            "設定の出力先 \"{}\" を解釈できないのでファイルへの保存として扱う",
+            raw
+        );
+        ScreenshotDestination::default()
+    }))
+}
+
 // 範囲外の品質が書かれていても、設定全体を失わせない。u8 のまま読むと
 // jpeg_quality = 256 のような値でパースがファイル単位で失敗し、品質と
 // 無関係な項目まで既定値へ戻ってしまう。TOML の整数は i64 なので、
@@ -441,6 +495,17 @@ where
         warn!("設定の音量 {} は範囲外なので {} として扱う", raw, clamped);
     }
     Ok(clamped)
+}
+
+// 設定ファイルに書かれた文字列から出力先を決める。
+// 解釈できない場合は None を返す。
+fn screenshot_destination_from_str(raw: &str) -> Option<ScreenshotDestination> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "file" => Some(ScreenshotDestination::File),
+        "clipboard" => Some(ScreenshotDestination::Clipboard),
+        "both" => Some(ScreenshotDestination::Both),
+        _ => None,
+    }
 }
 
 // 設定ファイルに書かれた文字列から保存形式を決める。
@@ -514,6 +579,10 @@ fn screenshot_folder_from(
 pub struct UiSettings {
     #[serde(deserialize_with = "deserialize_volume")]
     pub volume: f32,
+    // ミュート中か。**音量とは別に持つ。** 音量 0% で代用すると、解除したときに
+    // 戻すべき値が残らない。設定ダイアログには出さず、右クリックメニュー・
+    // ミドルクリック・ホットキーだけで切り替える
+    pub muted: bool,
     pub maintain_aspect_ratio: bool,
     pub last_window_size: Option<(f32, f32)>,
     pub last_window_pos: Option<(f32, f32)>,
@@ -521,6 +590,11 @@ pub struct UiSettings {
     pub enable_drag_move: bool,
     // 映像の上に FPS などの統計を重ねて出すか
     pub show_stats_overlay: bool,
+    // タイトルバーと枠を消すか。デュアルモニタでサブウィンドウとして置くときに
+    // 装飾が邪魔になるため。設定ダイアログには出さず、右クリックメニューだけで
+    // 切り替える。**有効にすると × が無くなる** ので、右クリックメニューの
+    // 「終了」と Alt+F4 が閉じる手段になる
+    pub borderless: bool,
 }
 
 impl Default for VideoSettings {
@@ -556,6 +630,8 @@ impl Default for AudioSettings {
 impl Default for ScreenshotSettings {
     fn default() -> Self {
         Self {
+            // 既定はファイルへの保存だけ。これまでの挙動をそのまま既定にする
+            destination: ScreenshotDestination::File,
             save_folder: default_screenshot_folder(),
             format: ScreenshotFormat::Jpeg,
             // image クレートの save() は JpegEncoder::new を通るため、
@@ -584,6 +660,8 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             volume: DEFAULT_VOLUME,
+            // 既定は音が出る状態にする
+            muted: false,
             maintain_aspect_ratio: true,
             last_window_size: None,
             last_window_pos: None,
@@ -591,6 +669,9 @@ impl Default for UiSettings {
             enable_drag_move: true,
             // 常時出しているものではないので、既定は非表示にする
             show_stats_overlay: false,
+            // 既定はタイトルバーありにする。装飾なしは閉じ方・動かし方が
+            // 通常のウィンドウと変わるので、知らずにその状態で起動させない
+            borderless: false,
         }
     }
 }
@@ -833,6 +914,7 @@ channels = 1
 passthrough_enabled = false
 
 [screenshot]
+destination = "both"
 save_folder = 'C:\shots'
 format = "png"
 jpeg_quality = 60
@@ -841,12 +923,14 @@ sound_volume = 50.0
 
 [ui]
 volume = 80.0
+muted = true
 maintain_aspect_ratio = false
 last_window_size = [800.0, 600.0]
 last_window_pos = [10.0, 20.0]
 always_on_top = true
 enable_drag_move = false
 show_stats_overlay = true
+borderless = true
 
 [hotkeys]
 screenshot = "Ctrl+S"
@@ -928,6 +1012,34 @@ volume = 80.0
     }
 
     #[test]
+    fn app_settings_missing_muted_defaults_to_unmuted() {
+        // ミュートの項目を足した版へ上げた直後、既存ユーザーの設定ファイルには
+        // このキーが無い。欠けていても他の項目が保持され、音が出る状態で起動すること
+        let config = without_key(FULL_CONFIG, "muted");
+        assert!(
+            !config.contains("muted ="),
+            "テスト用の設定から muted が消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("muted が欠けていても読めなければならない");
+
+        assert!(!settings.ui.muted); // 既定値は false
+        assert_eq!(settings.ui.volume, 80.0);
+        assert!(settings.ui.always_on_top);
+    }
+
+    #[test]
+    fn app_settings_muted_is_read_and_kept_apart_from_volume() {
+        // ミュートは音量とは別の項目。読み込みで音量へ潰れてはいけない
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("設定ファイルを読めなければならない");
+
+        assert!(settings.ui.muted);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
     fn app_settings_missing_show_stats_overlay_defaults_to_hidden() {
         // 情報表示の項目を足した版へ上げた直後、既存ユーザーの設定ファイルには
         // このキーが無い。欠けていても他の項目が保持され、既定の非表示になること。
@@ -944,6 +1056,34 @@ volume = 80.0
         assert_eq!(settings.ui.volume, 80.0);
         assert!(settings.ui.always_on_top);
         assert!(!settings.ui.enable_drag_move);
+    }
+
+    #[test]
+    fn app_settings_missing_borderless_defaults_to_decorated() {
+        // 装飾なしの項目を足した版へ上げた直後、既存ユーザーの設定ファイルには
+        // このキーが無い。欠けていても他の項目が保持され、タイトルバーありで起動すること。
+        // **既定が true になると、更新しただけで × が消えたウィンドウが出てくる。**
+        let config = without_key(FULL_CONFIG, "borderless");
+        assert!(
+            !config.contains("borderless ="),
+            "テスト用の設定から borderless が消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("borderless が欠けていても読めなければならない");
+
+        assert!(!settings.ui.borderless); // 既定値は false
+        assert_eq!(settings.ui.volume, 80.0);
+        assert!(settings.ui.always_on_top);
+        assert!(settings.ui.show_stats_overlay);
+    }
+
+    #[test]
+    fn app_settings_borderless_is_read_from_the_file() {
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("設定ファイルを読めなければならない");
+
+        assert!(settings.ui.borderless);
     }
 
     #[test]
@@ -1120,6 +1260,7 @@ volume = 80.0
         assert_eq!(restored.audio.sample_rate, Some(44100));
         assert_eq!(restored.audio.channels, Some(1));
         assert!(!restored.audio.passthrough_enabled);
+        assert_eq!(restored.screenshot.destination, ScreenshotDestination::Both);
         assert_eq!(restored.screenshot.save_folder, PathBuf::from(r"C:\shots"));
         assert_eq!(restored.screenshot.format, ScreenshotFormat::Png);
         assert_eq!(restored.screenshot.jpeg_quality, 60);
@@ -1571,6 +1712,71 @@ volume = 80.0
 
         assert_eq!(settings.screenshot.jpeg_quality, 90);
         assert_eq!(settings.screenshot.format, ScreenshotFormat::Png);
+    }
+
+    #[test]
+    fn app_settings_missing_destination_key_defaults_to_file() {
+        // 出力先を足す前の版が書いた設定ファイル。これまでどおりファイルへ
+        // 保存され、他の項目も保持されなければならない
+        let config = without_key(FULL_CONFIG, "destination");
+        assert!(
+            !config.contains("destination ="),
+            "テスト用の設定から destination が消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("destination が欠けていても読めなければならない");
+
+        assert_eq!(settings.screenshot.destination, ScreenshotDestination::File);
+        assert_eq!(settings.screenshot.format, ScreenshotFormat::Png);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_unknown_destination_value_falls_back_to_file_without_losing_settings() {
+        // 手で書き換えて綴りを誤った場合。出力先だけが既定へ倒れ、
+        // 無関係な項目は保持されなければならない
+        let config = FULL_CONFIG.replace(r#"destination = "both""#, r#"destination = "printer""#);
+        assert!(config.contains(r#"destination = "printer""#));
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("知らない出力先でも読めなければならない");
+
+        assert_eq!(settings.screenshot.destination, ScreenshotDestination::File);
+        assert_eq!(settings.screenshot.jpeg_quality, 60);
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn screenshot_destination_from_str_accepts_known_spellings() {
+        assert_eq!(
+            screenshot_destination_from_str("file"),
+            Some(ScreenshotDestination::File)
+        );
+        assert_eq!(
+            screenshot_destination_from_str("CLIPBOARD"),
+            Some(ScreenshotDestination::Clipboard)
+        );
+        assert_eq!(
+            screenshot_destination_from_str(" both "),
+            Some(ScreenshotDestination::Both)
+        );
+        assert_eq!(screenshot_destination_from_str(""), None);
+        assert_eq!(screenshot_destination_from_str("files"), None);
+    }
+
+    #[test]
+    fn screenshot_destination_flags_match_each_variant() {
+        // 出力先ごとに「何をするか」の判定。両方のときは 2 つとも true になる
+        assert!(ScreenshotDestination::File.saves_file());
+        assert!(!ScreenshotDestination::File.copies_to_clipboard());
+
+        assert!(!ScreenshotDestination::Clipboard.saves_file());
+        assert!(ScreenshotDestination::Clipboard.copies_to_clipboard());
+
+        assert!(ScreenshotDestination::Both.saves_file());
+        assert!(ScreenshotDestination::Both.copies_to_clipboard());
     }
 
     #[test]

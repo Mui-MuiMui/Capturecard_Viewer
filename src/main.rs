@@ -59,6 +59,18 @@ const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
 /// フルスクリーンを切り替えたときに OSD を出しておく時間
 const FULLSCREEN_OSD_DURATION: Duration = Duration::from_secs(1);
 
+/// 装飾なしにしたときにドラッグ移動を自動で有効にした、と知らせる OSD の表示時間。
+/// フルスクリーンの表示より長いのは、こちらが「設定を勝手に変えた」報告で、
+/// 読ませる必要があるため
+const DRAG_MOVE_GUARD_OSD_DURATION: Duration = Duration::from_secs(2);
+
+/// 上記の OSD に出す文言
+const DRAG_MOVE_GUARD_MESSAGE: &str = "ウィンドウを動かすため、画面ドラッグ移動を有効にしました";
+
+/// 装飾なしのとき、ウィンドウの端を「リサイズを始める場所」と見なす幅。
+/// 掴みやすさと、映像のドラッグ移動を邪魔しないことの兼ね合いで決めている
+const RESIZE_BORDER: f32 = 8.0;
+
 /// 音量を変えたときに OSD を出しておく時間。
 /// ホイールを回している間は回すたびに延びるので、これは「手を止めてから」の長さ
 const VOLUME_OSD_DURATION: Duration = Duration::from_millis(1500);
@@ -73,7 +85,7 @@ const VOLUME_SCROLL_STEP: f32 = 10.0;
 /// 取得スレッドから UI スレッドへ、この形でチャネル越しに返す
 type CapabilityResult = (String, Result<video::DeviceCapabilities, String>);
 
-/// スクリーンショットの保存結果。`(撮影を始めた時刻, 成功なら保存先のパス / 失敗なら理由)`。
+/// スクリーンショットの出力結果。`(撮影を始めた時刻, 何をしたか / 失敗なら理由)`。
 ///
 /// 保存スレッドから UI スレッドへ、この形でチャネル越しに返す。
 /// **失敗だけでなく成功も送る。** 成功で直近の失敗の記録を消さないと、
@@ -84,8 +96,66 @@ type CapabilityResult = (String, Result<video::DeviceCapabilities, String>);
 /// 古い結果で新しい記録を上書きしないよう、受け取る側が時刻で弾く
 type ScreenshotResult = (Instant, ScreenshotOutcome);
 
-/// 1 回の撮影の結末。成功なら保存先のパス、失敗なら理由。
-type ScreenshotOutcome = Result<PathBuf, String>;
+/// 1 回の撮影の結末。成功なら何をしたかの文、失敗なら理由。
+///
+/// **出力先ごとの内訳ではなく、文字列 1 つに畳んである。** 受け取る UI
+/// スレッドがすることは「ログに出す」と「失敗ならトーストに出す」だけで、
+/// 出力先の種類で処理を分けないため。畳む規則は
+/// `summarize_screenshot_delivery` が持つ。
+type ScreenshotOutcome = Result<String, String>;
+
+/// 出力先が「両方」のときに、片方だけ失敗した場合の結果の作り方。
+///
+/// 失敗が 1 つでもあれば全体を失敗として扱い、理由を並べる。成功したほうを
+/// 黙って捨てないよう、文言には成功した出力先も残す。
+///
+/// 引数の `None` は「その出力先が設定に含まれていない」を表す。`Some` は
+/// 実際に試した結果。
+///
+/// アプリの状態に触れないのでそのまま別スレッドで実行でき、テストからも呼べる。
+fn summarize_screenshot_delivery(
+    clipboard: Option<Result<(), String>>,
+    file: Option<Result<PathBuf, String>>,
+) -> ScreenshotOutcome {
+    let (copied, clipboard_error) = match clipboard {
+        Some(Ok(())) => (true, None),
+        Some(Err(reason)) => (false, Some(reason)),
+        None => (false, None),
+    };
+    let (saved_to, file_error) = match file {
+        Some(Ok(path)) => (Some(path), None),
+        Some(Err(reason)) => (None, Some(reason)),
+        None => (None, None),
+    };
+
+    let succeeded = match (copied, &saved_to) {
+        (true, Some(path)) => Some(format!(
+            "クリップボードへコピーし、{} へ保存した",
+            path.display()
+        )),
+        (true, None) => Some("クリップボードへコピーした".to_string()),
+        (false, Some(path)) => Some(format!("{} へ保存した", path.display())),
+        (false, None) => None,
+    };
+
+    let failures: Vec<String> = [clipboard_error, file_error]
+        .into_iter()
+        .flatten()
+        .collect();
+    if !failures.is_empty() {
+        let mut reason = failures.join(" / ");
+        // 片方だけ失敗した場合に、成功したほうを黙って捨てない。
+        // 「クリップボードには入っているのか」が分からないと次の操作を選べない
+        if let Some(done) = succeeded {
+            reason = format!("{}（{}）", reason, done);
+        }
+        return Err(reason);
+    }
+
+    // 出力先の enum が必ずどちらかを含むので通常は起きない。
+    // 黙って成功にすると、何も出力していないのに撮れたように見える
+    succeeded.ok_or_else(|| "出力先が 1 つも設定されていません".to_string())
+}
 
 /// 届いた結果を画面の記録へ反映してよいかを判定する。
 ///
@@ -491,6 +561,9 @@ pub struct CaptureCardViewer {
     // 常時表示の show_stats_overlay とは別物
     transient_overlay: TransientOverlay,
     volume: f32,
+    // ミュート中か。設定の ui.muted と対応する。音量とは独立で、
+    // ミュート中も volume は元の値を保つ
+    muted: bool,
     last_volume_sent: f32,
     last_settings_applied: Instant,
     // 設定に未保存の変更があるときの、最後に変更された時刻。
@@ -577,8 +650,13 @@ pub struct CaptureCardViewer {
 
     // ウィンドウ管理
     always_on_top: bool,
+    // タイトルバーと枠を消しているか。設定の ui.borderless と対応する。
+    // フルスクリーン中は OS 側が元から装飾を外しているので、この値は
+    // 「フルスクリーンから戻ったときにどちらへ戻すか」を保持しているだけになる
+    borderless: bool,
 
-    // 進行中のスクリーンショット保存スレッド。
+    // 進行中のスクリーンショット保存スレッド。クリップボードへの転送も
+    // このスレッドが行う。
     // 終了時に join して、書き出し途中の画像ファイルが残らないようにする
     screenshot_save_threads: Vec<JoinHandle<()>>,
 }
@@ -637,6 +715,7 @@ impl Default for CaptureCardViewer {
             show_stats_overlay,
             transient_overlay: TransientOverlay::default(),
             volume: 100.0,
+            muted: false,
             last_volume_sent: -1.0,
             last_settings_applied: Instant::now(),
             settings_dirty_since: None,
@@ -673,6 +752,7 @@ impl Default for CaptureCardViewer {
 
             // ウィンドウ管理
             always_on_top: false,
+            borderless: false,
 
             screenshot_save_threads: Vec::new(),
         };
@@ -699,6 +779,16 @@ impl Default for CaptureCardViewer {
                     // 出力デバイスはデフォルト（None）で自動選択させる
                     s.audio.output_device_name = None;
                     debug!("出力デバイスは既定（自動選択）にする");
+                }
+                // タイトルバーなしで保存されているのに画面ドラッグ移動が切れている
+                // 場合を直す。右クリックメニューからの切替では set_borderless が
+                // 同じ判定で守っているが、設定ファイルは手で編集できるため、
+                // 起動した時点で動かせないウィンドウが出てくる組み合わせを作れる
+                if needs_drag_move_guard(s.ui.borderless, s.ui.enable_drag_move) {
+                    s.ui.enable_drag_move = true;
+                    warn!(
+                        "タイトルバーなしで画面ドラッグ移動が無効だったため、ドラッグ移動を有効にした"
+                    );
                 }
                 // 読めなかった設定ファイルを退避できなかった場合は書き戻さない。
                 // ここで上書きすると、ディスクに残っている壊れたファイルが既定値で
@@ -1105,36 +1195,50 @@ impl CaptureCardViewer {
             HotkeyAction::ReconnectDevices => self.reconnect_devices(),
             HotkeyAction::VolumeUp => self.adjust_volume(VOLUME_SCROLL_STEP),
             HotkeyAction::VolumeDown => self.adjust_volume(-VOLUME_SCROLL_STEP),
+            HotkeyAction::ToggleMute => self.toggle_mute(),
         }
     }
 
-    /// いま表示しているフレームを、設定した形式（JPEG / PNG）で保存する。
+    /// いま表示しているフレームを、設定した出力先（ファイル / クリップボード /
+    /// 両方）へ出す。ファイルへは設定した形式（JPEG / PNG）で保存する。
     ///
     /// ロックは settings → video → screenshot の順に 1 つずつ取り、重ねない。
     /// エンコードと書き出しは別スレッドへ逃がす。1080p のエンコードは
     /// JPEG でも数十 ms かかり、UI スレッドで行うと映像が一瞬止まるため
-    /// （PNG は可逆圧縮のぶんさらに時間がかかる）
+    /// （PNG は可逆圧縮のぶんさらに時間がかかる）。クリップボードへの転送も
+    /// 同じスレッドで行う。こちらは他のアプリがクリップボードを掴んでいると
+    /// 待たされるため、UI スレッドに置けない
     fn take_screenshot(&mut self) {
-        debug!("スクリーンショットの保存を開始する");
+        debug!("スクリーンショットの出力を開始する");
 
         // この撮影を識別する時刻。結果が撮影順に届かないときの追い越し判定に使う。
         // ファイル名のタイムスタンプはミリ秒までなので同一ミリ秒で並びうるが、
         // `Instant` は単調増加するのでこちらは必ず順序が付く
         let started_at = Instant::now();
 
-        // 保存先と効果音の音量だけを取り出してロックを手放す。
+        // 出力先と効果音の音量だけを取り出してロックを手放す。
         // get_screenshot_path は連番を決めるためにファイルの有無を見るが、
         // ファイルを作るのは保存スレッドなので、ここでは何も書かない
         let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S-%3f").to_string();
         let save_params = self.settings.lock().ok().map(|settings| {
+            let destination = settings.screenshot.destination;
+            // クリップボードだけのときはファイル名を作らない。
+            // get_screenshot_path は連番を決めるために保存先フォルダを
+            // 走査するので、使わない名前のために I/O を走らせない
+            let file_target = destination.saves_file().then(|| {
+                (
+                    settings.get_screenshot_path(&timestamp),
+                    settings.screenshot.encoding(),
+                )
+            });
             (
-                settings.get_screenshot_path(&timestamp),
-                settings.screenshot.encoding(),
+                destination.copies_to_clipboard(),
+                file_target,
                 settings.screenshot.sound_volume,
             )
         });
-        let Some((path, encoding, sound_volume)) = save_params else {
-            warn!("スクリーンショットの保存で settings のロックを取得できない");
+        let Some((to_clipboard, file_target, sound_volume)) = save_params else {
+            warn!("スクリーンショットの出力で settings のロックを取得できない");
             return;
         };
 
@@ -1144,7 +1248,7 @@ impl CaptureCardViewer {
         let latest_frame = match self.video_capture.lock() {
             Ok(video) => video.get_latest_frame(),
             Err(_) => {
-                warn!("スクリーンショットの保存で video_capture のロックを取得できない");
+                warn!("スクリーンショットの出力で video_capture のロックを取得できない");
                 return;
             }
         };
@@ -1157,10 +1261,14 @@ impl CaptureCardViewer {
             return;
         };
         debug!(
-            "保存対象の映像フレームを取得した: {}x{}、保存先: {}",
+            "出力対象の映像フレームを取得した: {}x{}、クリップボード: {}、保存先: {}",
             frame.width,
             frame.height,
-            path.display()
+            to_clipboard,
+            file_target.as_ref().map_or_else(
+                || "なし".to_string(),
+                |(path, _)| path.display().to_string()
+            )
         );
 
         // 効果音は保存の完了を待たずに鳴らす。撮った手応えをその場で返すため。
@@ -1181,7 +1289,15 @@ impl CaptureCardViewer {
         // ログ出力も UI スレッド側（drain_screenshot_results）へ寄せてある
         let result_tx = self.screenshot_tx.clone();
         let handle = std::thread::spawn(move || {
-            let result = save_frame(&frame, &path, encoding).map(|()| path);
+            // 両方のときはクリップボードを先にする。撮ってすぐ貼る使い方で、
+            // ディスクへの書き出しを待たせないため。
+            // **片方が失敗しても他方は行う。** クリップボードを他のアプリが
+            // 掴んでいてコピーできなくても、ファイルは残したい
+            let clipboard = to_clipboard.then(|| screenshot::copy_frame_to_clipboard(&frame));
+            let file = file_target
+                .map(|(path, encoding)| save_frame(&frame, &path, encoding).map(|()| path));
+
+            let result = summarize_screenshot_delivery(clipboard, file);
             if result_tx.send((started_at, result)).is_err() {
                 // 受信側が無いのはアプリが終了したときだけ。結果は捨ててよい
                 debug!("スクリーンショットの結果の送り先が既に無いので捨てる");
@@ -1197,8 +1313,9 @@ impl CaptureCardViewer {
 
     /// 進行中のスクリーンショット保存がすべて終わるまで待つ。
     ///
-    /// 待ち時間はエンコードとディスクへの書き出しが終わるまでで、
-    /// 1080p の JPEG なら通常は数十 ms。終了時に呼ぶ
+    /// 待ち時間はエンコードとディスクへの書き出し（出力先にクリップボードが
+    /// 含まれる場合はその転送も）が終わるまでで、1080p の JPEG なら通常は
+    /// 数十 ms。終了時に呼ぶ
     fn join_screenshot_save_threads(&mut self) {
         let handles = std::mem::take(&mut self.screenshot_save_threads);
         if handles.is_empty() {
@@ -1225,6 +1342,12 @@ impl CaptureCardViewer {
             self.video_retry.is_active(),
             self.error_detail(ErrorSource::Video).as_deref(),
         );
+
+        // 装飾なしのときだけ、ウィンドウ端のドラッグをリサイズに割り当てる。
+        // 帯の上にいる間は映像のドラッグ移動を止める（両方が効くと、
+        // 端を掴んだつもりでウィンドウごと動く）
+        let on_resize_edge = self.handle_borderless_resize(ctx);
+
         egui::CentralPanel::default()
             .frame(egui::Frame::none().inner_margin(egui::Margin::same(2.0))) // マージンを2pxに設定
             .show(ctx, |ui| {
@@ -1260,7 +1383,7 @@ impl CaptureCardViewer {
                     );
 
                     // ウィンドウドラッグを処理（設定が有効な場合のみ）
-                    if response.dragged() {
+                    if response.dragged() && !on_resize_edge {
                         if let Ok(settings) = self.settings.lock() {
                             if settings.ui.enable_drag_move {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
@@ -1279,6 +1402,8 @@ impl CaptureCardViewer {
                             ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
                     }
 
+                    self.handle_middle_click_mute(&response);
+
                     // 音量調整のためのスクロールを処理
                     if response.hovered() {
                         self.handle_volume_scroll(ctx);
@@ -1291,7 +1416,7 @@ impl CaptureCardViewer {
                     });
 
                     // 空エリアでのウィンドウドラッグを処理（設定が有効な場合のみ）
-                    if response.dragged() {
+                    if response.dragged() && !on_resize_edge {
                         if let Ok(settings) = self.settings.lock() {
                             if settings.ui.enable_drag_move {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
@@ -1305,6 +1430,8 @@ impl CaptureCardViewer {
                         self.context_menu_pos =
                             ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
                     }
+
+                    self.handle_middle_click_mute(&response);
                 }
             });
     }
@@ -1365,6 +1492,8 @@ impl CaptureCardViewer {
                             ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
                     }
 
+                    self.handle_middle_click_mute(&response);
+
                     // マウススクロールでの音量調整（ウィンドウ版と同じ機能）
                     if response.hovered() {
                         self.handle_volume_scroll(ctx);
@@ -1391,6 +1520,8 @@ impl CaptureCardViewer {
                         self.context_menu_pos =
                             ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
                     }
+
+                    self.handle_middle_click_mute(&response);
                 }
             });
     }
@@ -1405,12 +1536,13 @@ impl CaptureCardViewer {
             return;
         }
 
-        let volume = if scroll_y > 0.0 {
-            (self.volume + VOLUME_SCROLL_STEP).min(MAX_VOLUME)
+        // 段の大きさ、上下限、ミュートの扱いを「音量を上げる / 下げる」の
+        // ホットキーと同じにするため、同じ経路へ寄せる
+        self.adjust_volume(if scroll_y > 0.0 {
+            VOLUME_SCROLL_STEP
         } else {
-            (self.volume - VOLUME_SCROLL_STEP).max(MIN_VOLUME)
-        };
-        self.set_volume_from_ui(volume);
+            -VOLUME_SCROLL_STEP
+        });
     }
 
     /// UI の操作で音量が変わったときの共通処理。
@@ -1430,13 +1562,24 @@ impl CaptureCardViewer {
         self.show_volume_overlay();
     }
 
-    /// いまの音量を OSD に出す。
+    /// いまの音量を OSD に出す。ミュート中はバーを灰色にして数字だけ残す。
     fn show_volume_overlay(&mut self) {
         self.transient_overlay.show(
-            volume_overlay_content(self.volume),
+            volume_overlay_content(self.volume, self.muted),
             VOLUME_OSD_DURATION,
             Instant::now(),
         );
+    }
+
+    /// 映像や空きエリアの上でのミドルクリックをミュートの切り替えへ回す。
+    ///
+    /// ウィンドウ表示とフルスクリーンの、映像あり / なしの 4 か所から呼ぶ。
+    /// 映像が出ていないときも切り替えられるようにしてあるのは、音だけ先に
+    /// 来ている状態でも黙らせられるようにするため。
+    fn handle_middle_click_mute(&mut self, response: &egui::Response) {
+        if response.middle_clicked() {
+            self.toggle_mute();
+        }
     }
 
     /// 映像の統計を左上へ半透明で重ねて描く。
@@ -1500,6 +1643,13 @@ impl CaptureCardViewer {
                         self.set_volume_from_ui(self.volume);
                     }
 
+                    // ミュートはスライダーのすぐ下に置く。音量 0% にする代わりの
+                    // 操作なので、離すと探されない
+                    let mut muted = self.muted;
+                    if ui.checkbox(&mut muted, "ミュート").changed() {
+                        self.set_muted_from_ui(muted);
+                    }
+
                     ui.separator();
                     let aspect_response =
                         ui.checkbox(&mut self.maintain_aspect_ratio, "アスペクト比を維持");
@@ -1531,15 +1681,43 @@ impl CaptureCardViewer {
                         self.toggle_fullscreen(ctx, self.is_fullscreen);
                     }
 
-                    // 画面ドラッグ移動のチェックボックス
+                    // タイトルバーを隠すチェックボックス。
+                    // フルスクリーン中は OS が元から装飾を外しているので触らせない。
+                    // ここで切り替えても見た目は変わらず、フルスクリーンを抜けた
+                    // ときに初めて効くので、操作と結果が結びつかない
+                    let mut temp_borderless = self.borderless;
+                    let borderless_response = ui
+                        .add_enabled(
+                            !self.is_fullscreen,
+                            egui::Checkbox::new(&mut temp_borderless, "タイトルバーを隠す"),
+                        )
+                        .on_hover_text(
+                            "タイトルバーと枠を消します。移動は映像のドラッグ、サイズ変更はウィンドウ端のドラッグ、終了はこのメニューの「終了」か Alt+F4 で行います",
+                        )
+                        .on_disabled_hover_text(
+                            "フルスクリーン中は元から装飾がないため切り替えられません",
+                        );
+
+                    if borderless_response.changed() {
+                        self.set_borderless(ctx, temp_borderless);
+                    }
+
+                    // 画面ドラッグ移動のチェックボックス。
+                    // 装飾なしの間は切らせない。切ると動かす手段が残らない
                     let enable_drag_move = if let Ok(settings) = self.settings.lock() {
                         settings.ui.enable_drag_move
                     } else {
                         true
                     };
                     let mut temp_enable_drag_move = enable_drag_move;
-                    let drag_move_response =
-                        ui.checkbox(&mut temp_enable_drag_move, "画面ドラッグ移動");
+                    let drag_move_response = ui
+                        .add_enabled(
+                            !self.borderless,
+                            egui::Checkbox::new(&mut temp_enable_drag_move, "画面ドラッグ移動"),
+                        )
+                        .on_disabled_hover_text(
+                            "タイトルバーを隠している間は、ウィンドウを動かす唯一の手段なので切れません",
+                        );
 
                     // 画面ドラッグ移動設定が変更された場合（書き出しはデバウンス）
                     if drag_move_response.changed() {
@@ -1593,6 +1771,19 @@ impl CaptureCardViewer {
                     }
 
                     ui.separator();
+                    // ウィンドウサイズのリセット。装飾なしで小さくしすぎて
+                    // 端の帯を掴めなくなったときの復帰手段
+                    if ui
+                        .add_enabled(
+                            !self.is_fullscreen,
+                            egui::Button::new("ウィンドウサイズをリセット"),
+                        )
+                        .on_disabled_hover_text("フルスクリーン中は変更できません")
+                        .clicked()
+                    {
+                        self.reset_window_size(ctx);
+                        close_menu = true;
+                    }
                     if ui.button("デバイス再接続").clicked() {
                         self.reconnect_devices();
                         close_menu = true;
@@ -1600,6 +1791,14 @@ impl CaptureCardViewer {
                     ui.separator();
                     if ui.button("詳細設定...").clicked() {
                         self.show_settings = true;
+                        close_menu = true;
+                    }
+                    ui.separator();
+                    // 終了。装飾なしでは × が無いので、ここが閉じる手段になる。
+                    // 押すと on_exit が走り、保留中の設定も書き出される
+                    if ui.button("終了").clicked() {
+                        info!("右クリックメニューから終了する");
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         close_menu = true;
                     }
                 });
@@ -1683,12 +1882,45 @@ fn format_stats_lines(stats: &FrameStats) -> Vec<String> {
 ///
 /// 数字は右クリックメニューの「音量: N%」と同じ `as i32` で作る。丸め方を
 /// 変えると、メニューのスライダーを動かしている間だけ OSD と 1% ずれて見える。
-fn volume_overlay_content(volume: f32) -> OverlayContent {
+///
+/// ミュート中はバーを灰色にし、文言に「（ミュート中）」を添える。**数字は消さない。**
+/// ミュートを解除したときに戻る音量がそのまま見えているほうが、操作の結果を
+/// 予想しやすいため。
+fn volume_overlay_content(volume: f32, muted: bool) -> OverlayContent {
+    let text = if muted {
+        format!("音量: {}%（ミュート中）", volume as i32)
+    } else {
+        format!("音量: {}%", volume as i32)
+    };
     OverlayContent::Bar {
-        text: format!("音量: {}%", volume as i32),
+        text,
         ratio: volume / MAX_VOLUME,
         marker_ratio: VOLUME_REFERENCE / MAX_VOLUME,
+        dimmed: muted,
     }
+}
+
+/// ミュートを切り替えたときに OSD へ出す内容を組み立てる。
+///
+/// 解除したときだけ音量を添える。ミュート中にスライダーで音量を変えている
+/// ことがあるため、「解除したら何%で鳴るのか」が分かるようにしている。
+fn mute_overlay_content(muted: bool, volume: f32) -> OverlayContent {
+    if muted {
+        OverlayContent::Text("ミュート".to_string())
+    } else {
+        OverlayContent::Text(format!("ミュート解除（音量: {}%）", volume as i32))
+    }
+}
+
+/// 映像上のホイール操作と「音量を上げる / 下げる」のホットキーで音量を変えたときの、
+/// 適用すべき `(音量, ミュート状態)`。
+///
+/// **ミュート中でも解除する。** これらの操作の近くにはミュートの表示が無く、
+/// 解除しないと「音量を上げたのに鳴らない」状態になって原因が分からない。
+/// 右クリックメニューのスライダーはすぐ下にミュートのチェックが見えているので、
+/// そちらは解除せず、灰色のバーで「効いていない」ことだけを示す。
+fn volume_change_result(current: f32, delta: f32) -> (f32, bool) {
+    ((current + delta).clamp(MIN_VOLUME, MAX_VOLUME), false)
 }
 
 /// 完了済みのスレッドハンドルを取り除く。
@@ -1819,6 +2051,72 @@ fn calculate_aspect_ratio_size(image_size: egui::Vec2, available_size: egui::Vec
     }
 }
 
+/// タイトルバーを消すときに「画面ドラッグ移動」を自動で有効にする必要があるかを返す。
+///
+/// 装飾なしではタイトルバーが無いため、ドラッグ移動も切れているとウィンドウを
+/// 動かす手段が残らない。**その状態を作らせない。** 端のドラッグはリサイズに
+/// 割り当ててあり、移動には使えない。
+///
+/// タイトルバーを戻すときは何もしない。ユーザーが自分で切ったドラッグ移動を
+/// 勝手に戻すことになるため。
+fn needs_drag_move_guard(to_borderless: bool, enable_drag_move: bool) -> bool {
+    to_borderless && !enable_drag_move
+}
+
+/// ウィンドウ端の当たり判定。`pos` が `rect` の縁から `margin` 以内なら、
+/// その縁に対応する `ResizeDirection` を返す。縁から離れていれば `None`。
+///
+/// 装飾なしのときにだけ使う。OS が描く枠の代わりに、自前で掴める帯を作る。
+///
+/// ウィンドウが `margin` の 2 倍より細いと左右（上下）の帯が重なる。
+/// その場合は左と上を優先する。どちらを選んでも掴めることに変わりはなく、
+/// 「どちらとも言えない」を返して掴めなくするほうが困るため。
+fn resize_direction_at(
+    pos: egui::Pos2,
+    rect: egui::Rect,
+    margin: f32,
+) -> Option<egui::ResizeDirection> {
+    use egui::ResizeDirection;
+
+    // ポインタ位置は egui から来るが、NaN が紛れ込むと比較がすべて false になり
+    // 判定が静かに壊れる。先に弾いておく
+    if !pos.x.is_finite() || !pos.y.is_finite() || !margin.is_finite() || margin <= 0.0 {
+        return None;
+    }
+    if !rect.contains(pos) {
+        return None;
+    }
+
+    let left = pos.x - rect.left() <= margin;
+    let right = !left && rect.right() - pos.x <= margin;
+    let top = pos.y - rect.top() <= margin;
+    let bottom = !top && rect.bottom() - pos.y <= margin;
+
+    match (top, bottom, left, right) {
+        (true, _, true, _) => Some(ResizeDirection::NorthWest),
+        (true, _, _, true) => Some(ResizeDirection::NorthEast),
+        (true, ..) => Some(ResizeDirection::North),
+        (_, true, true, _) => Some(ResizeDirection::SouthWest),
+        (_, true, _, true) => Some(ResizeDirection::SouthEast),
+        (_, true, ..) => Some(ResizeDirection::South),
+        (_, _, true, _) => Some(ResizeDirection::West),
+        (_, _, _, true) => Some(ResizeDirection::East),
+        _ => None,
+    }
+}
+
+/// リサイズの向きに対応するカーソル。装飾ありのウィンドウ枠と同じ見た目にする。
+fn resize_cursor(direction: egui::ResizeDirection) -> egui::CursorIcon {
+    use egui::{CursorIcon, ResizeDirection};
+
+    match direction {
+        ResizeDirection::North | ResizeDirection::South => CursorIcon::ResizeVertical,
+        ResizeDirection::East | ResizeDirection::West => CursorIcon::ResizeHorizontal,
+        ResizeDirection::NorthEast | ResizeDirection::SouthWest => CursorIcon::ResizeNeSw,
+        ResizeDirection::NorthWest | ResizeDirection::SouthEast => CursorIcon::ResizeNwSe,
+    }
+}
+
 /// 保存されたウィンドウサイズのうち、ウィンドウとして成立する値だけを採用して返す。
 ///
 /// 設定ファイルは手で編集できるため、0 や負数や NaN が入りうる。検証せずに
@@ -1945,6 +2243,11 @@ fn main() -> Result<(), eframe::Error> {
     // CaptureCardViewer::default 側だけで行うため。
     let (settings, _) = AppSettings::load();
     let mut viewport_builder = egui::ViewportBuilder::default().with_icon(load_icon());
+
+    // タイトルバーと枠の有無は最初のウィンドウ生成時に決める。
+    // 生成後に ViewportCommand::Decorations で戻すと、装飾ありのウィンドウが
+    // 一瞬見えてから消える
+    viewport_builder = viewport_builder.with_decorations(!settings.ui.borderless);
 
     // 保存されたウィンドウサイズがあれば適用する。値が壊れていれば既定のサイズにする
     let inner_size = window_size_or_default(settings.ui.last_window_size);
@@ -2444,6 +2747,10 @@ impl CaptureCardViewer {
                 // 音量を適用
                 self.volume = settings.ui.volume;
                 audio.set_volume(self.volume);
+
+                // ミュートも同じ扱い。ストリームの開き直しは伴わない
+                self.muted = settings.ui.muted;
+                audio.set_muted(self.muted);
             }
 
             // 設定ダイアログの「適用」「OK」で音量が変わったときも OSD を出す。
@@ -2470,6 +2777,11 @@ impl CaptureCardViewer {
             self.maintain_aspect_ratio = settings.ui.maintain_aspect_ratio;
             self.always_on_top = settings.ui.always_on_top;
             self.show_stats_overlay = settings.ui.show_stats_overlay;
+            // 装飾の有無は値を取り込むだけで、ここでは ViewportCommand を送らない。
+            // 実際の切替は右クリックメニュー（set_borderless）と起動時の
+            // ViewportBuilder が行う。2 秒ごとにコマンドを送ると、フルスクリーン中に
+            // 装飾を付け直そうとして表示がちらつく
+            self.borderless = settings.ui.borderless;
 
             // ホットキーの割り当て。
             //
@@ -2744,8 +3056,8 @@ impl CaptureCardViewer {
     fn drain_screenshot_results(&mut self) {
         while let Ok((started_at, result)) = self.screenshot_rx.try_recv() {
             match &result {
-                Ok(path) => info!("スクリーンショットを {} へ保存した", path.display()),
-                Err(reason) => error!("スクリーンショットを保存できない: {}", reason),
+                Ok(done) => info!("スクリーンショットを{}", done),
+                Err(reason) => error!("スクリーンショットを出力できない: {}", reason),
             }
             self.apply_screenshot_outcome(started_at, result);
         }
@@ -2966,14 +3278,140 @@ impl CaptureCardViewer {
         self.mark_settings_dirty();
     }
 
+    /// タイトルバーと枠の表示を切り替える。
+    ///
+    /// **装飾を外すときは「画面ドラッグ移動」も併せて見る。** どちらも無い状態に
+    /// すると、ウィンドウを動かす手段が残らない。自動で有効にしたうえで、
+    /// 設定を勝手に変えたことを OSD で伝える。
+    fn set_borderless(&mut self, ctx: &egui::Context, enabled: bool) {
+        self.borderless = enabled;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!enabled));
+
+        let mut enabled_drag_move = false;
+        if let Ok(mut settings) = self.settings.lock() {
+            settings.ui.borderless = enabled;
+            if needs_drag_move_guard(enabled, settings.ui.enable_drag_move) {
+                settings.ui.enable_drag_move = true;
+                enabled_drag_move = true;
+            }
+        } else {
+            warn!("タイトルバーの切替で settings のロックを取得できない");
+        }
+
+        info!(
+            "タイトルバーの表示を{}にした",
+            if enabled { "オフ" } else { "オン" }
+        );
+        self.mark_settings_dirty();
+
+        if enabled_drag_move {
+            info!("ウィンドウを動かせなくなるため、画面ドラッグ移動を自動で有効にした");
+            self.transient_overlay.show(
+                OverlayContent::Text(DRAG_MOVE_GUARD_MESSAGE.to_string()),
+                DRAG_MOVE_GUARD_OSD_DURATION,
+                Instant::now(),
+            );
+        }
+    }
+
+    /// 装飾なしのときに、ウィンドウ端のドラッグでリサイズを始める。
+    ///
+    /// 戻り値は「ポインタがいまリサイズ用の帯にいるか」。**`true` の間、
+    /// 呼び出し側は映像のドラッグによるウィンドウ移動を行わない。** 端を掴んだ
+    /// つもりでウィンドウごと動いてしまうため。
+    ///
+    /// メニューやダイアログが開いている間は何もしない。ウィンドウ端に重なった
+    /// ボタンを押そうとしてリサイズが始まるのを防ぐ。
+    fn handle_borderless_resize(&self, ctx: &egui::Context) -> bool {
+        if !self.borderless || self.is_fullscreen {
+            return false;
+        }
+        if self.show_context_menu || self.show_settings || self.show_hotkey_dialog {
+            return false;
+        }
+
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else {
+            return false;
+        };
+        let Some(direction) = resize_direction_at(pos, ctx.screen_rect(), RESIZE_BORDER) else {
+            return false;
+        };
+
+        ctx.set_cursor_icon(resize_cursor(direction));
+
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            trace!("装飾なしのウィンドウ端をつかんだ: {:?}", direction);
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+        }
+
+        true
+    }
+
+    /// ウィンドウの大きさを既定に戻す。
+    ///
+    /// 装飾なしでは端の帯でしかリサイズできず、小さくしすぎると掴む場所を
+    /// 見失う。そこからの復帰手段として右クリックメニューに置いてある。
+    fn reset_window_size(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            DEFAULT_WINDOW_SIZE.0,
+            DEFAULT_WINDOW_SIZE.1,
+        )));
+        info!(
+            "ウィンドウサイズを既定（{}x{}）に戻した",
+            DEFAULT_WINDOW_SIZE.0, DEFAULT_WINDOW_SIZE.1
+        );
+        // 設定への記録は update() のウィンドウ監視が拾う。ここで書くと
+        // OS が要求どおりの大きさにできなかった場合に実際とずれる
+    }
+
     /// 音量を `delta`%（負なら下げる）変える。
     ///
     /// 反映は `set_volume_from_ui` に任せる。映像上のホイール操作や
     /// 右クリックメニューのスライダーと同じ経路を通すことで、設定への
     /// 反映も OSD の表示も同じになる。
     fn adjust_volume(&mut self, delta: f32) {
-        let volume = (self.volume + delta).clamp(MIN_VOLUME, MAX_VOLUME);
+        let (volume, muted) = volume_change_result(self.volume, delta);
+        if self.muted != muted {
+            // 解除の OSD は出さない。直後の音量 OSD が新しい状態を示す
+            self.apply_muted(muted);
+        }
         self.set_volume_from_ui(volume);
+    }
+
+    /// ミュートの状態を反映する。設定へ書き、音声へ伝えるところまで。
+    ///
+    /// **OSD はここでは出さない。** 音量変更に巻き込まれた解除では、
+    /// ミュートの OSD ではなく音量の OSD を出したいため。
+    ///
+    /// ロックは settings → audio の順に 1 つずつ取り、重ねない。
+    fn apply_muted(&mut self, muted: bool) {
+        self.muted = muted;
+        if let Ok(mut settings) = self.settings.lock() {
+            settings.ui.muted = muted;
+        }
+        if let Ok(mut audio) = self.audio_capture.lock() {
+            audio.set_muted(muted);
+        }
+        self.mark_settings_dirty();
+    }
+
+    /// UI の操作でミュートが変わったときの共通処理。反映して OSD を出す。
+    fn set_muted_from_ui(&mut self, muted: bool) {
+        self.apply_muted(muted);
+        info!("ミュートを{}にした", if muted { "オン" } else { "オフ" });
+        self.transient_overlay.show(
+            mute_overlay_content(muted, self.volume),
+            VOLUME_OSD_DURATION,
+            Instant::now(),
+        );
+    }
+
+    /// ミュートを切り替える。
+    ///
+    /// 右クリックメニューのチェック、映像上のミドルクリック、ホットキーが
+    /// すべてここを通る。
+    fn toggle_mute(&mut self) {
+        self.set_muted_from_ui(!self.muted);
     }
 
     /// デバイスを強制的に開き直す。右クリックメニューの「デバイス再接続」と同じ。
@@ -3029,13 +3467,29 @@ mod tests {
 
     /// 音量 OSD のバーの中身を取り出す。テキスト以外の形で返ってきたら落とす
     fn volume_bar(volume: f32) -> (String, f32, f32) {
-        match volume_overlay_content(volume) {
+        let (text, ratio, marker_ratio, _) = volume_bar_with_mute(volume, false);
+        (text, ratio, marker_ratio)
+    }
+
+    /// ミュート状態を指定して音量 OSD のバーの中身を取り出す。
+    /// 最後の要素は「灰色で描くか」
+    fn volume_bar_with_mute(volume: f32, muted: bool) -> (String, f32, f32, bool) {
+        match volume_overlay_content(volume, muted) {
             OverlayContent::Bar {
                 text,
                 ratio,
                 marker_ratio,
-            } => (text, ratio, marker_ratio),
+                dimmed,
+            } => (text, ratio, marker_ratio, dimmed),
             other => panic!("音量 OSD がバー付きになっていない: {:?}", other),
+        }
+    }
+
+    /// ミュート OSD の文言を取り出す。バーが付いていたら落とす
+    fn mute_text(muted: bool, volume: f32) -> String {
+        match mute_overlay_content(muted, volume) {
+            OverlayContent::Text(text) => text,
+            other => panic!("ミュート OSD がテキストになっていない: {:?}", other),
         }
     }
 
@@ -3076,6 +3530,72 @@ mod tests {
         let (text, _, _) = volume_bar(79.6);
 
         assert_eq!(text, "音量: 79%");
+    }
+
+    #[test]
+    fn volume_overlay_content_while_muted_is_dimmed_and_labelled() {
+        // ミュート中でも数字は残す。解除したときに戻る音量が見えているほうが
+        // 操作の結果を予想しやすい
+        let (text, ratio, _, dimmed) = volume_bar_with_mute(80.0, true);
+
+        assert_eq!(text, "音量: 80%（ミュート中）");
+        assert!((ratio - 0.4).abs() < 1e-6, "バーの長さが違う: {}", ratio);
+        assert!(dimmed);
+    }
+
+    #[test]
+    fn volume_overlay_content_without_mute_is_not_dimmed() {
+        let (_, _, _, dimmed) = volume_bar_with_mute(80.0, false);
+
+        assert!(!dimmed);
+    }
+
+    #[test]
+    fn mute_overlay_content_muted_shows_only_the_state() {
+        assert_eq!(mute_text(true, 80.0), "ミュート");
+    }
+
+    #[test]
+    fn mute_overlay_content_unmuted_shows_restored_volume() {
+        assert_eq!(mute_text(false, 80.0), "ミュート解除（音量: 80%）");
+    }
+
+    #[test]
+    fn mute_overlay_content_rounds_volume_like_the_volume_osd() {
+        // 音量 OSD と丸め方を揃える。食い違うと解除の前後で 1% ずれて見える
+        assert_eq!(mute_text(false, 79.6), "ミュート解除（音量: 79%）");
+    }
+
+    #[test]
+    fn volume_change_result_releases_mute() {
+        // ホイールや音量ホットキーで音量を変えたらミュートは解除する
+        let (volume, muted) = volume_change_result(50.0, VOLUME_SCROLL_STEP);
+
+        assert_eq!(volume, 60.0);
+        assert!(!muted);
+    }
+
+    #[test]
+    fn volume_change_result_clamps_to_maximum() {
+        let (volume, _) = volume_change_result(MAX_VOLUME, VOLUME_SCROLL_STEP);
+
+        assert_eq!(volume, MAX_VOLUME);
+    }
+
+    #[test]
+    fn volume_change_result_clamps_to_minimum() {
+        let (volume, _) = volume_change_result(MIN_VOLUME, -VOLUME_SCROLL_STEP);
+
+        assert_eq!(volume, MIN_VOLUME);
+    }
+
+    #[test]
+    fn volume_change_result_from_muted_state_still_releases_mute() {
+        // 下げる方向でも解除する。「鳴らないまま下げ続ける」状態を作らない
+        let (volume, muted) = volume_change_result(50.0, -VOLUME_SCROLL_STEP);
+
+        assert_eq!(volume, 40.0);
+        assert!(!muted);
     }
 
     #[test]
@@ -3513,6 +4033,87 @@ mod tests {
     }
 
     #[test]
+    fn summarize_screenshot_delivery_file_only_reports_the_path() {
+        let outcome =
+            summarize_screenshot_delivery(None, Some(Ok(PathBuf::from(r"C:\shots\a.jpg"))));
+
+        assert_eq!(outcome, Ok(r"C:\shots\a.jpg へ保存した".to_string()));
+    }
+
+    #[test]
+    fn summarize_screenshot_delivery_clipboard_only_reports_the_copy() {
+        let outcome = summarize_screenshot_delivery(Some(Ok(())), None);
+
+        assert_eq!(outcome, Ok("クリップボードへコピーした".to_string()));
+    }
+
+    #[test]
+    fn summarize_screenshot_delivery_both_reports_the_copy_before_the_path() {
+        // 実際の処理順（クリップボード → ファイル）と同じ並びにする
+        let outcome =
+            summarize_screenshot_delivery(Some(Ok(())), Some(Ok(PathBuf::from(r"C:\shots\a.png"))));
+
+        assert_eq!(
+            outcome,
+            Ok(r"クリップボードへコピーし、C:\shots\a.png へ保存した".to_string())
+        );
+    }
+
+    #[test]
+    fn summarize_screenshot_delivery_clipboard_failure_keeps_the_saved_path_in_the_reason() {
+        // 片方だけ失敗した場合。全体は失敗だが、成功したほうも文言に残す。
+        // クリップボードに入っていないことと、ファイルは残っていることの
+        // 両方が分からないと、ユーザーは次に何をすればよいか決められない
+        let outcome = summarize_screenshot_delivery(
+            Some(Err("クリップボードを開けない: occupied".to_string())),
+            Some(Ok(PathBuf::from(r"C:\shots\a.jpg"))),
+        );
+
+        assert_eq!(
+            outcome,
+            Err(r"クリップボードを開けない: occupied（C:\shots\a.jpg へ保存した）".to_string())
+        );
+    }
+
+    #[test]
+    fn summarize_screenshot_delivery_file_failure_keeps_the_copy_in_the_reason() {
+        let outcome = summarize_screenshot_delivery(
+            Some(Ok(())),
+            Some(Err(
+                r"C:\shots\a.jpg を作成できない: access denied".to_string()
+            )),
+        );
+
+        assert_eq!(
+            outcome,
+            Err(
+                r"C:\shots\a.jpg を作成できない: access denied（クリップボードへコピーした）"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn summarize_screenshot_delivery_both_failures_are_joined() {
+        let outcome = summarize_screenshot_delivery(
+            Some(Err("クリップボードを開けない".to_string())),
+            Some(Err("書き込めない".to_string())),
+        );
+
+        assert_eq!(
+            outcome,
+            Err("クリップボードを開けない / 書き込めない".to_string())
+        );
+    }
+
+    #[test]
+    fn summarize_screenshot_delivery_without_any_destination_is_an_error() {
+        // 出力先の enum が必ずどちらかを含むので通常は起きないが、
+        // 何もしていないのに成功として扱わないこと
+        assert!(summarize_screenshot_delivery(None, None).is_err());
+    }
+
+    #[test]
     fn video_placeholder_text_without_detail_is_the_message_alone() {
         assert_eq!(
             video_placeholder_text(false, true, None),
@@ -3754,6 +4355,199 @@ mod tests {
         assert!(!CaptureCardViewer::should_record_window_geometry(
             true, None
         ));
+    }
+
+    #[test]
+    fn needs_drag_move_guard_borderless_without_drag_move_returns_true() {
+        // タイトルバーもドラッグ移動も無い状態は作らせない
+        assert!(needs_drag_move_guard(true, false));
+    }
+
+    #[test]
+    fn needs_drag_move_guard_borderless_with_drag_move_returns_false() {
+        // 既に動かせるなら何も変えない
+        assert!(!needs_drag_move_guard(true, true));
+    }
+
+    #[test]
+    fn needs_drag_move_guard_decorated_window_never_guards() {
+        // タイトルバーがあれば掴んで動かせるので、ユーザーが切った
+        // ドラッグ移動を勝手に戻さない
+        assert!(!needs_drag_move_guard(false, false));
+        assert!(!needs_drag_move_guard(false, true));
+    }
+
+    /// リサイズの当たり判定に使う、原点が (0, 0) でない矩形。
+    /// 左上が原点だと `left()` と 0 の取り違えに気付けない
+    fn resize_test_rect() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(100.0, 50.0), Vec2::new(400.0, 300.0))
+    }
+
+    #[test]
+    fn resize_direction_at_center_returns_none() {
+        let rect = resize_test_rect();
+
+        assert_eq!(
+            resize_direction_at(rect.center(), rect, RESIZE_BORDER),
+            None
+        );
+    }
+
+    #[test]
+    fn resize_direction_at_each_edge_returns_that_edge() {
+        use egui::ResizeDirection;
+        let rect = resize_test_rect();
+
+        assert_eq!(
+            resize_direction_at(egui::pos2(102.0, 200.0), rect, 8.0),
+            Some(ResizeDirection::West)
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(498.0, 200.0), rect, 8.0),
+            Some(ResizeDirection::East)
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(300.0, 52.0), rect, 8.0),
+            Some(ResizeDirection::North)
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(300.0, 348.0), rect, 8.0),
+            Some(ResizeDirection::South)
+        );
+    }
+
+    #[test]
+    fn resize_direction_at_each_corner_returns_the_diagonal() {
+        use egui::ResizeDirection;
+        let rect = resize_test_rect();
+
+        assert_eq!(
+            resize_direction_at(egui::pos2(101.0, 51.0), rect, 8.0),
+            Some(ResizeDirection::NorthWest)
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(499.0, 51.0), rect, 8.0),
+            Some(ResizeDirection::NorthEast)
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(101.0, 349.0), rect, 8.0),
+            Some(ResizeDirection::SouthWest)
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(499.0, 349.0), rect, 8.0),
+            Some(ResizeDirection::SouthEast)
+        );
+    }
+
+    #[test]
+    fn resize_direction_at_exactly_on_the_margin_still_resizes() {
+        use egui::ResizeDirection;
+        // 境界。帯の内側に含める側へ倒している
+        let rect = resize_test_rect();
+
+        assert_eq!(
+            resize_direction_at(egui::pos2(108.0, 200.0), rect, 8.0),
+            Some(ResizeDirection::West)
+        );
+        // 帯の 1 つ外は掴めない
+        assert_eq!(
+            resize_direction_at(egui::pos2(108.1, 200.0), rect, 8.0),
+            None
+        );
+    }
+
+    #[test]
+    fn resize_direction_at_outside_the_window_returns_none() {
+        let rect = resize_test_rect();
+
+        assert_eq!(
+            resize_direction_at(egui::pos2(99.0, 200.0), rect, 8.0),
+            None
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(300.0, 400.0), rect, 8.0),
+            None
+        );
+    }
+
+    #[test]
+    fn resize_direction_at_tiny_window_prefers_the_top_left() {
+        use egui::ResizeDirection;
+        // 帯の 2 倍より小さいウィンドウでは左右（上下）の判定が重なる。
+        // どちらとも言えないからと None を返すと、縮めすぎたウィンドウを
+        // 二度と広げられなくなる
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), Vec2::new(10.0, 10.0));
+
+        assert_eq!(
+            resize_direction_at(egui::pos2(5.0, 5.0), rect, 8.0),
+            Some(ResizeDirection::NorthWest)
+        );
+    }
+
+    #[test]
+    fn resize_direction_at_non_finite_input_returns_none() {
+        // NaN は比較がすべて false になり、判定が静かに壊れる
+        let rect = resize_test_rect();
+
+        assert_eq!(
+            resize_direction_at(egui::pos2(f32::NAN, 200.0), rect, 8.0),
+            None
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(102.0, f32::INFINITY), rect, 8.0),
+            None
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(102.0, 200.0), rect, f32::NAN),
+            None
+        );
+    }
+
+    #[test]
+    fn resize_direction_at_zero_margin_returns_none() {
+        // 帯の幅が 0 なら掴める場所は無い
+        let rect = resize_test_rect();
+
+        assert_eq!(resize_direction_at(rect.min, rect, 0.0), None);
+        assert_eq!(resize_direction_at(rect.min, rect, -4.0), None);
+    }
+
+    #[test]
+    fn resize_cursor_matches_the_direction() {
+        use egui::{CursorIcon, ResizeDirection};
+
+        assert_eq!(
+            resize_cursor(ResizeDirection::North),
+            CursorIcon::ResizeVertical
+        );
+        assert_eq!(
+            resize_cursor(ResizeDirection::South),
+            CursorIcon::ResizeVertical
+        );
+        assert_eq!(
+            resize_cursor(ResizeDirection::East),
+            CursorIcon::ResizeHorizontal
+        );
+        assert_eq!(
+            resize_cursor(ResizeDirection::West),
+            CursorIcon::ResizeHorizontal
+        );
+        assert_eq!(
+            resize_cursor(ResizeDirection::NorthEast),
+            CursorIcon::ResizeNeSw
+        );
+        assert_eq!(
+            resize_cursor(ResizeDirection::SouthWest),
+            CursorIcon::ResizeNeSw
+        );
+        assert_eq!(
+            resize_cursor(ResizeDirection::NorthWest),
+            CursorIcon::ResizeNwSe
+        );
+        assert_eq!(
+            resize_cursor(ResizeDirection::SouthEast),
+            CursorIcon::ResizeNwSe
+        );
     }
 
     #[test]
