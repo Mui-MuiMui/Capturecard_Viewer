@@ -440,12 +440,19 @@ fn video_mode_rank(
 /// 入れると、ダイアログを開いたままホイールで音量を変えて「適用」を押したときに
 /// 音量が巻き戻る。
 ///
-/// `video` / `audio` / `screenshot` にこの比較が要らないのは、ダイアログの外から
+/// `audio` / `screenshot` にこの比較が要らないのは、ダイアログの外から
 /// 書き換わらないため。ホットキー入力ダイアログもドラフトへ書く。
 ///
+/// `video` の `auto_reconnect` だけは例外で、ダイアログに無く右クリックメニューで
+/// 切り替える。丸ごと上書きすると、ダイアログを開いている間の切り替えが
+/// 開いた時点のスナップショットで巻き戻るため、実行中の値を残す。
+///
 /// **ダイアログに `ui` セクションの項目を足すときは、ここにも足すこと。**
+/// **逆に、ダイアログの外だけで変える項目を足すときは、ここで残すこと。**
 pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &AppSettings) {
+    let auto_reconnect = target.video.auto_reconnect;
     target.video = draft.video.clone();
+    target.video.auto_reconnect = auto_reconnect;
     target.audio = draft.audio.clone();
     target.screenshot = draft.screenshot.clone();
 
@@ -1357,6 +1364,8 @@ mod tests {
                 resolution: Some((1920, 1080)),
                 format: Some("MJPEG".to_string()),
                 fps: Some(30),
+                // 既定値（true）と異なる値にして、反映の有無を見分けられるようにする
+                auto_reconnect: false,
             },
             audio: AudioSettings {
                 input_device_name: Some("Line In".to_string()),
@@ -1504,6 +1513,23 @@ mod tests {
 
         assert_eq!(shared.ui.volume, 80.0);
         assert!(!shared.ui.maintain_aspect_ratio);
+    }
+
+    #[test]
+    fn commit_draft_keeps_auto_reconnect_changed_outside_dialog() {
+        // 自動再接続は右クリックメニューだけで切り替える。ダイアログを開いたまま
+        // 切り替えて「適用」を押しても、開いた時点の値へ巻き戻ってはいけない
+        let original = sample_settings(); // auto_reconnect = false
+        let draft = original.clone(); // ダイアログでは触れない項目
+        let mut shared = original.clone();
+
+        shared.video.auto_reconnect = true;
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert!(shared.video.auto_reconnect);
+        // 同じ video セクションの他の項目はドラフトで差し替わる
+        assert_eq!(shared.video.fps, Some(30));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use nokhwa::utils::{
 use nokhwa::CallbackCamera;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// デバイスを開ける映像モード 1 件。解像度とフレームレートの組み合わせ。
 ///
@@ -409,6 +409,11 @@ impl FrameBuffer {
             .map(|frame| (Arc::clone(frame), self.generation))
     }
 
+    /// 最後にフレームが届いてからの経過時間。1 枚も届いていなければ `None`。
+    fn since_last_frame(&self) -> Option<Duration> {
+        self.last_frame_instant.map(|at| at.elapsed())
+    }
+
     /// 保持しているフレームと統計を捨てる。キャプチャの停止時に呼ぶ。
     ///
     /// 世代番号は巻き戻さない。巻き戻すと、再接続後の最初のフレームが
@@ -441,6 +446,18 @@ impl FrameBuffer {
                 .map(|at| at.elapsed().as_secs_f32() * 1000.0),
         }
     }
+}
+
+/// 映像リンクの観測値。切断の判定に使う。
+///
+/// `FrameStats` と分けてあるのは、こちらが毎フレーム読まれるため。
+/// 間隔の集計（最大 120 要素の走査）を伴わない 2 つの値だけを持たせている。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoLinkState {
+    /// 映像ストリームを開けているか。`start_capture` が成功した状態
+    pub capturing: bool,
+    /// 最後にフレームが届いてからの経過時間。1 枚も届いていなければ `None`
+    pub since_last_frame: Option<Duration>,
 }
 
 pub struct VideoCapture {
@@ -784,6 +801,19 @@ impl VideoCapture {
             .ok()
             .map(|fb| fb.stats())
             .unwrap_or_default()
+    }
+
+    /// ストリームが開いているかと、フレームの途絶時間を返す。
+    ///
+    /// 切断の監視のために毎フレーム呼ばれる。ロックの中で行うのは
+    /// `Instant` の減算だけで、フレームコールバックをほとんど待たせない。
+    /// ロックを取れなかった場合は「まだ 1 枚も届いていない」として返す。
+    /// 途絶時間が取れない状態で切断と判断させないため
+    pub fn link_state(&self) -> VideoLinkState {
+        VideoLinkState {
+            capturing: self.camera.is_some(),
+            since_last_frame: self.frames.lock().ok().and_then(|fb| fb.since_last_frame()),
+        }
     }
 
     /// 世代番号が `last_generation` と異なるフレームがある場合だけ、
