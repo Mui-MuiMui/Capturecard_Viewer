@@ -68,12 +68,34 @@ const VOLUME_SCROLL_STEP: f32 = 10.0;
 /// 取得スレッドから UI スレッドへ、この形でチャネル越しに返す
 type CapabilityResult = (String, Result<video::DeviceCapabilities, String>);
 
-/// スクリーンショットの保存結果。成功なら保存先のパス、失敗なら理由。
+/// スクリーンショットの保存結果。`(撮影を始めた時刻, 成功なら保存先のパス / 失敗なら理由)`。
 ///
 /// 保存スレッドから UI スレッドへ、この形でチャネル越しに返す。
 /// **失敗だけでなく成功も送る。** 成功で直近の失敗の記録を消さないと、
-/// 一度失敗したあとは設定画面に古い失敗が残り続ける
-type ScreenshotResult = Result<PathBuf, String>;
+/// 一度失敗したあとは設定画面に古い失敗が残り続ける。
+///
+/// **撮影時刻を添えるのは、結果が撮影順に届くとは限らないため。** 保存は
+/// 撮影ごとにスレッドを起動するので、先に始めた保存が後から終わりうる。
+/// 古い結果で新しい記録を上書きしないよう、受け取る側が時刻で弾く
+type ScreenshotResult = (Instant, ScreenshotOutcome);
+
+/// 1 回の撮影の結末。成功なら保存先のパス、失敗なら理由。
+type ScreenshotOutcome = Result<PathBuf, String>;
+
+/// 届いた結果を画面の記録へ反映してよいかを判定する。
+///
+/// `last` は画面の記録へ反映済みの中で最も新しい撮影の開始時刻で、`None` は
+/// 「まだ何も反映していない」を表す。`started_at` は届いた結果の撮影時刻。
+///
+/// **同時刻は反映する側に倒す。** `Instant` は単調増加するので、別の撮影が
+/// まったく同じ時刻になることは通常起きないが、起きたとしても取りこぼす
+/// より出すほうがよい。
+fn screenshot_outcome_supersedes(last: Option<Instant>, started_at: Instant) -> bool {
+    match last {
+        None => true,
+        Some(last) => started_at >= last,
+    }
+}
 
 /// エラーをトーストで見せておく時間。
 ///
@@ -414,6 +436,10 @@ pub struct CaptureCardViewer {
 
     // 発生源ごとの直近の失敗。トーストの間引きもここが判断する
     errors: ErrorCenter,
+    // 画面の記録へ反映した中で、最も新しい撮影の開始時刻。
+    // 保存スレッドの結果は撮影順に届くとは限らないため、これより古い結果は
+    // ログだけ残して記録には触らない
+    last_screenshot_outcome_at: Option<Instant>,
 
     // UI状態管理
     show_settings: bool,
@@ -536,6 +562,7 @@ impl Default for CaptureCardViewer {
             screenshot_tx,
             screenshot_rx,
             errors: ErrorCenter::default(),
+            last_screenshot_outcome_at: None,
             show_settings: false,
             settings_dialog: ui::SettingsDialogState::default(),
             show_context_menu: false,
@@ -916,6 +943,11 @@ impl eframe::App for CaptureCardViewer {
         // ここで待たないと、main が返った時点でプロセスごと落ちて
         // 書きかけの画像ファイルがディスクに残る
         self.join_screenshot_save_threads();
+
+        // 終了中に終わった保存の結果をログへ残す。**待ったあとに読むこと。**
+        // 画面はもう出ないので通知はされないが、閉じる直前に撮った 1 枚が
+        // 保存できなかったことは、ログにだけは残しておかないと追えない
+        self.drain_screenshot_results();
     }
 }
 
@@ -991,6 +1023,11 @@ impl CaptureCardViewer {
     fn take_screenshot(&mut self) {
         debug!("スクリーンショットの保存を開始する");
 
+        // この撮影を識別する時刻。結果が撮影順に届かないときの追い越し判定に使う。
+        // ファイル名のタイムスタンプはミリ秒までなので同一ミリ秒で並びうるが、
+        // `Instant` は単調増加するのでこちらは必ず順序が付く
+        let started_at = Instant::now();
+
         // 保存先と効果音の音量だけを取り出してロックを手放す。
         // get_screenshot_path は連番を決めるためにファイルの有無を見るが、
         // ファイルを作るのは保存スレッドなので、ここでは何も書かない
@@ -1019,11 +1056,10 @@ impl CaptureCardViewer {
         };
         let Some(frame) = latest_frame else {
             warn!("映像フレームが無いのでスクリーンショットを撮れない");
-            // ホットキーを押しても何も起きないように見えるので画面にも出す
-            self.report_error(
-                ErrorSource::Screenshot,
-                "表示中の映像がありません".to_string(),
-            );
+            // ホットキーを押しても何も起きないように見えるので画面にも出す。
+            // 非同期の結果と同じ経路を通して、先に始めた保存の結果に
+            // 追い越されないようにする
+            self.apply_screenshot_outcome(started_at, Err("表示中の映像がありません".to_string()));
             return;
         };
         debug!(
@@ -1052,7 +1088,7 @@ impl CaptureCardViewer {
         let result_tx = self.screenshot_tx.clone();
         let handle = std::thread::spawn(move || {
             let result = save_frame(&frame, &path, encoding).map(|()| path);
-            if result_tx.send(result).is_err() {
+            if result_tx.send((started_at, result)).is_err() {
                 // 受信側が無いのはアプリが終了したときだけ。結果は捨ててよい
                 debug!("スクリーンショットの結果の送り先が既に無いので捨てる");
             }
@@ -2606,20 +2642,38 @@ impl CaptureCardViewer {
     ///
     /// 保存は撮影ごとに spawn したスレッドが行うため、失敗をその場で画面に
     /// 出せない。結果をここで受け取って、失敗ならトーストにする。
+    ///
+    /// **ログは届いた結果すべてについて出す。** 画面の記録は追い越しを弾くが、
+    /// ログまで落とすと何が起きたか追えなくなる。
     fn drain_screenshot_results(&mut self) {
-        while let Ok(result) = self.screenshot_rx.try_recv() {
-            match result {
-                Ok(path) => {
-                    info!("スクリーンショットを {} へ保存した", path.display());
-                    // 直前の失敗が解消したので記録を消す。残すと設定画面に
-                    // 古い失敗が出続ける
-                    self.errors.clear(ErrorSource::Screenshot);
-                }
-                Err(reason) => {
-                    error!("スクリーンショットを保存できない: {}", reason);
-                    self.report_error(ErrorSource::Screenshot, reason);
-                }
+        while let Ok((started_at, result)) = self.screenshot_rx.try_recv() {
+            match &result {
+                Ok(path) => info!("スクリーンショットを {} へ保存した", path.display()),
+                Err(reason) => error!("スクリーンショットを保存できない: {}", reason),
             }
+            self.apply_screenshot_outcome(started_at, result);
+        }
+    }
+
+    /// スクリーンショットの結果を画面の記録へ反映する。
+    ///
+    /// **先に始めた保存の結果が後から届いても、新しい記録を上書きしない。**
+    /// 保存は撮影ごとにスレッドを起動するため、エンコードにかかる時間が
+    /// 違えば終わる順も入れ替わる。そのまま反映すると、古い保存の成功が
+    /// 新しい保存の失敗を消してしまう。
+    ///
+    /// ログ出力は呼び出し側が済ませてある。ここは画面へ出す記録だけを扱う。
+    fn apply_screenshot_outcome(&mut self, started_at: Instant, result: ScreenshotOutcome) {
+        if !screenshot_outcome_supersedes(self.last_screenshot_outcome_at, started_at) {
+            debug!("先に始めた保存の結果が後から届いたので、画面の記録は更新しない");
+            return;
+        }
+        self.last_screenshot_outcome_at = Some(started_at);
+
+        match result {
+            // 直前の失敗が解消したので記録を消す。残すと古い失敗が出続ける
+            Ok(_) => self.errors.clear(ErrorSource::Screenshot),
+            Err(reason) => self.report_error(ErrorSource::Screenshot, reason),
         }
     }
 
@@ -3279,6 +3333,35 @@ mod tests {
             video_placeholder_message(false, true),
             "デバイスが接続されていません（再接続を試しています）"
         );
+    }
+
+    #[test]
+    fn screenshot_outcome_supersedes_without_previous_result_returns_true() {
+        assert!(screenshot_outcome_supersedes(None, Instant::now()));
+    }
+
+    #[test]
+    fn screenshot_outcome_supersedes_newer_result_returns_true() {
+        let first = Instant::now();
+        assert!(screenshot_outcome_supersedes(
+            Some(first),
+            first + Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn screenshot_outcome_supersedes_older_result_returns_false() {
+        // 先に始めた保存が後から終わった場合。新しい記録を上書きさせない
+        let first = Instant::now();
+        let second = first + Duration::from_millis(50);
+        assert!(!screenshot_outcome_supersedes(Some(second), first));
+    }
+
+    #[test]
+    fn screenshot_outcome_supersedes_same_instant_returns_true() {
+        // 境界。取りこぼすより出すほうに倒す
+        let now = Instant::now();
+        assert!(screenshot_outcome_supersedes(Some(now), now));
     }
 
     #[test]

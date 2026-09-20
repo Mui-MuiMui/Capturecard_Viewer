@@ -210,7 +210,7 @@ cargo build --release
 
 映像・音声が実際に何へ繋がっているかは、設定ダイアログの「接続状態」タブ（`SettingsTab::Status`）に出す。**タブは最後に置き、既定は「デバイス設定」のまま。** ダイアログを開く主な目的は設定の変更で、状態の確認は調べたいときだけだから。
 
-値は `CaptureCardViewer::connection_status()` が作って `ui::ConnectionStatus` で渡す。**描画中に `video_capture` / `audio_capture` のロックを取らない。** `stats()` / `link_state()` と同じく、小さな構造体の複製だけをロックの中で行う（`video::ActiveVideo` / `audio::ActiveAudio`）。集めるのは**ダイアログを開いている間だけ**で、閉じている間は毎フレームのロックが増えない。
+値は `CaptureCardViewer::connection_status()` が作って `status::ConnectionStatus` で渡す。**描画中に `video_capture` / `audio_capture` のロックを取らない。** `stats()` / `link_state()` と同じく、小さな構造体の複製だけをロックの中で行う（`video::ActiveVideo` / `audio::ActiveAudio`）。集めるのは**ダイアログを開いている間だけ**で、閉じている間は毎フレームのロックが増えない。
 
 出すのは設定に書かれた値ではなく**デバイスが確定させた値**。設定画面では対応していない組み合わせも選べるため、要求した値と食い違う。例外はフレームレートで、nokhwa のバインディングが実際の値を取れないため要求した値を「要求フレームレート」として出している（`video.rs` の `start_capture` のコメント）。
 
