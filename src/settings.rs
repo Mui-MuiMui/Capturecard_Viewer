@@ -514,6 +514,10 @@ fn screenshot_folder_from(
 pub struct UiSettings {
     #[serde(deserialize_with = "deserialize_volume")]
     pub volume: f32,
+    // ミュート中か。**音量とは別に持つ。** 音量 0% で代用すると、解除したときに
+    // 戻すべき値が残らない。設定ダイアログには出さず、右クリックメニュー・
+    // ミドルクリック・ホットキーだけで切り替える
+    pub muted: bool,
     pub maintain_aspect_ratio: bool,
     pub last_window_size: Option<(f32, f32)>,
     pub last_window_pos: Option<(f32, f32)>,
@@ -584,6 +588,8 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             volume: DEFAULT_VOLUME,
+            // 既定は音が出る状態にする
+            muted: false,
             maintain_aspect_ratio: true,
             last_window_size: None,
             last_window_pos: None,
@@ -841,6 +847,7 @@ sound_volume = 50.0
 
 [ui]
 volume = 80.0
+muted = true
 maintain_aspect_ratio = false
 last_window_size = [800.0, 600.0]
 last_window_pos = [10.0, 20.0]
@@ -925,6 +932,34 @@ volume = 80.0
         assert!(settings.ui.always_on_top);
         assert!(!settings.ui.maintain_aspect_ratio);
         assert_eq!(settings.ui.last_window_size, Some((800.0, 600.0)));
+    }
+
+    #[test]
+    fn app_settings_missing_muted_defaults_to_unmuted() {
+        // ミュートの項目を足した版へ上げた直後、既存ユーザーの設定ファイルには
+        // このキーが無い。欠けていても他の項目が保持され、音が出る状態で起動すること
+        let config = without_key(FULL_CONFIG, "muted");
+        assert!(
+            !config.contains("muted ="),
+            "テスト用の設定から muted が消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("muted が欠けていても読めなければならない");
+
+        assert!(!settings.ui.muted); // 既定値は false
+        assert_eq!(settings.ui.volume, 80.0);
+        assert!(settings.ui.always_on_top);
+    }
+
+    #[test]
+    fn app_settings_muted_is_read_and_kept_apart_from_volume() {
+        // ミュートは音量とは別の項目。読み込みで音量へ潰れてはいけない
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("設定ファイルを読めなければならない");
+
+        assert!(settings.ui.muted);
+        assert_eq!(settings.ui.volume, 80.0);
     }
 
     #[test]
