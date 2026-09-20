@@ -14,10 +14,44 @@ type AudioConsumer = ringbuf::Consumer<f32, Arc<HeapRb<f32>>>;
 /// 音量の既定値（100%）。設定を読めなかった場合もここへ倒す。
 const DEFAULT_VOLUME: f32 = 1.0;
 
+/// 実際に開いた音声ストリームの内容。
+///
+/// 設定ダイアログの「接続状態」タブに出すために持つ。**設定に書かれた値では
+/// なく、`select_best_config` が確定させた値を入れる。** 設定画面の選択肢は
+/// デバイスの能力から作っていないため、選んだ値と実際の値は食い違いうる
+/// （特に WASAPI はミックスフォーマットのチャンネル数しか列挙しない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveAudio {
+    /// 実際に開いた入力デバイス名
+    pub input_device: String,
+    /// 実際に開いた出力デバイス名
+    pub output_device: String,
+    /// 入力のサンプリングレート（Hz）とチャンネル数
+    pub input_sample_rate: u32,
+    pub input_channels: u16,
+    /// 出力のサンプリングレート（Hz）とチャンネル数
+    pub output_sample_rate: u32,
+    pub output_channels: u16,
+}
+
+impl ActiveAudio {
+    /// 入力側を 1 行で表す。
+    pub fn input_summary(&self) -> String {
+        format!("{}Hz {}ch", self.input_sample_rate, self.input_channels)
+    }
+
+    /// 出力側を 1 行で表す。
+    pub fn output_summary(&self) -> String {
+        format!("{}Hz {}ch", self.output_sample_rate, self.output_channels)
+    }
+}
+
 pub struct AudioCapture {
     host: cpal::Host,
     input_stream: Option<cpal::Stream>,
     output_stream: Option<cpal::Stream>,
+    /// いま開いているストリームの内容。閉じているときは `None`
+    active: Option<ActiveAudio>,
     /// 出力に掛ける倍率。`0.0`〜`2.0`。
     ///
     /// **出力コールバック（リアルタイムスレッド）が 1 回ごとに読むので、
@@ -71,6 +105,7 @@ impl AudioCapture {
             host,
             input_stream: None,
             output_stream: None,
+            active: None,
             volume: Arc::new(AtomicU32::new(DEFAULT_VOLUME.to_bits())),
             // 既定では音声パススルーを有効にする（音が出る状態で起動する）
             audio_passthrough_enabled: Arc::new(AtomicBool::new(true)),
@@ -292,12 +327,30 @@ impl AudioCapture {
         self.output_stream = Some(output_stream);
         // 監視の対象を、いま開いたストリームの旗へ差し替える
         self.stream_error = stream_error;
+        // 接続状態の表示用に、実際に開いた内容を控える
+        self.active = Some(ActiveAudio {
+            input_device: input_device_name,
+            output_device: output_device_name,
+            input_sample_rate: input_config.sample_rate().0,
+            input_channels: input_config.channels(),
+            output_sample_rate: output_config.sample_rate().0,
+            output_channels: output_config.channels(),
+        });
 
         info!("音声パススルーを開始した");
         Ok(())
     }
 
+    /// いま開いているストリームの内容。開いていなければ `None`。
+    ///
+    /// 設定ダイアログを開いている間だけ呼ばれる。小さな構造体の複製だけで、
+    /// デバイスの列挙もストリームへの問い合わせも行わない。
+    pub fn active(&self) -> Option<ActiveAudio> {
+        self.active.clone()
+    }
+
     pub fn stop_capture(&mut self) {
+        self.active = None;
         if let Some(s) = self.input_stream.take() {
             let _ = s.pause();
         }

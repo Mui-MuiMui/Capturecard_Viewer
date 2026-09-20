@@ -21,6 +21,7 @@ mod logging;
 mod overlay;
 mod screenshot;
 mod settings;
+mod status;
 mod ui;
 mod video;
 
@@ -30,6 +31,7 @@ use screenshot::ScreenshotManager;
 use settings::{
     AppSettings, AutoSavePolicy, ColorRange, ColorSpace, ScreenshotEncoding, MAX_VOLUME, MIN_VOLUME,
 };
+use status::{ConnectionStatus, ErrorCenter, ErrorSource, LinkStatus};
 use video::{FrameStats, VideoCapture};
 
 /// デバイスリストのキャッシュを更新する間隔
@@ -65,6 +67,41 @@ const VOLUME_SCROLL_STEP: f32 = 10.0;
 /// デバイス能力の取得結果。`(問い合わせたデバイス名, 結果)`。
 /// 取得スレッドから UI スレッドへ、この形でチャネル越しに返す
 type CapabilityResult = (String, Result<video::DeviceCapabilities, String>);
+
+/// スクリーンショットの保存結果。`(撮影を始めた時刻, 成功なら保存先のパス / 失敗なら理由)`。
+///
+/// 保存スレッドから UI スレッドへ、この形でチャネル越しに返す。
+/// **失敗だけでなく成功も送る。** 成功で直近の失敗の記録を消さないと、
+/// 一度失敗したあとは設定画面に古い失敗が残り続ける。
+///
+/// **撮影時刻を添えるのは、結果が撮影順に届くとは限らないため。** 保存は
+/// 撮影ごとにスレッドを起動するので、先に始めた保存が後から終わりうる。
+/// 古い結果で新しい記録を上書きしないよう、受け取る側が時刻で弾く
+type ScreenshotResult = (Instant, ScreenshotOutcome);
+
+/// 1 回の撮影の結末。成功なら保存先のパス、失敗なら理由。
+type ScreenshotOutcome = Result<PathBuf, String>;
+
+/// 届いた結果を画面の記録へ反映してよいかを判定する。
+///
+/// `last` は画面の記録へ反映済みの中で最も新しい撮影の開始時刻で、`None` は
+/// 「まだ何も反映していない」を表す。`started_at` は届いた結果の撮影時刻。
+///
+/// **同時刻は反映する側に倒す。** `Instant` は単調増加するので、別の撮影が
+/// まったく同じ時刻になることは通常起きないが、起きたとしても取りこぼす
+/// より出すほうがよい。
+fn screenshot_outcome_supersedes(last: Option<Instant>, started_at: Instant) -> bool {
+    match last {
+        None => true,
+        Some(last) => started_at >= last,
+    }
+}
+
+/// エラーをトーストで見せておく時間。
+///
+/// 音量 OSD（1.5 秒）より長い。音量は自分で操作した結果の確認なので一瞬で
+/// よいが、エラーは予期していない内容を読ませるため。
+const ERROR_TOAST_DURATION: Duration = Duration::from_secs(4);
 
 /// 接続に失敗したあと、最初に待つ時間。
 ///
@@ -233,6 +270,22 @@ fn video_placeholder_message(capturing: bool, reconnecting: bool) -> &'static st
     }
 }
 
+/// 映像が出ていないときに画面へ出す文言を、理由の 1 行を添えて組み立てる。
+///
+/// `detail` は直近の失敗（`ErrorCenter` に記録されたもの）。**ストリームを
+/// 開けている場合は添えない。** 映像信号が来ていないのはデバイスの手前の
+/// 問題で、そこに古い接続エラーを出すと原因を取り違えさせる。
+///
+/// 理由の切り詰めは呼び出し側（`error_detail`）が済ませてある。ここで
+/// 長さを見ないのは、切り詰めの基準を 1 か所に集めておくため。
+fn video_placeholder_text(capturing: bool, reconnecting: bool, detail: Option<&str>) -> String {
+    let head = video_placeholder_message(capturing, reconnecting);
+    match detail {
+        Some(detail) if !capturing => format!("{}\n{}", head, detail),
+        _ => head.to_string(),
+    }
+}
+
 /// 映像の接続対象。これが変わったらバックオフを捨てて即座に開き直す。
 /// `(デバイス名, 解像度, フォーマット, fps)`
 type VideoTarget = (
@@ -284,9 +337,6 @@ struct ConnectRetry<T> {
     attempts: u32,
     /// 次に試してよい時刻。`None` は「いますぐ試してよい」
     next_attempt_at: Option<Instant>,
-    /// 最後に失敗した理由。
-    /// 画面に出すのは「エラー通知 UI」のタスクの範囲なので、いまは保持だけする
-    last_error: Option<String>,
 }
 
 impl<T> Default for ConnectRetry<T> {
@@ -295,7 +345,6 @@ impl<T> Default for ConnectRetry<T> {
             target: None,
             attempts: 0,
             next_attempt_at: None,
-            last_error: None,
         }
     }
 }
@@ -346,37 +395,24 @@ impl<T: PartialEq> ConnectRetry<T> {
         self.attempts
     }
 
-    /// 最後に失敗した理由。
-    ///
-    /// 画面へ出すのは Asana の「エラー通知 UI」タスクの範囲なので、この PR では
-    /// 保持するところまでにしてある。本体からの読み手がまだ無いので
-    /// `dead_code` を止めているが、`expect` にしてあるので UI から使い始めれば
-    /// この属性自体が警告になって外し忘れに気付ける。テストからは使っているため
-    /// `cfg_attr(not(test), ..)` で本体のビルドにだけ付ける。
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "エラー通知 UI を入れるまで読み手がいない")
-    )]
-    fn last_error(&self) -> Option<&str> {
-        self.last_error.as_deref()
-    }
-
     /// 成功を記録する。以降は要求があるまで試さない。
     fn record_success(&mut self) {
         self.target = None;
         self.attempts = 0;
         self.next_attempt_at = None;
-        self.last_error = None;
     }
 
     /// 失敗を記録し、次に試してよい時刻を決める。
     ///
     /// 対象は保持したままにする。繋がるまで無限に再試行し、後からデバイスを
     /// 挿した場合に何もしなくても繋がるようにするため。
-    fn record_failure(&mut self, now: Instant, reason: String) {
+    ///
+    /// **失敗の理由はここでは持たない。** 画面へ出す記録は `ErrorCenter` が
+    /// 発生源ごとにまとめて持っており、両方に置くと消し忘れた片方が古い
+    /// 理由を出し続ける。
+    fn record_failure(&mut self, now: Instant) {
         self.attempts = self.attempts.saturating_add(1);
         self.next_attempt_at = now.checked_add(backoff_delay(self.attempts));
-        self.last_error = Some(reason);
     }
 }
 
@@ -391,6 +427,19 @@ pub struct CaptureCardViewer {
     // UI スレッドは update() で try_recv するだけにする
     capability_tx: Sender<CapabilityResult>,
     capability_rx: Receiver<CapabilityResult>,
+
+    // スクリーンショットの保存結果を受け取るチャネル。
+    // 保存は別スレッドで行うため、失敗をその場で画面に出せない。
+    // 能力取得と同じく、UI スレッドが update() で try_recv するだけにする
+    screenshot_tx: Sender<ScreenshotResult>,
+    screenshot_rx: Receiver<ScreenshotResult>,
+
+    // 発生源ごとの直近の失敗。トーストの間引きもここが判断する
+    errors: ErrorCenter,
+    // 画面の記録へ反映した中で、最も新しい撮影の開始時刻。
+    // 保存スレッドの結果は撮影順に届くとは限らないため、これより古い結果は
+    // ログだけ残して記録には触らない
+    last_screenshot_outcome_at: Option<Instant>,
 
     // UI状態管理
     show_settings: bool,
@@ -501,6 +550,7 @@ impl Default for CaptureCardViewer {
         let audio_capture = Arc::new(Mutex::new(AudioCapture::new()));
         let screenshot_manager = Arc::new(Mutex::new(ScreenshotManager::new()));
         let (capability_tx, capability_rx) = std::sync::mpsc::channel();
+        let (screenshot_tx, screenshot_rx) = std::sync::mpsc::channel();
 
         let mut app = Self {
             settings,
@@ -509,6 +559,10 @@ impl Default for CaptureCardViewer {
             screenshot_manager,
             capability_tx,
             capability_rx,
+            screenshot_tx,
+            screenshot_rx,
+            errors: ErrorCenter::default(),
+            last_screenshot_outcome_at: None,
             show_settings: false,
             settings_dialog: ui::SettingsDialogState::default(),
             show_context_menu: false,
@@ -622,6 +676,10 @@ impl eframe::App for CaptureCardViewer {
         // 設定ダイアログを開いていなくても受け取る（起動時の先読み分があるため）
         self.drain_capability_results();
 
+        // 別スレッドで行ったスクリーンショットの保存結果を取り込む。
+        // 失敗はここでトーストになる
+        self.drain_screenshot_results();
+
         // 起動直後に 1 度だけ行う処理。
         //
         // 以前はここで「起動から 2 秒」待ってからデバイスを開いていた。
@@ -734,14 +792,20 @@ impl eframe::App for CaptureCardViewer {
             let video_devices = self.get_cached_video_devices().clone();
             let input_devices = self.get_cached_input_devices().clone();
             let output_devices = self.get_cached_output_devices().clone();
+            let devices = ui::DeviceLists {
+                video: &video_devices,
+                input: &input_devices,
+                output: &output_devices,
+            };
+            // 接続状態はダイアログを開いている間だけ集める
+            let connection = self.connection_status();
             let action = ui::show_settings_dialog(
                 ctx,
                 &mut self.show_settings,
                 &mut self.settings_dialog,
                 &mut self.show_hotkey_dialog,
-                &video_devices,
-                &input_devices,
-                &output_devices,
+                &devices,
+                &connection,
             );
             self.handle_settings_dialog_action(action);
 
@@ -879,6 +943,11 @@ impl eframe::App for CaptureCardViewer {
         // ここで待たないと、main が返った時点でプロセスごと落ちて
         // 書きかけの画像ファイルがディスクに残る
         self.join_screenshot_save_threads();
+
+        // 終了中に終わった保存の結果をログへ残す。**待ったあとに読むこと。**
+        // 画面はもう出ないので通知はされないが、閉じる直前に撮った 1 枚が
+        // 保存できなかったことは、ログにだけは残しておかないと追えない
+        self.drain_screenshot_results();
     }
 }
 
@@ -954,6 +1023,11 @@ impl CaptureCardViewer {
     fn take_screenshot(&mut self) {
         debug!("スクリーンショットの保存を開始する");
 
+        // この撮影を識別する時刻。結果が撮影順に届かないときの追い越し判定に使う。
+        // ファイル名のタイムスタンプはミリ秒までなので同一ミリ秒で並びうるが、
+        // `Instant` は単調増加するのでこちらは必ず順序が付く
+        let started_at = Instant::now();
+
         // 保存先と効果音の音量だけを取り出してロックを手放す。
         // get_screenshot_path は連番を決めるためにファイルの有無を見るが、
         // ファイルを作るのは保存スレッドなので、ここでは何も書かない
@@ -982,6 +1056,10 @@ impl CaptureCardViewer {
         };
         let Some(frame) = latest_frame else {
             warn!("映像フレームが無いのでスクリーンショットを撮れない");
+            // ホットキーを押しても何も起きないように見えるので画面にも出す。
+            // 非同期の結果と同じ経路を通して、先に始めた保存の結果に
+            // 追い越されないようにする
+            self.apply_screenshot_outcome(started_at, Err("表示中の映像がありません".to_string()));
             return;
         };
         debug!(
@@ -1004,9 +1082,16 @@ impl CaptureCardViewer {
         // ホットキーを連打するとスレッドが並ぶが、撮るたびに 1 枚残るほうを優先して
         // 進行中の保存があっても捨てない。ファイル名は撮影時刻をミリ秒まで含むので、
         // 人が連打できる間隔なら衝突しない（同一ミリ秒の衝突は元からある別の問題）
-        let handle = std::thread::spawn(move || match save_frame(&frame, &path, encoding) {
-            Ok(()) => info!("スクリーンショットを {} へ保存した", path.display()),
-            Err(e) => error!("スクリーンショットを保存できない: {}", e),
+        // 結果は UI スレッドへ返す。失敗をログだけに出すと、保存先が書き込み
+        // 不可のときにホットキーを押しても何も起きないように見える。
+        // ログ出力も UI スレッド側（drain_screenshot_results）へ寄せてある
+        let result_tx = self.screenshot_tx.clone();
+        let handle = std::thread::spawn(move || {
+            let result = save_frame(&frame, &path, encoding).map(|()| path);
+            if result_tx.send((started_at, result)).is_err() {
+                // 受信側が無いのはアプリが終了したときだけ。結果は捨ててよい
+                debug!("スクリーンショットの結果の送り先が既に無いので捨てる");
+            }
         });
 
         // ハンドルを持っておく。捨てるとスレッドが切り離され、終了時に
@@ -1041,8 +1126,11 @@ impl CaptureCardViewer {
     fn show_windowed_ui(&mut self, ctx: &egui::Context) {
         // 映像が無いときの文言は描画に入る前に決める。
         // 描画のクロージャの中でロックを取らないため
-        let placeholder =
-            video_placeholder_message(self.video_capturing, self.video_retry.is_active());
+        let placeholder = video_placeholder_text(
+            self.video_capturing,
+            self.video_retry.is_active(),
+            self.error_detail(ErrorSource::Video).as_deref(),
+        );
         egui::CentralPanel::default()
             .frame(egui::Frame::none().inner_margin(egui::Margin::same(2.0))) // マージンを2pxに設定
             .show(ctx, |ui| {
@@ -1129,8 +1217,11 @@ impl CaptureCardViewer {
 
     fn show_fullscreen_ui(&mut self, ctx: &egui::Context) {
         // ウィンドウ表示と同じ理由で、描画に入る前に文言を決める
-        let placeholder =
-            video_placeholder_message(self.video_capturing, self.video_retry.is_active());
+        let placeholder = video_placeholder_text(
+            self.video_capturing,
+            self.video_retry.is_active(),
+            self.error_detail(ErrorSource::Video).as_deref(),
+        );
         // フルスクリーンUI（装飾なし、ウィンドウ版と同等の機能）
         egui::CentralPanel::default()
             .frame(egui::Frame::none().inner_margin(egui::Margin::same(0.0))) // フルスクリーンはマージン0
@@ -2099,6 +2190,9 @@ impl CaptureCardViewer {
             Ok(()) => {
                 info!("映像デバイスに接続した");
                 self.video_retry.record_success();
+                // 繋がったので直前の失敗は消す。プレースホルダーと
+                // 「接続状態」タブに古い理由が残らないようにする
+                self.errors.clear(ErrorSource::Video);
                 self.last_video_device = settings.video.device_name.clone();
                 self.last_video_res = settings.video.resolution;
                 self.last_video_format = settings.video.format.clone();
@@ -2106,7 +2200,8 @@ impl CaptureCardViewer {
             }
             Err(e) => {
                 warn!("映像デバイスへの接続に失敗した（{} 回目）: {}", attempt, e);
-                self.video_retry.record_failure(now, e);
+                self.video_retry.record_failure(now);
+                self.report_error(ErrorSource::Video, e);
                 debug!(
                     "映像デバイスへの再試行は {} ms 後",
                     backoff_delay(self.video_retry.attempts()).as_millis()
@@ -2134,7 +2229,8 @@ impl CaptureCardViewer {
                 "音声デバイスへの接続に失敗した（{} 回目）: {}",
                 attempt, reason
             );
-            self.audio_retry.record_failure(now, reason);
+            self.audio_retry.record_failure(now);
+            self.report_error(ErrorSource::Audio, reason);
             return;
         };
 
@@ -2197,6 +2293,8 @@ impl CaptureCardViewer {
         match fallback_error {
             None => {
                 self.audio_retry.record_success();
+                // 繋がったので直前の失敗は消す
+                self.errors.clear(ErrorSource::Audio);
                 // 既定のデバイスで繋がった場合も、設定に書かれている値を記録する。
                 // ここで実際に開いた値（None）を入れると、設定のデバイスが
                 // 現れても need_audio_restart が立たず繋ぎ直せなくなる
@@ -2206,7 +2304,8 @@ impl CaptureCardViewer {
                 self.last_audio_channels = settings.audio.channels;
             }
             Some(reason) => {
-                self.audio_retry.record_failure(now, reason);
+                self.audio_retry.record_failure(now);
+                self.report_error(ErrorSource::Audio, reason);
                 debug!(
                     "音声デバイスへの再試行は {} ms 後",
                     backoff_delay(self.audio_retry.attempts()).as_millis()
@@ -2539,6 +2638,160 @@ impl CaptureCardViewer {
         }
     }
 
+    /// 別スレッドから届いたスクリーンショットの保存結果を取り込む。
+    ///
+    /// 保存は撮影ごとに spawn したスレッドが行うため、失敗をその場で画面に
+    /// 出せない。結果をここで受け取って、失敗ならトーストにする。
+    ///
+    /// **ログは届いた結果すべてについて出す。** 画面の記録は追い越しを弾くが、
+    /// ログまで落とすと何が起きたか追えなくなる。
+    fn drain_screenshot_results(&mut self) {
+        while let Ok((started_at, result)) = self.screenshot_rx.try_recv() {
+            match &result {
+                Ok(path) => info!("スクリーンショットを {} へ保存した", path.display()),
+                Err(reason) => error!("スクリーンショットを保存できない: {}", reason),
+            }
+            self.apply_screenshot_outcome(started_at, result);
+        }
+    }
+
+    /// スクリーンショットの結果を画面の記録へ反映する。
+    ///
+    /// **先に始めた保存の結果が後から届いても、新しい記録を上書きしない。**
+    /// 保存は撮影ごとにスレッドを起動するため、エンコードにかかる時間が
+    /// 違えば終わる順も入れ替わる。そのまま反映すると、古い保存の成功が
+    /// 新しい保存の失敗を消してしまう。
+    ///
+    /// ログ出力は呼び出し側が済ませてある。ここは画面へ出す記録だけを扱う。
+    fn apply_screenshot_outcome(&mut self, started_at: Instant, result: ScreenshotOutcome) {
+        if !screenshot_outcome_supersedes(self.last_screenshot_outcome_at, started_at) {
+            debug!("先に始めた保存の結果が後から届いたので、画面の記録は更新しない");
+            return;
+        }
+        self.last_screenshot_outcome_at = Some(started_at);
+
+        match result {
+            // 直前の失敗が解消したので記録を消す。残すと古い失敗が出続ける
+            Ok(_) => self.errors.clear(ErrorSource::Screenshot),
+            Err(reason) => self.report_error(ErrorSource::Screenshot, reason),
+        }
+    }
+
+    /// 失敗を記録し、必要ならトーストで見せる。
+    ///
+    /// **ログは呼び出し側が従来どおり出す。** ここは画面へ出すための記録で、
+    /// `error!` / `warn!` の置き換えではない。同じ発生源で同じ文言が続く間は
+    /// `ErrorCenter` が間引くため、接続の再試行で連打にならない。
+    ///
+    /// 同じフレームで複数の発生源が失敗した場合、トーストは後に記録したものが
+    /// 勝つ（`TransientOverlay` は 1 件しか持たない）。**どれを見せるかを
+    /// 優先度で決めない。** 全てログと「接続状態」タブに残っており、
+    /// 消えたほうも次の再試行でまた記録されるため。
+    fn report_error(&mut self, source: ErrorSource, message: String) {
+        let notify = self
+            .errors
+            .record(source, message, Instant::now(), Local::now());
+        if !notify {
+            return;
+        }
+        // 上で記録したので必ず取れる
+        let Some(recorded) = self.errors.latest(source) else {
+            return;
+        };
+        let text = status::truncate(
+            &status::format_message(source, &recorded.message),
+            status::TOAST_MESSAGE_LIMIT,
+        );
+        self.transient_overlay.show(
+            OverlayContent::Text(text),
+            ERROR_TOAST_DURATION,
+            Instant::now(),
+        );
+    }
+
+    /// 発生源の直近の失敗を、映像プレースホルダーへ添える 1 行にする。
+    fn error_detail(&self, source: ErrorSource) -> Option<String> {
+        let recorded = self.errors.latest(source)?;
+        Some(status::truncate(
+            &status::format_message(source, &recorded.message),
+            status::PLACEHOLDER_DETAIL_LIMIT,
+        ))
+    }
+
+    /// 設定ダイアログの「接続状態」タブへ渡す観測値を作る。
+    ///
+    /// **ダイアログを開いている間だけ呼ぶ。** ロックは video → audio の順に
+    /// 1 つずつ取り、中では小さな構造体の複製しか行わない
+    /// （`stats()` / `link_state()` と同じ流儀）。
+    fn connection_status(&self) -> ConnectionStatus {
+        let active_video = match self.video_capture.lock() {
+            Ok(video) => video.active(),
+            Err(_) => {
+                warn!("接続状態の表示で video_capture のロックを取得できない");
+                None
+            }
+        };
+        let active_audio = match self.audio_capture.lock() {
+            Ok(audio) => audio.active(),
+            Err(_) => {
+                warn!("接続状態の表示で audio_capture のロックを取得できない");
+                None
+            }
+        };
+
+        let mut video = LinkStatus {
+            connected: active_video.is_some(),
+            reconnecting: self.video_retry.is_active(),
+            attempts: self.video_retry.attempts(),
+            details: Vec::new(),
+            error: self.status_error(ErrorSource::Video),
+        };
+        if let Some(active) = active_video {
+            video
+                .details
+                .push(format!("デバイス: {}", active.device_name));
+            video.details.push(format!("映像: {}", active.summary()));
+            // 実際の fps はデバイスから取れない（video.rs の start_capture を参照）
+            video
+                .details
+                .push(format!("要求フレームレート: {} fps", active.requested_fps));
+        }
+
+        let mut audio = LinkStatus {
+            connected: active_audio.is_some(),
+            reconnecting: self.audio_retry.is_active(),
+            attempts: self.audio_retry.attempts(),
+            details: Vec::new(),
+            error: self.status_error(ErrorSource::Audio),
+        };
+        if let Some(active) = active_audio {
+            audio.details.push(format!(
+                "入力: {}（{}）",
+                active.input_device,
+                active.input_summary()
+            ));
+            audio.details.push(format!(
+                "出力: {}（{}）",
+                active.output_device,
+                active.output_summary()
+            ));
+        }
+
+        ConnectionStatus { video, audio }
+    }
+
+    /// 「接続状態」タブに出す直近の失敗。`(整形済みの文言, 発生時刻)`。
+    ///
+    /// トーストやプレースホルダーと違い、ここでは切り詰めない。
+    /// 原因を調べるための場所なので、全文が読めるほうがよい。
+    fn status_error(&self, source: ErrorSource) -> Option<(String, String)> {
+        let recorded = self.errors.latest(source)?;
+        Some((
+            status::format_message(source, &recorded.message),
+            recorded.time_text(),
+        ))
+    }
+
     /// 溜まったデバイス能力の取得要求を、使い捨てのスレッドへ渡す。
     ///
     /// `get_device_capabilities` は `Camera::new` でデバイスを開いたうえで
@@ -2821,9 +3074,9 @@ mod tests {
         let now = Instant::now();
         let mut retry = ConnectRetry::default();
         retry.request("デバイス A");
-        retry.record_failure(now, "1 回目".to_string());
-        retry.record_failure(now, "2 回目".to_string());
-        retry.record_failure(now, "3 回目".to_string());
+        retry.record_failure(now);
+        retry.record_failure(now);
+        retry.record_failure(now);
         assert_eq!(retry.attempts(), 3);
 
         // 設定は何も変わっていないのに再度要求された状況
@@ -2844,8 +3097,8 @@ mod tests {
         let now = Instant::now();
         let mut retry = ConnectRetry::default();
         retry.request("デバイス A");
-        retry.record_failure(now, "失敗".to_string());
-        retry.record_failure(now, "失敗".to_string());
+        retry.record_failure(now);
+        retry.record_failure(now);
         assert!(!retry.is_due(now));
 
         retry.request("デバイス B");
@@ -2860,8 +3113,8 @@ mod tests {
         let now = Instant::now();
         let mut retry = ConnectRetry::default();
         retry.request("デバイス A");
-        retry.record_failure(now, "失敗".to_string());
-        retry.record_failure(now, "失敗".to_string());
+        retry.record_failure(now);
+        retry.record_failure(now);
         assert!(!retry.is_due(now));
 
         retry.request_now("デバイス A");
@@ -2903,7 +3156,7 @@ mod tests {
         let now = Instant::now();
         let mut retry = ConnectRetry::default();
         retry.request("デバイス A");
-        retry.record_failure(now, "デバイスが見つからない".to_string());
+        retry.record_failure(now);
 
         assert!(!retry.is_due(now), "失敗直後は待つ");
         assert!(
@@ -2922,10 +3175,10 @@ mod tests {
         let mut retry = ConnectRetry::default();
         retry.request("デバイス A");
 
-        retry.record_failure(now, "1 回目".to_string());
+        retry.record_failure(now);
         assert!(!retry.is_due(now + Duration::from_millis(199)));
 
-        retry.record_failure(now, "2 回目".to_string());
+        retry.record_failure(now);
         assert!(
             !retry.is_due(now + Duration::from_millis(399)),
             "2 回目の失敗では 400ms 待つ"
@@ -2938,14 +3191,13 @@ mod tests {
         let now = Instant::now();
         let mut retry = ConnectRetry::default();
         retry.request("デバイス A");
-        retry.record_failure(now, "一時的な失敗".to_string());
+        retry.record_failure(now);
         retry.record_success();
 
         assert!(
             !retry.is_due(now + Duration::from_secs(60)),
             "成功したら次のフレーム以降は試さない"
         );
-        assert_eq!(retry.last_error(), None, "成功したら失敗理由を捨てる");
     }
 
     #[test]
@@ -2955,25 +3207,16 @@ mod tests {
         let mut retry = ConnectRetry::default();
         retry.request("デバイス A");
         for _ in 0..8 {
-            retry.record_failure(now, "失敗".to_string());
+            retry.record_failure(now);
         }
         retry.record_success();
 
         retry.request("デバイス A");
-        retry.record_failure(now, "再要求後の 1 回目".to_string());
+        retry.record_failure(now);
         assert!(
             retry.is_due(now + Duration::from_millis(200)),
             "再要求後は 200ms から数え直す"
         );
-    }
-
-    #[test]
-    fn connect_retry_keeps_the_last_error() {
-        // UI 表示はまだ行わないが、理由は保持しておく
-        let mut retry = ConnectRetry::default();
-        retry.request("デバイス A");
-        retry.record_failure(Instant::now(), "Device 'X' not found".to_string());
-        assert_eq!(retry.last_error(), Some("Device 'X' not found"));
     }
 
     #[test]
@@ -2989,7 +3232,7 @@ mod tests {
         retry.request("デバイス A");
         assert!(retry.is_active());
 
-        retry.record_failure(Instant::now(), "Device 'A' not found".to_string());
+        retry.record_failure(Instant::now());
         // 失敗しても追いかけ続けている間は「再接続中」
         assert!(retry.is_active());
 
@@ -3089,6 +3332,61 @@ mod tests {
         assert_eq!(
             video_placeholder_message(false, true),
             "デバイスが接続されていません（再接続を試しています）"
+        );
+    }
+
+    #[test]
+    fn screenshot_outcome_supersedes_without_previous_result_returns_true() {
+        assert!(screenshot_outcome_supersedes(None, Instant::now()));
+    }
+
+    #[test]
+    fn screenshot_outcome_supersedes_newer_result_returns_true() {
+        let first = Instant::now();
+        assert!(screenshot_outcome_supersedes(
+            Some(first),
+            first + Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn screenshot_outcome_supersedes_older_result_returns_false() {
+        // 先に始めた保存が後から終わった場合。新しい記録を上書きさせない
+        let first = Instant::now();
+        let second = first + Duration::from_millis(50);
+        assert!(!screenshot_outcome_supersedes(Some(second), first));
+    }
+
+    #[test]
+    fn screenshot_outcome_supersedes_same_instant_returns_true() {
+        // 境界。取りこぼすより出すほうに倒す
+        let now = Instant::now();
+        assert!(screenshot_outcome_supersedes(Some(now), now));
+    }
+
+    #[test]
+    fn video_placeholder_text_without_detail_is_the_message_alone() {
+        assert_eq!(
+            video_placeholder_text(false, true, None),
+            "デバイスが接続されていません（再接続を試しています）"
+        );
+    }
+
+    #[test]
+    fn video_placeholder_text_adds_the_reason_on_a_second_line() {
+        assert_eq!(
+            video_placeholder_text(false, true, Some("映像デバイスに接続できません: not found")),
+            "デバイスが接続されていません（再接続を試しています）\n映像デバイスに接続できません: not found"
+        );
+    }
+
+    #[test]
+    fn video_placeholder_text_while_capturing_drops_the_reason() {
+        // ストリームは開けている＝接続の失敗ではない。古い接続エラーを
+        // 出すと、入力機器ではなく USB を疑わせてしまう
+        assert_eq!(
+            video_placeholder_text(true, false, Some("映像デバイスに接続できません: not found")),
+            "映像信号がありません"
         );
     }
 
