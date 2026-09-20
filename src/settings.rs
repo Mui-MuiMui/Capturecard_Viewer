@@ -35,6 +35,119 @@ pub struct VideoSettings {
     // 「デバイスの自動再接続」が 1 つのスイッチで両方を切り替えるため、
     // 設定の置き場所も 1 か所にまとめてある
     pub auto_reconnect: bool,
+    // YUY2 → RGB の変換に使う色空間。既定は解像度からの推定（Auto）。
+    //
+    // キャプチャーボードは入力信号の色空間を通知してこないため、通常は
+    // 解像度から推定するしかない。ただし SD で BT.709、HD で BT.601 を
+    // 出す機種があるので、手で固定できるようにしてある
+    #[serde(deserialize_with = "deserialize_color_space")]
+    pub color_space: ColorSpace,
+    // 入力信号の輝度レンジ。既定はリミテッド（Y 16〜235）。
+    //
+    // フルレンジ（Y 0〜255）で出す機種にリミテッド用の係数を当てると、
+    // 黒が潰れ白が飛ぶ。こちらも推定できないので設定で選ばせる
+    #[serde(deserialize_with = "deserialize_color_range")]
+    pub color_range: ColorRange,
+}
+
+// YUY2 → RGB の変換に使う色空間。設定ファイルには
+// color_space = "auto" / "bt601" / "bt709" と書かれる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorSpace {
+    // 既存ユーザーの設定ファイルには color_space が無い。既定を Auto に
+    // してあるので、これまでどおり解像度からの推定で動く
+    #[default]
+    Auto,
+    Bt601,
+    Bt709,
+}
+
+impl ColorSpace {
+    // 設定ダイアログのコンボボックスに出す表示名
+    pub fn label(self) -> &'static str {
+        match self {
+            ColorSpace::Auto => "自動（解像度から判断）",
+            ColorSpace::Bt601 => "BT.601（SD）",
+            ColorSpace::Bt709 => "BT.709（HD）",
+        }
+    }
+
+    // コンボボックスに並べる順。ダイアログ側で配列を書き写さずに済ませる
+    pub const ALL: [ColorSpace; 3] = [ColorSpace::Auto, ColorSpace::Bt601, ColorSpace::Bt709];
+}
+
+// 入力信号の輝度レンジ。設定ファイルには
+// color_range = "limited" / "full" と書かれる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorRange {
+    // 放送・HDMI の既定はリミテッドレンジ。従来の係数表もこちらなので、
+    // 設定が無い既存ユーザーの見え方は変わらない
+    #[default]
+    Limited,
+    Full,
+}
+
+impl ColorRange {
+    // 設定ダイアログのコンボボックスに出す表示名
+    pub fn label(self) -> &'static str {
+        match self {
+            ColorRange::Limited => "リミテッド（16〜235）",
+            ColorRange::Full => "フル（0〜255）",
+        }
+    }
+
+    pub const ALL: [ColorRange; 2] = [ColorRange::Limited, ColorRange::Full];
+}
+
+// 設定ファイルの color_space に知らない値が書かれていても、設定全体を
+// 失わせない。ScreenshotFormat と同じ考え方で、ここでエラーを返すと
+// TOML のパースがファイル単位で失敗し、色空間と無関係な項目まで既定値へ戻る。
+fn deserialize_color_space<'de, D>(deserializer: D) -> Result<ColorSpace, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(color_space_from_str(&raw).unwrap_or_else(|| {
+        warn!("設定の色空間 \"{}\" を解釈できないので自動として扱う", raw);
+        ColorSpace::default()
+    }))
+}
+
+// 設定ファイルの color_range も同じ扱いにする。
+fn deserialize_color_range<'de, D>(deserializer: D) -> Result<ColorRange, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(color_range_from_str(&raw).unwrap_or_else(|| {
+        warn!(
+            "設定の色レンジ \"{}\" を解釈できないのでリミテッドとして扱う",
+            raw
+        );
+        ColorRange::default()
+    }))
+}
+
+// 設定ファイルに書かれた文字列から色空間を決める。解釈できない場合は None。
+fn color_space_from_str(raw: &str) -> Option<ColorSpace> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(ColorSpace::Auto),
+        // ドットや空白入りで手書きされることを見込んで、区切りを落とした形も拾う
+        "bt601" | "bt.601" | "601" => Some(ColorSpace::Bt601),
+        "bt709" | "bt.709" | "709" => Some(ColorSpace::Bt709),
+        _ => None,
+    }
+}
+
+// 設定ファイルに書かれた文字列から輝度レンジを決める。解釈できない場合は None。
+fn color_range_from_str(raw: &str) -> Option<ColorRange> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "limited" | "tv" => Some(ColorRange::Limited),
+        "full" | "pc" => Some(ColorRange::Full),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +365,10 @@ impl Default for VideoSettings {
             // 既定は有効。USB を挿し直したときに何もしなくても復帰するほうが、
             // 「映像が止まったまま気付かない」よりも害が少ない
             auto_reconnect: true,
+            // 既定は従来どおりの振る舞い。解像度から BT.601 / BT.709 を選び、
+            // リミテッドレンジの係数で変換する
+            color_space: ColorSpace::Auto,
+            color_range: ColorRange::Limited,
         }
     }
 }
@@ -515,6 +632,8 @@ resolution = [1920, 1080]
 format = "MJPEG"
 fps = 30
 auto_reconnect = false
+color_space = "bt601"
+color_range = "full"
 
 [audio]
 input_device_name = "Line In"
@@ -1233,6 +1352,98 @@ show_stats_overlay = true
 
         assert_eq!(settings.screenshot.jpeg_quality, 1);
         assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_missing_color_keys_use_auto_and_limited() {
+        // 色空間の設定を足す前の版が書いた設定ファイル。
+        // 2 つのキーだけが既定へ倒れ、他の項目は保持されなければならない
+        let config = without_key(&without_key(FULL_CONFIG, "color_space"), "color_range");
+        assert!(
+            !config.contains("color_space =") && !config.contains("color_range ="),
+            "テスト用の設定から色空間のキーが消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("色空間のキーが欠けていても読めなければならない");
+
+        assert_eq!(settings.video.color_space, ColorSpace::Auto);
+        assert_eq!(settings.video.color_range, ColorRange::Limited);
+        assert_eq!(settings.video.fps, Some(30));
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_unknown_color_space_falls_back_without_losing_settings() {
+        // 手で書き換えて綴りを誤った場合。色空間だけが自動へ倒れ、
+        // 無関係な項目は保持されなければならない
+        let config = FULL_CONFIG.replace(r#"color_space = "bt601""#, r#"color_space = "bt2020""#);
+        assert!(config.contains(r#"color_space = "bt2020""#));
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("知らない色空間でも読めなければならない");
+
+        assert_eq!(settings.video.color_space, ColorSpace::Auto);
+        // 同じセクションの他の項目が巻き添えになっていないこと
+        assert_eq!(settings.video.color_range, ColorRange::Full);
+        assert_eq!(settings.video.fps, Some(30));
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_unknown_color_range_falls_back_without_losing_settings() {
+        let config = FULL_CONFIG.replace(r#"color_range = "full""#, r#"color_range = "wide""#);
+        assert!(config.contains(r#"color_range = "wide""#));
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("知らない色レンジでも読めなければならない");
+
+        assert_eq!(settings.video.color_range, ColorRange::Limited);
+        assert_eq!(settings.video.color_space, ColorSpace::Bt601);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn color_space_from_str_accepts_known_spellings() {
+        assert_eq!(color_space_from_str("auto"), Some(ColorSpace::Auto));
+        assert_eq!(color_space_from_str(" AUTO "), Some(ColorSpace::Auto));
+        assert_eq!(color_space_from_str("bt601"), Some(ColorSpace::Bt601));
+        assert_eq!(color_space_from_str("BT.709"), Some(ColorSpace::Bt709));
+        assert_eq!(color_space_from_str("601"), Some(ColorSpace::Bt601));
+        assert_eq!(color_space_from_str(""), None);
+        assert_eq!(color_space_from_str("bt2020"), None);
+    }
+
+    #[test]
+    fn color_range_from_str_accepts_known_spellings() {
+        assert_eq!(color_range_from_str("limited"), Some(ColorRange::Limited));
+        assert_eq!(color_range_from_str(" TV "), Some(ColorRange::Limited));
+        assert_eq!(color_range_from_str("full"), Some(ColorRange::Full));
+        assert_eq!(color_range_from_str("pc"), Some(ColorRange::Full));
+        assert_eq!(color_range_from_str(""), None);
+        assert_eq!(color_range_from_str("wide"), None);
+    }
+
+    #[test]
+    fn color_space_and_range_serialize_as_lowercase_strings() {
+        // 設定ファイルに書き出される綴り。ここが変わると、既に配布した版が
+        // 書いた設定ファイルを読めなくなる
+        let mut settings = AppSettings::default();
+        settings.video.color_space = ColorSpace::Bt709;
+        settings.video.color_range = ColorRange::Full;
+
+        let serialized = toml::to_string(&settings).expect("設定を書き出せること");
+
+        assert!(
+            serialized.contains(r#"color_space = "bt709""#),
+            "{}",
+            serialized
+        );
+        assert!(
+            serialized.contains(r#"color_range = "full""#),
+            "{}",
+            serialized
+        );
     }
 
     #[test]
