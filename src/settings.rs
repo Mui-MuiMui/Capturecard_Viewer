@@ -278,6 +278,8 @@ fn color_range_from_str(raw: &str) -> Option<ColorRange> {
 pub struct AudioSettings {
     pub input_device_name: Option<String>,
     pub output_device_name: Option<String>,
+    // 以下 2 項目は「希望値」。実際に開く値はデバイスの能力に合わせて
+    // `audio::select_best_config` が寄せるため、ここと食い違うことがある
     pub sample_rate: Option<u32>,
     pub channels: Option<u16>,
     pub passthrough_enabled: bool,
@@ -394,6 +396,11 @@ pub enum ScreenshotEncoding {
     Jpeg { quality: u8 },
     Png,
 }
+
+// オーディオのサンプリングレートとチャンネル数の既定値。
+// 設定に値が入っていないときの表示にも使うので、設定画面側と揃うよう定数にしてある
+pub const DEFAULT_SAMPLE_RATE: u32 = 48_000;
+pub const DEFAULT_CHANNELS: u16 = 2;
 
 // JPEG 品質の下限と上限。image クレートの JpegEncoder が受け付ける範囲に合わせてある
 pub const MIN_JPEG_QUALITY: u8 = 1;
@@ -621,8 +628,8 @@ impl Default for AudioSettings {
         Self {
             input_device_name: None,
             output_device_name: None,
-            sample_rate: Some(48000),
-            channels: Some(2),
+            sample_rate: Some(DEFAULT_SAMPLE_RATE),
+            channels: Some(DEFAULT_CHANNELS),
             passthrough_enabled: true,
         }
     }

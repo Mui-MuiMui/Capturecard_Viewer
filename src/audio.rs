@@ -1,6 +1,6 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, SampleRate, SupportedStreamConfig, SupportedStreamConfigRange};
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -18,8 +18,8 @@ const DEFAULT_VOLUME: f32 = 1.0;
 ///
 /// 設定ダイアログの「接続状態」タブに出すために持つ。**設定に書かれた値では
 /// なく、`select_best_config` が確定させた値を入れる。** 設定画面の選択肢は
-/// デバイスの能力から作っていないため、選んだ値と実際の値は食い違いうる
-/// （特に WASAPI はミックスフォーマットのチャンネル数しか列挙しない）。
+/// 入出力の両方が対応する値に絞ってあるが、能力を取得できなかったデバイスでは
+/// 既定の一覧を出すため、選んだ値と実際の値は食い違いうる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveAudio {
     /// 実際に開いた入力デバイス名
@@ -43,6 +43,374 @@ impl ActiveAudio {
     /// 出力側を 1 行で表す。
     pub fn output_summary(&self) -> String {
         format!("{}Hz {}ch", self.output_sample_rate, self.output_channels)
+    }
+}
+
+/// 音声デバイスの向き。能力の取得とログの文言で使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AudioDirection {
+    Input,
+    Output,
+}
+
+impl AudioDirection {
+    /// ログと画面に出す日本語の呼び名。
+    pub fn label(self) -> &'static str {
+        match self {
+            AudioDirection::Input => "入力",
+            AudioDirection::Output => "出力",
+        }
+    }
+}
+
+/// 出力デバイスが「デフォルト」（設定上は `None`）のときに、能力キャッシュの
+/// キーとして使う名前。
+///
+/// キャッシュはデバイス名の文字列で引くため、「既定のデバイス」を表す口が要る。
+/// 山括弧で囲んだ日本語は Windows のデバイスのフレンドリ名には現れないので、
+/// 実在のデバイス名と衝突しない。
+pub const DEFAULT_DEVICE_KEY: &str = "<既定のデバイス>";
+
+/// 設定に書かれたデバイス名を、能力キャッシュのキーへ直す。
+///
+/// 未選択（`None` や空文字）は「既定のデバイス」を指すキーにする。キャッシュは
+/// 空のキーを無視するため、そのまま渡すと出力が「デフォルト」のときに
+/// 対応設定を取りに行かない。
+pub fn cache_key(device_name: Option<&str>) -> String {
+    match device_name {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => DEFAULT_DEVICE_KEY.to_string(),
+    }
+}
+
+/// 能力キャッシュのキーを、`cpal` へ渡すデバイス名へ戻す。
+///
+/// `DEFAULT_DEVICE_KEY` と空文字は「既定のデバイス」を表す `None` になる。
+pub fn device_name_from_key(key: &str) -> Option<&str> {
+    if key.is_empty() || key == DEFAULT_DEVICE_KEY {
+        None
+    } else {
+        Some(key)
+    }
+}
+
+/// 音声デバイスが対応する設定。
+///
+/// `supported_input_configs()` / `supported_output_configs()` は WASAPI で
+/// 13 レート × 5 形式の `IsFormatSupported`（実測 300ms 前後）になるため、
+/// UI スレッドでは呼ばない。別スレッドで一度取ってこの型で持ち回す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioCapabilities {
+    /// デバイスが列挙した対応設定。`select_best_config` へそのまま渡せる
+    configs: Vec<SupportedStreamConfigRange>,
+    /// デバイスの既定設定（WASAPI のミックスフォーマット）
+    default_sample_rate: u32,
+    default_channels: u16,
+}
+
+impl AudioCapabilities {
+    /// デバイスが列挙した対応設定。
+    pub fn configs(&self) -> &[SupportedStreamConfigRange] {
+        &self.configs
+    }
+
+    /// デバイスの既定のサンプリングレート。
+    pub fn default_sample_rate(&self) -> u32 {
+        self.default_sample_rate
+    }
+
+    /// デバイスの既定のチャンネル数。
+    pub fn default_channels(&self) -> u16 {
+        self.default_channels
+    }
+
+    /// 設定画面に出せるサンプリングレート。昇順・重複なし。
+    pub fn sample_rates(&self) -> Vec<u32> {
+        supported_sample_rates(&self.configs)
+    }
+
+    /// 設定画面に出せるチャンネル数。昇順・重複なし。
+    pub fn channels(&self) -> Vec<u16> {
+        supported_channels(&self.configs)
+    }
+}
+
+/// 指定したデバイスの対応設定を取り、`AudioCapabilities` にまとめる。
+///
+/// **UI スレッドから直接呼ばないこと。** 列挙は WASAPI への問い合わせを
+/// 繰り返すため実測 300ms 前後かかる。`CaptureCardViewer` が使い捨ての
+/// スレッドへ投げ、結果をチャネルで受け取る。
+///
+/// `AudioCapture` のホストは使わず、この関数の中で新しく作る。`audio_capture`
+/// のロックを別スレッドから握ると、その間 UI スレッドの再接続が止まるため。
+pub fn query_capabilities(
+    direction: AudioDirection,
+    device_name: Option<&str>,
+) -> Result<AudioCapabilities, String> {
+    let host = cpal::default_host();
+
+    let device = match device_name {
+        Some(name) => find_device_in_host(&host, name, direction)?,
+        None => match direction {
+            AudioDirection::Input => host
+                .default_input_device()
+                .ok_or_else(|| "既定の入力デバイスがありません".to_string())?,
+            AudioDirection::Output => host
+                .default_output_device()
+                .ok_or_else(|| "既定の出力デバイスがありません".to_string())?,
+        },
+    };
+
+    let default_config = match direction {
+        AudioDirection::Input => device.default_input_config(),
+        AudioDirection::Output => device.default_output_config(),
+    }
+    .map_err(|e| format!("既定の設定を取得できません: {e}"))?;
+
+    let configs = match direction {
+        AudioDirection::Input => device.supported_input_configs().map(|it| it.collect()),
+        AudioDirection::Output => device.supported_output_configs().map(|it| it.collect()),
+    }
+    .map_err(|e| format!("対応設定を列挙できません: {e}"))?;
+
+    Ok(AudioCapabilities {
+        configs,
+        default_sample_rate: default_config.sample_rate().0,
+        default_channels: default_config.channels(),
+    })
+}
+
+/// ホストの一覧から名前でデバイスを探す。`AudioCapture::find_device_by_name` と
+/// 同じことを、`AudioCapture` を持たない別スレッドから行うためのもの。
+fn find_device_in_host(
+    host: &cpal::Host,
+    name: &str,
+    direction: AudioDirection,
+) -> Result<Device, String> {
+    let devices = match direction {
+        AudioDirection::Input => host.input_devices(),
+        AudioDirection::Output => host.output_devices(),
+    }
+    .map_err(|e| format!("デバイスを列挙できません: {e}"))?;
+
+    for device in devices {
+        if device.name().ok().as_deref() == Some(name) {
+            return Ok(device);
+        }
+    }
+    Err(format!("デバイス '{name}' が見つかりません"))
+}
+
+/// 設定画面に出すサンプリングレートの当たり値。
+///
+/// 連続した範囲（min < max）を返すホストでは「対応している値」を列挙できない
+/// ため、この一覧のうち範囲に収まるものを候補にする。WASAPI のように離散値を
+/// 列挙するホストでは、列挙された値がそのまま候補になるのでここは効かない。
+const BASELINE_SAMPLE_RATES: [u32; 7] = [8000, 16000, 22050, 32000, 44100, 48000, 96000];
+
+/// 能力を取得できなかったときに出す既定の選択肢。
+///
+/// 従来の固定一覧と同じ。デバイスが対応しない値も選べるが、`select_best_config`
+/// が最も近い値へ寄せるので開けなくなることはない。
+pub const FALLBACK_SAMPLE_RATES: [u32; 7] = BASELINE_SAMPLE_RATES;
+/// 同上、チャンネル数の既定の選択肢。
+pub const FALLBACK_CHANNELS: [u16; 2] = [1, 2];
+
+/// 対応設定の一覧から、選択肢に出せるサンプリングレートを作る。昇順・重複なし。
+///
+/// 扱えないサンプル形式（`sample_format_priority` が `None` を返すもの）しか
+/// 持たない設定は、選んでもストリームを組み立てられないので数に入れない。
+fn supported_sample_rates(configs: &[SupportedStreamConfigRange]) -> Vec<u32> {
+    let mut rates = Vec::new();
+    for range in configs {
+        if sample_format_priority(range.sample_format()).is_none() {
+            continue;
+        }
+        let min = range.min_sample_rate().0;
+        let max = range.max_sample_rate().0;
+        // 壊れた列挙は無視する（select_best_config と同じ扱い）
+        if min > max {
+            continue;
+        }
+        if min == max {
+            rates.push(min);
+        } else {
+            rates.extend(
+                BASELINE_SAMPLE_RATES
+                    .iter()
+                    .copied()
+                    .filter(|&rate| (min..=max).contains(&rate)),
+            );
+        }
+    }
+    rates.sort_unstable();
+    rates.dedup();
+    rates
+}
+
+/// 対応設定の一覧から、選択肢に出せるチャンネル数を作る。昇順・重複なし。
+fn supported_channels(configs: &[SupportedStreamConfigRange]) -> Vec<u16> {
+    let mut channels: Vec<u16> = configs
+        .iter()
+        .filter(|range| sample_format_priority(range.sample_format()).is_some())
+        .filter(|range| range.min_sample_rate() <= range.max_sample_rate())
+        .map(|range| range.channels())
+        .collect();
+    channels.sort_unstable();
+    channels.dedup();
+    channels
+}
+
+/// 選択肢の出どころ。UI が添える説明を出し分けるために持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChoiceSource {
+    /// 入出力の両方が対応する値だけを出している
+    Common,
+    /// 共通の値が無いので両方の和を出している。開くときに入出力で別の値になる
+    Disjoint,
+    /// 片方のデバイスの能力しか取れていないので、そちらだけで作った
+    OneSided,
+    /// どちらの能力も取れていないので固定の既定一覧
+    Fallback,
+}
+
+/// 設定画面に出す選択肢と、その出どころ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioChoices<T> {
+    pub values: Vec<T>,
+    pub source: ChoiceSource,
+}
+
+/// 入出力の能力から選択肢を組み立てる共通処理。
+///
+/// - 両方取れていて共通部分があれば共通部分（`Common`）
+/// - 両方取れていて共通部分が無ければ和（`Disjoint`）
+/// - 片方だけ取れていればその一覧（`OneSided`）
+/// - どちらも取れていなければ `fallback`（`Fallback`）
+///
+/// 共通部分が空のときに片側だけを出さないのは、どちらのデバイスに合わせたいかを
+/// ユーザーが決められるようにするため。
+fn build_choices<T: Copy + Ord>(
+    input: Option<Vec<T>>,
+    output: Option<Vec<T>>,
+    fallback: &[T],
+) -> AudioChoices<T> {
+    match (input, output) {
+        (Some(input), Some(output)) => {
+            let common = intersect_sorted(&input, &output);
+            if !common.is_empty() {
+                return AudioChoices {
+                    values: common,
+                    source: ChoiceSource::Common,
+                };
+            }
+            let mut union = input;
+            union.extend(output);
+            union.sort_unstable();
+            union.dedup();
+            AudioChoices {
+                values: union,
+                source: ChoiceSource::Disjoint,
+            }
+        }
+        (Some(values), None) | (None, Some(values)) => AudioChoices {
+            values,
+            source: ChoiceSource::OneSided,
+        },
+        (None, None) => AudioChoices {
+            values: fallback.to_vec(),
+            source: ChoiceSource::Fallback,
+        },
+    }
+}
+
+/// 片方だけ能力が取れているときに、空の一覧を「取れていない」と同じに扱う。
+///
+/// 対応設定を列挙できても、扱えるサンプル形式が 1 つも無ければ候補は空になる。
+/// 空のまま `build_choices` へ渡すと共通部分も和も空になり、選択肢が消える。
+fn non_empty<T>(values: Vec<T>) -> Option<Vec<T>> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+/// 設定画面に出すサンプリングレートの選択肢。
+pub fn selectable_sample_rates(
+    input: Option<&AudioCapabilities>,
+    output: Option<&AudioCapabilities>,
+) -> AudioChoices<u32> {
+    build_choices(
+        input.and_then(|caps| non_empty(caps.sample_rates())),
+        output.and_then(|caps| non_empty(caps.sample_rates())),
+        &FALLBACK_SAMPLE_RATES,
+    )
+}
+
+/// 設定画面に出すチャンネル数の選択肢。
+pub fn selectable_channels(
+    input: Option<&AudioCapabilities>,
+    output: Option<&AudioCapabilities>,
+) -> AudioChoices<u16> {
+    build_choices(
+        input.and_then(|caps| non_empty(caps.channels())),
+        output.and_then(|caps| non_empty(caps.channels())),
+        &FALLBACK_CHANNELS,
+    )
+}
+
+/// 昇順の 2 つの一覧の共通部分。
+fn intersect_sorted<T: Copy + Ord>(a: &[T], b: &[T]) -> Vec<T> {
+    a.iter()
+        .copied()
+        .filter(|value| b.contains(value))
+        .collect()
+}
+
+/// 候補の中から希望値に最も近いものを返す。候補が空なら `None`。
+///
+/// 同じ差の候補が 2 つあるときは先に来たほう（一覧は昇順なので小さいほう）を選ぶ。
+/// `select_best_config` が同点で列挙順の先頭を採るのと揃えてある。
+pub fn nearest_sample_rate(values: &[u32], desired: u32) -> Option<u32> {
+    values.iter().copied().min_by_key(|v| v.abs_diff(desired))
+}
+
+/// チャンネル数版の `nearest_sample_rate`。
+pub fn nearest_channels(values: &[u16], desired: u16) -> Option<u16> {
+    values.iter().copied().min_by_key(|v| v.abs_diff(desired))
+}
+
+/// パススルーを開くときの要求。
+///
+/// 引数で渡していたが、対応設定のキャッシュを加えて 6 つになったので構造体へ
+/// まとめた。`input_*` と `output_*` はどちらも同じ型で、順番を取り違えても
+/// コンパイルが通ってしまうため、名前で区別できる形にする意味もある。
+pub struct PassthroughRequest<'a> {
+    pub input_device_name: Option<&'a str>,
+    pub output_device_name: Option<&'a str>,
+    /// 設定画面で選んだサンプリングレート。`None` ならデバイスの既定に従う
+    pub sample_rate: Option<u32>,
+    /// 設定画面で選んだチャンネル数。`None` ならデバイスの既定に従う
+    pub channels: Option<u16>,
+    /// 別スレッドで先に取っておいた入力デバイスの対応設定。
+    /// `None` のときだけ、この場（UI スレッド）で列挙する
+    pub input_capabilities: Option<&'a AudioCapabilities>,
+    /// 同上、出力デバイスの対応設定
+    pub output_capabilities: Option<&'a AudioCapabilities>,
+}
+
+impl PassthroughRequest<'_> {
+    /// デバイスも設定も指定しない要求。既定デバイスへのフォールバックで使う。
+    pub fn defaults() -> Self {
+        Self {
+            input_device_name: None,
+            output_device_name: None,
+            sample_rate: None,
+            channels: None,
+            input_capabilities: None,
+            output_capabilities: None,
+        }
     }
 }
 
@@ -135,13 +503,16 @@ impl AudioCapture {
         }
     }
 
-    pub fn start_passthrough_with_settings(
-        &mut self,
-        input_device_name: Option<&str>,
-        output_device_name: Option<&str>,
-        desired_sample_rate: Option<u32>,
-        desired_channels: Option<u16>,
-    ) -> Result<(), String> {
+    pub fn start_passthrough(&mut self, request: &PassthroughRequest<'_>) -> Result<(), String> {
+        let PassthroughRequest {
+            input_device_name,
+            output_device_name,
+            sample_rate: desired_sample_rate,
+            channels: desired_channels,
+            input_capabilities,
+            output_capabilities,
+        } = *request;
+
         self.stop_capture();
         info!("音声パススルーを開始する");
 
@@ -188,32 +559,63 @@ impl AudioCapture {
             .default_output_config()
             .map_err(|e| format!("Failed to get output config: {}", e))?;
 
+        // 対応設定の一覧。**先に別スレッドで取ってあればそれを使う。**
+        // WASAPI の列挙は 300ms 前後かかるため、ここ（UI スレッド）で毎回
+        // 走らせるとデバイスの切り替えのたびにウィンドウが固まる
+        let input_ranges = resolve_ranges(input_capabilities, AudioDirection::Input, || {
+            input_device
+                .supported_input_configs()
+                .map(|it| it.collect())
+        });
+        let output_ranges = resolve_ranges(output_capabilities, AudioDirection::Output, || {
+            output_device
+                .supported_output_configs()
+                .map(|it| it.collect())
+        });
+
         // 設定画面で選んだサンプルレート・チャンネル数を、デバイスが対応する
         // 組み合わせの中で最も近いものへ寄せる。列挙できない、または選べる設定が
         // 無いデバイスでは既定設定のまま開く（従来の挙動）
-        let input_config = input_device
-            .supported_input_configs()
-            .ok()
-            .and_then(|configs| {
-                select_best_config(
-                    &configs.collect::<Vec<_>>(),
+        //
+        // **まず入出力で同じ設定に揃えられないかを見る。** 揃っていれば
+        // リングバッファのサンプルをそのまま流せる。揃わない組み合わせでは
+        // 再生速度とピッチがずれる
+        let aligned = select_aligned_configs(
+            &input_ranges,
+            &output_ranges,
+            desired_sample_rate.unwrap_or_else(|| input_default.sample_rate().0),
+            desired_channels.unwrap_or_else(|| input_default.channels()),
+        );
+
+        let (input_config, output_config) = match aligned {
+            Some(pair) => pair,
+            None => {
+                let input_config = select_best_config(
+                    &input_ranges,
                     desired_sample_rate.unwrap_or_else(|| input_default.sample_rate().0),
                     desired_channels.unwrap_or_else(|| input_default.channels()),
                 )
-            })
-            .unwrap_or(input_default);
-
-        let output_config = output_device
-            .supported_output_configs()
-            .ok()
-            .and_then(|configs| {
-                select_best_config(
-                    &configs.collect::<Vec<_>>(),
+                .unwrap_or(input_default);
+                let output_config = select_best_config(
+                    &output_ranges,
                     desired_sample_rate.unwrap_or_else(|| output_default.sample_rate().0),
                     desired_channels.unwrap_or_else(|| output_default.channels()),
                 )
-            })
-            .unwrap_or(output_default);
+                .unwrap_or(output_default);
+                if input_config.sample_rate() != output_config.sample_rate()
+                    || input_config.channels() != output_config.channels()
+                {
+                    warn!(
+                        "入出力で共通の設定が無いため別々の設定で開く（再生速度とピッチがずれる）- 入力: {}Hz {}ch、出力: {}Hz {}ch",
+                        input_config.sample_rate().0,
+                        input_config.channels(),
+                        output_config.sample_rate().0,
+                        output_config.channels()
+                    );
+                }
+                (input_config, output_config)
+            }
+        };
 
         info!(
             "音声の設定 - 入力: {}Hz {}ch ({:?})、出力: {}Hz {}ch ({:?})",
@@ -476,6 +878,90 @@ fn select_best_config(
         })
         .min_by_key(|(key, _)| *key)
         .map(|(_, config)| config)
+}
+
+/// 入力と出力の両方が対応する設定を選ぶ。
+///
+/// 揃えられればリングバッファのサンプルをそのまま流せる。WASAPI は共有モードで
+/// ミックスフォーマットしか通さないことが多く、入力 48kHz・出力 44.1kHz のように
+/// 揃えられない組み合わせは珍しくない。その場合は `None` を返し、呼び出し側が
+/// それぞれの最寄りを選ぶ。
+///
+/// 共通の候補を出してから `select_best_config` へ同じ値を渡し、**両方が本当に
+/// その値で開けるかを最後に確かめる。** レートとチャンネル数を別々に共通化して
+/// いるため、「片方はそのレート、もう片方はそのチャンネル数」しか持たない
+/// 組み合わせが候補に残りうる。
+fn select_aligned_configs(
+    input: &[SupportedStreamConfigRange],
+    output: &[SupportedStreamConfigRange],
+    desired_sample_rate: u32,
+    desired_channels: u16,
+) -> Option<(SupportedStreamConfig, SupportedStreamConfig)> {
+    let rates = intersect_sorted(
+        &supported_sample_rates(input),
+        &supported_sample_rates(output),
+    );
+    let channels = intersect_sorted(&supported_channels(input), &supported_channels(output));
+
+    let rate = nearest_sample_rate(&rates, desired_sample_rate)?;
+    let channels = nearest_channels(&channels, desired_channels)?;
+
+    let input_config = select_best_config(input, rate, channels)?;
+    let output_config = select_best_config(output, rate, channels)?;
+
+    if input_config.sample_rate() != output_config.sample_rate()
+        || input_config.channels() != output_config.channels()
+    {
+        return None;
+    }
+
+    info!(
+        "入出力を同じ設定に揃えた: {}Hz {}ch",
+        input_config.sample_rate().0,
+        input_config.channels()
+    );
+    Some((input_config, output_config))
+}
+
+/// 対応設定の一覧を用意する。
+///
+/// 別スレッドで取ったキャッシュがあればそれを使い、無いときだけその場で列挙する。
+/// 列挙に失敗したら空を返す。空なら `select_best_config` が `None` を返し、
+/// 呼び出し側がデバイスの既定設定へ落ちる（従来の挙動）。
+fn resolve_ranges<E: std::fmt::Display>(
+    cached: Option<&AudioCapabilities>,
+    direction: AudioDirection,
+    enumerate: impl FnOnce() -> Result<Vec<SupportedStreamConfigRange>, E>,
+) -> Vec<SupportedStreamConfigRange> {
+    if let Some(caps) = cached {
+        debug!(
+            "{}デバイスの対応設定は取得済みのものを使う（{} 件）",
+            direction.label(),
+            caps.configs().len()
+        );
+        return caps.configs().to_vec();
+    }
+
+    let started = std::time::Instant::now();
+    match enumerate() {
+        Ok(ranges) => {
+            debug!(
+                "{}デバイスの対応設定をこの場で列挙した（{} 件、{} ms）",
+                direction.label(),
+                ranges.len(),
+                started.elapsed().as_millis()
+            );
+            ranges
+        }
+        Err(e) => {
+            warn!(
+                "{}デバイスの対応設定を列挙できないので既定の設定で開く: {}",
+                direction.label(),
+                e
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// 未対応のサンプルフォーマットに当たったときのエラー文言を組み立てる。
@@ -1072,6 +1558,261 @@ mod tests {
         ];
 
         assert!(select_best_config(&configs, 48000, 2).is_none());
+    }
+
+    /// テスト用の `AudioCapabilities`。既定値は WASAPI のミックスフォーマットを模す。
+    fn capabilities(configs: &[SupportedStreamConfigRange]) -> AudioCapabilities {
+        AudioCapabilities {
+            configs: configs.to_vec(),
+            default_sample_rate: 48000,
+            default_channels: 2,
+        }
+    }
+
+    #[test]
+    fn supported_sample_rates_discrete_ranges_are_listed_sorted_and_deduped() {
+        // WASAPI は min == max の離散値を並べる。同じレートが形式違いで複数出る
+        let configs = [
+            discrete_range(2, 48000, SampleFormat::F32),
+            discrete_range(2, 44100, SampleFormat::I16),
+            discrete_range(2, 48000, SampleFormat::I16),
+        ];
+
+        assert_eq!(supported_sample_rates(&configs), vec![44100, 48000]);
+    }
+
+    #[test]
+    fn supported_sample_rates_continuous_range_uses_baseline_values() {
+        // 連続した範囲では「対応している値」を列挙できないので、当たり値のうち
+        // 範囲に収まるものを候補にする
+        let configs = [config_range(2, 16000, 48000, SampleFormat::F32)];
+
+        assert_eq!(
+            supported_sample_rates(&configs),
+            vec![16000, 22050, 32000, 44100, 48000]
+        );
+    }
+
+    #[test]
+    fn supported_sample_rates_skips_unsupported_formats() {
+        // 変換関数が無い形式は選んでもストリームを組み立てられない
+        let configs = [
+            discrete_range(2, 96000, SampleFormat::U8),
+            discrete_range(2, 48000, SampleFormat::F32),
+        ];
+
+        assert_eq!(supported_sample_rates(&configs), vec![48000]);
+    }
+
+    #[test]
+    fn supported_sample_rates_skips_reversed_range() {
+        // min > max の壊れた列挙。select_best_config と同じく無視する
+        let configs = [config_range(2, 96000, 8000, SampleFormat::F32)];
+
+        assert!(supported_sample_rates(&configs).is_empty());
+    }
+
+    #[test]
+    fn supported_channels_are_sorted_and_deduped() {
+        let configs = [
+            discrete_range(2, 48000, SampleFormat::F32),
+            discrete_range(1, 48000, SampleFormat::F32),
+            discrete_range(2, 44100, SampleFormat::I16),
+        ];
+
+        assert_eq!(supported_channels(&configs), vec![1, 2]);
+    }
+
+    #[test]
+    fn supported_channels_skips_unsupported_formats() {
+        let configs = [
+            discrete_range(6, 48000, SampleFormat::F64),
+            discrete_range(2, 48000, SampleFormat::F32),
+        ];
+
+        assert_eq!(supported_channels(&configs), vec![2]);
+    }
+
+    #[test]
+    fn intersect_sorted_keeps_only_common_values() {
+        assert_eq!(intersect_sorted(&[1, 2, 3], &[2, 3, 4]), vec![2, 3]);
+        assert!(intersect_sorted(&[1, 2], &[3, 4]).is_empty());
+        assert!(intersect_sorted::<u32>(&[], &[1]).is_empty());
+    }
+
+    #[test]
+    fn nearest_sample_rate_picks_the_closest_value() {
+        assert_eq!(nearest_sample_rate(&[32000, 48000], 44100), Some(48000));
+        assert_eq!(nearest_sample_rate(&[44100, 48000], 44100), Some(44100));
+    }
+
+    #[test]
+    fn nearest_sample_rate_tie_picks_the_smaller_value() {
+        // 一覧は昇順なので、同じ差なら先に来た小さいほうが残る。
+        // select_best_config が同点で列挙順の先頭を採るのと揃えてある
+        assert_eq!(nearest_sample_rate(&[32000, 48000], 40000), Some(32000));
+    }
+
+    #[test]
+    fn nearest_sample_rate_empty_list_returns_none() {
+        assert_eq!(nearest_sample_rate(&[], 48000), None);
+    }
+
+    #[test]
+    fn nearest_channels_picks_the_closest_value() {
+        assert_eq!(nearest_channels(&[2], 1), Some(2));
+        assert_eq!(nearest_channels(&[1, 2], 1), Some(1));
+        assert_eq!(nearest_channels(&[], 2), None);
+    }
+
+    #[test]
+    fn selectable_sample_rates_uses_the_common_values() {
+        let input = capabilities(&[
+            discrete_range(2, 44100, SampleFormat::F32),
+            discrete_range(2, 48000, SampleFormat::F32),
+        ]);
+        let output = capabilities(&[
+            discrete_range(2, 48000, SampleFormat::F32),
+            discrete_range(2, 96000, SampleFormat::F32),
+        ]);
+
+        let choices = selectable_sample_rates(Some(&input), Some(&output));
+
+        assert_eq!(choices.values, vec![48000]);
+        assert_eq!(choices.source, ChoiceSource::Common);
+    }
+
+    #[test]
+    fn selectable_sample_rates_without_common_values_falls_back_to_the_union() {
+        // 入力 48kHz・出力 44.1kHz は WASAPI では珍しくない。
+        // 片側だけを出すと、どちらに合わせたいかをユーザーが選べなくなる
+        let input = capabilities(&[discrete_range(2, 48000, SampleFormat::F32)]);
+        let output = capabilities(&[discrete_range(2, 44100, SampleFormat::F32)]);
+
+        let choices = selectable_sample_rates(Some(&input), Some(&output));
+
+        assert_eq!(choices.values, vec![44100, 48000]);
+        assert_eq!(choices.source, ChoiceSource::Disjoint);
+    }
+
+    #[test]
+    fn selectable_sample_rates_with_one_side_missing_uses_that_side() {
+        let input = capabilities(&[discrete_range(2, 48000, SampleFormat::F32)]);
+
+        let choices = selectable_sample_rates(Some(&input), None);
+
+        assert_eq!(choices.values, vec![48000]);
+        assert_eq!(choices.source, ChoiceSource::OneSided);
+    }
+
+    #[test]
+    fn selectable_sample_rates_with_no_capabilities_uses_the_fallback_list() {
+        let choices = selectable_sample_rates(None, None);
+
+        assert_eq!(choices.values, FALLBACK_SAMPLE_RATES.to_vec());
+        assert_eq!(choices.source, ChoiceSource::Fallback);
+    }
+
+    #[test]
+    fn selectable_sample_rates_treats_an_empty_capability_as_missing() {
+        // 列挙はできたが扱える形式が 1 つも無いデバイス。空のまま共通部分を
+        // 取ると選択肢が消えるので、取得できていないのと同じに扱う
+        let input = capabilities(&[discrete_range(2, 48000, SampleFormat::U8)]);
+        let output = capabilities(&[discrete_range(2, 44100, SampleFormat::F32)]);
+
+        let choices = selectable_sample_rates(Some(&input), Some(&output));
+
+        assert_eq!(choices.values, vec![44100]);
+        assert_eq!(choices.source, ChoiceSource::OneSided);
+    }
+
+    #[test]
+    fn selectable_channels_uses_the_common_values() {
+        let input = capabilities(&[
+            discrete_range(1, 48000, SampleFormat::F32),
+            discrete_range(2, 48000, SampleFormat::F32),
+        ]);
+        let output = capabilities(&[discrete_range(2, 48000, SampleFormat::F32)]);
+
+        let choices = selectable_channels(Some(&input), Some(&output));
+
+        assert_eq!(choices.values, vec![2]);
+        assert_eq!(choices.source, ChoiceSource::Common);
+    }
+
+    #[test]
+    fn selectable_channels_with_no_capabilities_uses_the_fallback_list() {
+        let choices = selectable_channels(None, None);
+
+        assert_eq!(choices.values, FALLBACK_CHANNELS.to_vec());
+        assert_eq!(choices.source, ChoiceSource::Fallback);
+    }
+
+    #[test]
+    fn select_aligned_configs_matches_both_sides() {
+        let input = [
+            discrete_range(2, 44100, SampleFormat::F32),
+            discrete_range(2, 48000, SampleFormat::F32),
+        ];
+        let output = [discrete_range(2, 48000, SampleFormat::I16)];
+
+        let (in_config, out_config) =
+            select_aligned_configs(&input, &output, 44100, 2).expect("揃えられるはず");
+
+        // 44100 は出力が対応しないので、共通の 48000 へ寄る
+        assert_eq!(in_config.sample_rate(), SampleRate(48000));
+        assert_eq!(out_config.sample_rate(), SampleRate(48000));
+        assert_eq!(in_config.channels(), 2);
+        assert_eq!(out_config.channels(), 2);
+    }
+
+    #[test]
+    fn select_aligned_configs_without_a_common_rate_returns_none() {
+        let input = [discrete_range(2, 48000, SampleFormat::F32)];
+        let output = [discrete_range(2, 44100, SampleFormat::F32)];
+
+        assert!(select_aligned_configs(&input, &output, 48000, 2).is_none());
+    }
+
+    #[test]
+    fn select_aligned_configs_without_a_common_channel_count_returns_none() {
+        let input = [discrete_range(1, 48000, SampleFormat::F32)];
+        let output = [discrete_range(2, 48000, SampleFormat::F32)];
+
+        assert!(select_aligned_configs(&input, &output, 48000, 2).is_none());
+    }
+
+    #[test]
+    fn select_aligned_configs_rejects_a_cross_matched_combination() {
+        // レートは 48000 が、チャンネル数は 2 が共通しているが、
+        // 「48000Hz かつ 2ch」を両方が開けるわけではない
+        let input = [
+            discrete_range(2, 44100, SampleFormat::F32),
+            discrete_range(1, 48000, SampleFormat::F32),
+        ];
+        let output = [
+            discrete_range(1, 44100, SampleFormat::F32),
+            discrete_range(2, 48000, SampleFormat::F32),
+        ];
+
+        assert!(select_aligned_configs(&input, &output, 48000, 2).is_none());
+    }
+
+    #[test]
+    fn select_aligned_configs_empty_lists_return_none() {
+        assert!(select_aligned_configs(&[], &[], 48000, 2).is_none());
+    }
+
+    #[test]
+    fn cache_key_round_trips_through_device_name() {
+        assert_eq!(cache_key(Some("Line In")), "Line In");
+        assert_eq!(device_name_from_key("Line In"), Some("Line In"));
+
+        // 未選択と空文字はどちらも既定のデバイスを指す
+        assert_eq!(cache_key(None), DEFAULT_DEVICE_KEY);
+        assert_eq!(cache_key(Some("")), DEFAULT_DEVICE_KEY);
+        assert_eq!(device_name_from_key(DEFAULT_DEVICE_KEY), None);
+        assert_eq!(device_name_from_key(""), None);
     }
 
     #[test]

@@ -179,11 +179,17 @@ Both settings describe **what the incoming signal is**. When they disagree with 
 
 **Audio**
 
-- Sample rate: 32000 Hz (a matter of preference)
+- Sample rate: 48000 Hz (chosen from the values the devices support)
 - Channels: 2
 - Audio passthrough: enabled
 
-The audio options are listed regardless of the device, so you can pick a value your device does not support. In that case the closest value the device does support is used. (Channel count is often limited to the device default.)
+The sample rate and channel options only list values that **both the input and the output device support**. As with video, the capabilities are queried on a worker thread, so switching devices does not freeze the window. A spinner is shown while the query runs; if it fails, the reason and a 再取得 (retry) button appear and the options fall back to a fixed list.
+
+- In Windows shared mode the channel count is fixed to the device mix format. When only one value is available the combo box is disabled and the reason is shown.
+- When the input and the output have no value in common (for example 48000 Hz input and 44100 Hz output), both sets are listed together with a warning. In that combination each side is opened at its own nearest value, so playback speed and pitch drift.
+- If the saved value is not in the list (after hand-editing the config file, for instance), a warning names the value that is actually used.
+
+What was actually opened is shown under 設定 (Settings) → 接続状態 (Connection status).
 
 ## Known issues
 
