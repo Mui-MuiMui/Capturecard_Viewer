@@ -170,6 +170,21 @@ pub struct VideoSettings {
     // 黒が潰れ白が飛ぶ。こちらも推定できないので設定で選ばせる
     #[serde(deserialize_with = "deserialize_color_range")]
     pub color_range: ColorRange,
+    // 映像の明るさ。-100〜100 で 0 が無調整。
+    //
+    // 色空間やレンジの選び直しでは追いつかない、機種ごとの「暗い」「薄い」
+    // といったクセを手で埋めるためのもの。3 つとも YUY2 → RGB の係数表へ
+    // 畳み込むので、変換のコストは調整の有無で変わらない
+    #[serde(deserialize_with = "deserialize_brightness")]
+    pub brightness: i32,
+    // 映像のコントラスト。-100〜100 で 0 が無調整。
+    // -100 で中間グレー一色、100 で 2 倍になる
+    #[serde(deserialize_with = "deserialize_contrast")]
+    pub contrast: i32,
+    // 映像の彩度。-100〜100 で 0 が無調整。
+    // -100 で白黒、100 で 2 倍になる
+    #[serde(deserialize_with = "deserialize_saturation")]
+    pub saturation: i32,
 }
 
 // YUY2 → RGB の変換に使う色空間。設定ファイルには
@@ -398,6 +413,14 @@ pub enum ScreenshotEncoding {
 pub const MIN_JPEG_QUALITY: u8 = 1;
 pub const MAX_JPEG_QUALITY: u8 = 100;
 
+// 映像調整（明るさ・コントラスト・彩度）の下限と上限。0 が無調整。
+//
+// 3 つで範囲を揃えてあるのは、スライダーの中央が常に「無調整」になり、
+// 「リセット」が 3 つとも 0 を書くだけで済むため。実際の倍率への変換は
+// video::VideoAdjustments が受け持つ
+pub const MIN_VIDEO_ADJUSTMENT: i32 = -100;
+pub const MAX_VIDEO_ADJUSTMENT: i32 = 100;
+
 // 音量の下限と上限。100% が等倍で、そこから先は増幅になる。
 // UI（スライダー・ホイール）と OSD の表示もこの範囲を前提にしている
 pub const MIN_VOLUME: f32 = 0.0;
@@ -465,6 +488,58 @@ where
     }
     // clamp 済みなので u8 に収まる
     Ok(clamped as u8)
+}
+
+// 範囲外の映像調整の値が書かれていても、設定全体を失わせない。
+// 考え方は deserialize_jpeg_quality と同じで、TOML の整数である i64 で
+// 受けてから -100〜100 へ丸める。i32 のまま読むと、手で書き換えられた
+// 巨大な値でパースがファイル単位で失敗し、無関係な項目まで既定値へ戻る。
+//
+// 項目名を引数で受けるのは、ログだけを見て「どのスライダーの値が
+// 丸められたか」を判別できるようにするため。
+fn clamp_video_adjustment(name: &str, raw: i64) -> i32 {
+    let clamped = raw.clamp(
+        i64::from(MIN_VIDEO_ADJUSTMENT),
+        i64::from(MAX_VIDEO_ADJUSTMENT),
+    );
+    if clamped != raw {
+        warn!(
+            "設定の映像調整（{}）{} は範囲外なので {} として扱う",
+            name, raw, clamped
+        );
+    }
+    // clamp 済みなので i32 に収まる
+    clamped as i32
+}
+
+fn deserialize_brightness<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(clamp_video_adjustment(
+        "明るさ",
+        i64::deserialize(deserializer)?,
+    ))
+}
+
+fn deserialize_contrast<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(clamp_video_adjustment(
+        "コントラスト",
+        i64::deserialize(deserializer)?,
+    ))
+}
+
+fn deserialize_saturation<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(clamp_video_adjustment(
+        "彩度",
+        i64::deserialize(deserializer)?,
+    ))
 }
 
 // 範囲外の音量が書かれていても、そのまま受け取らない。
@@ -611,6 +686,11 @@ impl Default for VideoSettings {
             // リミテッドレンジの係数で変換する
             color_space: ColorSpace::Auto,
             color_range: ColorRange::Limited,
+            // 既定は無調整。係数表がそのまま使われ、変換結果は
+            // 映像調整を入れる前と 1 ビットも変わらない
+            brightness: 0,
+            contrast: 0,
+            saturation: 0,
         }
     }
 }
@@ -905,6 +985,9 @@ fps = 30
 auto_reconnect = false
 color_space = "bt601"
 color_range = "full"
+brightness = 10
+contrast = -20
+saturation = 30
 
 [audio]
 input_device_name = "Line In"
@@ -1869,6 +1952,69 @@ volume = 80.0
         assert_eq!(settings.video.color_range, ColorRange::Limited);
         assert_eq!(settings.video.color_space, ColorSpace::Bt601);
         assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_missing_video_adjustment_keys_use_zero() {
+        // 映像調整を足す前の版が書いた設定ファイル。
+        // 3 つのキーだけが無調整へ倒れ、他の項目は保持されなければならない
+        let config = without_key(
+            &without_key(&without_key(FULL_CONFIG, "brightness"), "contrast"),
+            "saturation",
+        );
+        assert!(
+            !config.contains("brightness =")
+                && !config.contains("contrast =")
+                && !config.contains("saturation ="),
+            "テスト用の設定から映像調整のキーが消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("映像調整のキーが欠けていても読めなければならない");
+
+        assert_eq!(settings.video.brightness, 0);
+        assert_eq!(settings.video.contrast, 0);
+        assert_eq!(settings.video.saturation, 0);
+        assert_eq!(settings.video.color_range, ColorRange::Full);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_video_adjustment_keys_are_read() {
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("全項目を書いた設定は読めなければならない");
+
+        assert_eq!(settings.video.brightness, 10);
+        assert_eq!(settings.video.contrast, -20);
+        assert_eq!(settings.video.saturation, 30);
+    }
+
+    #[test]
+    fn app_settings_out_of_range_video_adjustment_is_clamped_without_losing_settings() {
+        // 手で書き換えた場合。i32 に収まらない値でも設定全体を失わせない
+        let config = FULL_CONFIG
+            .replace("brightness = 10", "brightness = 5000000000")
+            .replace("contrast = -20", "contrast = -300");
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("範囲外の映像調整でも読めなければならない");
+
+        assert_eq!(settings.video.brightness, MAX_VIDEO_ADJUSTMENT);
+        assert_eq!(settings.video.contrast, MIN_VIDEO_ADJUSTMENT);
+        // 巻き添えになっていないこと
+        assert_eq!(settings.video.saturation, 30);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn clamp_video_adjustment_keeps_values_in_range() {
+        assert_eq!(clamp_video_adjustment("明るさ", 0), 0);
+        assert_eq!(clamp_video_adjustment("明るさ", 100), 100);
+        assert_eq!(clamp_video_adjustment("明るさ", -100), -100);
+        assert_eq!(clamp_video_adjustment("明るさ", 101), 100);
+        assert_eq!(clamp_video_adjustment("明るさ", -101), -100);
+        assert_eq!(clamp_video_adjustment("明るさ", i64::MAX), 100);
+        assert_eq!(clamp_video_adjustment("明るさ", i64::MIN), -100);
     }
 
     #[test]

@@ -35,7 +35,7 @@ use settings::{
     AppSettings, AutoSavePolicy, ColorRange, ColorSpace, ScreenshotEncoding, MAX_VOLUME, MIN_VOLUME,
 };
 use status::{ConnectionStatus, ErrorCenter, ErrorSource, LinkStatus};
-use video::{FrameStats, VideoCapture};
+use video::{FrameStats, VideoAdjustments, VideoCapture};
 
 /// デバイスリストのキャッシュを更新する間隔
 const DEVICE_LIST_CACHE_INTERVAL: Duration = Duration::from_secs(5);
@@ -609,6 +609,9 @@ pub struct CaptureCardViewer {
     // キャプチャの開き直しは伴わないが、2 秒ごとに video_capture の
     // ロックを取らずに済むよう、他と同じく差分で判定する
     last_color_conversion: Option<(ColorSpace, ColorRange)>,
+    // 最後に VideoCapture へ渡した映像調整（明るさ・コントラスト・彩度）。
+    // 色変換と同じ理由で差分を取る
+    last_video_adjustments: Option<VideoAdjustments>,
     // 最後に適用したスクリーンショットの効果音。
     // apply_settings が 2 秒ごとに呼ばれるため、差分がないときは再適用しない。
     //
@@ -709,6 +712,7 @@ impl Default for CaptureCardViewer {
             last_audio_channels: None,
             last_video_fps: None,
             last_color_conversion: None,
+            last_video_adjustments: None,
             last_sound_file: None,
 
             video_retry: ConnectRetry::default(),
@@ -2671,6 +2675,24 @@ impl CaptureCardViewer {
                     // 次の適用タイミングで入れ直す
                     warn!("色変換の設定で video_capture のロックを取得できない");
                     self.last_color_conversion = None;
+                }
+            }
+
+            // 明るさ・コントラスト・彩度も係数表へ畳み込まれるだけなので、
+            // 色空間・レンジと同じく開き直しを伴わない
+            let adjustments = VideoAdjustments::new(
+                settings.video.brightness,
+                settings.video.contrast,
+                settings.video.saturation,
+            );
+            if Self::needs_reapply(initial, &adjustments, &self.last_video_adjustments) {
+                if let Ok(video) = self.video_capture.lock() {
+                    video.set_video_adjustments(adjustments);
+                    self.last_video_adjustments = Some(adjustments);
+                } else {
+                    // 次の適用タイミングで入れ直す
+                    warn!("映像調整で video_capture のロックを取得できない");
+                    self.last_video_adjustments = None;
                 }
             }
 
