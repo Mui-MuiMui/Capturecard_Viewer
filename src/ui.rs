@@ -1355,6 +1355,13 @@ pub fn show_hotkey_capture_dialog(
 
     if close_dialog {
         *show_dialog = false;
+    } else if !*show_dialog {
+        // × で閉じられた場合。`egui::Window::open` が `show_dialog` を
+        // false にするだけでボタンは押されないため、設定ダイアログの ×
+        // と同じくキャンセル扱いにして入力中の状態を捨てる。
+        // 捨てないと、次に開いたときに前回の取得結果が残ったままになり、
+        // 何も入力せず OK を押しただけでそのキーが確定してしまう
+        capture.reset();
     }
 
     outcome
