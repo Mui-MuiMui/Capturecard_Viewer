@@ -27,7 +27,7 @@ mod video;
 use audio::AudioCapture;
 use overlay::{OverlayContent, TransientOverlay};
 use screenshot::ScreenshotManager;
-use settings::{AppSettings, AutoSavePolicy, ScreenshotEncoding};
+use settings::{AppSettings, AutoSavePolicy, ScreenshotEncoding, MAX_VOLUME, MIN_VOLUME};
 use video::{FrameStats, VideoCapture};
 
 /// デバイスリストのキャッシュを更新する間隔
@@ -53,9 +53,6 @@ const FULLSCREEN_OSD_DURATION: Duration = Duration::from_secs(1);
 /// 音量を変えたときに OSD を出しておく時間。
 /// ホイールを回している間は回すたびに延びるので、これは「手を止めてから」の長さ
 const VOLUME_OSD_DURATION: Duration = Duration::from_millis(1500);
-
-/// 音量の上限。100% が等倍で、それ以上は増幅になる
-const VOLUME_MAX: f32 = 200.0;
 
 /// 音量の基準値。OSD のバーはこの位置に目盛りを引く
 const VOLUME_REFERENCE: f32 = 100.0;
@@ -1029,9 +1026,9 @@ impl CaptureCardViewer {
         }
 
         let volume = if scroll_y > 0.0 {
-            (self.volume + VOLUME_SCROLL_STEP).min(VOLUME_MAX)
+            (self.volume + VOLUME_SCROLL_STEP).min(MAX_VOLUME)
         } else {
-            (self.volume - VOLUME_SCROLL_STEP).max(0.0)
+            (self.volume - VOLUME_SCROLL_STEP).max(MIN_VOLUME)
         };
         self.set_volume_from_ui(volume);
     }
@@ -1112,8 +1109,9 @@ impl CaptureCardViewer {
                     ui.set_max_width(240.0);
 
                     ui.label(format!("音量: {}%", self.volume as i32));
-                    let volume_response =
-                        ui.add(egui::Slider::new(&mut self.volume, 0.0..=VOLUME_MAX).suffix("%"));
+                    let volume_response = ui.add(
+                        egui::Slider::new(&mut self.volume, MIN_VOLUME..=MAX_VOLUME).suffix("%"),
+                    );
 
                     // 音量が変更された場合、設定に反映する（書き出しはデバウンス）。
                     // スライダーが self.volume を書き換えたあとなので、同じ値を
@@ -1287,7 +1285,7 @@ fn format_stats_lines(stats: &FrameStats) -> Vec<String> {
 
 /// 音量 OSD に出す内容を組み立てる。
 ///
-/// バーは 0〜`VOLUME_MAX`% を全体とし、100% の位置に目盛りを引く。
+/// バーは 0〜`MAX_VOLUME`% を全体とし、100% の位置に目盛りを引く。
 /// 上限が 200% なので、数字だけでは「上げすぎているのか」が分かりにくいため。
 ///
 /// 数字は右クリックメニューの「音量: N%」と同じ `as i32` で作る。丸め方を
@@ -1295,8 +1293,8 @@ fn format_stats_lines(stats: &FrameStats) -> Vec<String> {
 fn volume_overlay_content(volume: f32) -> OverlayContent {
     OverlayContent::Bar {
         text: format!("音量: {}%", volume as i32),
-        ratio: volume / VOLUME_MAX,
-        marker_ratio: VOLUME_REFERENCE / VOLUME_MAX,
+        ratio: volume / MAX_VOLUME,
+        marker_ratio: VOLUME_REFERENCE / MAX_VOLUME,
     }
 }
 

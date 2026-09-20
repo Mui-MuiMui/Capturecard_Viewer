@@ -114,6 +114,14 @@ pub enum ScreenshotEncoding {
 pub const MIN_JPEG_QUALITY: u8 = 1;
 pub const MAX_JPEG_QUALITY: u8 = 100;
 
+// 音量の下限と上限。100% が等倍で、そこから先は増幅になる。
+// UI（スライダー・ホイール）と OSD の表示もこの範囲を前提にしている
+pub const MIN_VOLUME: f32 = 0.0;
+pub const MAX_VOLUME: f32 = 200.0;
+
+// 音量の既定値。等倍
+pub const DEFAULT_VOLUME: f32 = 100.0;
+
 // 設定ファイルの format に知らない値が書かれていても、設定全体を失わせない。
 // ここでエラーを返すと TOML のパースがファイル単位で失敗し、保存形式と
 // 無関係な項目まで既定値へ戻ってしまう。
@@ -155,6 +163,36 @@ where
     }
     // clamp 済みなので u8 に収まる
     Ok(clamped as u8)
+}
+
+// 範囲外の音量が書かれていても、そのまま受け取らない。
+// UI からは 0〜200% しか作れないが、設定ファイルは手で書き換えられる。
+// 1000% が書かれていると OSD に「音量: 1000%」と出てしまう
+// （音声側は AudioCapture::set_volume が別途 0〜2.0 に丸めている）。
+//
+// jpeg_quality と違い、範囲外でもパース自体は成功するので設定が失われる
+// わけではない。表示と実際の音量を食い違わせないために丸めている。
+//
+// NaN と無限大は clamp では落ちない（NaN.clamp(..) は NaN を返す）ため、
+// 先に既定値へ倒す。
+fn deserialize_volume<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = f32::deserialize(deserializer)?;
+    if !raw.is_finite() {
+        warn!(
+            "設定の音量 {} は数値として扱えないので {}% として扱う",
+            raw, DEFAULT_VOLUME
+        );
+        return Ok(DEFAULT_VOLUME);
+    }
+
+    let clamped = raw.clamp(MIN_VOLUME, MAX_VOLUME);
+    if clamped != raw {
+        warn!("設定の音量 {} は範囲外なので {} として扱う", raw, clamped);
+    }
+    Ok(clamped)
 }
 
 // 設定ファイルに書かれた文字列から保存形式を決める。
@@ -226,6 +264,7 @@ fn screenshot_folder_from(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiSettings {
+    #[serde(deserialize_with = "deserialize_volume")]
     pub volume: f32,
     pub maintain_aspect_ratio: bool,
     pub last_window_size: Option<(f32, f32)>,
@@ -287,7 +326,7 @@ impl Default for ScreenshotSettings {
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
-            volume: 100.0,
+            volume: DEFAULT_VOLUME,
             maintain_aspect_ratio: true,
             last_window_size: None,
             last_window_pos: None,
@@ -658,6 +697,49 @@ show_stats_overlay = true
         assert!(settings.ui.maintain_aspect_ratio);
         assert!(!settings.ui.always_on_top);
         assert!(settings.ui.enable_drag_move);
+    }
+
+    #[test]
+    fn app_settings_volume_above_maximum_is_clamped() {
+        // 手で書き換えた設定ファイル。UI からは作れない値でも読めてしまうので、
+        // 表示と実際の音量が食い違わないよう上限で止める
+        let settings: AppSettings =
+            toml::from_str("[ui]\nvolume = 1000.0\n").expect("範囲外でも読めなければならない");
+
+        assert_eq!(settings.ui.volume, 200.0);
+    }
+
+    #[test]
+    fn app_settings_volume_below_minimum_is_clamped() {
+        let settings: AppSettings =
+            toml::from_str("[ui]\nvolume = -50.0\n").expect("範囲外でも読めなければならない");
+
+        assert_eq!(settings.ui.volume, 0.0);
+    }
+
+    #[test]
+    fn app_settings_volume_not_a_number_falls_back_to_default() {
+        // TOML は nan / inf をそのまま書ける。clamp では落とせないので
+        // 既定値へ倒していること
+        let settings: AppSettings =
+            toml::from_str("[ui]\nvolume = nan\n").expect("nan でも読めなければならない");
+        assert_eq!(settings.ui.volume, 100.0);
+
+        let settings: AppSettings =
+            toml::from_str("[ui]\nvolume = inf\n").expect("inf でも読めなければならない");
+        assert_eq!(settings.ui.volume, 100.0);
+    }
+
+    #[test]
+    fn app_settings_volume_at_bounds_is_kept() {
+        // 境界。丸めが 1 段ずれて端の値が使えなくなっていないこと
+        let settings: AppSettings =
+            toml::from_str("[ui]\nvolume = 200.0\n").expect("上限が読めなければならない");
+        assert_eq!(settings.ui.volume, 200.0);
+
+        let settings: AppSettings =
+            toml::from_str("[ui]\nvolume = 0.0\n").expect("下限が読めなければならない");
+        assert_eq!(settings.ui.volume, 0.0);
     }
 
     #[test]
