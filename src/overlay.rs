@@ -14,11 +14,25 @@ use std::time::{Duration, Instant};
 /// 左上は統計オーバーレイが使っているため、重ならない場所を選んでいる。
 const BOTTOM_OFFSET: f32 = 48.0;
 
+/// バーの大きさ
+const BAR_WIDTH: f32 = 200.0;
+const BAR_HEIGHT: f32 = 10.0;
+
 /// OSD に出す中身。
 #[derive(Debug, Clone, PartialEq)]
 pub enum OverlayContent {
     /// テキストだけを出す
     Text(String),
+    /// テキストの下に横バーを添える。
+    ///
+    /// `ratio` はバーの塗り具合、`marker_ratio` は目盛りを引く位置で、
+    /// どちらも 0.0〜1.0 で表す。音量のように既定値（100%）が範囲の途中にある
+    /// 値で、「いまどのあたりか」と「基準はどこか」を一目で分かるようにするためにある。
+    Bar {
+        text: String,
+        ratio: f32,
+        marker_ratio: f32,
+    },
 }
 
 /// 一定時間で自動的に消える OSD の状態。
@@ -86,6 +100,14 @@ impl TransientOverlay {
                         OverlayContent::Text(text) => {
                             draw_text(ui, text);
                         }
+                        OverlayContent::Bar {
+                            text,
+                            ratio,
+                            marker_ratio,
+                        } => {
+                            draw_text(ui, text);
+                            draw_bar(ui, *ratio, *marker_ratio);
+                        }
                     });
             });
     }
@@ -98,6 +120,71 @@ fn draw_text(ui: &mut egui::Ui, text: &str) {
             .size(16.0)
             .color(egui::Color32::WHITE),
     );
+}
+
+/// 横バーを描く。基準位置（音量なら 100%）に目盛りを引き、
+/// そこを超えた分は色を変えて「基準より上げている」ことが分かるようにする。
+fn draw_bar(ui: &mut egui::Ui, ratio: f32, marker_ratio: f32) {
+    let ratio = normalized_ratio(ratio);
+    let marker_ratio = normalized_ratio(marker_ratio);
+
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(BAR_WIDTH, BAR_HEIGHT),
+        // 押せるものではないので当たり判定を持たせない
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+
+    // 溝
+    painter.rect_filled(rect, 2.0, egui::Color32::from_white_alpha(40));
+
+    // 基準までの塗り
+    let base_end = ratio.min(marker_ratio);
+    if base_end > 0.0 {
+        painter.rect_filled(
+            sub_rect(rect, 0.0, base_end),
+            2.0,
+            egui::Color32::from_rgb(220, 220, 220),
+        );
+    }
+
+    // 基準を超えた分
+    if ratio > marker_ratio {
+        painter.rect_filled(
+            sub_rect(rect, marker_ratio, ratio),
+            2.0,
+            egui::Color32::from_rgb(240, 160, 60),
+        );
+    }
+
+    // 基準位置の目盛り
+    let marker_x = rect.left() + rect.width() * marker_ratio;
+    painter.line_segment(
+        [
+            egui::pos2(marker_x, rect.top()),
+            egui::pos2(marker_x, rect.bottom()),
+        ],
+        egui::Stroke::new(1.0_f32, egui::Color32::WHITE),
+    );
+}
+
+/// バーの `from`〜`to`（どちらも 0.0〜1.0）に当たる矩形を返す。
+fn sub_rect(rect: egui::Rect, from: f32, to: f32) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(rect.left() + rect.width() * from, rect.top()),
+        egui::pos2(rect.left() + rect.width() * to, rect.bottom()),
+    )
+}
+
+/// バーの割合を 0.0〜1.0 に収める。NaN は 0.0 として扱う。
+///
+/// 割合は呼び出し側の割り算で作るため、上限が 0 の場合に NaN や無限大が
+/// 紛れ込みうる。そのまま描くと矩形の座標が壊れる。
+fn normalized_ratio(ratio: f32) -> f32 {
+    if ratio.is_nan() {
+        return 0.0;
+    }
+    ratio.clamp(0.0, 1.0)
 }
 
 /// 表示を始めた時刻と表示時間から、`now` 時点の残り時間を返す。
@@ -220,5 +307,24 @@ mod tests {
 
         assert!(overlay.remaining_at(start).is_some());
         assert_eq!(overlay.remaining_at(start + Duration::from_secs(1)), None);
+    }
+
+    #[test]
+    fn normalized_ratio_clamps_out_of_range() {
+        assert_eq!(normalized_ratio(-0.5), 0.0);
+        assert_eq!(normalized_ratio(1.5), 1.0);
+        assert_eq!(normalized_ratio(0.25), 0.25);
+    }
+
+    #[test]
+    fn normalized_ratio_nan_returns_zero() {
+        // 上限 0 での割り算などで NaN が来ても矩形を壊さない
+        assert_eq!(normalized_ratio(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn normalized_ratio_infinity_is_clamped() {
+        assert_eq!(normalized_ratio(f32::INFINITY), 1.0);
+        assert_eq!(normalized_ratio(f32::NEG_INFINITY), 0.0);
     }
 }
