@@ -235,6 +235,20 @@ fn elapsed_ms(start: Instant) -> f32 {
     start.elapsed().as_secs_f32() * 1000.0
 }
 
+/// 実際に開いた解像度とフォーマットを 1 行にまとめる。
+///
+/// ログと設定ダイアログの「接続状態」タブで同じ文言を使う。
+/// 片方しか取れていない場合も、取れているほうは出す。取れなかったことと
+/// 「値が無い」ことを画面上で区別できるようにするため。
+fn format_actual_video(resolution: Option<(u32, u32)>, format: Option<&str>) -> String {
+    match (resolution, format) {
+        (Some((width, height)), Some(format)) => format!("{}x{} {}", width, height, format),
+        (Some((width, height)), None) => format!("{}x{} （フォーマット不明）", width, height),
+        (None, Some(format)) => format!("（解像度不明） {}", format),
+        (None, None) => "（取得できない）".to_string(),
+    }
+}
+
 pub struct VideoFrame {
     pub width: usize,
     pub height: usize,
@@ -460,9 +474,39 @@ pub struct VideoLinkState {
     pub since_last_frame: Option<Duration>,
 }
 
+/// 実際に開いた映像ストリームの内容。
+///
+/// 設定ダイアログの「接続状態」タブに出すために持つ。**設定に書かれた値では
+/// なく、デバイスが確定させた値を入れる。** 設定画面では対応していない
+/// 組み合わせも選べるため、要求した値と実際の値は食い違いうる。
+///
+/// `fps` だけは要求した値を持つ。nokhwa のバインディングが
+/// `MF_MT_FRAME_RATE` の分母しか読んでおらず、実際の値を取れないため
+/// （`start_capture` のコメントを参照）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveVideo {
+    /// 実際に開いたデバイス名
+    pub device_name: String,
+    /// 確定した解像度。取得できなければ `None`
+    pub resolution: Option<(u32, u32)>,
+    /// 確定したフレームフォーマット名。取得できなければ `None`
+    pub format: Option<String>,
+    /// 要求したフレームレート
+    pub requested_fps: u32,
+}
+
+impl ActiveVideo {
+    /// 解像度とフォーマットを 1 行で表す。ログに出しているものと同じ文言。
+    pub fn summary(&self) -> String {
+        format_actual_video(self.resolution, self.format.as_deref())
+    }
+}
+
 pub struct VideoCapture {
     camera: Option<CallbackCamera>,
     frames: Arc<Mutex<FrameBuffer>>,
+    /// いま開いているストリームの内容。閉じているときは `None`
+    active: Option<ActiveVideo>,
 }
 
 impl VideoCapture {
@@ -470,6 +514,7 @@ impl VideoCapture {
         Self {
             camera: None,
             frames: Arc::new(Mutex::new(FrameBuffer::new())),
+            active: None,
         }
     }
 
@@ -546,6 +591,10 @@ impl VideoCapture {
             devices.into_iter().next().ok_or("No video devices found")?
         };
 
+        // 実際に要求したフレームレート。接続状態の表示に使う。
+        // 解像度が未指定のときに要求する 60 を初期値にしてある
+        let mut requested_fps = 60;
+
         // Windows Media Foundationでの問題を回避するフォーマット設定
         let requested_format = if let Some((w, h)) = resolution {
             // 設定画面では MJPEG / RGB24 も選べるが、実装が追いついておらず
@@ -573,6 +622,7 @@ impl VideoCapture {
                     requested, fps_value
                 );
             }
+            requested_fps = fps_value;
 
             // フォールバック戦略: 安定したYUYVを使用
             RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
@@ -732,6 +782,10 @@ impl VideoCapture {
         // （nokhwa-bindings-windows 0.4.6 の `format_refreshed`）。
         // 要求した fps は直前の debug! に残してある
         let actual_format = camera.camera_format().ok();
+        let actual_resolution = actual_format
+            .as_ref()
+            .map(|f| (f.resolution().width_x, f.resolution().height_y));
+        let actual_format_name = actual_format.as_ref().map(|f| format!("{:?}", f.format()));
 
         let open_start = Instant::now();
         camera
@@ -742,24 +796,33 @@ impl VideoCapture {
         info!(
             "映像ストリームを開いた（デバイス: {}、実際の設定: {}、Camera::new {:.1}ms、open_stream {:.1}ms）",
             device_info.human_name(),
-            actual_format
-                .map(|f| format!(
-                    "{}x{} {:?}",
-                    f.resolution().width_x,
-                    f.resolution().height_y,
-                    f.format()
-                ))
-                .unwrap_or_else(|| "（取得できない）".to_string()),
+            format_actual_video(actual_resolution, actual_format_name.as_deref()),
             create_ms,
             open_ms
         );
 
         self.camera = Some(camera);
+        // 接続状態の表示用に、実際に開いた内容を控える
+        self.active = Some(ActiveVideo {
+            device_name: device_info.human_name().to_string(),
+            resolution: actual_resolution,
+            format: actual_format_name,
+            requested_fps,
+        });
 
         Ok(())
     }
 
+    /// いま開いているストリームの内容。開いていなければ `None`。
+    ///
+    /// 設定ダイアログを開いている間だけ呼ばれる。小さな構造体の複製だけで、
+    /// フレームバッファのロックも取らない。
+    pub fn active(&self) -> Option<ActiveVideo> {
+        self.active.clone()
+    }
+
     pub fn stop_capture(&mut self) {
+        self.active = None;
         if let Some(mut camera) = self.camera.take() {
             let stop_start = Instant::now();
             match camera.stop_stream() {
@@ -1005,6 +1068,36 @@ mod tests {
         let mut out = Vec::new();
         yuy2_to_rgb_naive(width, height, src, matrix, &mut out);
         out
+    }
+
+    #[test]
+    fn format_actual_video_with_both_values_joins_them() {
+        assert_eq!(
+            format_actual_video(Some((1920, 1080)), Some("YUYV")),
+            "1920x1080 YUYV"
+        );
+    }
+
+    #[test]
+    fn format_actual_video_without_format_keeps_the_resolution() {
+        assert_eq!(
+            format_actual_video(Some((640, 480)), None),
+            "640x480 （フォーマット不明）"
+        );
+    }
+
+    #[test]
+    fn format_actual_video_without_resolution_keeps_the_format() {
+        assert_eq!(
+            format_actual_video(None, Some("MJPEG")),
+            "（解像度不明） MJPEG"
+        );
+    }
+
+    #[test]
+    fn format_actual_video_without_any_value_says_so() {
+        // 取得できないことと「値が無い」ことを画面上で区別する
+        assert_eq!(format_actual_video(None, None), "（取得できない）");
     }
 
     /// 識別しやすいように全画素を marker で埋めたフレームを作る
