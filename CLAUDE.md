@@ -121,9 +121,13 @@ cargo build --release
 
 **デバイス起因の不具合を調べるときは `.claude/skills/device-debug/SKILL.md` の手順に従う。** ログの読み方、正常時の所要時間の目安、症状ごとの確認順をまとめてある。
 
-### catch_unwind は機能しない
+### catch_unwind は使わない
 
-`Cargo.toml` の `[profile.release]` に `panic = "abort"` があるため、`main.rs` 内の `std::panic::catch_unwind` は release ビルドで一切機能しない。
+`Cargo.toml` の `[profile.release]` に `panic = "abort"` があるため、`std::panic::catch_unwind` は release ビルドで一切機能しない。パニックが起きればプロセスごと落ちる。
+
+以前は `update()` の中で `ViewportCommand` の送出と `apply_settings` を `catch_unwind` で囲み、失敗を警告に落としているように見えていた。**実際には守っておらず、読む側に「ここはパニックしても続く」と誤解させるだけなので削除した。** 代わりに、囲んでいた処理がパニックしないことを確認してある（`unwrap` / `expect` / 添字が無く、`Mutex::lock()` の失敗も `if let Ok` で受けている）。
+
+**パニックしうる処理を書かない側で担保すること。** `Option` と `Result` は `unwrap` せずに分岐し、ロックの失敗はログに残して諦める。`catch_unwind` を足しても release では効かない。
 
 ### 設定構造体の `#[serde(default)]` を外さない
 

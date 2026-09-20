@@ -10,7 +10,6 @@ use chrono::Local;
 use eframe::egui;
 use image::GenericImageView;
 use log::{debug, error, info, trace, warn};
-use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -461,15 +460,11 @@ impl eframe::App for CaptureCardViewer {
 
             // ウィンドウレベルは always_on_top を設定から取り込んだあとに適用する。
             // 順序を入れ替えると、既定値の false で 1 度適用されてしまう
-            if let Err(e) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
-                    egui::WindowLevel::AlwaysOnTop
-                } else {
-                    egui::WindowLevel::Normal
-                }));
-            })) {
-                warn!("ウィンドウレベルの設定でパニックが起きた: {:?}", e);
-            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            }));
         }
 
         // 期限が来ているデバイスの接続を 1 回だけ試す。
@@ -484,13 +479,7 @@ impl eframe::App for CaptureCardViewer {
 
         // 定期的に実行時設定が保存設定と一致することを確認（外部変更に対応）
         if self.last_settings_applied.elapsed().as_secs_f32() > 2.0 {
-            if let Err(e) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                self.apply_settings(false);
-            })) {
-                warn!("設定の適用でパニックが起きた: {:?}", e);
-                // タイマーをリセットして連続的なエラー出力を防止
-                self.last_settings_applied = Instant::now();
-            }
+            self.apply_settings(false);
         }
 
         // 音量が変更された場合、オーディオバックエンドに伝播
