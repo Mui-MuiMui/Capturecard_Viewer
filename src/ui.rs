@@ -29,6 +29,25 @@ pub enum SettingsDialogAction {
     /// テスト再生: 効果音を編集中の音量で鳴らすだけ。
     /// 設定は動かさないしダイアログも閉じない
     TestSound,
+    /// 設定を書き出す: **実行中の設定**をファイルへ保存する。
+    /// 編集中のドラフトではないので、ダイアログの中身は動かない
+    ExportSettings,
+    /// 設定を読み込む: ファイルを読んでドラフトへ入れる。
+    /// 反映は「適用」「OK」で行うので、ここでは実行中の設定を触らない
+    ImportSettings,
+    /// 設定を初期化: ドラフトを既定値に戻す。こちらも反映は「適用」「OK」
+    ResetDraft,
+}
+
+/// 「その他」タブに出す 1 行のメッセージ。
+///
+/// 書き出し・読み込み・初期化の結果をその場で伝える。失敗はトーストでも
+/// 出すが、トーストは画面下部に出るためダイアログに隠れることがある。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagementMessage {
+    pub text: String,
+    /// 失敗を伝えるものか。表示色を分ける
+    pub is_error: bool,
 }
 
 /// 設定ダイアログのタブ。
@@ -41,6 +60,8 @@ pub enum SettingsTab {
     #[default]
     Device,
     Screenshot,
+    /// 設定の書き出し・読み込み・初期化
+    Other,
     /// 映像と音声が実際に何へ繋がっているか、直近の失敗は何か
     Status,
 }
@@ -298,6 +319,12 @@ pub struct SettingsDialogState {
     audio_output_capabilities: AudioCapabilityCache,
     // ホットキー入力ダイアログの入力状態
     hotkey_capture: HotkeyCaptureState,
+    // 「その他」タブに出す直近の結果。ドラフトについての説明なので、
+    // ドラフトを作り直すとき・捨てるときに一緒に捨てる
+    management_message: Option<ManagementMessage>,
+    // 「設定を初期化」の確認待ちか。押し間違いで設定が消えないよう、
+    // 1 段目のボタンではこれを立てるだけにして、2 段目で確定させる
+    reset_confirm: bool,
 }
 
 impl SettingsDialogState {
@@ -314,12 +341,37 @@ impl SettingsDialogState {
     pub fn begin_edit(&mut self, current: &AppSettings) {
         self.draft = Some(current.clone());
         self.original = Some(current.clone());
+        self.forget_management_state();
     }
 
     /// 編集を終える。ドラフトは捨てる。
     pub fn end_edit(&mut self) {
         self.draft = None;
         self.original = None;
+        self.forget_management_state();
+    }
+
+    /// 「その他」タブの表示状態を捨てる。
+    ///
+    /// メッセージも確認待ちもドラフトについてのものなので、ドラフトを
+    /// 作り直すとき・捨てるときに残さない。残すと、開き直したダイアログに
+    /// 「読み込みました」が出たままになる。
+    fn forget_management_state(&mut self) {
+        self.management_message = None;
+        self.reset_confirm = false;
+    }
+
+    /// 「その他」タブに出すメッセージを差し替える。
+    pub fn set_management_message(&mut self, text: String, is_error: bool) {
+        self.management_message = Some(ManagementMessage { text, is_error });
+    }
+
+    /// 「その他」タブのメッセージを消す。
+    ///
+    /// 「適用」で反映したあとに呼ぶ。「適用」か「OK」で反映してください、と
+    /// 促す文言が、反映したあとも残ると読み手を迷わせる。
+    pub fn clear_management_message(&mut self) {
+        self.management_message = None;
     }
 
     pub fn draft(&self) -> Option<&AppSettings> {
@@ -407,6 +459,19 @@ impl SettingsDialogState {
             },
             // 効果音を鳴らすだけなので、ドラフトもファイルもダイアログも動かさない
             SettingsDialogAction::TestSound => SettingsDialogTransition {
+                commit_draft: false,
+                save_to_file: false,
+                close: false,
+            },
+            // 書き出し・読み込み・初期化は、呼び出し側が別に処理する。
+            //
+            // **`save_to_file` を立てない。** ここでの保存は
+            // `%AppData%` の設定ファイルへの書き出しを指しており、
+            // ユーザーが選んだ場所への書き出しとは別物。読み込みと初期化も
+            // ドラフトを差し替えるだけで、反映は「適用」「OK」に任せる
+            SettingsDialogAction::ExportSettings
+            | SettingsDialogAction::ImportSettings
+            | SettingsDialogAction::ResetDraft => SettingsDialogTransition {
                 commit_draft: false,
                 save_to_file: false,
                 close: false,
@@ -536,7 +601,10 @@ fn video_mode_rank(
 ///
 /// `video` の `auto_reconnect` だけは例外で、ダイアログに無く右クリックメニューで
 /// 切り替える。丸ごと上書きすると、ダイアログを開いている間の切り替えが
-/// 開いた時点のスナップショットで巻き戻るため、実行中の値を残す。
+/// 開いた時点のスナップショットで巻き戻るため、`ui` の 2 項目と同じ比較を使い、
+/// **ドラフトで実際に変わったときだけ**反映する。通常の編集ではドラフトの値が
+/// 動かないので、これまでどおり実行中の値が残る。動くのは設定の読み込みと
+/// 初期化だけで、そのときはユーザーが選んだ内容を反映する側が正しい。
 ///
 /// `ui` の `muted` もダイアログに無い（右クリックメニュー・ミドルクリック・
 /// ホットキーで切り替える）。ここで触らないので、ダイアログを開いている間の
@@ -547,7 +615,11 @@ fn video_mode_rank(
 pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &AppSettings) {
     let auto_reconnect = target.video.auto_reconnect;
     target.video = draft.video.clone();
-    target.video.auto_reconnect = auto_reconnect;
+    // ドラフトが開いた時点のままなら、ダイアログの外（右クリックメニュー）で
+    // 切り替えた値を残す。変わっているのは読み込みと初期化のときだけ
+    if draft.video.auto_reconnect == original.video.auto_reconnect {
+        target.video.auto_reconnect = auto_reconnect;
+    }
     target.audio = draft.audio.clone();
     target.screenshot = draft.screenshot.clone();
     // ホットキーの割り当てもダイアログの中だけで変わる
@@ -560,6 +632,51 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
     if draft.ui.volume != original.ui.volume {
         target.ui.volume = draft.ui.volume;
     }
+}
+
+/// 読み込んだ設定からドラフトを作る。
+///
+/// `current` は差し替える前のドラフト。`imported` の `ui` セクションは
+/// **ダイアログが編集する 2 項目（`volume` / `maintain_aspect_ratio`）だけ**を
+/// 採り、残りは `current` の値を保つ。
+///
+/// ウィンドウの位置とサイズを持ち込まないのがいちばんの理由。別の画面構成の
+/// PC で書き出したファイルを読むと、画面の外にウィンドウが飛ぶ。
+///
+/// 他の `ui` の項目（`always_on_top` / `enable_drag_move` / `show_stats_overlay` /
+/// `muted`）を持ち込まないのは、**`commit_draft` がそれらを反映しないため。**
+/// 右クリックメニューで切り替えるものなので、ドラフトへ入れても「適用」で
+/// 実行中の値へ戻る。読めたように見えて反映されない項目を作るより、
+/// 最初から触らないほうが分かりやすい。
+///
+/// `video.auto_reconnect` は同じく右クリックメニューで切り替えるが、
+/// `commit_draft` が「ドラフトで変わったときだけ反映する」形になっているので
+/// **読み込んだ値をそのまま採る。** 読み込みも初期化もドラフトの編集なので、
+/// 反映される側が正しい。
+///
+/// **`commit_draft` が反映しない項目を増やすときは、ここでも `current` の値を
+/// 保つこと。逆に反映する項目を増やすときは、ここでも `imported` から採ること。**
+/// 2 つが食い違うと、読み込んだのに反映されない項目が生まれる。
+pub fn draft_from_imported(imported: AppSettings, current: &AppSettings) -> AppSettings {
+    let mut draft = imported;
+    let volume = draft.ui.volume;
+    let maintain_aspect_ratio = draft.ui.maintain_aspect_ratio;
+
+    draft.ui = current.ui.clone();
+    draft.ui.volume = volume;
+    draft.ui.maintain_aspect_ratio = maintain_aspect_ratio;
+    draft
+}
+
+/// 初期化でドラフトを作る。
+///
+/// 既定値を読み込んだのと同じ扱いにしてある。ウィンドウの位置とサイズが
+/// 保たれるのも、`ui` の他の項目が現状のまま残るのも読み込みと同じ。
+///
+/// 初期化でウィンドウが既定の大きさに戻らないのは意図した動作。位置と
+/// サイズは設定ダイアログで触れる項目ではなく、初期化したい対象でもない。
+pub fn draft_from_defaults(current: &AppSettings) -> AppSettings {
+    draft_from_imported(AppSettings::default(), current)
 }
 
 /// 設定ダイアログへ渡すデバイスの一覧。
@@ -603,6 +720,8 @@ pub fn show_settings_dialog(
         audio_input_capabilities,
         audio_output_capabilities,
         hotkey_capture,
+        management_message,
+        reset_confirm,
         ..
     } = dialog;
 
@@ -632,6 +751,7 @@ pub fn show_settings_dialog(
                     SettingsTab::Screenshot,
                     "スクリーンショット設定",
                 );
+                ui.selectable_value(selected_tab, SettingsTab::Other, "その他");
                 ui.selectable_value(selected_tab, SettingsTab::Status, "接続状態");
             });
 
@@ -654,6 +774,12 @@ pub fn show_settings_dialog(
                         hotkey_errors,
                     ) {
                         button = SettingsDialogAction::TestSound;
+                    }
+                }
+                SettingsTab::Other => {
+                    let requested = show_other_tab(ui, management_message.as_ref(), reset_confirm);
+                    if requested != SettingsDialogAction::None {
+                        button = requested;
                     }
                 }
                 SettingsTab::Status => show_status_tab(ui, connection),
@@ -1343,6 +1469,90 @@ fn show_device_settings_tab(
             ui.add(egui::Slider::new(&mut settings.ui.volume, 0.0..=200.0).suffix("%"));
         });
     });
+}
+
+/// 「その他」タブを描画し、押されたボタンを返す。
+///
+/// 設定の書き出し・読み込み・初期化を置いてある。**ここでは何も実行しない。**
+/// ファイルダイアログもファイル I/O も `CaptureCardViewer` が行う
+/// （`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
+///
+/// タブに分けてあるのは、下部の「OK / キャンセル / 適用」の並びへ足すと
+/// 「初期化」が「OK」の隣に来るため。押し間違いで設定が消える並びにしない。
+/// 読み込みと初期化が「適用」を押すまで反映されないことの説明も、
+/// ボタンの真下に書けるほうが伝わる。
+fn show_other_tab(
+    ui: &mut egui::Ui,
+    message: Option<&ManagementMessage>,
+    reset_confirm: &mut bool,
+) -> SettingsDialogAction {
+    ui.heading("その他");
+    ui.add_space(10.0);
+
+    let mut action = SettingsDialogAction::None;
+
+    ui.group(|ui| {
+        ui.strong("設定ファイル");
+        ui.add_space(5.0);
+
+        ui.horizontal(|ui| {
+            if ui.button("設定を書き出す...").clicked() {
+                action = SettingsDialogAction::ExportSettings;
+            }
+            if ui.button("設定を読み込む...").clicked() {
+                action = SettingsDialogAction::ImportSettings;
+            }
+        });
+
+        ui.add_space(5.0);
+        ui.small("書き出すのは実行中の設定です。編集中の内容を含めたい場合は、先に「適用」を押してください。");
+        ui.small("読み込んだ内容は編集中の設定に入ります。「適用」か「OK」を押すまで反映されません。");
+        ui.small("ウィンドウの位置とサイズは読み込みません。別の画面構成で書き出したファイルを読んでも、ウィンドウは動きません。");
+    });
+
+    ui.add_space(15.0);
+
+    ui.group(|ui| {
+        ui.strong("初期化");
+        ui.add_space(5.0);
+
+        if *reset_confirm {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "⚠ 編集中の設定を初期値に戻します。よろしいですか？",
+            );
+            ui.horizontal(|ui| {
+                if ui.button("初期化する").clicked() {
+                    action = SettingsDialogAction::ResetDraft;
+                    *reset_confirm = false;
+                }
+                if ui.button("やめる").clicked() {
+                    *reset_confirm = false;
+                }
+            });
+        } else if ui.button("設定を初期化...").clicked() {
+            *reset_confirm = true;
+        }
+
+        ui.add_space(5.0);
+        ui.small(
+            "初期化も編集中の設定に対して行います。「適用」か「OK」を押すまで反映されません。",
+        );
+        ui.small("戻る範囲は読み込みと同じです。ウィンドウの位置とサイズ、右クリックメニューで切り替える項目は初期化しません。");
+    });
+
+    if let Some(message) = message {
+        ui.add_space(15.0);
+        ui.separator();
+        let color = if message.is_error {
+            egui::Color32::LIGHT_RED
+        } else {
+            egui::Color32::LIGHT_GREEN
+        };
+        ui.colored_label(color, &message.text);
+    }
+
+    action
 }
 
 /// チャンネル数の表示名。
@@ -2275,6 +2485,302 @@ mod tests {
         assert!(!transition.commit_draft);
         assert!(!transition.save_to_file);
         assert!(!transition.close);
+    }
+
+    #[test]
+    fn transition_for_settings_file_actions_change_nothing() {
+        // 書き出し・読み込み・初期化はダイアログの外側が別に処理する。
+        // ここで save_to_file を立てると %AppData% の設定ファイルまで
+        // 書き換わり、読み込んだだけで取り消せなくなる
+        for action in [
+            SettingsDialogAction::ExportSettings,
+            SettingsDialogAction::ImportSettings,
+            SettingsDialogAction::ResetDraft,
+        ] {
+            let transition = SettingsDialogState::transition_for(action);
+            assert!(
+                !transition.commit_draft,
+                "{:?} が反映を要求している",
+                action
+            );
+            assert!(
+                !transition.save_to_file,
+                "{:?} が保存を要求している",
+                action
+            );
+            assert!(!transition.close, "{:?} がクローズを要求している", action);
+        }
+    }
+
+    #[test]
+    fn draft_from_imported_takes_device_and_screenshot_sections() {
+        let imported = sample_settings();
+        let current = AppSettings::default();
+
+        let draft = draft_from_imported(imported.clone(), &current);
+
+        assert_eq!(draft.video.device_name, imported.video.device_name);
+        assert_eq!(draft.video.resolution, imported.video.resolution);
+        assert_eq!(draft.video.auto_reconnect, imported.video.auto_reconnect);
+        assert_eq!(draft.audio.sample_rate, imported.audio.sample_rate);
+        assert_eq!(draft.screenshot.format, imported.screenshot.format);
+        assert_eq!(draft.hotkeys, imported.hotkeys);
+    }
+
+    #[test]
+    fn draft_from_imported_takes_video_adjustments() {
+        // 映像調整は video セクションごと差し替わる。commit_draft も
+        // video を丸ごと入れるので、読み込んだ値がそのまま反映される
+        let imported = sample_settings();
+        let current = AppSettings::default();
+
+        let draft = draft_from_imported(imported.clone(), &current);
+
+        assert_eq!(draft.video.brightness, imported.video.brightness);
+        assert_eq!(draft.video.contrast, imported.video.contrast);
+        assert_eq!(draft.video.saturation, imported.video.saturation);
+    }
+
+    #[test]
+    fn draft_from_defaults_resets_video_adjustments() {
+        // 初期化で 3 つとも無調整へ戻ること
+        let current = sample_settings();
+
+        let draft = draft_from_defaults(&current);
+
+        assert_eq!(draft.video.brightness, 0);
+        assert_eq!(draft.video.contrast, 0);
+        assert_eq!(draft.video.saturation, 0);
+    }
+
+    #[test]
+    fn commit_draft_applies_video_adjustments() {
+        // ダイアログのスライダーで編集した値が共有の設定へ移ること
+        let mut shared = AppSettings::default();
+        let original = AppSettings::default();
+        let draft = sample_settings();
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.video.brightness, 10);
+        assert_eq!(shared.video.contrast, -20);
+        assert_eq!(shared.video.saturation, 30);
+    }
+
+    #[test]
+    fn draft_from_imported_takes_auto_reconnect() {
+        // auto_reconnect は右クリックメニューで切り替えるが、commit_draft が
+        // 「ドラフトで変わったときだけ反映する」形なので読み込める
+        let imported = sample_settings();
+        let current = AppSettings::default();
+        assert_ne!(imported.video.auto_reconnect, current.video.auto_reconnect);
+
+        let draft = draft_from_imported(imported.clone(), &current);
+
+        assert_eq!(draft.video.auto_reconnect, imported.video.auto_reconnect);
+    }
+
+    #[test]
+    fn draft_from_defaults_takes_the_default_auto_reconnect() {
+        // 初期化も同じ。自動再接続を切っている状態から初期化すれば、
+        // 既定値（オン）へ戻る
+        let mut current = sample_settings();
+        current.video.auto_reconnect = false;
+
+        let draft = draft_from_defaults(&current);
+
+        assert!(draft.video.auto_reconnect);
+    }
+
+    #[test]
+    fn commit_draft_applies_auto_reconnect_changed_by_import() {
+        // 読み込みで変わった auto_reconnect は実行中の設定へ届くこと。
+        // commit_draft_keeps_auto_reconnect_changed_outside_dialog と対になる
+        let mut target = AppSettings::default();
+        let original = target.clone();
+        let mut draft = target.clone();
+        draft.video.auto_reconnect = !original.video.auto_reconnect;
+
+        commit_draft(&mut target, &draft, &original);
+
+        assert_eq!(target.video.auto_reconnect, draft.video.auto_reconnect);
+    }
+
+    #[test]
+    fn draft_from_imported_keeps_the_window_geometry() {
+        // 別の画面構成で書き出したファイルを読んでも、ウィンドウが
+        // 画面の外へ飛ばないこと
+        let imported = sample_settings();
+        let mut current = AppSettings::default();
+        current.ui.last_window_size = Some((1280.0, 720.0));
+        current.ui.last_window_pos = Some((100.0, 50.0));
+
+        let draft = draft_from_imported(imported, &current);
+
+        assert_eq!(draft.ui.last_window_size, Some((1280.0, 720.0)));
+        assert_eq!(draft.ui.last_window_pos, Some((100.0, 50.0)));
+    }
+
+    #[test]
+    fn draft_from_imported_takes_the_two_ui_items_the_dialog_edits() {
+        // commit_draft が反映する 2 項目だけは読み込む。
+        // 読み込んでも反映されない項目を作らないため
+        let imported = sample_settings();
+        let current = AppSettings::default();
+        assert_ne!(imported.ui.volume, current.ui.volume);
+        assert_ne!(
+            imported.ui.maintain_aspect_ratio,
+            current.ui.maintain_aspect_ratio
+        );
+
+        let draft = draft_from_imported(imported.clone(), &current);
+
+        assert_eq!(draft.ui.volume, imported.ui.volume);
+        assert_eq!(
+            draft.ui.maintain_aspect_ratio,
+            imported.ui.maintain_aspect_ratio
+        );
+    }
+
+    #[test]
+    fn draft_from_imported_keeps_ui_items_the_dialog_cannot_apply() {
+        // always_on_top などは右クリックメニューで切り替えるもので、
+        // commit_draft が反映しない。読み込んでも「適用」で消えるだけなので、
+        // 最初からドラフトへ入れない
+        let mut imported = sample_settings();
+        imported.ui.borderless = true;
+        let current = AppSettings::default();
+        assert_ne!(imported.ui.always_on_top, current.ui.always_on_top);
+        assert_ne!(imported.ui.borderless, current.ui.borderless);
+
+        let draft = draft_from_imported(imported, &current);
+
+        assert_eq!(draft.ui.always_on_top, current.ui.always_on_top);
+        assert_eq!(draft.ui.enable_drag_move, current.ui.enable_drag_move);
+        assert_eq!(draft.ui.show_stats_overlay, current.ui.show_stats_overlay);
+        assert_eq!(draft.ui.muted, current.ui.muted);
+        assert_eq!(draft.ui.borderless, current.ui.borderless);
+    }
+
+    #[test]
+    fn draft_from_defaults_resets_the_settings_but_not_the_window_geometry() {
+        let mut current = sample_settings();
+        current.ui.last_window_size = Some((640.0, 480.0));
+        current.ui.last_window_pos = Some((5.0, 6.0));
+        let defaults = AppSettings::default();
+
+        let draft = draft_from_defaults(&current);
+
+        assert_eq!(draft.video.resolution, defaults.video.resolution);
+        assert_eq!(draft.audio.sample_rate, defaults.audio.sample_rate);
+        assert_eq!(draft.screenshot.format, defaults.screenshot.format);
+        assert_eq!(draft.hotkeys, defaults.hotkeys);
+        assert_eq!(draft.ui.volume, defaults.ui.volume);
+        assert_eq!(
+            draft.ui.maintain_aspect_ratio,
+            defaults.ui.maintain_aspect_ratio
+        );
+        assert_eq!(draft.ui.last_window_size, Some((640.0, 480.0)));
+        assert_eq!(draft.ui.last_window_pos, Some((5.0, 6.0)));
+    }
+
+    #[test]
+    fn imported_draft_reaches_the_shared_settings_on_commit() {
+        // 読み込み → 「適用」の一連。commit_draft が拾う範囲と
+        // draft_from_imported が読む範囲が噛み合っていることを見る
+        let mut target = AppSettings::default();
+        let original = target.clone();
+        let imported = sample_settings();
+
+        let draft = draft_from_imported(imported.clone(), &original);
+        commit_draft(&mut target, &draft, &original);
+
+        assert_eq!(target.video.device_name, imported.video.device_name);
+        assert_eq!(target.screenshot.format, imported.screenshot.format);
+        assert_eq!(target.hotkeys, imported.hotkeys);
+        assert_eq!(target.ui.volume, imported.ui.volume);
+        assert_eq!(
+            target.ui.maintain_aspect_ratio,
+            imported.ui.maintain_aspect_ratio
+        );
+        // ウィンドウの位置とサイズは動かない
+        assert_eq!(target.ui.last_window_size, original.ui.last_window_size);
+        assert_eq!(target.ui.last_window_pos, original.ui.last_window_pos);
+        // 自動再接続は読み込んだ値が届く
+        assert_eq!(target.video.auto_reconnect, imported.video.auto_reconnect);
+        // commit_draft が反映しない項目は、ドラフトにも実行中の値が入っている。
+        // 「読み込んだのに反映されない」項目が生まれていないこと
+        assert_eq!(target.ui.always_on_top, original.ui.always_on_top);
+        assert_eq!(draft.ui.always_on_top, original.ui.always_on_top);
+    }
+
+    #[test]
+    fn reset_draft_reaches_the_shared_settings_on_commit() {
+        // 初期化 →「適用」の一連。自動再接続を切っている状態から初期化すれば
+        // 既定値（オン）へ戻り、ドラフトと実行中の設定が食い違わないこと
+        let mut target = sample_settings();
+        target.video.auto_reconnect = false;
+        let original = target.clone();
+        let defaults = AppSettings::default();
+
+        let draft = draft_from_defaults(&original);
+        commit_draft(&mut target, &draft, &original);
+
+        assert_eq!(target.video.resolution, defaults.video.resolution);
+        assert_eq!(target.hotkeys, defaults.hotkeys);
+        assert_eq!(target.ui.volume, defaults.ui.volume);
+        assert_eq!(target.video.auto_reconnect, defaults.video.auto_reconnect);
+        assert_eq!(draft.video.auto_reconnect, defaults.video.auto_reconnect);
+        assert_eq!(target.ui.last_window_size, original.ui.last_window_size);
+        assert_eq!(target.ui.last_window_pos, original.ui.last_window_pos);
+    }
+
+    #[test]
+    fn settings_dialog_state_end_edit_drops_the_management_message() {
+        // 開き直したダイアログに「読み込みました」が残らないこと
+        let mut state = SettingsDialogState::default();
+        state.begin_edit(&AppSettings::default());
+        state.set_management_message("読み込みました".to_string(), false);
+
+        state.end_edit();
+
+        assert!(state.management_message.is_none());
+    }
+
+    #[test]
+    fn settings_dialog_state_begin_edit_drops_the_management_message() {
+        let mut state = SettingsDialogState::default();
+        state.set_management_message("失敗しました".to_string(), true);
+
+        state.begin_edit(&AppSettings::default());
+
+        assert!(state.management_message.is_none());
+    }
+
+    #[test]
+    fn settings_dialog_state_management_message_keeps_the_error_flag() {
+        let mut state = SettingsDialogState::default();
+        state.begin_edit(&AppSettings::default());
+
+        state.set_management_message("読み込めません".to_string(), true);
+
+        let message = state
+            .management_message
+            .as_ref()
+            .expect("メッセージがあること");
+        assert_eq!(message.text, "読み込めません");
+        assert!(message.is_error);
+    }
+
+    #[test]
+    fn settings_dialog_state_clear_management_message_removes_it() {
+        let mut state = SettingsDialogState::default();
+        state.begin_edit(&AppSettings::default());
+        state.set_management_message("読み込みました".to_string(), false);
+
+        state.clear_management_message();
+
+        assert!(state.management_message.is_none());
     }
 
     #[test]
