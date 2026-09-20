@@ -305,7 +305,20 @@ toggle_fullscreen = "Ctrl+F11"
 
 - ビデオフォーマットの MJPEG / RGB24（内部で YUYV に強制される）
 
-オーディオのサンプリングレート／チャンネル数は `select_best_config` でストリームに反映されるようになった。ただし**選択肢はデバイスの能力から生成していないため、デバイスが対応していない値を選べてしまう。** その場合は対応する中で最も近い値が使われる。特に WASAPI はミックスフォーマットのチャンネル数しか列挙しないので、モノラルを選んでもステレオで開かれることが多い。
+オーディオのサンプリングレート／チャンネル数は `select_best_config` でストリームに反映され、**選択肢も入出力デバイスの対応設定から生成している**（`audio::selectable_sample_rates` / `selectable_channels`）。デバイスの能力を取得できなかった場合だけ固定の既定一覧へ倒すので、そのときは対応しない値も選べる。
+
+残っているのは**入出力で設定を揃えられない場合の音の崩れ**。`select_aligned_configs` が共通の設定を探し、見つかれば揃えて開く。見つからない場合（入力 48000Hz・出力 44100Hz など）はそれぞれの最寄りで開くため、再生速度とピッチがずれる。リサンプリングとチャンネル変換は未実装で、設定画面とログに警告を出すだけ。
+
+### オーディオデバイスの対応設定は別スレッドで取る
+
+`supported_input_configs()` / `supported_output_configs()` は WASAPI で 13 レート × 5 形式の `IsFormatSupported`（COM 呼び出し 65 回、実測約 300ms）になる。**UI スレッドから呼ばないこと。**
+
+ビデオの `ui::CapabilityCache` を型引数付きに一般化し、オーディオもそこへ乗せてある。入力と出力で別のキャッシュを持つ（同名のデバイスが両方にあっても混ざらないため）。取得は `audio::query_capabilities` を使い捨てのスレッドで呼び、結果は mpsc で UI スレッドへ返して `drain_capability_results` が反映する。
+
+- キャッシュのキーはデバイス名。「デフォルト」（設定上は `None`）は `audio::DEFAULT_DEVICE_KEY` で表す。変換は `audio::cache_key` / `audio::device_name_from_key`
+- **音声を開く `start_passthrough` は、その一覧を `PassthroughRequest` で受け取る。** 渡さないとその場で列挙するので、UI スレッドが止まる
+- 起動直後の接続は対応設定が届くまで見送る（`audio_capabilities_ready`）。届かない環境のために `AUDIO_CAPABILITY_WAIT_LIMIT` で打ち切り、その場合だけ列挙しながら開く
+- 接続に失敗したらキャッシュを `retry` で捨てる。デバイスを挿し直したときに古い一覧で失敗し続けるのを防ぐ
 
 ### アセットは exe に埋め込んである
 
