@@ -5,11 +5,11 @@ use nokhwa::utils::{
 };
 use nokhwa::CallbackCamera;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::repaint::RepaintWaker;
-use crate::settings::{ColorRange, ColorSpace};
+use crate::settings::{ColorRange, ColorSpace, MAX_VIDEO_ADJUSTMENT, MIN_VIDEO_ADJUSTMENT};
 use std::time::{Duration, Instant};
 
 /// デバイスを開ける映像モード 1 件。解像度とフレームレートの組み合わせ。
@@ -87,7 +87,11 @@ pub type DeviceCapabilities = Vec<FormatCapability>;
 ///
 /// `g_u` と `g_v` は減算に使うため、符号を除いた大きさを持つ。
 /// Cb/Cr から引くオフセットはどちらのレンジでも 128 なので、表には持たせていない。
-#[derive(Debug, PartialEq, Eq)]
+///
+/// 明るさ・コントラスト・彩度の調整も、この表へ畳み込んで表現する
+/// （`adjusted_color_matrix`）。変換式そのものは変わらないため、
+/// 調整を入れても 1 画素あたりの演算は増えない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ColorMatrix {
     /// ログに出す名前。どの表で変換したかを後から追えるようにする
     name: &'static str,
@@ -103,6 +107,11 @@ struct ColorMatrix {
     g_v: i32,
     /// B への Cb - 128 の寄与
     b_u: i32,
+    /// R/G/B すべてに加える定数（係数と同じく 1024 倍の固定小数点）。
+    ///
+    /// 明るさとコントラストの調整がここに集約される。無調整では 0 で、
+    /// そのとき変換結果は調整を入れる前と完全に一致する
+    offset: i32,
 }
 
 /// BT.601 リミテッドレンジ（SD 向け。Kr = 0.299、Kb = 0.114）。
@@ -118,6 +127,7 @@ static BT601: ColorMatrix = ColorMatrix {
     g_u: 401,
     g_v: 833,
     b_u: 2066,
+    offset: 0,
 };
 
 /// BT.709 リミテッドレンジ（HD 向け。Kr = 0.2126、Kb = 0.0722）。
@@ -132,6 +142,7 @@ static BT709: ColorMatrix = ColorMatrix {
     g_u: 218,
     g_v: 546,
     b_u: 2163,
+    offset: 0,
 };
 
 /// BT.601 フルレンジ。
@@ -147,6 +158,7 @@ static BT601_FULL: ColorMatrix = ColorMatrix {
     g_u: 352,
     g_v: 731,
     b_u: 1815,
+    offset: 0,
 };
 
 /// BT.709 フルレンジ。
@@ -162,6 +174,7 @@ static BT709_FULL: ColorMatrix = ColorMatrix {
     g_u: 192,
     g_v: 479,
     b_u: 1900,
+    offset: 0,
 };
 
 /// HD とみなす境界。これ以上なら BT.709 を使う。
@@ -200,6 +213,106 @@ fn color_matrix_for(
     }
 }
 
+/// 映像の明るさ・コントラスト・彩度の調整値。
+///
+/// いずれも -100〜100 で 0 が無調整。3 つで範囲を揃えてあるのは、
+/// スライダーの中央が常に無調整になり、「リセット」が 3 つとも 0 を
+/// 書くだけで済むため。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VideoAdjustments {
+    brightness: i32,
+    contrast: i32,
+    saturation: i32,
+}
+
+impl VideoAdjustments {
+    /// 無調整。係数表がそのまま使われる
+    pub const NEUTRAL: Self = Self {
+        brightness: 0,
+        contrast: 0,
+        saturation: 0,
+    };
+
+    /// 設定の値から作る。範囲外の値は丸める。
+    ///
+    /// 設定の読み込み側でも丸めているが、ここでも丸めておく。係数が
+    /// 際限なく大きくなると `i32` の乗算が溢れうるため、変換に使う値は
+    /// 入口を問わず範囲内であることをここで保証する
+    pub fn new(brightness: i32, contrast: i32, saturation: i32) -> Self {
+        Self {
+            brightness: brightness.clamp(MIN_VIDEO_ADJUSTMENT, MAX_VIDEO_ADJUSTMENT),
+            contrast: contrast.clamp(MIN_VIDEO_ADJUSTMENT, MAX_VIDEO_ADJUSTMENT),
+            saturation: saturation.clamp(MIN_VIDEO_ADJUSTMENT, MAX_VIDEO_ADJUSTMENT),
+        }
+    }
+
+    /// 3 つとも 0 か。ログに「調整あり」と出すかの判定に使う
+    fn is_neutral(self) -> bool {
+        self == Self::NEUTRAL
+    }
+}
+
+/// RGB でのコントラストと彩度の中心。
+///
+/// コントラストは「中間グレーを動かさずに振幅を伸び縮みさせる」操作なので、
+/// 0〜255 の中央である 128 を基準にする。
+const ADJUSTMENT_PIVOT: f32 = 128.0;
+
+/// 係数を 1024 倍で持つときの倍率。`>> 10` で戻すのと対になる
+const FIXED_POINT_SCALE: f32 = 1024.0;
+
+/// 係数表へ明るさ・コントラスト・彩度を畳み込む。
+///
+/// Y'CbCr → RGB はアフィン変換なので、出力側での
+///
+/// ```text
+/// out = contrast * (in - 128) + 128 + brightness
+/// ```
+///
+/// という調整は、係数と定数項の付け替えだけで表現できる。`in` は
+/// 輝度の項（`y * (Y - y_offset)`）と色差の項の和なので、
+///
+/// - コントラスト … 輝度と色差の両方の係数に掛かる
+/// - 彩度 … 色差の係数にだけ掛かる
+/// - 明るさとコントラストの分の定数 … `offset` に集約される
+///
+/// となる。**変換関数の形は変わらないので、調整の有無で 1 画素あたりの
+/// 演算数は変わらない。** この関数自体はフレームごとに呼ばれるが、係数の
+/// 掛け直しは 6 回で、画素数（1080p なら 200 万）に比べれば無視できる。
+/// 前回の結果を覚えて使い回す形にしていないのは、覚える対象が解像度・
+/// 色空間・レンジ・調整値の 4 つになり、毎フレームの比較のほうが
+/// 掛け算より安いとは言えないため。
+///
+/// 倍率は -100 で 0 倍、0 で 1 倍、100 で 2 倍。彩度 -100 は色差を
+/// 完全に落として白黒に、コントラスト -100 は中間グレー一色になる。
+/// 明るさは RGB へ直に足す値で、-100〜100 をそのまま使う。
+fn adjusted_color_matrix(base: &ColorMatrix, adjustments: VideoAdjustments) -> ColorMatrix {
+    if adjustments.is_neutral() {
+        // 無調整なら丸め誤差の入る余地も残さず、表をそのまま返す
+        return *base;
+    }
+
+    let contrast = 1.0 + adjustments.contrast as f32 / 100.0;
+    let saturation = 1.0 + adjustments.saturation as f32 / 100.0;
+    // 色差にはコントラストと彩度の両方が掛かる
+    let chroma = contrast * saturation;
+    let brightness = adjustments.brightness as f32;
+
+    let scale = |coefficient: i32, gain: f32| (coefficient as f32 * gain).round() as i32;
+
+    ColorMatrix {
+        name: base.name,
+        y_offset: base.y_offset,
+        y: scale(base.y, contrast),
+        r_v: scale(base.r_v, chroma),
+        g_u: scale(base.g_u, chroma),
+        g_v: scale(base.g_v, chroma),
+        b_u: scale(base.b_u, chroma),
+        offset: (FIXED_POINT_SCALE * (ADJUSTMENT_PIVOT * (1.0 - contrast) + brightness)).round()
+            as i32,
+    }
+}
+
 /// YUY2 -> RGB24 の高速変換 (最適化版)。
 ///
 /// 変換に使う係数は `matrix` で受け取る。解像度から選ぶ場合は
@@ -232,8 +345,14 @@ fn yuy2_to_rgb_naive(
             g_u,
             g_v,
             b_u,
+            offset,
             ..
         } = *matrix;
+
+        // Y に掛ける前の減算（Y - y_offset）と、明るさ・コントラストの定数項を
+        // 1 つにまとめる。cy * (Y - y_offset) + offset は cy * Y - bias に等しい。
+        // ループの外で畳んでおけば、調整の有無で 1 画素あたりの演算が増えない
+        let bias = cy * y_offset - offset;
 
         let (src_chunks, _) = src.as_chunks::<4>();
         let (out_chunks, _) = out.as_chunks_mut::<6>();
@@ -245,20 +364,20 @@ fn yuy2_to_rgb_naive(
             let y1 = src_chunk[2] as i32;
             let v = src_chunk[3] as i32;
 
-            // 入力レンジの原点へ寄せる (整数演算で高速化)
-            // リミテッドなら 16、フルなら 0 を引く
-            let c0 = y0 - y_offset;
-            let c1 = y1 - y_offset;
+            // 輝度の項。bias に「入力レンジの原点へ寄せる分」と
+            // 「明るさ・コントラストの定数項」が畳み込まれている
+            let l0 = cy * y0 - bias;
+            let l1 = cy * y1 - bias;
             let d = u - 128;
             let e = v - 128;
 
             // 係数は 1024 倍の固定小数点なので >> 10 で戻す
-            let r0 = (cy * c0 + r_v * e) >> 10;
-            let g0 = (cy * c0 - g_u * d - g_v * e) >> 10;
-            let b0 = (cy * c0 + b_u * d) >> 10;
-            let r1 = (cy * c1 + r_v * e) >> 10;
-            let g1 = (cy * c1 - g_u * d - g_v * e) >> 10;
-            let b1 = (cy * c1 + b_u * d) >> 10;
+            let r0 = (l0 + r_v * e) >> 10;
+            let g0 = (l0 - g_u * d - g_v * e) >> 10;
+            let b0 = (l0 + b_u * d) >> 10;
+            let r1 = (l1 + r_v * e) >> 10;
+            let g1 = (l1 - g_u * d - g_v * e) >> 10;
+            let b1 = (l1 + b_u * d) >> 10;
 
             out_chunk[0] = r0.clamp(0, 255) as u8;
             out_chunk[1] = g0.clamp(0, 255) as u8;
@@ -576,10 +695,16 @@ impl ActiveVideo {
 /// 色空間とレンジを別々の Atomic にしてあるため、片方だけ書き換えた瞬間に
 /// コールバックが読むと新旧が混ざりうる。混ざっても有効な組み合わせに
 /// しかならず、次のフレームで揃うので、まとめて更新する仕組みは持たせていない。
+/// 明るさ・コントラスト・彩度も同じ扱いで、1 フレームだけ途中の値が
+/// 見えることがあるが、範囲内の値であることに変わりはない。
 #[derive(Debug)]
 struct SharedColorConversion {
     space: AtomicU8,
     range: AtomicU8,
+    /// 映像調整。いずれも -100〜100 で、値の意味は `VideoAdjustments` と同じ
+    brightness: AtomicI32,
+    contrast: AtomicI32,
+    saturation: AtomicI32,
 }
 
 /// `ColorSpace` を `AtomicU8` へ詰めるときの値。
@@ -597,6 +722,9 @@ impl SharedColorConversion {
         Self {
             space: AtomicU8::new(SPACE_AUTO),
             range: AtomicU8::new(RANGE_LIMITED),
+            brightness: AtomicI32::new(0),
+            contrast: AtomicI32::new(0),
+            saturation: AtomicI32::new(0),
         }
     }
 
@@ -626,6 +754,23 @@ impl SharedColorConversion {
             _ => ColorRange::Limited,
         };
         (space, range)
+    }
+
+    fn store_adjustments(&self, adjustments: VideoAdjustments) {
+        self.brightness
+            .store(adjustments.brightness, Ordering::Relaxed);
+        self.contrast.store(adjustments.contrast, Ordering::Relaxed);
+        self.saturation
+            .store(adjustments.saturation, Ordering::Relaxed);
+    }
+
+    fn load_adjustments(&self) -> VideoAdjustments {
+        // store 側が範囲内の値しか入れないので、new の丸めは保険
+        VideoAdjustments::new(
+            self.brightness.load(Ordering::Relaxed),
+            self.contrast.load(Ordering::Relaxed),
+            self.saturation.load(Ordering::Relaxed),
+        )
     }
 }
 
@@ -674,6 +819,18 @@ impl VideoCapture {
         info!(
             "色変換の設定を反映した（色空間: {:?}、レンジ: {:?}）",
             space, range
+        );
+    }
+
+    /// 明るさ・コントラスト・彩度を差し替える。
+    ///
+    /// 色空間やレンジと同じく、キャプチャ中でも次のフレームから効く。
+    /// 調整は係数表へ畳み込まれるので、変換そのものは重くならない。
+    pub fn set_video_adjustments(&self, adjustments: VideoAdjustments) {
+        self.color_conversion.store_adjustments(adjustments);
+        info!(
+            "映像調整を反映した（明るさ: {}、コントラスト: {}、彩度: {}）",
+            adjustments.brightness, adjustments.contrast, adjustments.saturation
         );
     }
 
@@ -859,19 +1016,28 @@ impl VideoCapture {
                             // 入力信号の色空間は通知されないため、設定が「自動」なら
                             // 解像度から推定する。レンジは常に設定の値を使う
                             let (space, range) = color_conversion.load();
-                            let matrix = color_matrix_for(width, height, space, range);
+                            let matrix = adjusted_color_matrix(
+                                color_matrix_for(width, height, space, range),
+                                color_conversion.load_adjustments(),
+                            );
                             matrix_name = matrix.name;
-                            yuy2_to_rgb_naive(width, height, &raw_data, matrix, &mut rgb);
+                            yuy2_to_rgb_naive(width, height, &raw_data, &matrix, &mut rgb);
                             rgb_vec = Some(rgb);
                             used_fast = true;
                         }
                     }
 
                     _ => {
-                        // その他のフォーマットも標準デコード
+                        // その他のフォーマットも標準デコード。
+                        //
+                        // **この経路では色空間・色レンジ・映像調整が効かない。**
+                        // 係数表はデコーダの内部にあり、外から差し替えられないため。
+                        // 変換後の RGB へフィルタを掛ければ反映はできるが、
+                        // もともと重い経路に 1 画素あたりの処理を足すことになるので
+                        // 採っていない。設定が効かないことをログに残す
                         if fallback_notice.take() {
                             warn!(
-                                "YUY2 の高速パスを使えないのでデコーダへフォールバックする（フォーマット: {:?}、{}x{}）。以降は記録しない",
+                                "YUY2 の高速パスを使えないのでデコーダへフォールバックする（フォーマット: {:?}、{}x{}）。この経路では色空間・色レンジ・映像調整が反映されない。以降は記録しない",
                                 source_format, width, height
                             );
                         }
@@ -1896,6 +2062,173 @@ mod tests {
         }
     }
 
+    // ---- 映像調整（明るさ / コントラスト / 彩度）----
+    //
+    // 調整値から係数表への変換と、その表を通した変換結果を分けて確かめる。
+    // 期待する係数は手計算した値をベタ書きする
+
+    #[test]
+    fn adjusted_color_matrix_neutral_returns_the_base_table() {
+        // 3 つとも 0 なら、どの表も 1 ビットも変わらないこと。
+        // 既存ユーザーの見え方を変えないための前提
+        for base in [&BT601, &BT709, &BT601_FULL, &BT709_FULL] {
+            assert_eq!(
+                adjusted_color_matrix(base, VideoAdjustments::NEUTRAL),
+                *base
+            );
+        }
+    }
+
+    #[test]
+    fn adjusted_color_matrix_brightness_only_moves_the_offset() {
+        // 明るさは RGB へ直に足す値なので、係数は動かず offset だけが変わる。
+        // offset は 1024 倍の固定小数点なので 50 * 1024 = 51200
+        let adjusted = adjusted_color_matrix(&BT601, VideoAdjustments::new(50, 0, 0));
+        assert_eq!(adjusted.y, BT601.y);
+        assert_eq!(adjusted.r_v, BT601.r_v);
+        assert_eq!(adjusted.g_u, BT601.g_u);
+        assert_eq!(adjusted.g_v, BT601.g_v);
+        assert_eq!(adjusted.b_u, BT601.b_u);
+        assert_eq!(adjusted.y_offset, BT601.y_offset);
+        assert_eq!(adjusted.offset, 51200);
+    }
+
+    #[test]
+    fn adjusted_color_matrix_contrast_scales_every_coefficient() {
+        // コントラスト +100 は 2 倍。輝度も色差も 2 倍になり、
+        // 中間グレー（128）を動かさないための定数 128 * (1 - 2) * 1024 が入る
+        let adjusted = adjusted_color_matrix(&BT601, VideoAdjustments::new(0, 100, 0));
+        assert_eq!(adjusted.y, 2384);
+        assert_eq!(adjusted.r_v, 3268);
+        assert_eq!(adjusted.g_u, 802);
+        assert_eq!(adjusted.g_v, 1666);
+        assert_eq!(adjusted.b_u, 4132);
+        assert_eq!(adjusted.offset, -131072);
+    }
+
+    #[test]
+    fn adjusted_color_matrix_saturation_scales_only_chroma() {
+        // 彩度 +100 は色差だけを 2 倍にする。輝度の係数と offset は動かない
+        let adjusted = adjusted_color_matrix(&BT601, VideoAdjustments::new(0, 0, 100));
+        assert_eq!(adjusted.y, BT601.y);
+        assert_eq!(adjusted.r_v, 3268);
+        assert_eq!(adjusted.g_u, 802);
+        assert_eq!(adjusted.g_v, 1666);
+        assert_eq!(adjusted.b_u, 4132);
+        assert_eq!(adjusted.offset, 0);
+    }
+
+    #[test]
+    fn adjusted_color_matrix_minimum_saturation_zeroes_chroma() {
+        // 彩度 -100 は色差を完全に落とす。白黒になる
+        let adjusted = adjusted_color_matrix(&BT709, VideoAdjustments::new(0, 0, -100));
+        assert_eq!(adjusted.y, BT709.y);
+        assert_eq!(adjusted.r_v, 0);
+        assert_eq!(adjusted.g_u, 0);
+        assert_eq!(adjusted.g_v, 0);
+        assert_eq!(adjusted.b_u, 0);
+        assert_eq!(adjusted.offset, 0);
+    }
+
+    #[test]
+    fn adjusted_color_matrix_minimum_contrast_zeroes_luma_and_chroma() {
+        // コントラスト -100 は振幅を 0 にする。offset だけが残り、
+        // 中間グレー（128 * 1024 = 131072）一色になる
+        let adjusted = adjusted_color_matrix(&BT601, VideoAdjustments::new(0, -100, 0));
+        assert_eq!(adjusted.y, 0);
+        assert_eq!(adjusted.r_v, 0);
+        assert_eq!(adjusted.b_u, 0);
+        assert_eq!(adjusted.offset, 131072);
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_brightness_shifts_every_channel() {
+        // フルレンジで Y=100（Cb = Cr = 128）。明るさ +25 で 125 になる
+        let src = [100u8, 128, 100, 128];
+        let matrix = adjusted_color_matrix(&BT601_FULL, VideoAdjustments::new(25, 0, 0));
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &matrix),
+            vec![125, 125, 125, 125, 125, 125]
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_contrast_keeps_mid_gray_and_stretches_the_rest() {
+        // フルレンジで Y=128 と Y=192。コントラスト +100（2 倍）では
+        // 中間グレーの 128 は動かず、192 は (192-128)*2+128 = 256 で飽和する
+        let src = [128u8, 128, 192, 128];
+        let matrix = adjusted_color_matrix(&BT601_FULL, VideoAdjustments::new(0, 100, 0));
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &matrix),
+            vec![128, 128, 128, 255, 255, 255]
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_minimum_saturation_produces_gray_pixels() {
+        // 色の付いた入力でも、彩度 -100 なら R = G = B になる。
+        // 値は輝度の項だけ: (1192 * (81 - 16)) >> 10 = 75、
+        //                   (1192 * (145 - 16)) >> 10 = 150
+        let src = [81u8, 90, 145, 240];
+        let matrix = adjusted_color_matrix(&BT601, VideoAdjustments::new(0, 0, -100));
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &matrix),
+            vec![75, 75, 75, 150, 150, 150]
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_minimum_contrast_produces_flat_mid_gray() {
+        // コントラスト -100 では入力によらず一様な中間グレーになる
+        let src = [81u8, 90, 145, 240];
+        let matrix = adjusted_color_matrix(&BT601, VideoAdjustments::new(0, -100, 0));
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &matrix),
+            vec![128, 128, 128, 128, 128, 128]
+        );
+    }
+
+    #[test]
+    fn yuy2_to_rgb_naive_neutral_adjustments_match_the_base_table() {
+        // 無調整では調整を入れる前と同じ結果になること。
+        // BT.601 の既知パターンのテストと同じ期待値
+        let src = [81u8, 90, 145, 240];
+        let matrix = adjusted_color_matrix(&BT601, VideoAdjustments::NEUTRAL);
+        assert_eq!(
+            convert_yuy2(2, 1, &src, &matrix),
+            vec![254, 0, 0, 255, 73, 73]
+        );
+    }
+
+    #[test]
+    fn video_adjustments_new_clamps_out_of_range_values() {
+        // 設定ファイル側でも丸めているが、変換へ渡る値はここでも保証する
+        let adjustments = VideoAdjustments::new(1000, -1000, i32::MAX);
+        assert_eq!(adjustments.brightness, MAX_VIDEO_ADJUSTMENT);
+        assert_eq!(adjustments.contrast, MIN_VIDEO_ADJUSTMENT);
+        assert_eq!(adjustments.saturation, MAX_VIDEO_ADJUSTMENT);
+    }
+
+    #[test]
+    fn video_adjustments_default_is_neutral() {
+        assert_eq!(VideoAdjustments::default(), VideoAdjustments::NEUTRAL);
+        assert!(VideoAdjustments::NEUTRAL.is_neutral());
+        assert!(!VideoAdjustments::new(1, 0, 0).is_neutral());
+    }
+
+    #[test]
+    fn shared_color_conversion_round_trips_adjustments() {
+        // フレームコールバックが読む側。3 つの値が入れ替わらないこと
+        let shared = SharedColorConversion::new();
+        assert_eq!(shared.load_adjustments(), VideoAdjustments::NEUTRAL);
+
+        let adjustments = VideoAdjustments::new(10, -20, 30);
+        shared.store_adjustments(adjustments);
+        assert_eq!(shared.load_adjustments(), adjustments);
+        // 色空間とレンジは巻き添えにならない
+        assert_eq!(shared.load(), (ColorSpace::Auto, ColorRange::Limited));
+    }
+
     #[test]
     #[ignore = "計測用"]
     fn yuy2_to_rgb_naive_1080p_conversion_time() {
@@ -1930,9 +2263,20 @@ mod tests {
         }
         let reusing_ms = reusing_start.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
 
+        // 映像調整を入れた表でも同じ時間で変換できることを確かめる。
+        // 調整は係数と定数項へ畳み込まれ、変換式の形は変わらないため
+        let adjusted = adjusted_color_matrix(&BT709, VideoAdjustments::new(20, -30, 40));
+        yuy2_to_rgb_naive(WIDTH, HEIGHT, &src, &adjusted, &mut out);
+        let adjusted_start = Instant::now();
+        for _ in 0..FRAMES {
+            yuy2_to_rgb_naive(WIDTH, HEIGHT, &src, &adjusted, &mut out);
+            std::hint::black_box(&out);
+        }
+        let adjusted_ms = adjusted_start.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
+
         println!(
-            "1080p YUY2->RGB {} frames: allocate={:.3} ms/frame, reuse={:.3} ms/frame",
-            FRAMES, allocating_ms, reusing_ms
+            "1080p YUY2->RGB {} frames: allocate={:.3} ms/frame, reuse={:.3} ms/frame, adjusted={:.3} ms/frame",
+            FRAMES, allocating_ms, reusing_ms, adjusted_ms
         );
     }
 }

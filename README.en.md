@@ -177,6 +177,21 @@ Both settings describe **what the incoming signal is**. When they disagree with 
 - **Color space** — leave it on auto unless colors look off. Auto uses BT.709 when `width >= 1280 or height >= 720`, and BT.601 when both are below that. If **skin tones or reds look shifted**, the guess is probably wrong for your device, so pick BT.601 or BT.709 by hand.
 - **Color range** — pick "リミテッド" (limited, 16-235) when **blacks look washed out grey and whites look dull**, and "フル" (full, 0-255) when **shadows are crushed and highlights are blown out**. This mirrors the RGB range setting on your capture card or source device.
 
+**Picture adjustments (映像調整): brightness / contrast / saturation**
+
+The same video section has three sliders, each from -100 to 100 with **0 meaning no adjustment**. The "リセット" (reset) button puts all three back to 0.
+
+They are meant for per-device quirks that remain after the color space and range are correct — a picture that is simply too dark or too washed out. **Get the color space and range right first**; covering up a wrong signal interpretation with these sliders only shifts other colors.
+
+- **明るさ (brightness)** — raises (+) or lowers (-) the whole picture
+- **コントラスト (contrast)** — widens (+) or narrows (-) the gap between dark and bright. -100 gives a flat mid grey
+- **彩度 (saturation)** — strengthens (+) or weakens (-) the colors. -100 gives black and white
+
+The adjustments are folded into the YUY2 -> RGB coefficients, so **the CPU cost barely changes**. The per-pixel work is exactly the same as with no adjustment; what is added is a handful of coefficient multiplications once per frame (no measurable difference at 1080p). Like the color space and range, they take effect on the next frame and the device is not reopened.
+
+> **The color space, color range and picture adjustments can all be inactive.**
+> They work by swapping the coefficients used when this app converts YUY2 frames itself. If the device delivers something other than YUY2 (MJPEG, for example), the conversion is left to the decoder and none of these settings apply. When that happens the log contains a line about falling back to the decoder.
+
 **Audio**
 
 - Sample rate: 48000 Hz (chosen from the values the devices support)

@@ -2,7 +2,8 @@ use crate::audio::{self, AudioCapabilities, ChoiceSource};
 use crate::hotkey::{HotkeyAction, HotkeyError};
 use crate::settings::{
     AppSettings, ColorRange, ColorSpace, ScreenshotDestination, ScreenshotFormat, DEFAULT_CHANNELS,
-    DEFAULT_SAMPLE_RATE, MAX_JPEG_QUALITY, MIN_JPEG_QUALITY,
+    DEFAULT_SAMPLE_RATE, MAX_JPEG_QUALITY, MAX_VIDEO_ADJUSTMENT, MIN_JPEG_QUALITY,
+    MIN_VIDEO_ADJUSTMENT,
 };
 use crate::status::{ConnectionStatus, ErrorSource, LinkStatus};
 use crate::video::{DeviceCapabilities, VideoMode};
@@ -814,6 +815,19 @@ pub struct AudioCapabilityCaches<'a> {
     pub output: &'a mut AudioCapabilityCache,
 }
 
+/// 映像調整のスライダー 1 本。明るさ・コントラスト・彩度で見た目を揃える。
+///
+/// 3 本とも範囲と既定値が同じなので、目盛りの刻みや中央の位置が
+/// 揃っていないと「0 が無調整」であることが読み取りにくくなる。
+fn video_adjustment_slider(ui: &mut egui::Ui, value: &mut i32, label: &str, hint: &str) {
+    ui.add(
+        egui::Slider::new(value, MIN_VIDEO_ADJUSTMENT..=MAX_VIDEO_ADJUSTMENT)
+            .text(label)
+            .clamp_to_range(true),
+    )
+    .on_hover_text(hint);
+}
+
 fn show_device_settings_tab(
     ui: &mut egui::Ui,
     settings: &mut AppSettings,
@@ -1155,6 +1169,42 @@ fn show_device_settings_tab(
                 .response
                 .on_hover_text("黒が灰色に浮く、または黒潰れ・白飛びする場合に切り替えます");
         });
+
+        ui.add_space(5.0);
+
+        // 映像調整。色空間・レンジを合わせても残る機種ごとのクセを手で埋める。
+        // 3 つとも YUY2 → RGB の係数表へ畳み込まれるので、変換は重くならない
+        ui.horizontal(|ui| {
+            ui.strong("映像調整");
+            if ui
+                .button("リセット")
+                .on_hover_text("明るさ・コントラスト・彩度を無調整（0）へ戻します")
+                .clicked()
+            {
+                settings.video.brightness = 0;
+                settings.video.contrast = 0;
+                settings.video.saturation = 0;
+            }
+        });
+
+        video_adjustment_slider(
+            ui,
+            &mut settings.video.brightness,
+            "明るさ",
+            "映像全体を明るく（＋）または暗く（－）します",
+        );
+        video_adjustment_slider(
+            ui,
+            &mut settings.video.contrast,
+            "コントラスト",
+            "明暗の差を強く（＋）または弱く（－）します。-100 で中間グレー一色になります",
+        );
+        video_adjustment_slider(
+            ui,
+            &mut settings.video.saturation,
+            "彩度",
+            "色の濃さを強く（＋）または弱く（－）します。-100 で白黒になります",
+        );
     });
 
     ui.add_space(15.0);
@@ -2228,6 +2278,10 @@ mod tests {
                 // 色空間とレンジも既定値と異なる値にしておく
                 color_space: ColorSpace::Bt709,
                 color_range: ColorRange::Full,
+                // 映像調整も既定値（0）と異なる値にしておく
+                brightness: 10,
+                contrast: -20,
+                saturation: 30,
             },
             audio: AudioSettings {
                 input_device_name: Some("Line In".to_string()),
@@ -2471,6 +2525,46 @@ mod tests {
         assert_eq!(draft.audio.sample_rate, imported.audio.sample_rate);
         assert_eq!(draft.screenshot.format, imported.screenshot.format);
         assert_eq!(draft.hotkeys, imported.hotkeys);
+    }
+
+    #[test]
+    fn draft_from_imported_takes_video_adjustments() {
+        // 映像調整は video セクションごと差し替わる。commit_draft も
+        // video を丸ごと入れるので、読み込んだ値がそのまま反映される
+        let imported = sample_settings();
+        let current = AppSettings::default();
+
+        let draft = draft_from_imported(imported.clone(), &current);
+
+        assert_eq!(draft.video.brightness, imported.video.brightness);
+        assert_eq!(draft.video.contrast, imported.video.contrast);
+        assert_eq!(draft.video.saturation, imported.video.saturation);
+    }
+
+    #[test]
+    fn draft_from_defaults_resets_video_adjustments() {
+        // 初期化で 3 つとも無調整へ戻ること
+        let current = sample_settings();
+
+        let draft = draft_from_defaults(&current);
+
+        assert_eq!(draft.video.brightness, 0);
+        assert_eq!(draft.video.contrast, 0);
+        assert_eq!(draft.video.saturation, 0);
+    }
+
+    #[test]
+    fn commit_draft_applies_video_adjustments() {
+        // ダイアログのスライダーで編集した値が共有の設定へ移ること
+        let mut shared = AppSettings::default();
+        let original = AppSettings::default();
+        let draft = sample_settings();
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.video.brightness, 10);
+        assert_eq!(shared.video.contrast, -20);
+        assert_eq!(shared.video.saturation, 30);
     }
 
     #[test]
