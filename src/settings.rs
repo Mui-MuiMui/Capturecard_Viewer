@@ -1,5 +1,7 @@
-use log::{error, warn};
+use crate::hotkey::HotkeyAction;
+use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 // confy が設定ファイルの置き場所を決めるのに使う名前。
@@ -13,13 +15,133 @@ pub(crate) const APP_NAME: &str = "capturecard_viewer";
 //   - Option の項目が欠けた場合は None になり、Default の値が使われない
 // という形で既存ユーザーの設定が失われる。新しい項目を足すときも外さないこと。
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
+// 読み込みは RawAppSettings を経由する。旧版の screenshot.hotkey を
+// hotkeys へ移す処理（migrate_hotkeys）を、どの経路で読んでも必ず通すため。
+// #[serde(from)] を外すと、テストの toml::from_str だけ移行を通らない、
+// といった食い違いが生まれる。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "RawAppSettings")]
 pub struct AppSettings {
     pub video: VideoSettings,
     pub audio: AudioSettings,
     pub screenshot: ScreenshotSettings,
     pub ui: UiSettings,
+    // アクション → ホットキー文字列。割り当てが無いアクションは入っていない。
+    //
+    // 設定ファイルでは独立した [hotkeys] セクションになる。**セクションごと
+    // 存在しない場合と、空のセクションがある場合は意味が違う。** 前者は
+    // 旧版が書いた設定ファイル（既定の F5 を入れる）、後者はすべての
+    // 割り当てを外した状態（何も入れない）。
+    pub hotkeys: BTreeMap<HotkeyAction, String>,
+}
+
+// 設定ファイルから読んだままの形。
+//
+// AppSettings との違いは hotkeys が Option であることだけ。`None` は
+// 「[hotkeys] セクションが無い」を表し、空のマップ（セクションはあるが
+// 中身が空）と区別する。この区別が無いと、旧版の設定ファイルを読んだときに
+// 既定値の F5 とユーザーが外した状態を見分けられない。
+//
+// キーを String で受けるのは、知らないアクション名が書かれていても
+// ファイル全体のパースを失敗させないため。読めない名前は捨ててログに残す。
+//
+// **AppSettings に項目を足すときは、ここと From の実装にも足すこと。**
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct RawAppSettings {
+    video: VideoSettings,
+    audio: AudioSettings,
+    screenshot: ScreenshotSettings,
+    ui: UiSettings,
+    hotkeys: Option<BTreeMap<String, String>>,
+}
+
+impl From<RawAppSettings> for AppSettings {
+    fn from(raw: RawAppSettings) -> Self {
+        let RawAppSettings {
+            video,
+            audio,
+            mut screenshot,
+            ui,
+            hotkeys,
+        } = raw;
+
+        // 旧版の項目はここで読み切って捨てる。保存では書き出さない
+        let legacy_hotkey = screenshot.legacy_hotkey.take();
+        let hotkeys = migrate_hotkeys(hotkeys, legacy_hotkey);
+
+        Self {
+            video,
+            audio,
+            screenshot,
+            ui,
+            hotkeys,
+        }
+    }
+}
+
+// 既定のホットキー割り当て。
+//
+// **スクリーンショット以外は既定で未割り当てにしてある。** グローバル
+// ホットキーは他のアプリより先にキーを奪うため、こちらから勝手に
+// F11 や Ctrl+↑ のような一般的なキーを押さえるべきではない。
+fn default_hotkeys() -> BTreeMap<HotkeyAction, String> {
+    BTreeMap::from([(HotkeyAction::Screenshot, "F5".to_string())])
+}
+
+// 設定ファイルの [hotkeys] と、旧版の screenshot.hotkey から、実際に使う
+// 割り当てを決める。
+//
+// - [hotkeys] がある（新しい版が書いた）: そのまま使う。旧版の項目は無視する
+// - [hotkeys] が無い（旧版が書いた）: 既定値を土台に、screenshot.hotkey が
+//   あればスクリーンショットへ移す
+//
+// 旧版の設定ファイルで screenshot.hotkey が欠けている場合は既定の F5 になる。
+// 旧版では「ホットキーを外した状態」を設定ファイルに残せなかった（項目ごと
+// 消えるため、欠けた項目と区別できない）ので、そこは従来どおりの挙動に揃えてある。
+fn migrate_hotkeys(
+    table: Option<BTreeMap<String, String>>,
+    legacy_hotkey: Option<String>,
+) -> BTreeMap<HotkeyAction, String> {
+    let Some(table) = table else {
+        let mut hotkeys = default_hotkeys();
+        if let Some(hotkey) = legacy_hotkey {
+            info!(
+                "旧版の設定にあるスクリーンショットのホットキー {} を hotkeys へ移す",
+                hotkey
+            );
+            hotkeys.insert(HotkeyAction::Screenshot, hotkey);
+        }
+        return hotkeys;
+    };
+
+    let mut hotkeys = BTreeMap::new();
+    for (key, hotkey) in table {
+        match HotkeyAction::from_key(&key) {
+            Some(action) => {
+                hotkeys.insert(action, hotkey);
+            }
+            // 新しい版が増やしたアクションを古い版で読んだ場合など。
+            // ここでエラーにすると設定ファイル全体が読めなくなる
+            None => warn!(
+                "設定の hotkeys にある知らないアクション \"{}\" を無視する",
+                key
+            ),
+        }
+    }
+    hotkeys
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            video: VideoSettings::default(),
+            audio: AudioSettings::default(),
+            screenshot: ScreenshotSettings::default(),
+            ui: UiSettings::default(),
+            hotkeys: default_hotkeys(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,7 +300,14 @@ pub struct ScreenshotSettings {
     pub jpeg_quality: u8,
     pub sound_file: Option<PathBuf>,
     pub sound_volume: f32,
-    pub hotkey: Option<String>,
+    // 旧版のホットキー設定。**読むだけで、保存では書き出さない。**
+    //
+    // ホットキーはアクションごとに持つようになったため、置き場所は
+    // `AppSettings::hotkeys` へ移った。ここに残しているのは、既存の
+    // 設定ファイルにある値を起動時に移すためだけ。`AppSettings` を作る
+    // 時点で `None` に戻るので、この項目を見て動く処理を足さないこと。
+    #[serde(rename = "hotkey", skip_serializing)]
+    pub legacy_hotkey: Option<String>,
 }
 
 // スクリーンショットの保存形式。設定ファイルには format = "jpeg" / "png" と書かれる。
@@ -444,7 +573,9 @@ impl Default for ScreenshotSettings {
             // None は「効果音を鳴らさない」の意味なので、既定値には使えない
             sound_file: Some(PathBuf::from("sound/SS.mp3")),
             sound_volume: 100.0,
-            hotkey: Some("F5".to_string()),
+            // 既定は「旧版の項目が無い」。既定のホットキーは
+            // default_hotkeys() が持つ
+            legacy_hotkey: None,
         }
     }
 }
@@ -639,6 +770,26 @@ impl AppSettings {
         }
     }
 
+    // アクションに割り当てられたホットキー。未割り当てなら None。
+    pub fn hotkey(&self, action: HotkeyAction) -> Option<&str> {
+        self.hotkeys.get(&action).map(String::as_str)
+    }
+
+    // アクションのホットキーを差し替える。`None` は割り当ての解除。
+    //
+    // 解除をキーの削除で表すのは、空文字と「未割り当て」を混ぜないため。
+    // 空文字を入れるとパースに失敗して、毎回ログへ理由が出ることになる。
+    pub fn set_hotkey(&mut self, action: HotkeyAction, hotkey: Option<String>) {
+        match hotkey {
+            Some(hotkey) => {
+                self.hotkeys.insert(action, hotkey);
+            }
+            None => {
+                self.hotkeys.remove(&action);
+            }
+        }
+    }
+
     pub fn get_screenshot_path(&self, timestamp: &str) -> PathBuf {
         let extension = self.screenshot.format.extension();
         let mut path = self.screenshot.save_folder.clone();
@@ -687,7 +838,6 @@ format = "png"
 jpeg_quality = 60
 sound_file = 'sound/custom.mp3'
 sound_volume = 50.0
-hotkey = "Ctrl+S"
 
 [ui]
 volume = 80.0
@@ -697,6 +847,29 @@ last_window_pos = [10.0, 20.0]
 always_on_top = true
 enable_drag_move = false
 show_stats_overlay = true
+
+[hotkeys]
+screenshot = "Ctrl+S"
+toggle_fullscreen = "F11"
+"#;
+
+    // ホットキーをアクション別にする前の版が書いた設定ファイル。
+    // [hotkeys] が無く、screenshot セクションに hotkey がある。
+    const LEGACY_CONFIG: &str = r#"
+[video]
+device_name = "Capture Device"
+fps = 30
+
+[audio]
+sample_rate = 44100
+
+[screenshot]
+save_folder = 'C:\shots'
+sound_volume = 50.0
+hotkey = "Ctrl+S"
+
+[ui]
+volume = 80.0
 "#;
 
     // 指定したキーの行を取り除く。項目を 1 つ追加した直後の、
@@ -731,7 +904,7 @@ show_stats_overlay = true
         assert_eq!(settings.video.resolution, Some((1920, 1080)));
         assert_eq!(settings.video.format, Some("MJPEG".to_string()));
         assert_eq!(settings.audio.sample_rate, Some(44100));
-        assert_eq!(settings.screenshot.hotkey, Some("Ctrl+S".to_string()));
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
         assert_eq!(settings.ui.volume, 80.0);
     }
 
@@ -851,7 +1024,7 @@ show_stats_overlay = true
             settings.screenshot.sound_file,
             Some(PathBuf::from("sound/SS.mp3"))
         );
-        assert_eq!(settings.screenshot.hotkey, Some("F5".to_string()));
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("F5"));
         assert_eq!(settings.ui.volume, 100.0);
         assert!(settings.ui.maintain_aspect_ratio);
         assert!(!settings.ui.always_on_top);
@@ -905,7 +1078,13 @@ show_stats_overlay = true
     fn app_settings_unknown_key_is_ignored() {
         // 新しい版で増えた項目が残った設定ファイルを、古い版で読む場合。
         // 知らないキーで失敗せず、既知の項目が保持されなければならない。
-        let config = format!("{}future_option = true\n", FULL_CONFIG);
+        // [hotkeys] は値が文字列でなければ読めないため、末尾ではなく
+        // [ui] の中へ入れる
+        let config = FULL_CONFIG.replace(
+            "show_stats_overlay = true",
+            "show_stats_overlay = true\nfuture_option = true",
+        );
+        assert!(config.contains("future_option = true"));
 
         let settings: AppSettings =
             toml::from_str(&config).expect("知らないキーがあっても読めなければならない");
@@ -949,7 +1128,8 @@ show_stats_overlay = true
             Some(PathBuf::from("sound/custom.mp3"))
         );
         assert_eq!(restored.screenshot.sound_volume, 50.0);
-        assert_eq!(restored.screenshot.hotkey, Some("Ctrl+S".to_string()));
+        assert_eq!(restored.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
+        assert_eq!(restored.hotkey(HotkeyAction::ToggleFullscreen), Some("F11"));
         assert_eq!(restored.ui.volume, 80.0);
         assert!(!restored.ui.maintain_aspect_ratio);
         assert_eq!(restored.ui.last_window_size, Some((800.0, 600.0)));
@@ -1374,7 +1554,7 @@ show_stats_overlay = true
 
         assert_eq!(settings.screenshot.format, ScreenshotFormat::Jpeg);
         assert_eq!(settings.screenshot.jpeg_quality, 60);
-        assert_eq!(settings.screenshot.hotkey, Some("Ctrl+S".to_string()));
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
         assert_eq!(settings.ui.volume, 80.0);
     }
 
@@ -1405,7 +1585,7 @@ show_stats_overlay = true
 
         assert_eq!(settings.screenshot.format, ScreenshotFormat::Jpeg);
         assert_eq!(settings.screenshot.jpeg_quality, 60);
-        assert_eq!(settings.screenshot.hotkey, Some("Ctrl+S".to_string()));
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
         assert_eq!(settings.ui.volume, 80.0);
     }
 
@@ -1421,7 +1601,7 @@ show_stats_overlay = true
 
         assert_eq!(settings.screenshot.jpeg_quality, 100);
         assert_eq!(settings.screenshot.format, ScreenshotFormat::Png);
-        assert_eq!(settings.screenshot.hotkey, Some("Ctrl+S".to_string()));
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
         assert_eq!(settings.ui.volume, 80.0);
     }
 
@@ -1544,6 +1724,179 @@ show_stats_overlay = true
         );
         assert_eq!(screenshot_format_from_str(""), None);
         assert_eq!(screenshot_format_from_str("bmp"), None);
+    }
+
+    // ---- ホットキーの移行 ----
+
+    #[test]
+    fn legacy_config_moves_screenshot_hotkey_into_hotkeys() {
+        // アクション別にする前の版が書いた設定ファイル。設定していた
+        // ホットキーがスクリーンショットへ移り、失われないこと
+        let settings: AppSettings =
+            toml::from_str(LEGACY_CONFIG).expect("旧版の設定ファイルが読めなければならない");
+
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
+        // 他のアクションは未割り当てのまま
+        assert_eq!(settings.hotkeys.len(), 1);
+        // 無関係な項目も保持される
+        assert_eq!(settings.ui.volume, 80.0);
+        assert_eq!(settings.video.fps, Some(30));
+    }
+
+    #[test]
+    fn legacy_config_without_hotkey_keeps_the_default_f5() {
+        // 旧版では「ホットキーを外した状態」を設定ファイルに残せなかった
+        // （項目ごと消えるため、欠けた項目と区別できない）。移行後も
+        // 従来と同じく既定の F5 になること
+        let config = without_key(LEGACY_CONFIG, "hotkey");
+        assert!(
+            !config.contains("hotkey ="),
+            "テスト用の設定に hotkey が残っている"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("hotkey が無い旧版の設定も読めなければならない");
+
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("F5"));
+    }
+
+    #[test]
+    fn hotkeys_section_wins_over_the_legacy_key() {
+        // 手で書き換えて両方が書かれている場合。新しい形式を正とする
+        let config = format!("{}\n[hotkeys]\nscreenshot = \"F8\"\n", LEGACY_CONFIG);
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("両方あっても読めなければならない");
+
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("F8"));
+    }
+
+    #[test]
+    fn empty_hotkeys_section_means_no_assignment() {
+        // すべての割り当てを外した状態。セクションはあるが中身が無い。
+        // 既定の F5 を入れ直してはならない
+        let config = format!("{}\n[hotkeys]\n", LEGACY_CONFIG);
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("空の [hotkeys] でも読めなければならない");
+
+        assert!(settings.hotkeys.is_empty());
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), None);
+    }
+
+    #[test]
+    fn empty_hotkeys_survives_a_save_and_load_roundtrip() {
+        // 「割り当て無し」を書き出して読み直しても、既定の F5 に戻らないこと。
+        // [hotkeys] セクションごと書き出されないと、旧版の設定ファイルと
+        // 区別が付かなくなる
+        let mut original = AppSettings::default();
+        original.hotkeys.clear();
+
+        let serialized = toml::to_string(&original).expect("設定を書き出せなければならない");
+        let restored: AppSettings =
+            toml::from_str(&serialized).expect("書き出した設定を読み直せなければならない");
+
+        assert!(
+            serialized.contains("[hotkeys]"),
+            "空でも [hotkeys] セクションが書き出されること: {}",
+            serialized
+        );
+        assert!(restored.hotkeys.is_empty());
+    }
+
+    #[test]
+    fn saved_config_does_not_keep_the_legacy_hotkey_key() {
+        // 移行したあとは旧版の項目を書き戻さない。残すと 2 つの置き場所が
+        // 食い違ったときにどちらが正か決まらなくなる
+        let settings: AppSettings =
+            toml::from_str(LEGACY_CONFIG).expect("旧版の設定ファイルが読めなければならない");
+
+        let serialized = toml::to_string(&settings).expect("設定を書き出せなければならない");
+
+        assert!(
+            !serialized.contains("hotkey = "),
+            "screenshot.hotkey が書き戻されている: {}",
+            serialized
+        );
+        assert!(serialized.contains("screenshot = \"Ctrl+S\""));
+    }
+
+    #[test]
+    fn migrated_settings_drop_the_legacy_field() {
+        // 読み込んだ時点で旧版の項目は空になる。残っていると、そこを見て
+        // 動く処理をうっかり足せてしまう
+        let settings: AppSettings =
+            toml::from_str(LEGACY_CONFIG).expect("旧版の設定ファイルが読めなければならない");
+
+        assert_eq!(settings.screenshot.legacy_hotkey, None);
+    }
+
+    #[test]
+    fn unknown_hotkey_action_is_ignored_without_losing_settings() {
+        // 新しい版が増やしたアクションを古い版で読んだ場合。知らない名前で
+        // ファイル全体のパースを失敗させない
+        let config = format!("{}mute = \"Ctrl+M\"\n", FULL_CONFIG);
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("知らないアクションがあっても読めなければならない");
+
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
+        assert_eq!(settings.hotkey(HotkeyAction::ToggleFullscreen), Some("F11"));
+        assert_eq!(settings.hotkeys.len(), 2);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn hotkeys_are_readable_for_every_action() {
+        // アクションを足したときに、設定ファイル側のキー名が読めなくなって
+        // いないことを全アクションで確かめる
+        let lines: String = HotkeyAction::ALL
+            .iter()
+            .map(|action| format!("{} = \"F5\"\n", action.as_str()))
+            .collect();
+        let config = format!("[hotkeys]\n{}", lines);
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("全アクションぶんの割り当てが読めなければならない");
+
+        assert_eq!(settings.hotkeys.len(), HotkeyAction::ALL.len());
+        for action in HotkeyAction::ALL {
+            assert_eq!(settings.hotkey(action), Some("F5"), "{:?}", action);
+        }
+    }
+
+    #[test]
+    fn set_hotkey_none_removes_the_assignment() {
+        let mut settings = AppSettings::default();
+
+        settings.set_hotkey(HotkeyAction::Screenshot, None);
+
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), None);
+        assert!(settings.hotkeys.is_empty());
+    }
+
+    #[test]
+    fn set_hotkey_replaces_the_existing_assignment() {
+        let mut settings = AppSettings::default();
+
+        settings.set_hotkey(HotkeyAction::Screenshot, Some("Ctrl+S".to_string()));
+        settings.set_hotkey(HotkeyAction::VolumeUp, Some("Ctrl+Shift+1".to_string()));
+
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
+        assert_eq!(
+            settings.hotkey(HotkeyAction::VolumeUp),
+            Some("Ctrl+Shift+1")
+        );
+    }
+
+    #[test]
+    fn default_hotkeys_assign_only_the_screenshot() {
+        // 他のアクションを既定で割り当てない。グローバルホットキーは
+        // 他のアプリより先にキーを奪うため、こちらから押さえない
+        let settings = AppSettings::default();
+
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("F5"));
+        assert_eq!(settings.hotkeys.len(), 1);
     }
 
     #[test]

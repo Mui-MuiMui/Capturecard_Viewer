@@ -54,16 +54,9 @@ pub enum ErrorSource {
     Screenshot,
     /// グローバルホットキーの登録。
     ///
-    /// **記録する仕組みだけ用意してある。** ホットキーの登録処理は別タスクで
-    /// `src/hotkey.rs` へ分離中で、そちらが
-    /// `CaptureCardViewer::report_error(ErrorSource::Hotkey, ..)` を
-    /// 呼べば画面に出るようになる。本体からの構築がまだ無いので
-    /// `dead_code` を止めているが、`expect` にしてあるので使い始めれば
-    /// この属性自体が警告になって外し忘れに気付ける
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "ホットキーの分離が終わるまで構築側がいない")
-    )]
+    /// 記録するのは `CaptureCardViewer::apply_hotkey_assignments`。
+    /// 登録できないものが 1 つでも残っていれば通知し、すべて登録できたら
+    /// `ErrorCenter::clear` で取り下げる
     Hotkey,
 }
 

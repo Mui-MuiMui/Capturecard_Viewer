@@ -10,6 +10,7 @@ use chrono::Local;
 use eframe::egui;
 use image::GenericImageView;
 use log::{debug, error, info, trace, warn};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -17,6 +18,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 mod audio;
+mod hotkey;
 mod logging;
 mod overlay;
 mod screenshot;
@@ -26,6 +28,7 @@ mod ui;
 mod video;
 
 use audio::AudioCapture;
+use hotkey::{HotkeyAction, HotkeyError, HotkeyManager};
 use overlay::{OverlayContent, TransientOverlay};
 use screenshot::ScreenshotManager;
 use settings::{
@@ -61,7 +64,7 @@ const VOLUME_OSD_DURATION: Duration = Duration::from_millis(1500);
 /// 音量の基準値。OSD のバーはこの位置に目盛りを引く
 const VOLUME_REFERENCE: f32 = 100.0;
 
-/// ホイール 1 段で動かす音量
+/// ホイール 1 段、またはホットキー 1 回で動かす音量
 const VOLUME_SCROLL_STEP: f32 = 10.0;
 
 /// デバイス能力の取得結果。`(問い合わせたデバイス名, 結果)`。
@@ -318,6 +321,25 @@ fn audio_target(settings: &AppSettings) -> AudioTarget {
     )
 }
 
+/// 登録できなかったホットキーを、通知 1 件ぶんの文字列にまとめる。
+/// すべて登録できていれば `None`。
+///
+/// 定型文（「ホットキーを登録できません」）は `status::format_message` が
+/// 前に付けるので、ここでは付けない。どのアクションのどのキーが駄目だったかを
+/// 並べるところまでを受け持つ。
+fn hotkey_error_summary(errors: &BTreeMap<HotkeyAction, HotkeyError>) -> Option<String> {
+    if errors.is_empty() {
+        return None;
+    }
+
+    let detail = errors
+        .iter()
+        .map(|(action, error)| format!("{}（{}）: {}", action.label(), error.hotkey, error.message))
+        .collect::<Vec<_>>()
+        .join(" / ");
+    Some(detail)
+}
+
 /// デバイス接続の再試行を、UI スレッドを止めずに回すための状態。
 ///
 /// `update()` から毎フレーム `is_due()` を見て、期限が来ていれば 1 回だけ試す。
@@ -421,6 +443,12 @@ pub struct CaptureCardViewer {
     video_capture: Arc<Mutex<VideoCapture>>,
     audio_capture: Arc<Mutex<AudioCapture>>,
     screenshot_manager: Arc<Mutex<ScreenshotManager>>,
+    // グローバルホットキーの登録と押下の検出。
+    //
+    // **`Arc<Mutex<..>>` にしていない。** 触るのは UI スレッドだけで、
+    // リスナースレッドと共有するのは `HotkeyManager` の内部にある
+    // 共有状態（登録中の ID と押下の記録）だけのため
+    hotkey_manager: HotkeyManager,
 
     // デバイス能力の取得結果を受け取るチャネル。
     // 取得はデバイスを開く重い処理なので使い捨てのスレッドへ投げ、
@@ -486,10 +514,15 @@ pub struct CaptureCardViewer {
     // `take_stream_error` は読んだ時点で旗を下ろすため、見送ったエラーを
     // ここへ移しておかないと、そのまま音が戻らなくなる
     audio_stream_error_pending: bool,
-    // ホットキーダイアログで確定した内容のうち、まだ実行時へ反映していないもの。
-    // 外側の None は「保留なし」、内側の None は「クリアされた（解除する）」
-    pending_hotkey: Option<Option<String>>,
-    temp_hotkey: String, // ホットキーダイアログ用の一時保存
+    // ホットキー入力ダイアログで編集中の内容。
+    // 確定した文字列で、まだ設定（ドラフトまたは共有設定）へ書いていないもの
+    temp_hotkey: String,
+    // `temp_hotkey` がどのアクションのものか。
+    //
+    // 入力ダイアログはモーダルではないので、開いたまま一覧の別の行の
+    // 「設定...」を押せる。編集対象が変わったことをここで検出して
+    // `temp_hotkey` を捨てないと、前のアクションのキーが残ったまま確定する
+    temp_hotkey_action: Option<HotkeyAction>,
     // 最後に適用した実行時パラメータ（差分ベースの再起動回避用）
     last_video_device: Option<String>,
     last_video_res: Option<(u32, u32)>,
@@ -503,15 +536,17 @@ pub struct CaptureCardViewer {
     // キャプチャの開き直しは伴わないが、2 秒ごとに video_capture の
     // ロックを取らずに済むよう、他と同じく差分で判定する
     last_color_conversion: Option<(ColorSpace, ColorRange)>,
-    // 最後に適用したスクリーンショット関連の値
+    // 最後に適用したスクリーンショットの効果音。
     // apply_settings が 2 秒ごとに呼ばれるため、差分がないときは再適用しない。
     //
     // **設定と同じ `Option` を丸ごと包んでいる。** 外側の `None` は
     // 「まだ適用できていない（次の適用でやり直す）」、内側の `None` は
-    // 「未設定を適用済み＝クリア済み」を表す。内側を潰して `Option<String>` に
+    // 「未設定を適用済み＝クリア済み」を表す。内側を潰して `Option<PathBuf>` に
     // すると、クリア（設定が `None`）と未適用が同じ値になり、クリアを
-    // 差分として検出できない
-    last_hotkey: Option<Option<String>>,
+    // 差分として検出できない。
+    //
+    // ホットキーに同じ仕組みが要らないのは、`HotkeyManager::apply` が
+    // 自分で差分を取るため
     last_sound_file: Option<Option<PathBuf>>,
 
     // デバイス接続の再試行。映像と音声で別々に持ち、片方が失敗しても
@@ -557,6 +592,7 @@ impl Default for CaptureCardViewer {
             video_capture,
             audio_capture,
             screenshot_manager,
+            hotkey_manager: HotkeyManager::new(),
             capability_tx,
             capability_rx,
             screenshot_tx,
@@ -583,8 +619,8 @@ impl Default for CaptureCardViewer {
             video_capturing: false,
             last_audio_error_reconnect: None,
             audio_stream_error_pending: false,
-            pending_hotkey: None,
             temp_hotkey: String::new(),
+            temp_hotkey_action: None,
             last_video_device: None,
             last_video_res: None,
             last_video_format: None,
@@ -594,7 +630,6 @@ impl Default for CaptureCardViewer {
             last_audio_channels: None,
             last_video_fps: None,
             last_color_conversion: None,
-            last_hotkey: None,
             last_sound_file: None,
 
             video_retry: ConnectRetry::default(),
@@ -712,7 +747,7 @@ impl eframe::App for CaptureCardViewer {
         self.monitor_device_health();
 
         // グローバルホットキーを処理
-        self.handle_hotkeys();
+        self.handle_hotkeys(ctx);
 
         // 定期的に実行時設定が保存設定と一致することを確認（外部変更に対応）
         if self.last_settings_applied.elapsed().as_secs_f32() > 2.0 {
@@ -806,6 +841,7 @@ impl eframe::App for CaptureCardViewer {
                 &mut self.show_hotkey_dialog,
                 &devices,
                 &connection,
+                self.hotkey_manager.errors(),
             );
             self.handle_settings_dialog_action(action);
 
@@ -815,16 +851,37 @@ impl eframe::App for CaptureCardViewer {
 
         // ホットキーキャプチャダイアログ
         if self.show_hotkey_dialog {
+            // どのアクションを編集しているかは、一覧の「設定...」が
+            // HotkeyCaptureState へ入れている。他に開く経路が無いので通常は
+            // 必ず入っているが、取れない場合もダイアログを無反応にせず
+            // スクリーンショットとして扱う
+            let action = self
+                .settings_dialog
+                .hotkey_capture()
+                .editing()
+                .unwrap_or(HotkeyAction::Screenshot);
+
+            // 編集対象が変わったら、前のアクションで見せていた値を捨てる。
+            //
+            // ホットキー入力ダイアログはモーダルではないため、開いたまま
+            // 一覧の別の行の「設定...」を押せる。捨てないと、前のアクションの
+            // キーが表示に残ったまま OK で確定し、押した覚えのないキーが
+            // 新しいアクションへ入る
+            if self.temp_hotkey_action != Some(action) {
+                self.temp_hotkey_action = Some(action);
+                self.temp_hotkey.clear();
+            }
+
             // ダイアログが開かれた時に現在の設定値をtemp_hotkeyに設定。
             // 設定ダイアログから開かれた場合は、編集中のドラフトの値を見せる
             if self.temp_hotkey.is_empty() {
                 let current = match self.settings_dialog.draft() {
-                    Some(draft) => draft.screenshot.hotkey.clone(),
+                    Some(draft) => draft.hotkey(action).map(str::to_string),
                     None => self
                         .settings
                         .lock()
                         .ok()
-                        .and_then(|settings| settings.screenshot.hotkey.clone()),
+                        .and_then(|settings| settings.hotkey(action).map(str::to_string)),
                 };
                 self.temp_hotkey = current.unwrap_or_default();
             }
@@ -832,6 +889,7 @@ impl eframe::App for CaptureCardViewer {
             let outcome = ui::show_hotkey_capture_dialog(
                 ctx,
                 &mut self.show_hotkey_dialog,
+                action,
                 &mut self.temp_hotkey,
                 self.settings_dialog.hotkey_capture_mut(),
             );
@@ -852,7 +910,7 @@ impl eframe::App for CaptureCardViewer {
                 // 上書きして、設定したホットキーが消える
                 let wrote_to_draft = match self.settings_dialog.draft_mut() {
                     Some(draft) => {
-                        draft.screenshot.hotkey = hotkey.clone();
+                        draft.set_hotkey(action, hotkey.clone());
                         true
                     }
                     None => false,
@@ -862,10 +920,10 @@ impl eframe::App for CaptureCardViewer {
                     // 設定ダイアログが閉じられた状態でホットキーだけ確定した場合。
                     // ドラフトが無いので共有設定へ直接書き、その場で登録（解除）する
                     if let Ok(mut settings) = self.settings.lock() {
-                        settings.screenshot.hotkey = hotkey.clone();
+                        settings.set_hotkey(action, hotkey.clone());
                     }
                     self.mark_settings_dirty();
-                    self.pending_hotkey = Some(hotkey);
+                    self.apply_hotkeys_now();
                 }
                 // ドラフトへ書いた場合はここで登録しない。
                 // 登録すると、2 秒ごとの apply_settings が共有設定側の古い
@@ -876,6 +934,7 @@ impl eframe::App for CaptureCardViewer {
             // ダイアログが閉じられた時にtemp_hotkeyをクリア
             if !self.show_hotkey_dialog {
                 self.temp_hotkey.clear();
+                self.temp_hotkey_action = None;
             }
         }
 
@@ -887,41 +946,6 @@ impl eframe::App for CaptureCardViewer {
         // 一時表示のオーバーレイ（フルスクリーン切替・音量）。
         // 期限が来れば自分で消え、消える時刻の再描画も自分で予約する
         self.transient_overlay.draw(ctx, Instant::now());
-
-        // 新しくキャプチャされたホットキーを即座に登録（クリアなら解除）
-        if let Some(pending) = self.pending_hotkey.take() {
-            if let Ok(mut ss) = self.screenshot_manager.lock() {
-                match pending {
-                    Some(hk) => {
-                        debug!("捕捉したホットキーを登録する: {}", hk);
-                        match ss.set_hotkey(&hk) {
-                            Ok(()) => {
-                                debug!("ホットキー {} の登録に成功した", hk);
-                                // apply_settings が同じホットキーを登録し直さないよう記録する
-                                self.last_hotkey = Some(Some(hk));
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "ホットキー {} を登録できないので次の適用で再試行する: {}",
-                                    hk, e
-                                );
-                                // 登録できていないので apply_settings 側で再試行させる
-                                self.last_hotkey = None;
-                            }
-                        }
-                    }
-                    None => {
-                        debug!("ホットキーがクリアされたので登録を解除する");
-                        ss.clear_hotkey();
-                        // 解除済みであることを記録する。記録しないと 2 秒ごとに
-                        // 解除し直すことになる
-                        self.last_hotkey = Some(None);
-                    }
-                }
-            } else {
-                warn!("ホットキーの登録で screenshot_manager のロックを取得できない");
-            }
-        }
 
         // 保留中の設定変更を、操作が落ち着いたところでまとめて書き出す
         self.flush_settings_if_due(ctx);
@@ -990,27 +1014,39 @@ impl CaptureCardViewer {
         ctx.request_repaint_after(std::time::Duration::from_millis(16)); // ~60fps
     }
 
-    fn handle_hotkeys(&mut self) {
-        let should_screenshot = {
-            // デバウンスの判定で最終実行時刻を書き換えるため、可変で借りる
-            if let Ok(mut screenshot_manager) = self.screenshot_manager.lock() {
-                let pressed = screenshot_manager.is_hotkey_pressed();
-                if pressed {
-                    // 押下の検出自体は screenshot 側が debug で残している
-                    trace!("ホットキーの押下を受け取った");
-                }
-                pressed
-            } else {
-                // ここが失敗するのはロックが毒されたときだけで、毎フレーム呼ばれる。
-                // release ビルドは panic = "abort" なので毒されること自体が起きない
-                warn!("ホットキーの確認で screenshot_manager のロックを取得できない");
-                false
-            }
-        };
+    /// 押されたホットキーのアクションを実行する。
+    ///
+    /// 1 フレームに複数のアクションが押されていた場合は、`HotkeyAction` の
+    /// 宣言順に実行する。
+    fn handle_hotkeys(&mut self, ctx: &egui::Context) {
+        for action in self.hotkey_manager.take_pressed() {
+            trace!("ホットキーの押下を受け取った: {}", action.label());
+            self.run_hotkey_action(ctx, action);
+        }
+    }
 
-        if should_screenshot {
-            debug!("スクリーンショットの処理に入る");
-            self.take_screenshot();
+    /// ホットキーに割り当てられたアクションを 1 つ実行する。
+    ///
+    /// **実処理は右クリックメニューや映像上の操作と同じ経路を通す。**
+    /// ここに独自の処理を書くと、同じ操作なのに設定の保存やオーバーレイ表示の
+    /// 有無が経路によって変わってしまう。
+    fn run_hotkey_action(&mut self, ctx: &egui::Context, action: HotkeyAction) {
+        match action {
+            HotkeyAction::Screenshot => {
+                debug!("スクリーンショットの処理に入る");
+                self.take_screenshot();
+            }
+            HotkeyAction::ToggleFullscreen => {
+                let to_full = !self.is_fullscreen;
+                self.toggle_fullscreen(ctx, to_full);
+            }
+            HotkeyAction::ToggleAlwaysOnTop => {
+                let enabled = !self.always_on_top;
+                self.set_always_on_top(ctx, enabled);
+            }
+            HotkeyAction::ReconnectDevices => self.reconnect_devices(),
+            HotkeyAction::VolumeUp => self.adjust_volume(VOLUME_SCROLL_STEP),
+            HotkeyAction::VolumeDown => self.adjust_volume(-VOLUME_SCROLL_STEP),
         }
     }
 
@@ -1421,21 +1457,11 @@ impl CaptureCardViewer {
                     // 最前面表示のチェックボックス
                     let always_on_top_response = ui.checkbox(&mut self.always_on_top, "最前面表示");
 
-                    // 最前面表示設定が変更された場合
+                    // 最前面表示設定が変更された場合。
+                    // チェックボックスが self.always_on_top を書き換えたあとなので、
+                    // 同じ値を渡してウィンドウレベルの適用と保存だけを行わせる
                     if always_on_top_response.changed() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
-                            if self.always_on_top {
-                                egui::WindowLevel::AlwaysOnTop
-                            } else {
-                                egui::WindowLevel::Normal
-                            },
-                        ));
-
-                        // 設定に反映する（書き出しはデバウンス）
-                        if let Ok(mut settings) = self.settings.lock() {
-                            settings.ui.always_on_top = self.always_on_top;
-                        }
-                        self.mark_settings_dirty();
+                        self.set_always_on_top(ctx, self.always_on_top);
                     }
 
                     // フルスクリーン表示のチェックボックス
@@ -1510,21 +1536,7 @@ impl CaptureCardViewer {
 
                     ui.separator();
                     if ui.button("デバイス再接続").clicked() {
-                        // 強制的にデバイス再接続（last_*をクリアして強制再接続）
-                        self.last_video_device = None;
-                        self.last_audio_device = None;
-                        // 途絶の記録も落とす。開き直したあとの途絶を、改めて
-                        // 検出してログに残せるようにする
-                        self.last_video_link_action = VideoLinkAction::Keep;
-                        // 保留していた音声のエラーも、ここで開き直すので落とす
-                        self.audio_stream_error_pending = false;
-                        // ユーザーが明示的にやり直しを求めているので、
-                        // バックオフの待ち時間を飛ばして次のフレームで試す
-                        if let Ok(settings) = self.settings.lock() {
-                            self.video_retry.request_now(video_target(&settings));
-                            self.audio_retry.request_now(audio_target(&settings));
-                        }
-                        self.apply_settings(false);
+                        self.reconnect_devices();
                         close_menu = true;
                     }
                     ui.separator();
@@ -2401,29 +2413,19 @@ impl CaptureCardViewer {
             self.always_on_top = settings.ui.always_on_top;
             self.show_stats_overlay = settings.ui.show_stats_overlay;
 
-            // スクリーンショット設定
+            // ホットキーの割り当て。
+            //
+            // 差分は `HotkeyManager::apply` が取る。無条件に登録し直すと、
+            // 2 秒ごとに unregister → register が走ってその瞬間のキー入力を
+            // 取りこぼす
+            self.apply_hotkey_assignments(&settings.hotkeys);
+
+            // スクリーンショットの効果音
             //
             // **`None`（クリア）も差分として扱う。** 以前は `if let Some(..)` で
             // 包んでいたため、設定画面で「クリア」してもそのセッション中は
-            // ホットキーが効き続け、効果音も鳴り続けていた
+            // 効果音が鳴り続けていた
             if let Ok(mut ss) = self.screenshot_manager.lock() {
-                // 無条件に登録し直すと、2 秒ごとに unregister → register が走って
-                // その瞬間のキー入力を取りこぼす
-                if Self::needs_reapply(initial, &settings.screenshot.hotkey, &self.last_hotkey) {
-                    match &settings.screenshot.hotkey {
-                        Some(hk) => match ss.set_hotkey(hk) {
-                            Ok(()) => self.last_hotkey = Some(Some(hk.clone())),
-                            // 失敗すると古いホットキーは解除済みで何も登録されていない。
-                            // last を空にして次の適用タイミングで再試行する
-                            Err(_) => self.last_hotkey = None,
-                        },
-                        None => {
-                            ss.clear_hotkey();
-                            self.last_hotkey = Some(None);
-                        }
-                    }
-                }
-
                 // 無条件に呼ぶと 2 秒ごとに効果音ファイル全体を読み直すことになる
                 if Self::needs_reapply(
                     initial,
@@ -2487,6 +2489,42 @@ impl CaptureCardViewer {
         if transition.close {
             self.settings_dialog.end_edit();
             self.show_settings = false;
+        }
+    }
+
+    /// 共有設定のホットキー割り当てを、その場で登録し直す。
+    ///
+    /// 2 秒ごとの `apply_settings` を待たずに反映したい経路（設定ダイアログを
+    /// 閉じた状態でホットキー入力ダイアログだけを操作した場合）で使う。
+    fn apply_hotkeys_now(&mut self) {
+        // 登録はデバイスを開くような重い処理ではないが、`apply` の中で
+        // ログを出すため settings のロックは先に手放しておく
+        let desired = match self.settings.lock() {
+            Ok(settings) => settings.hotkeys.clone(),
+            Err(_) => {
+                warn!("ホットキーの適用で settings のロックを取得できない");
+                return;
+            }
+        };
+        self.apply_hotkey_assignments(&desired);
+    }
+
+    /// ホットキーの割り当てを登録し直し、失敗を画面へ出す。
+    ///
+    /// **`HotkeyManager::apply` を直接呼ばないこと。** 直接呼ぶと、失敗の
+    /// 通知と、直ったときのエラー表示の取り下げが抜ける。
+    fn apply_hotkey_assignments(&mut self, desired: &BTreeMap<HotkeyAction, String>) {
+        self.hotkey_manager.apply(desired);
+
+        // 登録できないものが残っているかは apply のあとにまとめて見る。
+        // 1 件ずつ通知すると、複数まとめて失敗したときにトーストが
+        // 上書きされて最後の 1 件しか読めない
+        let summary = hotkey_error_summary(self.hotkey_manager.errors());
+        match summary {
+            Some(reason) => self.report_error(ErrorSource::Hotkey, reason),
+            // 他のアプリがキーを離して登録できるようになった場合も通る。
+            // 残しておくと、直ったのに接続状態の表示が古いままになる
+            None => self.errors.clear(ErrorSource::Hotkey),
         }
     }
 
@@ -2846,6 +2884,58 @@ impl CaptureCardViewer {
     fn get_cached_output_devices(&mut self) -> &Vec<String> {
         self.update_cached_device_lists();
         &self.cached_output_devices
+    }
+
+    /// 最前面表示を切り替える。
+    ///
+    /// 右クリックメニューのチェックボックスと同じことを行う。ウィンドウレベルの
+    /// 適用、設定への反映、デバウンス保存までを 1 か所にまとめてある。
+    fn set_always_on_top(&mut self, ctx: &egui::Context, enabled: bool) {
+        self.always_on_top = enabled;
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if enabled {
+            egui::WindowLevel::AlwaysOnTop
+        } else {
+            egui::WindowLevel::Normal
+        }));
+
+        if let Ok(mut settings) = self.settings.lock() {
+            settings.ui.always_on_top = enabled;
+        }
+        info!(
+            "最前面表示を{}にした",
+            if enabled { "オン" } else { "オフ" }
+        );
+        self.mark_settings_dirty();
+    }
+
+    /// 音量を `delta`%（負なら下げる）変える。
+    ///
+    /// 反映は `set_volume_from_ui` に任せる。映像上のホイール操作や
+    /// 右クリックメニューのスライダーと同じ経路を通すことで、設定への
+    /// 反映も OSD の表示も同じになる。
+    fn adjust_volume(&mut self, delta: f32) {
+        let volume = (self.volume + delta).clamp(MIN_VOLUME, MAX_VOLUME);
+        self.set_volume_from_ui(volume);
+    }
+
+    /// デバイスを強制的に開き直す。右クリックメニューの「デバイス再接続」と同じ。
+    fn reconnect_devices(&mut self) {
+        info!("デバイスの再接続を要求された");
+        // 強制的にデバイス再接続（last_*をクリアして強制再接続）
+        self.last_video_device = None;
+        self.last_audio_device = None;
+        // 途絶の記録も落とす。開き直したあとの途絶を、改めて
+        // 検出してログに残せるようにする
+        self.last_video_link_action = VideoLinkAction::Keep;
+        // 保留していた音声のエラーも、ここで開き直すので落とす
+        self.audio_stream_error_pending = false;
+        // ユーザーが明示的にやり直しを求めているので、
+        // バックオフの待ち時間を飛ばして次のフレームで試す
+        if let Ok(settings) = self.settings.lock() {
+            self.video_retry.request_now(video_target(&settings));
+            self.audio_retry.request_now(audio_target(&settings));
+        }
+        self.apply_settings(false);
     }
 
     fn toggle_fullscreen(&mut self, ctx: &egui::Context, to_full: bool) {
@@ -3668,6 +3758,73 @@ mod tests {
             &None::<String>,
             &None
         ));
+    }
+
+    #[test]
+    fn hotkey_error_summary_without_errors_is_none() {
+        // すべて登録できている状態。通知を出さないだけでなく、
+        // 呼び出し側が既存の通知を取り下げる合図にもなる
+        assert_eq!(hotkey_error_summary(&BTreeMap::new()), None);
+    }
+
+    #[test]
+    fn hotkey_error_summary_one_error_names_the_action_and_key() {
+        let errors = BTreeMap::from([(
+            HotkeyAction::Screenshot,
+            HotkeyError {
+                hotkey: "F12".to_string(),
+                message: "他のアプリと競合しています".to_string(),
+            },
+        )]);
+
+        assert_eq!(
+            hotkey_error_summary(&errors),
+            Some("スクリーンショット（F12）: 他のアプリと競合しています".to_string())
+        );
+    }
+
+    #[test]
+    fn hotkey_error_summary_multiple_errors_are_joined() {
+        // 1 件ずつ通知するとトーストが上書きされて最後の 1 件しか読めない。
+        // 並び順はアクションの宣言順（BTreeMap）で安定する
+        let errors = BTreeMap::from([
+            (
+                HotkeyAction::VolumeUp,
+                HotkeyError {
+                    hotkey: "F8".to_string(),
+                    message: "理由 B".to_string(),
+                },
+            ),
+            (
+                HotkeyAction::Screenshot,
+                HotkeyError {
+                    hotkey: "F5".to_string(),
+                    message: "理由 A".to_string(),
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            hotkey_error_summary(&errors),
+            Some("スクリーンショット（F5）: 理由 A / 音量を上げる（F8）: 理由 B".to_string())
+        );
+    }
+
+    #[test]
+    fn hotkey_error_summary_does_not_repeat_the_headline() {
+        // 定型文は status::format_message が前に付ける。ここで付けると
+        // 「ホットキーを登録できません: ホットキーを登録できません: ...」になる
+        let errors = BTreeMap::from([(
+            HotkeyAction::Screenshot,
+            HotkeyError {
+                hotkey: "F5".to_string(),
+                message: "理由".to_string(),
+            },
+        )]);
+
+        let summary = hotkey_error_summary(&errors).expect("理由があること");
+
+        assert!(!summary.contains(ErrorSource::Hotkey.headline()));
     }
 
     #[test]

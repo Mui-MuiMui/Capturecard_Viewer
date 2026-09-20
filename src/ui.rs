@@ -1,11 +1,12 @@
+use crate::hotkey::{HotkeyAction, HotkeyError};
 use crate::settings::{
     AppSettings, ColorRange, ColorSpace, ScreenshotFormat, MAX_JPEG_QUALITY, MIN_JPEG_QUALITY,
 };
-use crate::status::{ConnectionStatus, LinkStatus};
+use crate::status::{ConnectionStatus, ErrorSource, LinkStatus};
 use crate::video::{DeviceCapabilities, VideoMode};
 use eframe::egui;
 use log::debug;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// 設定ダイアログで行われた操作。
 ///
@@ -163,11 +164,30 @@ pub struct HotkeyCaptureState {
     /// 待機中に確定したホットキー文字列。
     /// OK を押すまで呼び出し側へは渡さない
     temp: String,
+    /// どのアクションのホットキーを編集しているか。
+    ///
+    /// **`reset` でも消さない。** 「クリア」で閉じたときに、呼び出し側が
+    /// どのアクションを未設定にすればよいか分からなくなるため。
+    /// 次に一覧の「設定...」が押されたときに入れ替わる。
+    editing: Option<HotkeyAction>,
 }
 
 impl HotkeyCaptureState {
     pub fn is_capturing(&self) -> bool {
         self.capturing
+    }
+
+    /// 編集対象のアクションを決めて、入力状態を初期化する。
+    /// 一覧の「設定...」から呼ぶ。
+    pub fn begin_for(&mut self, action: HotkeyAction) {
+        self.editing = Some(action);
+        self.capturing = false;
+        self.temp.clear();
+    }
+
+    /// 編集中のアクション。まだ一度も開いていなければ `None`。
+    pub fn editing(&self) -> Option<HotkeyAction> {
+        self.editing
     }
 
     /// 待機中に確定したホットキー文字列。まだ何も取れていなければ空。
@@ -283,6 +303,11 @@ impl SettingsDialogState {
     /// × で先に閉じても入力中の状態を失わないよう、`end_edit` では触らない。
     pub fn hotkey_capture_mut(&mut self) -> &mut HotkeyCaptureState {
         &mut self.hotkey_capture
+    }
+
+    /// ホットキー入力ダイアログの入力状態（読み取り）。
+    pub fn hotkey_capture(&self) -> &HotkeyCaptureState {
+        &self.hotkey_capture
     }
 
     /// デバイス能力の取得状態。
@@ -464,6 +489,8 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
     target.video.auto_reconnect = auto_reconnect;
     target.audio = draft.audio.clone();
     target.screenshot = draft.screenshot.clone();
+    // ホットキーの割り当てもダイアログの中だけで変わる
+    target.hotkeys = draft.hotkeys.clone();
 
     // ダイアログの「ユーザーインターフェース」グループが編集する 2 項目
     if draft.ui.maintain_aspect_ratio != original.ui.maintain_aspect_ratio {
@@ -503,14 +530,16 @@ pub fn show_settings_dialog(
     show_hotkey_dialog: &mut bool,
     devices: &DeviceLists<'_>,
     connection: &ConnectionStatus,
+    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
 ) -> SettingsDialogAction {
     // フィールドごとに分解して受ける。ドラフトを編集しながら
-    // デバイス能力のキャッシュも書き換えるため、dialog をまるごと借りると
-    // 二重の可変借用になる
+    // デバイス能力のキャッシュやホットキー入力の状態も書き換えるため、
+    // dialog をまるごと借りると二重の可変借用になる
     let SettingsDialogState {
         draft,
         selected_tab,
         capabilities,
+        hotkey_capture,
         ..
     } = dialog;
 
@@ -543,7 +572,13 @@ pub fn show_settings_dialog(
             egui::ScrollArea::vertical().show(ui, |ui| match selected_tab {
                 SettingsTab::Device => show_device_settings_tab(ui, draft, capabilities, devices),
                 SettingsTab::Screenshot => {
-                    if show_screenshot_settings_tab(ui, draft, show_hotkey_dialog) {
+                    if show_screenshot_settings_tab(
+                        ui,
+                        draft,
+                        show_hotkey_dialog,
+                        hotkey_capture,
+                        hotkey_errors,
+                    ) {
                         button = SettingsDialogAction::TestSound;
                     }
                 }
@@ -1097,6 +1132,8 @@ fn show_screenshot_settings_tab(
     ui: &mut egui::Ui,
     settings: &mut AppSettings,
     show_hotkey_dialog: &mut bool,
+    capture: &mut HotkeyCaptureState,
+    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
 ) -> bool {
     ui.heading("スクリーンショット設定");
     ui.add_space(10.0);
@@ -1222,38 +1259,143 @@ fn show_screenshot_settings_tab(
     ui.add_space(15.0);
 
     // ホットキー設定
-    ui.group(|ui| {
-        ui.strong("ホットキー設定");
-        ui.add_space(5.0);
-
-        ui.horizontal(|ui| {
-            ui.label("スクリーンショットホットキー:");
-            let hotkey_str = settings
-                .screenshot
-                .hotkey
-                .clone()
-                .unwrap_or_else(|| "未設定".to_string());
-
-            ui.label(&hotkey_str);
-
-            if ui.button("ホットキー設定...").clicked() {
-                *show_hotkey_dialog = true;
-            }
-        });
-
-        if settings.screenshot.hotkey.is_some() {
-            ui.horizontal(|ui| {
-                if ui.button("ホットキー解除").clicked() {
-                    settings.screenshot.hotkey = None;
-                }
-            });
-        }
-
-        ui.add_space(5.0);
-        ui.small("『ホットキー設定...』を押して希望のキーコンビネーションを入力してください。");
-    });
+    show_hotkey_assignments(ui, settings, show_hotkey_dialog, capture, hotkey_errors);
 
     test_sound_requested
+}
+
+/// アクションごとのホットキー割り当ての一覧を描く。
+///
+/// `hotkey_errors` は**実行中の設定**で登録できなかったもの。ドラフトの
+/// 内容ではないので、割り当てを変えても「適用」を押すまで消えない。
+fn show_hotkey_assignments(
+    ui: &mut egui::Ui,
+    settings: &mut AppSettings,
+    show_hotkey_dialog: &mut bool,
+    capture: &mut HotkeyCaptureState,
+    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
+) {
+    ui.group(|ui| {
+        ui.strong("ホットキー");
+        ui.add_space(5.0);
+        ui.small(
+            "他のアプリを操作している間も効きます。スクリーンショット以外の操作にも割り当てられます。",
+        );
+        ui.add_space(8.0);
+
+        let duplicates = duplicate_hotkey_actions(&settings.hotkeys);
+        // 一覧を描いている間は settings を読むだけにして、書き換えは
+        // 描き終えてから行う（同じデータを読みながら書き換えないため）
+        let mut clear_requested: Option<HotkeyAction> = None;
+
+        egui::Grid::new("hotkey_assignments")
+            .num_columns(4)
+            .spacing([8.0, 6.0])
+            .striped(true)
+            .show(ui, |ui| {
+                for action in HotkeyAction::ALL {
+                    ui.label(action.label());
+
+                    match settings.hotkey(action) {
+                        Some(hotkey) => {
+                            let text = egui::RichText::new(hotkey).monospace();
+                            if duplicates.contains(&action) {
+                                ui.label(text.color(egui::Color32::YELLOW));
+                            } else {
+                                ui.label(text);
+                            }
+                        }
+                        None => {
+                            ui.weak("未設定");
+                        }
+                    }
+
+                    if ui.button("設定...").clicked() {
+                        // どのアクションを編集しているかを入力ダイアログへ渡す
+                        capture.begin_for(action);
+                        *show_hotkey_dialog = true;
+                    }
+
+                    let can_clear = settings.hotkey(action).is_some();
+                    if ui
+                        .add_enabled(can_clear, egui::Button::new("クリア"))
+                        .clicked()
+                    {
+                        clear_requested = Some(action);
+                    }
+
+                    ui.end_row();
+                }
+            });
+
+        if let Some(action) = clear_requested {
+            debug!("{} のホットキーをクリアする", action.label());
+            settings.set_hotkey(action, None);
+        }
+
+        if !duplicates.is_empty() {
+            let names: Vec<&str> = duplicates.iter().map(|action| action.label()).collect();
+            ui.add_space(5.0);
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!(
+                    "注意: 同じキーが複数のアクションに割り当てられています（{}）。適用しても、上にある側だけが有効になります。",
+                    names.join("、")
+                ),
+            );
+        }
+
+        // 登録に失敗したものを、理由とともに出す。トーストは気付かせるための
+        // もので流れて消えるため、どのアクションが失敗しているかはここで見る。
+        // 見出しは status.rs の定型文をそのまま使い、通知と表現を揃える
+        if !hotkey_errors.is_empty() {
+            ui.add_space(5.0);
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                format!("{}:", ErrorSource::Hotkey.headline()),
+            );
+            for (action, error) in hotkey_errors {
+                ui.colored_label(
+                    egui::Color32::LIGHT_RED,
+                    format!("{}（{}）— {}", action.label(), error.hotkey, error.message),
+                );
+            }
+        }
+    });
+}
+
+/// 同じキーが 2 つ以上のアクションに割り当てられているものを返す。
+///
+/// 比較は表記のゆれを吸収する。`"Ctrl+S"` と `"ctrl + s"`、`"Shift+Ctrl+S"` は
+/// どれも同じ `HotKey` になるため、文字列のまま比べると重複を見逃す。
+pub fn duplicate_hotkey_actions(
+    hotkeys: &BTreeMap<HotkeyAction, String>,
+) -> BTreeSet<HotkeyAction> {
+    let mut seen: HashMap<String, Vec<HotkeyAction>> = HashMap::new();
+    for (action, hotkey) in hotkeys {
+        seen.entry(normalize_hotkey(hotkey))
+            .or_default()
+            .push(*action);
+    }
+
+    seen.into_values()
+        .filter(|actions| actions.len() > 1)
+        .flatten()
+        .collect()
+}
+
+/// ホットキー文字列を、同じキーの組み合わせなら同じになる形へ正規化する。
+///
+/// 大文字小文字と空白を落とし、`+` で分けた要素を並べ替える。
+/// `hotkey::parse_hotkey` が修飾キーの順序を問わないことに合わせてある。
+fn normalize_hotkey(hotkey: &str) -> String {
+    let mut parts: Vec<String> = hotkey
+        .split('+')
+        .map(|part| part.trim().to_ascii_lowercase())
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts.sort();
+    parts.join("+")
 }
 
 /// egui のキーを、ホットキー文字列で使う名前に変換する。
@@ -1359,11 +1501,13 @@ pub enum HotkeyDialogOutcome {
 
 /// ホットキー入力ダイアログを描画する。
 ///
-/// `captured_hotkey` は呼び出し側が持つ確定済みのホットキー、
-/// `capture` は入力待機中の一時状態。両方とも呼び出し側が保持する。
+/// `action` は編集対象のアクション、`captured_hotkey` は呼び出し側が持つ
+/// 確定済みのホットキー、`capture` は入力待機中の一時状態。
+/// いずれも呼び出し側が保持する。
 pub fn show_hotkey_capture_dialog(
     ctx: &egui::Context,
     show_dialog: &mut bool,
+    action: HotkeyAction,
     captured_hotkey: &mut String,
     capture: &mut HotkeyCaptureState,
 ) -> HotkeyDialogOutcome {
@@ -1376,13 +1520,14 @@ pub fn show_hotkey_capture_dialog(
         .collapsible(false)
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                ui.heading("ホットキー設定");
+                ui.heading(format!("ホットキー設定: {}", action.label()));
                 ui.add_space(10.0);
 
                 if !capture.is_capturing() {
-                    ui.label(
-                        "『キャプチャ開始』を押してスクリーンショット用のキーを入力してください",
-                    );
+                    ui.label(format!(
+                        "『キャプチャ開始』を押して「{}」に割り当てるキーを入力してください",
+                        action.label()
+                    ));
 
                     ui.add_space(10.0);
 
@@ -1515,7 +1660,7 @@ mod tests {
                 jpeg_quality: 60,
                 sound_file: Some(PathBuf::from("sound/custom.mp3")),
                 sound_volume: 50.0,
-                hotkey: Some("Ctrl+S".to_string()),
+                legacy_hotkey: None,
             },
             ui: UiSettings {
                 volume: 80.0,
@@ -1526,7 +1671,126 @@ mod tests {
                 enable_drag_move: false,
                 show_stats_overlay: true,
             },
+            hotkeys: BTreeMap::from([
+                (HotkeyAction::Screenshot, "Ctrl+S".to_string()),
+                (HotkeyAction::ToggleFullscreen, "F11".to_string()),
+            ]),
         }
+    }
+
+    // ---- ホットキーの重複判定 ----
+
+    fn hotkeys(pairs: &[(HotkeyAction, &str)]) -> BTreeMap<HotkeyAction, String> {
+        pairs
+            .iter()
+            .map(|(action, key)| (*action, (*key).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn duplicate_hotkey_actions_without_duplicates_is_empty() {
+        let assigned = hotkeys(&[
+            (HotkeyAction::Screenshot, "F5"),
+            (HotkeyAction::ToggleFullscreen, "F6"),
+        ]);
+
+        assert!(duplicate_hotkey_actions(&assigned).is_empty());
+    }
+
+    #[test]
+    fn duplicate_hotkey_actions_reports_both_sides() {
+        let assigned = hotkeys(&[
+            (HotkeyAction::Screenshot, "F5"),
+            (HotkeyAction::ToggleFullscreen, "F6"),
+            (HotkeyAction::VolumeUp, "F5"),
+        ]);
+
+        let duplicates = duplicate_hotkey_actions(&assigned);
+
+        assert_eq!(
+            duplicates.into_iter().collect::<Vec<_>>(),
+            vec![HotkeyAction::Screenshot, HotkeyAction::VolumeUp]
+        );
+    }
+
+    #[test]
+    fn duplicate_hotkey_actions_ignores_case_and_spaces() {
+        // 同じ HotKey になる書き方は重複として扱う。文字列のまま比べると
+        // 見逃して、登録の段階で片方が黙って無効になる
+        let assigned = hotkeys(&[
+            (HotkeyAction::Screenshot, "Ctrl+S"),
+            (HotkeyAction::VolumeUp, " ctrl + s "),
+        ]);
+
+        assert_eq!(duplicate_hotkey_actions(&assigned).len(), 2);
+    }
+
+    #[test]
+    fn duplicate_hotkey_actions_ignores_modifier_order() {
+        // parse_hotkey は修飾キーの順序を問わないので、判定も揃える
+        let assigned = hotkeys(&[
+            (HotkeyAction::Screenshot, "Ctrl+Shift+A"),
+            (HotkeyAction::VolumeDown, "Shift+Ctrl+A"),
+        ]);
+
+        assert_eq!(duplicate_hotkey_actions(&assigned).len(), 2);
+    }
+
+    #[test]
+    fn duplicate_hotkey_actions_empty_assignment_is_empty() {
+        assert!(duplicate_hotkey_actions(&BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn normalize_hotkey_same_combination_gives_same_string() {
+        assert_eq!(normalize_hotkey("Ctrl+S"), normalize_hotkey("ctrl+s"));
+        assert_eq!(
+            normalize_hotkey("Ctrl+Shift+A"),
+            normalize_hotkey("shift+ctrl+a")
+        );
+        assert_ne!(normalize_hotkey("Ctrl+S"), normalize_hotkey("Ctrl+A"));
+        assert_ne!(normalize_hotkey("Ctrl+S"), normalize_hotkey("Alt+S"));
+    }
+
+    // ---- ホットキー入力ダイアログの編集対象 ----
+
+    #[test]
+    fn hotkey_capture_begin_for_records_the_action() {
+        let mut capture = HotkeyCaptureState::default();
+
+        capture.begin_for(HotkeyAction::VolumeUp);
+
+        assert_eq!(capture.editing(), Some(HotkeyAction::VolumeUp));
+        assert!(!capture.is_capturing());
+        assert!(capture.temp().is_empty());
+    }
+
+    #[test]
+    fn hotkey_capture_begin_for_discards_the_previous_input() {
+        // 別のアクションを編集し始めたときに、前のアクションで取得した
+        // キーが残っていると、そのまま OK を押しただけで確定してしまう
+        let mut capture = HotkeyCaptureState::default();
+        capture.begin_for(HotkeyAction::Screenshot);
+        capture.finish("Ctrl+S".to_string());
+
+        capture.begin_for(HotkeyAction::VolumeDown);
+
+        assert!(capture.temp().is_empty());
+        assert_eq!(capture.editing(), Some(HotkeyAction::VolumeDown));
+    }
+
+    #[test]
+    fn hotkey_capture_reset_keeps_the_editing_action() {
+        // 「クリア」やキャンセルで閉じたあとも、呼び出し側がどのアクションを
+        // 未設定にすればよいか分かる必要がある
+        let mut capture = HotkeyCaptureState::default();
+        capture.begin_for(HotkeyAction::ReconnectDevices);
+        capture.finish("F9".to_string());
+
+        capture.reset();
+
+        assert_eq!(capture.editing(), Some(HotkeyAction::ReconnectDevices));
+        assert!(capture.temp().is_empty());
     }
 
     #[test]
@@ -1629,11 +1893,38 @@ mod tests {
         assert_eq!(shared.audio.sample_rate, Some(44100));
         assert_eq!(shared.audio.channels, Some(1));
         assert!(!shared.audio.passthrough_enabled);
-        assert_eq!(shared.screenshot.hotkey, Some("Ctrl+S".to_string()));
         assert_eq!(shared.screenshot.sound_volume, 50.0);
         // 保存形式と品質も screenshot セクションごと差し替わる
         assert_eq!(shared.screenshot.format, ScreenshotFormat::Png);
         assert_eq!(shared.screenshot.jpeg_quality, 60);
+    }
+
+    #[test]
+    fn commit_draft_replaces_hotkey_assignments() {
+        // ホットキーの割り当てはダイアログの中だけで変わるので、
+        // ドラフトの内容でまるごと差し替える
+        let mut shared = AppSettings::default();
+        let original = AppSettings::default();
+        let draft = sample_settings();
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
+        assert_eq!(shared.hotkey(HotkeyAction::ToggleFullscreen), Some("F11"));
+    }
+
+    #[test]
+    fn commit_draft_clearing_every_hotkey_reaches_the_shared_settings() {
+        // すべての割り当てを外した状態を、空のマップとして反映できること。
+        // 「ドラフトに何も無い＝変更なし」と扱うと、解除が反映されない
+        let mut shared = AppSettings::default();
+        let original = AppSettings::default();
+        let mut draft = AppSettings::default();
+        draft.hotkeys.clear();
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert!(shared.hotkeys.is_empty());
     }
 
     #[test]

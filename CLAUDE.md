@@ -28,8 +28,9 @@ cargo build --release
 | `src/main.rs` | アプリ状態 `CaptureCardViewer`、`eframe::App` 実装、映像描画、コンテキストメニュー、デバイス接続の要求とバックオフ再試行、スクリーンショット処理、エントリポイント |
 | `src/video.rs` | nokhwa `CallbackCamera` によるキャプチャ、YUY2→RGB 変換、`FrameBuffer`（`Arc` によるフレーム共有と世代番号）、デバイス能力の取得 |
 | `src/audio.rs` | cpal による入力→リングバッファ→出力のパススルー、音量制御 |
-| `src/screenshot.rs` | global-hotkey によるグローバルホットキー登録とリスナースレッド、rodio による効果音再生 |
-| `src/settings.rs` | `AppSettings` とその serde 定義、confy による読み書き、保存パスの決定 |
+| `src/hotkey.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）、global-hotkey によるアクション別の登録とリスナースレッド、押下の検出とデバウンス、ホットキー文字列のパース |
+| `src/screenshot.rs` | rodio による効果音の読み込みと再生 |
+| `src/settings.rs` | `AppSettings` とその serde 定義、confy による読み書き、保存パスの決定、旧形式からの移行 |
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |
 | `src/ui.rs` | 設定ダイアログとホットキー設定ダイアログの描画 |
 | `src/status.rs` | 失敗の記録（`ErrorCenter`）とトーストの間引き判定、設定ダイアログへ渡す接続状態（`ConnectionStatus`）、日本語の定型文 |
@@ -59,12 +60,16 @@ cargo build --release
 - egui/eframe の UI スレッド（`update()` が毎フレーム呼ばれる。ここが全ての起点）
 - nokhwa のフレームコールバックスレッド
 - cpal の入力コールバック／出力コールバックスレッド
-- ホットキーリスナースレッド（`ScreenshotManager::new` で 1 本だけ起動し、`Drop` で join する）
+- ホットキーリスナースレッド（`HotkeyManager::new` で 1 本だけ起動し、`Drop` で join する）
 - 効果音再生スレッド（再生ごとに spawn）
 - スクリーンショットの保存スレッド（撮影ごとに spawn。JPEG エンコードとファイル書き出しを行う）
 - デバイス能力取得スレッド（要求ごとに spawn。結果は mpsc チャネルで UI スレッドへ返す）
 
-ホットキーのリスナースレッドは `GlobalHotKeyEvent::receiver()` が返すイベントチャネルを `recv_timeout(200ms)` で待つ。**このチャネルはプロセスに 1 つしかないので、リスナーもアプリ全体で 1 本だけにする。** `set_hotkey` は登録と解除だけを行い、スレッドは作り直さない。リスナーが照合に使う「登録中のホットキー ID」は `Arc<Mutex<Option<u32>>>` で共有し、`set_hotkey` が差し替える。終了要求は `AtomicBool` で、タイムアウトのたびに確認する（終了までに最大 200ms かかる）。
+ホットキーのリスナースレッドは `GlobalHotKeyEvent::receiver()` が返すイベントチャネルを `recv_timeout(200ms)` で待つ。**このチャネルはプロセスに 1 つしかないので、リスナーもアプリ全体で 1 本だけにする。** `HotkeyManager::apply` は登録と解除だけを行い、スレッドは作り直さない。終了要求は `AtomicBool` で、タイムアウトのたびに確認する（終了までに最大 200ms かかる）。
+
+リスナーと共有するのは `Arc<Mutex<ListenerState>>` 1 つで、中身は「登録中のホットキー ID → アクション」と「検出した押下（アクションの集合）」。**この 2 つを別々のロックに分けないこと。** リスナーは ID の照合と押下の記録を同じロックの中で行い、解除側も ID の削除と保留中の押下の削除を同じロックの中で行う。分けると、リスナーが照合を終えてから記録するまでの隙に解除が完了し、**クリアしたはずのキーで 1 回だけ実行される**（PR #55）。
+
+`HotkeyManager` 自体は `Arc<Mutex<..>>` で包んでいない。触るのは UI スレッドだけで、スレッドをまたぐのは上の共有状態だけのため。
 
 保存スレッドの `JoinHandle` は `CaptureCardViewer::screenshot_save_threads` が持ち、`on_exit` で全て join する。**ここを捨てるとスレッドが切り離され、撮影直後に閉じたときプロセスの終了が書き出しを追い越して壊れた JPEG が残る。** 溜め込まないよう、撮影のたびに `drop_finished_threads` で完了済みのハンドルを落としている。
 
@@ -82,6 +87,8 @@ cargo build --release
 
 - `apply_settings` と `poll_device_connection` は先頭で設定を丸ごと複製し、以降はその複製だけを見る。デバイスの開き直しは 1 回でも数百 ms かかるため、その間ロックを握らない
 - `take_screenshot` は settings → video → screenshot の順に 1 つずつ取り、エンコードと保存は別スレッドへ渡す
+
+`hotkey_manager` はこの 4 つに含まれない。`CaptureCardViewer` が直接持っており、UI スレッドからしか触らないため `Mutex` が要らない（内部の `ListenerState` だけがリスナースレッドと共有されている）。
 
 **ネストが避けられない処理を足すときは、順序を settings → video → audio → screenshot に揃えること。** また、**ロックを握ったまま重い処理（デバイスの開き直し、画像のエンコード、ファイル I/O）を行わないこと。** 特に `video_capture` はフレームコールバックスレッドと共有しており、握っている間そちらの `push_back` が止まる。
 
@@ -154,6 +161,28 @@ cargo build --release
 
 `load()` は `(AppSettings, LoadOutcome)` を返す。`LoadOutcome` は退避まで含めて成功したかを表し、**退避できなかった場合に起動時の書き戻しを止めるためにある。** 退避に失敗すると読めなかったファイルがディスクに残るので、そこへ既定値を `save()` すると証跡ごと潰れる。`CaptureCardViewer::default` の起動時保存は `may_write_defaults_on_startup()` で守ってあるので、**起動経路に `save()` を足すときは同じ判断を通すこと。** 設定ダイアログからの明示的な保存は、ユーザーの意思なので抑止していない。
 
+### ホットキーはアクションごとに持つ
+
+割り当ては `AppSettings::hotkeys`（`BTreeMap<HotkeyAction, String>`）にあり、設定ファイルでは独立した `[hotkeys]` セクションになる。キーは `HotkeyAction::as_str()` の文字列。
+
+```toml
+[hotkeys]
+screenshot = "F5"
+toggle_fullscreen = "Ctrl+F11"
+```
+
+- **`[hotkeys]` セクションが無い場合と、空のセクションがある場合は意味が違う。** 前者は旧版が書いた設定ファイル（既定の F5 を入れる）、後者はすべての割り当てを外した状態（何も入れない）。`RawAppSettings::hotkeys` を `Option` で受けているのはこの区別のため
+- **既定で割り当てるのはスクリーンショットの F5 だけ。** グローバルホットキーは他のアプリより先にキーを奪うので、こちらから F11 のような一般的なキーを押さえない
+- **旧版の `screenshot.hotkey` は読むだけで書き戻さない。** `ScreenshotSettings::legacy_hotkey` が `#[serde(rename = "hotkey", skip_serializing)]` で受け、`[hotkeys]` が無いときだけスクリーンショットへ移す。移行後の最初の保存で旧項目は設定ファイルから消える（新しい版で一度起動すると、古い版へ戻したときはホットキーが既定の F5 に戻る）
+- 知らないアクション名は読み飛ばしてログに残す。エラーにすると設定ファイル全体が読めなくなる
+- **読み込みは `#[serde(from = "RawAppSettings")]` を通る。** どの経路で読んでも移行が走るようにするためで、`AppSettings` に項目を足すときは `RawAppSettings` と `From` にも足すこと
+
+アクションを増やすときは `HotkeyAction` に variant を足し、`ALL` / `as_str` / `label` の 3 か所と、`main.rs` の `run_hotkey_action` を埋める。**`as_str` の文字列は設定ファイルに書かれるので、一度出した名前は変えない。** 実行は右クリックメニューや映像上の操作と同じメソッドを呼ぶこと（`set_always_on_top` / `adjust_volume` / `reconnect_devices` / `toggle_fullscreen`）。独自に書くと、同じ操作なのに設定の保存やオーバーレイ表示の有無が経路で変わる。
+
+登録は `HotkeyManager::apply` が差分だけ行う。2 秒ごとに呼ばれるため、無条件に登録し直すとその瞬間の入力を取りこぼす。登録できなかったものは `errors()` に残り、設定画面に理由が出る。**直るまで毎回試し直すが、ログに出すのは理由が変わったときだけ**（同じ失敗が 2 秒ごとに積もらないように）。
+
+**`HotkeyManager::apply` を直接呼ばないこと。** 呼ぶのは `CaptureCardViewer::apply_hotkey_assignments` だけで、そこで `report_error(ErrorSource::Hotkey, ..)` によるトースト通知と、全て登録できたときの `ErrorCenter::clear` を行っている。直接呼ぶとこれらが抜ける。設定画面の一覧に出す見出しも `ErrorSource::Hotkey.headline()` を使い、トーストと同じ文言に揃えてある。
+
 ### 設定の保存はデバウンスされる
 
 ウィンドウの移動・リサイズ、音量スクロール、コンテキストメニューの各操作は、その場ではディスクへ書かない。`mark_settings_dirty()` で変更を記録し、`update()` の末尾の `flush_settings_if_due()` が最後の変更から 2 秒空いたところでまとめて書き出す。終了時は `on_exit` が保留の有無にかかわらず書き出す。
@@ -184,10 +213,11 @@ cargo build --release
 - × は `egui::Window::open()` が `show_settings` を false にするだけでボタンが押されないため、描画後の開閉状態から `ui::resolve_action` が拾ってキャンセルへ倒している
 - **「適用」と「OK」の違いは閉じるかどうかだけ。** 保存の有無で分けると「適用したのに再起動で戻る」という曖昧さが残るため、Windows のプロパティシートと同じ意味に揃えてある
 - **キャンセルは「適用」で反映済みの内容を戻さない。** 戻すには反映前の状態をもう 1 つ持つ必要があり、デバイスの開き直しも 2 度走る
-- 反映は `ui::commit_draft` が `video` / `audio` / `screenshot` と、ダイアログが編集する `ui` の 2 項目（`maintain_aspect_ratio` / `volume`）だけに限っている。`ui` を丸ごと入れると、ダイアログを開いている間に動かしたウィンドウの位置が巻き戻る。**ダイアログに `ui` の項目を足すときは `commit_draft` にも足すこと**
+- 反映は `ui::commit_draft` が `video` / `audio` / `screenshot` / `hotkeys` と、ダイアログが編集する `ui` の 2 項目（`maintain_aspect_ratio` / `volume`）だけに限っている。`ui` を丸ごと入れると、ダイアログを開いている間に動かしたウィンドウの位置が巻き戻る。**ダイアログに `ui` の項目を足すときは `commit_draft` にも足すこと**
 - 逆に、**`video` / `audio` / `screenshot` にダイアログの外から変わる項目を足すときは、`commit_draft` で実行中の値を残すこと。** `video.auto_reconnect`（右クリックメニューの「デバイスの自動再接続」）がその例で、セクションを丸ごと入れるとダイアログを開いている間の切り替えが開いた時点のスナップショットで巻き戻る
 - `ui` の 2 項目はダイアログの外（ホイールでの音量調整、コンテキストメニュー）でも変わるため、開いた時点の値（`SettingsDialogState::original`）と比べて**ダイアログで実際に編集されたときだけ**反映する。無条件に入れると、ダイアログを開いたままホイールで音量を変えて「適用」を押したときに巻き戻る
 - ホットキー入力ダイアログと効果音のテスト再生もドラフトを見る。ドラフトへ書いたホットキーはその場で登録しない（2 秒ごとの `apply_settings` が共有設定側の古い値で登録し直してしまうため）
+- ホットキー入力ダイアログは**どのアクションを編集中か**を `HotkeyCaptureState::editing` で持つ。`reset()` でも消さないのは、「クリア」で閉じたときに呼び出し側がどのアクションを未設定にすべきか分からなくなるため
 
 タブ選択・デバイス能力キャッシュ・ホットキー入力も `SettingsDialogState` が持つ。これらは設定の中身ではないので「キャンセル」や `end_edit` では捨てず、ダイアログを開き直しても引き継ぐ。**`ui.rs` に `static` を追加しないこと。** ダイアログの新しい状態は `SettingsDialogState` へ追加する。
 
