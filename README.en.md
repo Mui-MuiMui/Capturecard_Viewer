@@ -41,6 +41,24 @@ To also remove the settings file, delete the following directory:
   - Advanced settings
 - **Mouse wheel**: Adjust volume (±10%)
 
+### Hotkeys
+
+The settings window → **screenshot settings** tab → ホットキー (Hotkeys) lets you assign a key to each of the following actions. **They work while other applications have focus.**
+
+| Action | Description | Default |
+|---|---|---|
+| スクリーンショット (Screenshot) | Saves the video frame currently on screen | F5 |
+| フルスクリーン切替 (Toggle fullscreen) | Switches between fullscreen and windowed | unassigned |
+| 最前面表示の切替 (Toggle always-on-top) | Toggles keeping the window above the others | unassigned |
+| デバイス再接続 (Reconnect devices) | Reopens the video and audio devices | unassigned |
+| 音量を上げる (Volume up) | Raises the volume by 10% (up to 200%) | unassigned |
+| 音量を下げる (Volume down) | Lowers the volume by 10% | unassigned |
+
+- Press 設定... (Set) on a row to capture a key, or クリア (Clear) to remove the assignment. Changes take effect when you press 適用 (Apply) or OK.
+- Assigning the same key to more than one action shows a warning. If you apply it anyway, only the action higher in the list stays active.
+- Keys already taken by another application cannot be registered; the reason is shown below the list.
+- Only the screenshot action has a key by default. Global hotkeys take a key away from every other application, so the rest are left unassigned.
+
 ### Stats overlay
 
 Turning on "情報表示" (Show stats) in the context menu overlays the following on the top-left of the video. The on/off state is saved to the configuration file and restored on the next launch.
@@ -58,7 +76,7 @@ Turning on "情報表示" (Show stats) in the context menu overlays the followin
 1. Right-click → "詳細設定..." (Advanced settings) to open the settings window.
 2. Select video and audio devices in the **device settings** tab.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
-3. Configure the save location, file format, sound effect, and hotkey in the **screenshot settings** tab.
+3. Configure the save location, file format, sound effect, and the per-action hotkeys in the **screenshot settings** tab.
 
 Edits in the settings window are kept as a draft and do not affect the running application until you press a button.
 
@@ -76,7 +94,7 @@ Edits in the settings window are kept as a draft and do not affect the running a
 
 ### Screenshots
 
-- **Default key**: F5 (configurable)
+- **Default key**: F5 (configurable; see "Hotkeys")
 - **Save location**: Desktop (configurable)
 - **File format**: JPEG (default, quality 1-100 selectable, 90 by default) or PNG
 - **File name**: `YYYY-MM-DD_HH-MM-SS-mmm.jpg` (`.png` when PNG is selected)
@@ -117,7 +135,7 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 
 **Screenshot hotkey**
 
-- F12 cannot currently be used for screenshots. Registration fails due to a conflict with other software on the system.
+- F12 cannot currently be used for screenshots. Registration fails due to a conflict with other software on the system. The reason is shown under the hotkey list in the settings window.
 
 **Device connection at startup**
 

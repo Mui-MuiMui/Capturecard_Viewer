@@ -25,6 +25,7 @@ flowchart TD
     app["app<br/>AppState / eframe::App / イベント処理"]
     ui["ui<br/>描画のみ"]
     settings["settings<br/>永続化"]
+    hotkey["hotkey<br/>グローバルホットキー"]
     device["device<br/>ワーカー層"]
     video["video"]
     audio["audio"]
@@ -34,6 +35,7 @@ flowchart TD
     main --> app
     app --> ui
     app --> settings
+    app --> hotkey
     app --> device
     device --> video
     device --> audio
@@ -54,6 +56,7 @@ flowchart TD
 | `device` | デバイス操作をワーカースレッドへ隔離し、チャネルで橋渡しする | UI の知識 |
 | `video` / `audio` | デバイス固有の処理 | アプリ状態の知識 |
 | `settings` | 設定の型と永続化 | 実行時状態 |
+| `hotkey` | 割り当てられる操作の定義、グローバルホットキーの登録と押下の検出 | 操作そのものの実行（`app` が行う） |
 | `platform` | Windows 固有処理（フォント、アイコン、モニタ情報） | 汎用ロジック |
 | `logging` | ログの初期化と出力先 | — |
 
@@ -287,6 +290,8 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 デバイス接続の失敗、ホットキー登録の失敗、スクリーンショットの保存失敗は、UI に表示する。ログにだけ書いて画面上は無反応、という状態を作らない。
 
+**ホットキーの登録失敗は実装済み。** `HotkeyManager::errors()` が「いま登録できていないもの」をアクションごとに持ち、設定画面のホットキー一覧の下に理由を出す。同じキーを 2 つのアクションへ割り当てた場合も、一覧の上で警告する。
+
 ## テスト可能性
 
 `.claude/skills/testing-conventions/SKILL.md` の方針を構造の側から支える。
@@ -302,7 +307,7 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 | 目指す姿 | 現状 | 対応するタスク |
 |---|---|---|
 | レイヤー分離 | `main.rs` にアプリ状態・UI・デバイス制御が同居 | main.rs のモジュール分割 |
-| UI は状態を持たない | `ui.rs` から `static` / `static mut` は消え、タブ選択・デバイス能力キャッシュ・ホットキー入力の待機状態は `CaptureCardViewer` が持つ `SettingsDialogState` にある。ダイアログの開閉フラグと確定済みのホットキーは `CaptureCardViewer` が直接持つ。ホットキー入力ダイアログはまだ `&mut` で受けた値を直接書き換える | UI 層をイベント返却型にする |
+| UI は状態を持たない | `ui.rs` から `static` / `static mut` は消え、タブ選択・デバイス能力キャッシュ・ホットキー入力の待機状態（編集中のアクションを含む）は `CaptureCardViewer` が持つ `SettingsDialogState` にある。ダイアログの開閉フラグと確定済みのホットキーは `CaptureCardViewer` が直接持つ。ホットキー入力ダイアログはまだ `&mut` で受けた値を直接書き換える | UI 層をイベント返却型にする |
 | イベント駆動 | 2 秒ごとに設定を再適用するポーリング | apply_settings の 2 秒ごとの再登録 |
 | チャネルでの隔離 | UI から `Arc<Mutex<..>>` 越しにデバイスを直接操作 | デバイスアクセスをワーカースレッド + チャネルにする |
 | UI をブロックしない | デバイス能力の取得もスクリーンショットの JPEG エンコードも別スレッドへ移した。再試行の `sleep` は廃止し、デバイスを開く処理だけが UI スレッド上に残る | デバイスアクセスをワーカースレッド + チャネルにする |

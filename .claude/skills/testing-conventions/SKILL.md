@@ -25,8 +25,9 @@ Capturecard_Viewer はキャプチャーデバイスと音声デバイスに強�
 | 関数 | 見るべき観点 |
 |---|---|
 | `video::yuy2_to_rgb_naive` | 既知の YUYV パターン → 期待 RGB、幅が奇数、データ長が不足、値が飽和する入力 |
-| `screenshot::parse_hotkey` | `"F5"`、`"Ctrl+S"`、`"Ctrl+Shift+A"`、修飾キーのみ、空文字、未知のキー |
-| `screenshot::parse_key_code` | 対応キー全種、大文字小文字、未対応キーがエラーになること |
+| `hotkey::parse_hotkey` | `"F5"`、`"Ctrl+S"`、`"Ctrl+Shift+A"`、修飾キーのみ、空文字、未知のキー |
+| `hotkey::parse_key_code` | 対応キー全種、大文字小文字、未対応キーがエラーになること |
+| `ui::duplicate_hotkey_actions` | 重複なし、2 つが同じキー、大文字小文字や修飾キーの順序が違う同じキー、空 |
 | `settings::get_screenshot_path` | 同名ファイルが既にある場合の連番付与、連番が 2 つ以上続く場合 |
 | `calculate_aspect_ratio_size` | 画像が横長 / 縦長 / 同比、利用可能サイズの幅または高さが 0 |
 
