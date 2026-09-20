@@ -1248,7 +1248,7 @@ fn show_other_tab(
         if *reset_confirm {
             ui.colored_label(
                 egui::Color32::YELLOW,
-                "⚠ すべての設定を初期値に戻します。よろしいですか？",
+                "⚠ 編集中の設定を初期値に戻します。よろしいですか？",
             );
             ui.horizontal(|ui| {
                 if ui.button("初期化する").clicked() {
@@ -1267,7 +1267,7 @@ fn show_other_tab(
         ui.small(
             "初期化も編集中の設定に対して行います。「適用」か「OK」を押すまで反映されません。",
         );
-        ui.small("ウィンドウの位置とサイズは初期化しません。");
+        ui.small("戻る範囲は読み込みと同じです。ウィンドウの位置とサイズ、右クリックメニューで切り替える項目は初期化しません。");
     });
 
     if let Some(message) = message {

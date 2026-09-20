@@ -128,7 +128,7 @@ These live in the **その他 (Other)** tab of the settings window. Use them whe
 |---|---|
 | 設定を書き出す... (Export settings) | Saves the current settings as a TOML file. The default file name is `capturecard_viewer-settings-YYYYMMDD.toml` |
 | 設定を読み込む... (Import settings) | Reads an exported file into the settings you are currently editing |
-| 設定を初期化... (Reset settings) | Resets the settings you are editing to their defaults. Nothing happens until you press the confirmation button |
+| 設定を初期化... (Reset settings) | Resets the settings you are editing to their defaults. It covers the same items as import, so the window position and size are left alone. Nothing happens until you press the confirmation button |
 
 - **Export writes the running settings, not the draft.** Press 適用 first if you want your current edits included.
 - **Import and reset only change the draft.** Like every other edit, they reach the running application when you press 適用 or OK, and キャンセル discards them.
