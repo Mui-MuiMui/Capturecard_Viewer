@@ -36,12 +36,26 @@ To also remove the settings file, delete the following directory:
   - Toggle aspect ratio preservation
   - Toggle always-on-top
   - Toggle fullscreen
+  - Toggle the title bar (borderless mode)
   - Toggle window dragging
   - Toggle the stats overlay (shows FPS and more over the video)
   - Toggle automatic device reconnection
+  - Reset the window size (back to the default 1280x720)
   - Reconnect device
   - Advanced settings
+  - Quit
 - **Mouse wheel**: Adjust volume (±10%). The current volume appears as a bar at the bottom of the screen and fades out after about 1.5 seconds (the same overlay appears when you change the volume from the context menu slider or the settings dialog)
+
+#### Borderless mode (hiding the title bar)
+
+You can remove the title bar and the window frame, which helps when the window sits on a second monitor as a sub-window. The state is saved to the settings file and restored on the next launch.
+
+- Toggle it with **タイトルバーを隠す (Hide the title bar)** in the context menu.
+- **Moving**: drag the video area. Because of that, turning the title bar off also turns 画面ドラッグ移動 (window dragging) on if it was off, and a notice appears at the bottom of the screen for about two seconds. While the title bar is hidden, window dragging cannot be turned off, since it is the only way left to move the window.
+- **Resizing**: move the pointer within about 8 px of a window edge — the cursor changes — and drag. The corners resize diagonally.
+- **If the window gets too small**: use ウィンドウサイズをリセット (Reset the window size) in the context menu to go back to the default 1280x720.
+- **Quitting**: there is no close button, so use 終了 (Quit) in the context menu or `Alt+F4`.
+- The item is disabled while fullscreen, which has no decorations to begin with. Leaving fullscreen restores whatever the setting says.
 
 #### Mute
 
@@ -119,7 +133,7 @@ These live in the **その他 (Other)** tab of the settings window. Use them whe
 - **Export writes the running settings, not the draft.** Press 適用 first if you want your current edits included.
 - **Import and reset only change the draft.** Like every other edit, they reach the running application when you press 適用 or OK, and キャンセル discards them.
 - **Window position and size are never imported.** A file exported on a machine with a different display layout will not move your window off-screen. Reset leaves the position and size alone as well.
-- Of the items toggled from the right-click menu, always on top, drag to move, stats overlay and mute are not imported. They cannot be changed from the settings window, so importing them would have no effect. Automatic device reconnection *is* imported.
+- Of the items toggled from the right-click menu, always on top, drag to move, stats overlay, mute and borderless mode are not imported. They cannot be changed from the settings window, so importing them would have no effect. Automatic device reconnection *is* imported.
 - If a value cannot be understood, only that item falls back to its default and the rest is imported. If the file is not valid TOML, nothing changes and the reason is shown.
 
 ### Screenshots

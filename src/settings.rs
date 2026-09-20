@@ -591,6 +591,11 @@ pub struct UiSettings {
     pub enable_drag_move: bool,
     // 映像の上に FPS などの統計を重ねて出すか
     pub show_stats_overlay: bool,
+    // タイトルバーと枠を消すか。デュアルモニタでサブウィンドウとして置くときに
+    // 装飾が邪魔になるため。設定ダイアログには出さず、右クリックメニューだけで
+    // 切り替える。**有効にすると × が無くなる** ので、右クリックメニューの
+    // 「終了」と Alt+F4 が閉じる手段になる
+    pub borderless: bool,
 }
 
 impl Default for VideoSettings {
@@ -665,6 +670,9 @@ impl Default for UiSettings {
             enable_drag_move: true,
             // 常時出しているものではないので、既定は非表示にする
             show_stats_overlay: false,
+            // 既定はタイトルバーありにする。装飾なしは閉じ方・動かし方が
+            // 通常のウィンドウと変わるので、知らずにその状態で起動させない
+            borderless: false,
         }
     }
 }
@@ -966,6 +974,7 @@ last_window_pos = [10.0, 20.0]
 always_on_top = true
 enable_drag_move = false
 show_stats_overlay = true
+borderless = true
 
 [hotkeys]
 screenshot = "Ctrl+S"
@@ -1091,6 +1100,34 @@ volume = 80.0
         assert_eq!(settings.ui.volume, 80.0);
         assert!(settings.ui.always_on_top);
         assert!(!settings.ui.enable_drag_move);
+    }
+
+    #[test]
+    fn app_settings_missing_borderless_defaults_to_decorated() {
+        // 装飾なしの項目を足した版へ上げた直後、既存ユーザーの設定ファイルには
+        // このキーが無い。欠けていても他の項目が保持され、タイトルバーありで起動すること。
+        // **既定が true になると、更新しただけで × が消えたウィンドウが出てくる。**
+        let config = without_key(FULL_CONFIG, "borderless");
+        assert!(
+            !config.contains("borderless ="),
+            "テスト用の設定から borderless が消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("borderless が欠けていても読めなければならない");
+
+        assert!(!settings.ui.borderless); // 既定値は false
+        assert_eq!(settings.ui.volume, 80.0);
+        assert!(settings.ui.always_on_top);
+        assert!(settings.ui.show_stats_overlay);
+    }
+
+    #[test]
+    fn app_settings_borderless_is_read_from_the_file() {
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("設定ファイルを読めなければならない");
+
+        assert!(settings.ui.borderless);
     }
 
     #[test]

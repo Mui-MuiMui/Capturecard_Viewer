@@ -1926,6 +1926,7 @@ mod tests {
                 always_on_top: true,
                 enable_drag_move: false,
                 show_stats_overlay: true,
+                borderless: false,
             },
             hotkeys: BTreeMap::from([
                 (HotkeyAction::Screenshot, "Ctrl+S".to_string()),
@@ -2224,9 +2225,11 @@ mod tests {
         // always_on_top などは右クリックメニューで切り替えるもので、
         // commit_draft が反映しない。読み込んでも「適用」で消えるだけなので、
         // 最初からドラフトへ入れない
-        let imported = sample_settings();
+        let mut imported = sample_settings();
+        imported.ui.borderless = true;
         let current = AppSettings::default();
         assert_ne!(imported.ui.always_on_top, current.ui.always_on_top);
+        assert_ne!(imported.ui.borderless, current.ui.borderless);
 
         let draft = draft_from_imported(imported, &current);
 
@@ -2234,6 +2237,7 @@ mod tests {
         assert_eq!(draft.ui.enable_drag_move, current.ui.enable_drag_move);
         assert_eq!(draft.ui.show_stats_overlay, current.ui.show_stats_overlay);
         assert_eq!(draft.ui.muted, current.ui.muted);
+        assert_eq!(draft.ui.borderless, current.ui.borderless);
     }
 
     #[test]
@@ -2504,6 +2508,41 @@ mod tests {
         commit_draft(&mut shared, &draft, &original);
 
         assert_eq!(shared.ui.muted, !original.ui.muted);
+    }
+
+    #[test]
+    fn commit_draft_keeps_borderless_changed_outside_dialog() {
+        // タイトルバーの表示もダイアログに無い。ダイアログを開いたまま
+        // 右クリックメニューで隠して「適用」を押しても、装飾が戻ってはいけない
+        let original = sample_settings();
+        let draft = original.clone();
+        let mut shared = original.clone();
+
+        shared.ui.borderless = !original.ui.borderless;
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.ui.borderless, !original.ui.borderless);
+    }
+
+    #[test]
+    fn commit_draft_keeps_drag_move_enabled_by_the_borderless_guard() {
+        // 装飾を外すときのガードが有効にした「画面ドラッグ移動」も、
+        // ダイアログの「適用」で切られてはいけない。切られると
+        // タイトルバーもドラッグ移動も無い状態になり、ウィンドウを動かせなくなる
+        let mut original = sample_settings();
+        original.ui.enable_drag_move = false;
+        let draft = original.clone();
+        let mut shared = original.clone();
+
+        // 右クリックメニューで「タイトルバーを隠す」を押した状態
+        shared.ui.borderless = true;
+        shared.ui.enable_drag_move = true;
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert!(shared.ui.borderless);
+        assert!(shared.ui.enable_drag_move);
     }
 
     #[test]
