@@ -29,8 +29,10 @@ To also remove the settings file, delete the following directory:
 
 - **Double-click**: Toggle fullscreen
 - **Drag**: Drag the video area to move the window
+- **Middle-click**: Toggle mute
 - **Right-click**: Open the context menu
   - Volume adjustment (0–200%)
+  - Toggle mute
   - Toggle aspect ratio preservation
   - Toggle always-on-top
   - Toggle fullscreen
@@ -40,6 +42,15 @@ To also remove the settings file, delete the following directory:
   - Reconnect device
   - Advanced settings
 - **Mouse wheel**: Adjust volume (±10%). The current volume appears as a bar at the bottom of the screen and fades out after about 1.5 seconds (the same overlay appears when you change the volume from the context menu slider or the settings dialog)
+
+#### Mute
+
+You can silence the output without dropping the volume to 0%. The volume value is kept while muted, so unmuting resumes at the same level. The state is saved to the settings file and restored on the next launch.
+
+- Toggle it with **middle-click**, the **ミュート (Mute)** checkbox in the context menu, or the **ミュート切替 (Toggle mute)** hotkey.
+- Toggling shows ミュート (Muted) / ミュート解除（音量: N%）(Unmuted, volume: N%) at the bottom of the screen for about 1.5 seconds.
+- **Turning the mouse wheel (or pressing a volume hotkey) while muted unmutes and applies the volume change.** Those gestures give no on-screen hint that the output is muted, so keeping the mute would look like "I raised the volume but nothing plays".
+- Moving the context menu slider does *not* unmute, because the mute checkbox is visible right below it. In that case the volume bar is drawn in grey and reads 音量: N%（ミュート中）(Volume: N%, muted).
 
 ### Hotkeys
 
@@ -53,6 +64,7 @@ The settings window → **screenshot settings** tab → ホットキー (Hotkeys
 | デバイス再接続 (Reconnect devices) | Reopens the video and audio devices | unassigned |
 | 音量を上げる (Volume up) | Raises the volume by 10% (up to 200%) | unassigned |
 | 音量を下げる (Volume down) | Lowers the volume by 10% | unassigned |
+| ミュート切替 (Toggle mute) | Toggles mute on and off | unassigned |
 
 - Press 設定... (Set) on a row to capture a key, or クリア (Clear) to remove the assignment. Changes take effect when you press 適用 (Apply) or OK.
 - A hotkey does exactly what the mouse does: changing the volume shows the volume bar at the bottom, toggling fullscreen shows the indicator at the top-left.
@@ -77,7 +89,7 @@ Turning on "情報表示" (Show stats) in the context menu overlays the followin
 1. Right-click → "詳細設定..." (Advanced settings) to open the settings window.
 2. Select video and audio devices in the **device settings** tab.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
-3. Configure the save location, file format, sound effect, and the per-action hotkeys in the **screenshot settings** tab.
+3. Configure the destination, save location, file format, sound effect, and the per-action hotkeys in the **screenshot settings** tab.
 
 Edits in the settings window are kept as a draft and do not affect the running application until you press a button.
 
@@ -96,12 +108,15 @@ Edits in the settings window are kept as a draft and do not affect the running a
 ### Screenshots
 
 - **Default key**: F5 (configurable; see "Hotkeys")
+- **Destination**: Save to a file (default) / copy to the clipboard / both
 - **Save location**: Desktop (configurable)
 - **File format**: JPEG (default, quality 1-100 selectable, 90 by default) or PNG
 - **File name**: `YYYY-MM-DD_HH-MM-SS-mmm.jpg` (`.png` when PNG is selected)
 - **Sound effect**: Custom audio files are supported, with adjustable volume
 
 JPEG keeps files small but blurs text and thin lines. Choose PNG when you want to keep game UI or subtitles exactly as rendered; PNG is lossless but produces files several times larger.
+
+Setting the destination to the clipboard (or to both) puts the captured frame straight onto the clipboard, ready to paste into Discord or a chat window. The clipboard copy is uncompressed, so the file format and JPEG quality settings apply only to the file that is written. When only the clipboard is selected, no file is created.
 
 ## Where settings are stored
 

@@ -66,7 +66,7 @@ impl ErrorSource {
         match self {
             ErrorSource::Video => "映像デバイスに接続できません",
             ErrorSource::Audio => "音声デバイスに接続できません",
-            ErrorSource::Screenshot => "スクリーンショットを保存できません",
+            ErrorSource::Screenshot => "スクリーンショットを出力できません",
             ErrorSource::Hotkey => "ホットキーを登録できません",
         }
     }
@@ -456,7 +456,7 @@ mod tests {
     fn format_message_uses_a_different_headline_per_source() {
         assert_eq!(
             format_message(ErrorSource::Screenshot, "access denied"),
-            "スクリーンショットを保存できません: access denied"
+            "スクリーンショットを出力できません: access denied"
         );
         assert_eq!(
             format_message(ErrorSource::Hotkey, "F5 is in use"),
