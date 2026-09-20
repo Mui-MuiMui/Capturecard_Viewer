@@ -466,6 +466,14 @@ impl HotkeyManager {
         fired
     }
 
+    /// 登録できなかったアクションと、その理由。設定画面に出す。
+    ///
+    /// 直っていない間は毎回の `apply` で試し直しているので、ここに残っている
+    /// のは「いまも登録できていないもの」だけ。
+    pub fn errors(&self) -> &BTreeMap<HotkeyAction, HotkeyError> {
+        &self.errors
+    }
+
     /// 1 つのアクションにホットキーを登録する。失敗は `errors` に記録する。
     fn register(&mut self, action: HotkeyAction, hotkey_str: &str) {
         let hotkey = match parse_hotkey(hotkey_str) {

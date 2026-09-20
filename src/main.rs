@@ -729,9 +729,12 @@ impl eframe::App for CaptureCardViewer {
                 &mut self.show_settings,
                 &mut self.settings_dialog,
                 &mut self.show_hotkey_dialog,
-                &video_devices,
-                &input_devices,
-                &output_devices,
+                ui::DeviceLists {
+                    video: &video_devices,
+                    input: &input_devices,
+                    output: &output_devices,
+                },
+                self.hotkey_manager.errors(),
             );
             self.handle_settings_dialog_action(action);
 
@@ -741,16 +744,26 @@ impl eframe::App for CaptureCardViewer {
 
         // ホットキーキャプチャダイアログ
         if self.show_hotkey_dialog {
+            // どのアクションを編集しているかは、一覧の「設定...」が
+            // HotkeyCaptureState へ入れている。他に開く経路が無いので通常は
+            // 必ず入っているが、取れない場合もダイアログを無反応にせず
+            // スクリーンショットとして扱う
+            let action = self
+                .settings_dialog
+                .hotkey_capture()
+                .editing()
+                .unwrap_or(HotkeyAction::Screenshot);
+
             // ダイアログが開かれた時に現在の設定値をtemp_hotkeyに設定。
             // 設定ダイアログから開かれた場合は、編集中のドラフトの値を見せる
             if self.temp_hotkey.is_empty() {
                 let current = match self.settings_dialog.draft() {
-                    Some(draft) => draft.hotkey(HotkeyAction::Screenshot).map(str::to_string),
-                    None => self.settings.lock().ok().and_then(|settings| {
-                        settings
-                            .hotkey(HotkeyAction::Screenshot)
-                            .map(str::to_string)
-                    }),
+                    Some(draft) => draft.hotkey(action).map(str::to_string),
+                    None => self
+                        .settings
+                        .lock()
+                        .ok()
+                        .and_then(|settings| settings.hotkey(action).map(str::to_string)),
                 };
                 self.temp_hotkey = current.unwrap_or_default();
             }
@@ -758,6 +771,7 @@ impl eframe::App for CaptureCardViewer {
             let outcome = ui::show_hotkey_capture_dialog(
                 ctx,
                 &mut self.show_hotkey_dialog,
+                action,
                 &mut self.temp_hotkey,
                 self.settings_dialog.hotkey_capture_mut(),
             );
@@ -778,7 +792,7 @@ impl eframe::App for CaptureCardViewer {
                 // 上書きして、設定したホットキーが消える
                 let wrote_to_draft = match self.settings_dialog.draft_mut() {
                     Some(draft) => {
-                        draft.set_hotkey(HotkeyAction::Screenshot, hotkey.clone());
+                        draft.set_hotkey(action, hotkey.clone());
                         true
                     }
                     None => false,
@@ -788,7 +802,7 @@ impl eframe::App for CaptureCardViewer {
                     // 設定ダイアログが閉じられた状態でホットキーだけ確定した場合。
                     // ドラフトが無いので共有設定へ直接書き、その場で登録（解除）する
                     if let Ok(mut settings) = self.settings.lock() {
-                        settings.set_hotkey(HotkeyAction::Screenshot, hotkey.clone());
+                        settings.set_hotkey(action, hotkey.clone());
                     }
                     self.mark_settings_dirty();
                     self.apply_hotkeys_now();
