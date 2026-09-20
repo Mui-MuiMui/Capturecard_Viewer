@@ -27,7 +27,9 @@ mod video;
 use audio::AudioCapture;
 use overlay::{OverlayContent, TransientOverlay};
 use screenshot::ScreenshotManager;
-use settings::{AppSettings, AutoSavePolicy, ScreenshotEncoding, MAX_VOLUME, MIN_VOLUME};
+use settings::{
+    AppSettings, AutoSavePolicy, ColorRange, ColorSpace, ScreenshotEncoding, MAX_VOLUME, MIN_VOLUME,
+};
 use video::{FrameStats, VideoCapture};
 
 /// デバイスリストのキャッシュを更新する間隔
@@ -448,6 +450,10 @@ pub struct CaptureCardViewer {
     last_audio_rate: Option<u32>,
     last_audio_channels: Option<u16>,
     last_video_fps: Option<u32>,
+    // 最後に VideoCapture へ渡した色変換の設定。
+    // キャプチャの開き直しは伴わないが、2 秒ごとに video_capture の
+    // ロックを取らずに済むよう、他と同じく差分で判定する
+    last_color_conversion: Option<(ColorSpace, ColorRange)>,
     // 最後に適用したスクリーンショット関連の値
     // apply_settings が 2 秒ごとに呼ばれるため、差分がないときは再適用しない。
     //
@@ -533,6 +539,7 @@ impl Default for CaptureCardViewer {
             last_audio_rate: None,
             last_audio_channels: None,
             last_video_fps: None,
+            last_color_conversion: None,
             last_hotkey: None,
             last_sound_file: None,
 
@@ -2236,6 +2243,21 @@ impl CaptureCardViewer {
 
             if settings.video.device_name.is_some() && (need_video_restart || initial) {
                 self.video_retry.request(video_target(&settings));
+            }
+
+            // 色空間とレンジはデバイスの開き直しを伴わない。共有の Atomic へ
+            // 書くだけで次のフレームから効くので、ここで反映する。
+            // 2 秒ごとに video_capture のロックを取らないよう差分で判定する
+            let color_conversion = (settings.video.color_space, settings.video.color_range);
+            if Self::needs_reapply(initial, &color_conversion, &self.last_color_conversion) {
+                if let Ok(video) = self.video_capture.lock() {
+                    video.set_color_conversion(color_conversion.0, color_conversion.1);
+                    self.last_color_conversion = Some(color_conversion);
+                } else {
+                    // 次の適用タイミングで入れ直す
+                    warn!("色変換の設定で video_capture のロックを取得できない");
+                    self.last_color_conversion = None;
+                }
             }
 
             // Audio
