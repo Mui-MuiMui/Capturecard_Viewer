@@ -286,6 +286,11 @@ pub struct AudioSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScreenshotSettings {
+    // 撮った画をどこへ出すか。ファイル・クリップボード・両方の 3 択。
+    // 保存形式と JPEG 品質はファイルへ出すときだけ効く（クリップボードへは
+    // 圧縮せずそのまま渡す）
+    #[serde(deserialize_with = "deserialize_screenshot_destination")]
+    pub destination: ScreenshotDestination,
     pub save_folder: PathBuf,
     // 保存形式と JPEG の品質を別々の項目にしてある。品質を持つ enum を
     // 1 項目として持たせると TOML では [screenshot.format] のテーブルになり、
@@ -309,6 +314,37 @@ pub struct ScreenshotSettings {
     // 時点で `None` に戻るので、この項目を見て動く処理を足さないこと。
     #[serde(rename = "hotkey", skip_serializing)]
     pub legacy_hotkey: Option<String>,
+}
+
+// スクリーンショットの出力先。
+// 設定ファイルには destination = "file" / "clipboard" / "both" と書かれる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenshotDestination {
+    // 既存ユーザーの設定ファイルには destination が無い。既定をファイルに
+    // してあるので、これまでどおりフォルダへ保存されるだけで挙動は変わらない
+    #[default]
+    File,
+    Clipboard,
+    Both,
+}
+
+impl ScreenshotDestination {
+    // ファイルへ書き出すか。false のときは保存先のファイル名も作らない
+    pub fn saves_file(self) -> bool {
+        matches!(
+            self,
+            ScreenshotDestination::File | ScreenshotDestination::Both
+        )
+    }
+
+    // クリップボードへコピーするか
+    pub fn copies_to_clipboard(self) -> bool {
+        matches!(
+            self,
+            ScreenshotDestination::Clipboard | ScreenshotDestination::Both
+        )
+    }
 }
 
 // スクリーンショットの保存形式。設定ファイルには format = "jpeg" / "png" と書かれる。
@@ -391,6 +427,24 @@ where
     }))
 }
 
+// 設定ファイルの destination に知らない値が書かれていても、設定全体を失わせない。
+// 理由は deserialize_screenshot_format と同じ。
+fn deserialize_screenshot_destination<'de, D>(
+    deserializer: D,
+) -> Result<ScreenshotDestination, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(screenshot_destination_from_str(&raw).unwrap_or_else(|| {
+        warn!(
+            "設定の出力先 \"{}\" を解釈できないのでファイルへの保存として扱う",
+            raw
+        );
+        ScreenshotDestination::default()
+    }))
+}
+
 // 範囲外の品質が書かれていても、設定全体を失わせない。u8 のまま読むと
 // jpeg_quality = 256 のような値でパースがファイル単位で失敗し、品質と
 // 無関係な項目まで既定値へ戻ってしまう。TOML の整数は i64 なので、
@@ -442,6 +496,17 @@ where
         warn!("設定の音量 {} は範囲外なので {} として扱う", raw, clamped);
     }
     Ok(clamped)
+}
+
+// 設定ファイルに書かれた文字列から出力先を決める。
+// 解釈できない場合は None を返す。
+fn screenshot_destination_from_str(raw: &str) -> Option<ScreenshotDestination> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "file" => Some(ScreenshotDestination::File),
+        "clipboard" => Some(ScreenshotDestination::Clipboard),
+        "both" => Some(ScreenshotDestination::Both),
+        _ => None,
+    }
 }
 
 // 設定ファイルに書かれた文字列から保存形式を決める。
@@ -561,6 +626,8 @@ impl Default for AudioSettings {
 impl Default for ScreenshotSettings {
     fn default() -> Self {
         Self {
+            // 既定はファイルへの保存だけ。これまでの挙動をそのまま既定にする
+            destination: ScreenshotDestination::File,
             save_folder: default_screenshot_folder(),
             format: ScreenshotFormat::Jpeg,
             // image クレートの save() は JpegEncoder::new を通るため、
@@ -883,6 +950,7 @@ channels = 1
 passthrough_enabled = false
 
 [screenshot]
+destination = "both"
 save_folder = 'C:\shots'
 format = "png"
 jpeg_quality = 60
@@ -1199,6 +1267,7 @@ volume = 80.0
         assert_eq!(restored.audio.sample_rate, Some(44100));
         assert_eq!(restored.audio.channels, Some(1));
         assert!(!restored.audio.passthrough_enabled);
+        assert_eq!(restored.screenshot.destination, ScreenshotDestination::Both);
         assert_eq!(restored.screenshot.save_folder, PathBuf::from(r"C:\shots"));
         assert_eq!(restored.screenshot.format, ScreenshotFormat::Png);
         assert_eq!(restored.screenshot.jpeg_quality, 60);
@@ -1650,6 +1719,71 @@ volume = 80.0
 
         assert_eq!(settings.screenshot.jpeg_quality, 90);
         assert_eq!(settings.screenshot.format, ScreenshotFormat::Png);
+    }
+
+    #[test]
+    fn app_settings_missing_destination_key_defaults_to_file() {
+        // 出力先を足す前の版が書いた設定ファイル。これまでどおりファイルへ
+        // 保存され、他の項目も保持されなければならない
+        let config = without_key(FULL_CONFIG, "destination");
+        assert!(
+            !config.contains("destination ="),
+            "テスト用の設定から destination が消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("destination が欠けていても読めなければならない");
+
+        assert_eq!(settings.screenshot.destination, ScreenshotDestination::File);
+        assert_eq!(settings.screenshot.format, ScreenshotFormat::Png);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_unknown_destination_value_falls_back_to_file_without_losing_settings() {
+        // 手で書き換えて綴りを誤った場合。出力先だけが既定へ倒れ、
+        // 無関係な項目は保持されなければならない
+        let config = FULL_CONFIG.replace(r#"destination = "both""#, r#"destination = "printer""#);
+        assert!(config.contains(r#"destination = "printer""#));
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("知らない出力先でも読めなければならない");
+
+        assert_eq!(settings.screenshot.destination, ScreenshotDestination::File);
+        assert_eq!(settings.screenshot.jpeg_quality, 60);
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn screenshot_destination_from_str_accepts_known_spellings() {
+        assert_eq!(
+            screenshot_destination_from_str("file"),
+            Some(ScreenshotDestination::File)
+        );
+        assert_eq!(
+            screenshot_destination_from_str("CLIPBOARD"),
+            Some(ScreenshotDestination::Clipboard)
+        );
+        assert_eq!(
+            screenshot_destination_from_str(" both "),
+            Some(ScreenshotDestination::Both)
+        );
+        assert_eq!(screenshot_destination_from_str(""), None);
+        assert_eq!(screenshot_destination_from_str("files"), None);
+    }
+
+    #[test]
+    fn screenshot_destination_flags_match_each_variant() {
+        // 出力先ごとに「何をするか」の判定。両方のときは 2 つとも true になる
+        assert!(ScreenshotDestination::File.saves_file());
+        assert!(!ScreenshotDestination::File.copies_to_clipboard());
+
+        assert!(!ScreenshotDestination::Clipboard.saves_file());
+        assert!(ScreenshotDestination::Clipboard.copies_to_clipboard());
+
+        assert!(ScreenshotDestination::Both.saves_file());
+        assert!(ScreenshotDestination::Both.copies_to_clipboard());
     }
 
     #[test]

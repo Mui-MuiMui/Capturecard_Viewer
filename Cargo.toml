@@ -31,6 +31,9 @@ rodio = "0.17"
 dirs = "5.0"
 rfd = "0.11"
 ringbuf = "0.3"
+# スクリーンショットをクリップボードへコピーする。egui-winit が既に同じ版を
+# 使っているため、クレート自体は増えない（image-data フィーチャの分だけ増える）
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 
 # テスト専用。設定の TOML を直接読み書きして検証するため
 [dev-dependencies]
