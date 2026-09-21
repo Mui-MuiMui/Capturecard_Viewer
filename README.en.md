@@ -68,7 +68,7 @@ You can silence the output without dropping the volume to 0%. The volume value i
 
 ### Hotkeys
 
-The settings window → **screenshot settings** tab → ホットキー (Hotkeys) lets you assign a key to each of the following actions. **They work while other applications have focus.**
+The settings window → **ホットキー (Hotkeys) tab** lets you assign a key to each of the following actions. **They work while other applications have focus.**
 
 | Action | Description | Default |
 |---|---|---|
@@ -103,8 +103,9 @@ Turning on "情報表示" (Show stats) in the context menu overlays the followin
 1. Right-click → "詳細設定..." (Advanced settings) to open the settings window.
 2. Select video and audio devices in the **device settings** tab.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
-3. Configure the destination, save location, file format, sound effect, and the per-action hotkeys in the **screenshot settings** tab.
-4. Export, import or reset the settings in the **その他 (Other)** tab.
+3. Configure the destination, save location, file format, and sound effect in the **screenshot settings** tab.
+4. Configure the per-action hotkeys in the **ホットキー (Hotkeys)** tab.
+5. Export, import or reset the settings in the **その他 (Other)** tab.
 
 Edits in the settings window are kept as a draft and do not affect the running application until you press a button.
 

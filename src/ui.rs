@@ -155,6 +155,7 @@ fn link_status_badge(status: &LinkStatus) -> (String, NoticeKind) {
 
 /// 設定ダイアログのタブ。
 ///
+/// 並びはデバイス設定 / スクリーンショット設定 / ホットキー / その他 / 接続状態。
 /// 「接続状態」を最後に置き、既定は「デバイス設定」のままにしてある。
 /// ダイアログを開く主な目的は設定の変更で、状態の確認は調べたいときだけ
 /// だからで、先頭に置くと毎回そこを通ることになる。
@@ -163,6 +164,10 @@ pub enum SettingsTab {
     #[default]
     Device,
     Screenshot,
+    /// ホットキーの一覧と割り当て。以前はスクリーンショット設定タブの中にあったが、
+    /// フルスクリーン切替や音量操作などスクリーンショット以外のアクションも
+    /// 増えたため、タブ名と内容を合わせて独立させた
+    Hotkeys,
     /// 設定の書き出し・読み込み・初期化
     Other,
     /// 映像と音声が実際に何へ繋がっているか、直近の失敗は何か
@@ -854,6 +859,7 @@ pub fn show_settings_dialog(
                     SettingsTab::Screenshot,
                     "スクリーンショット設定",
                 );
+                ui.selectable_value(selected_tab, SettingsTab::Hotkeys, "ホットキー");
                 ui.selectable_value(selected_tab, SettingsTab::Other, "その他");
                 ui.selectable_value(selected_tab, SettingsTab::Status, "接続状態");
             });
@@ -869,16 +875,17 @@ pub fn show_settings_dialog(
                     devices,
                 ),
                 SettingsTab::Screenshot => {
-                    if show_screenshot_settings_tab(
-                        ui,
-                        draft,
-                        show_hotkey_dialog,
-                        hotkey_capture,
-                        hotkey_errors,
-                    ) {
+                    if show_screenshot_settings_tab(ui, draft) {
                         button = SettingsDialogAction::TestSound;
                     }
                 }
+                SettingsTab::Hotkeys => show_hotkey_settings_tab(
+                    ui,
+                    draft,
+                    show_hotkey_dialog,
+                    hotkey_capture,
+                    hotkey_errors,
+                ),
                 SettingsTab::Other => {
                     let requested = show_other_tab(ui, management_message.as_ref(), reset_confirm);
                     if requested != SettingsDialogAction::None {
@@ -1815,13 +1822,7 @@ fn show_link_status(ui: &mut egui::Ui, title: &str, status: &LinkStatus) {
 ///
 /// 効果音の再生はダイアログの仕事ではないので、ここでは鳴らさずに
 /// イベントとして上へ返す（`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
-fn show_screenshot_settings_tab(
-    ui: &mut egui::Ui,
-    settings: &mut AppSettings,
-    show_hotkey_dialog: &mut bool,
-    capture: &mut HotkeyCaptureState,
-    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
-) -> bool {
+fn show_screenshot_settings_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
     ui.heading("スクリーンショット設定");
     ui.add_space(10.0);
 
@@ -1982,12 +1983,26 @@ fn show_screenshot_settings_tab(
         }
     });
 
-    ui.add_space(15.0);
-
-    // ホットキー設定
-    show_hotkey_assignments(ui, settings, show_hotkey_dialog, capture, hotkey_errors);
-
     test_sound_requested
+}
+
+/// 「ホットキー」タブを描く。
+///
+/// 以前はスクリーンショット設定タブの一部だったが、フルスクリーン切替や
+/// 音量操作などスクリーンショット以外のアクションも並ぶため、タブ名と
+/// 内容が合っていなかった。一覧の描画自体は `show_hotkey_assignments` を
+/// そのまま使う。
+fn show_hotkey_settings_tab(
+    ui: &mut egui::Ui,
+    settings: &mut AppSettings,
+    show_hotkey_dialog: &mut bool,
+    capture: &mut HotkeyCaptureState,
+    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
+) {
+    ui.heading("ホットキー設定");
+    ui.add_space(10.0);
+
+    show_hotkey_assignments(ui, settings, show_hotkey_dialog, capture, hotkey_errors);
 }
 
 /// アクションごとのホットキー割り当ての一覧を描く。
