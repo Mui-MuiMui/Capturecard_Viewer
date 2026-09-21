@@ -247,6 +247,14 @@ const VIDEO_SIGNAL_TIMEOUT: Duration = Duration::from_secs(3);
 /// ため、下限を置いて毎フレーム開き直さないようにする。
 const AUDIO_ERROR_RECONNECT_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
+/// 「既定のデバイス」を追いかけるために、Windows 側の既定デバイス名を
+/// 確認する間隔。
+///
+/// `default_input_device()` / `default_output_device()` は COM 呼び出しを
+/// 伴うため、毎フレームは避ける（#135）。5 秒キャッシュの `cached_*_devices`
+/// と違って設定ダイアログの開閉に関係なく動かす必要があるので、別のタイマーを持つ。
+const DEFAULT_AUDIO_DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(4);
+
 /// 連続 `attempt` 回失敗したあとに待つ時間を返す。
 ///
 /// `CONNECT_BACKOFF_BASE` から倍々に伸ばし、`CONNECT_BACKOFF_MAX` で頭打ちにする。
@@ -420,6 +428,41 @@ fn should_resync_audio_after_video(
         return false;
     }
     !audio_connected || audio_retry_active
+}
+
+/// 「既定のデバイス」設定を追いかけている 1 方向（入力または出力）について、
+/// Windows 側の既定が実際に切り替わったかを判定する。
+///
+/// `configured` は設定に書かれたデバイス名で、`None` が「既定のデバイス」を
+/// 表す。`opened` はいま実際に開いている名前（`audio::ActiveAudio` の
+/// 該当フィールド）、`current_default` は今回問い合わせた Windows 側の
+/// 既定デバイス名。
+///
+/// **明示的にデバイスを選んでいる場合（`configured` が `Some`）は常に
+/// `false`。** 既定の切り替えを追う話であって、設定のデバイスを Windows の
+/// 既定へ倒す話ではない（「音声は繋がらなくても別のデバイスへ倒さない」を参照）。
+/// `current_default` が取れなかった場合（`None`）も判定を保留する。
+fn default_audio_device_changed(
+    configured: Option<&str>,
+    opened: &str,
+    current_default: Option<&str>,
+) -> bool {
+    if configured.is_some() {
+        return false;
+    }
+    match current_default {
+        Some(name) => name != opened,
+        None => false,
+    }
+}
+
+/// Windows 側の既定デバイス名を確認してよい時刻が来ているかを判定する。
+/// `elapsed` は前回確認してからの経過時間で、`None` は「一度も確認していない」を表す。
+fn should_poll_default_audio_device(elapsed: Option<Duration>) -> bool {
+    match elapsed {
+        None => true,
+        Some(elapsed) => elapsed >= DEFAULT_AUDIO_DEVICE_POLL_INTERVAL,
+    }
 }
 
 /// 映像が出ていないときに画面へ出す文言を決める。
@@ -744,6 +787,11 @@ pub struct CaptureCardViewer {
     cached_output_devices: Vec<String>,
     last_device_list_update: Option<Instant>,
 
+    // 「既定のデバイス」設定（音声）が Windows 側の既定切り替えに
+    // 追従しているかを確認した最後の時刻。設定ダイアログの開閉に関係なく
+    // 動くので、`last_device_list_update` とは別に持つ
+    last_default_audio_check: Option<Instant>,
+
     // ウィンドウ管理
     always_on_top: bool,
     // タイトルバーと枠を消しているか。設定の ui.borderless と対応する。
@@ -849,6 +897,7 @@ impl Default for CaptureCardViewer {
             cached_input_devices: Vec::new(),
             cached_output_devices: Vec::new(),
             last_device_list_update: None,
+            last_default_audio_check: None,
 
             // ウィンドウ管理
             always_on_top: false,
@@ -866,6 +915,19 @@ impl Default for CaptureCardViewer {
                         s.video.device_name = Some(name.clone());
                     }
                 }
+                // **入力デバイスは出力と違い、未設定のままにしない。** 出力の
+                // 既定は「スピーカー」でまず無害だが、入力の既定は環境依存
+                // （ノート PC ならほぼ確実に内蔵マイク）で、パススルーが
+                // そのままマイクの音をスピーカーへ流してしまう。#134（PR #147）
+                // で切断時に同じことが起きる不具合を直したばかりで、初回起動で
+                // 同じ誤動作を起こすわけにいかない。列挙した先頭のデバイスへ
+                // 書き換えて確定させる。
+                //
+                // この結果、入力側の「既定のデバイス」追従（poll_default_audio_device
+                // の track_input）は、設定ファイルを手で編集して
+                // input_device_name を消した場合にだけ効く。設定画面の
+                // コンボボックスに「デフォルト」の選択肢を足すかどうかは
+                // 別 Issue で判断する
                 if s.audio.input_device_name.is_none() {
                     let ac = AudioCapture::new();
                     let list = ac.list_input_devices();
@@ -983,6 +1045,10 @@ impl eframe::App for CaptureCardViewer {
         // フレームの途絶と音声ストリームのエラーを見て、必要なら開き直しを要求する。
         // 実際に開くのは次のフレームの poll_device_connection
         self.monitor_device_health();
+
+        // 「既定のデバイス」設定が Windows 側の既定切り替えに追従しているかを
+        // 確認する。設定ダイアログの開閉に関係なく、数秒おきに動く
+        self.poll_default_audio_device();
 
         // グローバルホットキーを処理
         self.handle_hotkeys(ctx);
@@ -2993,6 +3059,121 @@ impl CaptureCardViewer {
         self.last_audio_device = None;
         self.audio_retry.request_now(target);
         info!("音声デバイスの再接続を要求した");
+    }
+
+    /// 「既定のデバイス」設定（入力・出力のどちらか、または両方）が、
+    /// Windows 側の既定切り替えに追従しているかを確認する。`update()` から
+    /// 毎フレーム呼ぶが、内部でタイマーを見て `DEFAULT_AUDIO_DEVICE_POLL_INTERVAL`
+    /// おきにしか動かない（#135）。
+    ///
+    /// cpal は WASAPI の `IMMNotificationClient` を公開しておらず、既定
+    /// デバイスの切り替えを通知では受け取れない。`default_input_device()` /
+    /// `default_output_device()` を都度問い合わせて名前を突き合わせるしかなく、
+    /// この呼び出しは COM を伴うため毎フレームは避ける。
+    ///
+    /// **既存の 5 秒キャッシュ（`update_cached_device_lists`）には相乗りしない。**
+    /// あちらは設定ダイアログを描画している間しか呼ばれないため、閉じている間は
+    /// 既定の切り替えに気付けなくなる。
+    ///
+    /// 判定そのものは純粋関数 `default_audio_device_changed` に切り出してある。
+    fn poll_default_audio_device(&mut self) {
+        let elapsed = self.last_default_audio_check.map(|last| last.elapsed());
+        if !should_poll_default_audio_device(elapsed) {
+            return;
+        }
+        self.last_default_audio_check = Some(Instant::now());
+
+        // 既に音声の再接続を追いかけている最中なら何もしない。ストリームの
+        // エラーコールバックや映像復帰による再接続と要求が重なるのを防ぐための
+        // もので、`ConnectRetry` に「同じ対象なら要求を積み直さない」仕組みが
+        // 既にあるが、ここでは対象を確定させる前に丸ごと見送る
+        if self.audio_retry.is_active() {
+            return;
+        }
+
+        let settings = match self.settings.lock() {
+            Ok(settings) => settings.clone(),
+            Err(_) => {
+                warn!("既定音声デバイスの監視で settings のロックを取得できない");
+                return;
+            }
+        };
+        let track_input = settings.audio.input_device_name.is_none();
+        let track_output = settings.audio.output_device_name.is_none();
+        if !track_input && !track_output {
+            // 入出力とも明示的にデバイスを選んでいるので、追いかける対象が無い
+            return;
+        }
+
+        let Ok(audio) = self.audio_capture.lock() else {
+            warn!("既定音声デバイスの監視で audio_capture のロックを取得できない");
+            return;
+        };
+        // まだ何も開けていない（起動直後・再接続中）なら、開いた時点の名前が
+        // 無いので比べようがない。poll_device_connection の担当
+        let Some(active) = audio.active() else {
+            return;
+        };
+        let current_input = if track_input {
+            audio.default_input_device_name()
+        } else {
+            None
+        };
+        let current_output = if track_output {
+            audio.default_output_device_name()
+        } else {
+            None
+        };
+        drop(audio);
+
+        let input_switched = track_input
+            && default_audio_device_changed(
+                settings.audio.input_device_name.as_deref(),
+                &active.input_device,
+                current_input.as_deref(),
+            );
+        let output_switched = track_output
+            && default_audio_device_changed(
+                settings.audio.output_device_name.as_deref(),
+                &active.output_device,
+                current_output.as_deref(),
+            );
+        if !input_switched && !output_switched {
+            return;
+        }
+
+        info!(
+            "Windows 側の既定音声デバイスが切り替わったので再接続する（入力: {}, 出力: {}）",
+            input_switched, output_switched
+        );
+
+        // 「既定のデバイス」のキャッシュキーは切り替わっても同じ文字列
+        // （`DEFAULT_DEVICE_KEY`）のままなので、古い物理デバイスの対応設定が
+        // 残ってしまう。取り直さないと、新しい既定デバイスが対応しない
+        // サンプリングレートやチャンネル数のまま開こうとしうる。
+        // 接続に失敗したときの取り直し（`try_connect_audio`）と同じ扱い
+        if input_switched {
+            self.settings_dialog
+                .audio_input_capabilities_mut()
+                .retry(&audio::cache_key(None));
+        }
+        if output_switched {
+            self.settings_dialog
+                .audio_output_capabilities_mut()
+                .retry(&audio::cache_key(None));
+        }
+        self.dispatch_capability_requests();
+
+        match self.audio_capture.lock() {
+            Ok(mut audio) => audio.stop_capture(),
+            Err(_) => {
+                warn!("既定音声デバイスの再接続で audio_capture のロックを取得できない");
+                return;
+            }
+        }
+        self.last_audio_device = None;
+        self.last_audio_output = None;
+        self.audio_retry.request_now(audio_target(&settings));
     }
 
     /// 映像デバイスへの接続を 1 回だけ試す。
@@ -5053,6 +5234,74 @@ mod tests {
     fn should_resync_audio_after_video_when_audio_is_healthy_returns_false() {
         // 音声が別のデバイス（マイクなど）で無事なら触らない
         assert!(!should_resync_audio_after_video(true, true, false));
+    }
+
+    #[test]
+    fn default_audio_device_changed_explicit_device_returns_false() {
+        // 明示的にデバイスを選んでいる向きは、既定が変わっても関係ない
+        assert!(!default_audio_device_changed(
+            Some("USB マイク"),
+            "USB マイク",
+            Some("別のマイク")
+        ));
+    }
+
+    #[test]
+    fn default_audio_device_changed_same_name_returns_false() {
+        // 開いている名前と Windows 側の既定が一致していれば追従済み
+        assert!(!default_audio_device_changed(
+            None,
+            "スピーカー (Realtek)",
+            Some("スピーカー (Realtek)")
+        ));
+    }
+
+    #[test]
+    fn default_audio_device_changed_different_name_returns_true() {
+        // Windows 側で既定が切り替わり、開いている名前と食い違っている
+        assert!(default_audio_device_changed(
+            None,
+            "スピーカー (Realtek)",
+            Some("ヘッドセット (USB)")
+        ));
+    }
+
+    #[test]
+    fn default_audio_device_changed_current_default_unknown_returns_false() {
+        // 既定デバイスの問い合わせ自体に失敗した場合は判定を保留する
+        assert!(!default_audio_device_changed(
+            None,
+            "スピーカー (Realtek)",
+            None
+        ));
+    }
+
+    #[test]
+    fn should_poll_default_audio_device_never_checked_returns_true() {
+        // 一度も確認していない状態では必ず確認する
+        assert!(should_poll_default_audio_device(None));
+    }
+
+    #[test]
+    fn should_poll_default_audio_device_just_before_interval_returns_false() {
+        assert!(!should_poll_default_audio_device(Some(
+            Duration::from_millis(3999)
+        )));
+    }
+
+    #[test]
+    fn should_poll_default_audio_device_at_interval_returns_true() {
+        // 境界。ちょうど 4000ms で確認する
+        assert!(should_poll_default_audio_device(Some(
+            Duration::from_millis(4000)
+        )));
+    }
+
+    #[test]
+    fn should_poll_default_audio_device_long_after_interval_returns_true() {
+        assert!(should_poll_default_audio_device(Some(Duration::from_secs(
+            3600
+        ))));
     }
 
     #[test]
