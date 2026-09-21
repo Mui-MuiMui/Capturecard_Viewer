@@ -700,15 +700,6 @@ pub struct CaptureCardViewer {
     // `take_stream_error` は読んだ時点で旗を下ろすため、見送ったエラーを
     // ここへ移しておかないと、そのまま音が戻らなくなる
     audio_stream_error_pending: bool,
-    // ホットキー入力ダイアログで編集中の内容。
-    // 確定した文字列で、まだ設定（ドラフトまたは共有設定）へ書いていないもの
-    temp_hotkey: String,
-    // `temp_hotkey` がどのアクションのものか。
-    //
-    // 入力ダイアログはモーダルではないので、開いたまま一覧の別の行の
-    // 「設定...」を押せる。編集対象が変わったことをここで検出して
-    // `temp_hotkey` を捨てないと、前のアクションのキーが残ったまま確定する
-    temp_hotkey_action: Option<HotkeyAction>,
     // 最後に適用した実行時パラメータ（差分ベースの再起動回避用）
     last_video_device: Option<String>,
     last_video_res: Option<(u32, u32)>,
@@ -837,8 +828,6 @@ impl Default for CaptureCardViewer {
             video_capturing: false,
             last_audio_error_reconnect: None,
             audio_stream_error_pending: false,
-            temp_hotkey: String::new(),
-            temp_hotkey_action: None,
             last_video_device: None,
             last_video_res: None,
             last_video_format: None,
@@ -944,6 +933,11 @@ impl Default for CaptureCardViewer {
 
 impl eframe::App for CaptureCardViewer {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ホットキー入力ダイアログの開閉を検出するため、このフレームに入る前の
+        // 状態を控えておく。設定ダイアログの描画（一覧の「設定...」）で
+        // `show_hotkey_dialog` が変わるより前に取る必要がある
+        let hotkey_dialog_was_open = self.show_hotkey_dialog;
+
         // 再描画の窓口を Context と結びつける。2 回目以降は何もしない。
         // **デバイスを開くより先に済ませること。** 開いたあとだと、
         // 最初のフレームの到着を知らせる先が無い
@@ -1097,6 +1091,13 @@ impl eframe::App for CaptureCardViewer {
             self.dispatch_capability_requests();
         }
 
+        // ホットキー入力ダイアログを開いた最初のフレームで、グローバルホットキーを
+        // 一時解除する。**ダイアログの描画より前に行う。** こうしないと、開いた
+        // 最初のフレームで押されたキーがグローバルホットキーとしても実行されうる
+        if self.show_hotkey_dialog && !hotkey_dialog_was_open {
+            self.hotkey_manager.pause();
+        }
+
         // ホットキーキャプチャダイアログ
         if self.show_hotkey_dialog {
             // どのアクションを編集しているかは、一覧の「設定...」が
@@ -1109,81 +1110,80 @@ impl eframe::App for CaptureCardViewer {
                 .editing()
                 .unwrap_or(HotkeyAction::Screenshot);
 
-            // 編集対象が変わったら、前のアクションで見せていた値を捨てる。
-            //
-            // ホットキー入力ダイアログはモーダルではないため、開いたまま
-            // 一覧の別の行の「設定...」を押せる。捨てないと、前のアクションの
-            // キーが表示に残ったまま OK で確定し、押した覚えのないキーが
-            // 新しいアクションへ入る
-            if self.temp_hotkey_action != Some(action) {
-                self.temp_hotkey_action = Some(action);
-                self.temp_hotkey.clear();
-            }
-
-            // ダイアログが開かれた時に現在の設定値をtemp_hotkeyに設定。
-            // 設定ダイアログから開かれた場合は、編集中のドラフトの値を見せる
-            if self.temp_hotkey.is_empty() {
-                let current = match self.settings_dialog.draft() {
-                    Some(draft) => draft.hotkey(action).map(str::to_string),
-                    None => self
-                        .settings
-                        .lock()
-                        .ok()
-                        .and_then(|settings| settings.hotkey(action).map(str::to_string)),
-                };
-                self.temp_hotkey = current.unwrap_or_default();
-            }
+            // 重複判定に使う現在の割り当て一覧。設定ダイアログから開かれている
+            // 場合はドラフトを、そうでなければ共有設定を見る（一覧の表示と
+            // 同じ基準に揃える）
+            let existing_hotkeys = match self.settings_dialog.draft() {
+                Some(draft) => draft.hotkeys.clone(),
+                None => self
+                    .settings
+                    .lock()
+                    .map(|settings| settings.hotkeys.clone())
+                    .unwrap_or_default(),
+            };
 
             let outcome = ui::show_hotkey_capture_dialog(
                 ctx,
                 &mut self.show_hotkey_dialog,
                 action,
-                &mut self.temp_hotkey,
+                &existing_hotkeys,
                 self.settings_dialog.hotkey_capture_mut(),
             );
 
-            // 確定またはクリアされた場合、設定を更新。
-            // クリアは「ホットキーを使わない」という明示の指定なので、
-            // 確定と同じ経路で `None` を書き込む
-            let new_hotkey = match outcome {
-                ui::HotkeyDialogOutcome::None => None,
-                ui::HotkeyDialogOutcome::Captured if self.temp_hotkey.is_empty() => None,
-                ui::HotkeyDialogOutcome::Captured => Some(Some(self.temp_hotkey.clone())),
-                ui::HotkeyDialogOutcome::Cleared => Some(None),
-            };
+            if let ui::HotkeyDialogOutcome::Captured(candidate) = outcome {
+                // 一時停止で自分自身の登録は解除済みなので、ここでの試し登録が
+                // 自分の他のアクションと衝突することはない。他のアプリが既に
+                // 使っているキー（F12 など）だけを弾ける
+                match self.hotkey_manager.try_register(&candidate) {
+                    Ok(()) => {
+                        debug!("{} に {} を割り当てた", action.label(), candidate);
 
-            if let Some(hotkey) = new_hotkey {
-                // 設定ダイアログから開かれている場合はドラフトへ書く。
-                // 共有設定へ直接書くと、ダイアログの OK がドラフトの古い値で
-                // 上書きして、設定したホットキーが消える
-                let wrote_to_draft = match self.settings_dialog.draft_mut() {
-                    Some(draft) => {
-                        draft.set_hotkey(action, hotkey.clone());
-                        true
-                    }
-                    None => false,
-                };
+                        // 設定ダイアログから開かれている場合はドラフトへ書く。
+                        // 共有設定へ直接書くと、ダイアログの OK がドラフトの古い値で
+                        // 上書きして、設定したホットキーが消える
+                        let wrote_to_draft = match self.settings_dialog.draft_mut() {
+                            Some(draft) => {
+                                draft.set_hotkey(action, Some(candidate.clone()));
+                                true
+                            }
+                            None => false,
+                        };
 
-                if !wrote_to_draft {
-                    // 設定ダイアログが閉じられた状態でホットキーだけ確定した場合。
-                    // ドラフトが無いので共有設定へ直接書き、その場で登録（解除）する
-                    if let Ok(mut settings) = self.settings.lock() {
-                        settings.set_hotkey(action, hotkey.clone());
+                        if !wrote_to_draft {
+                            // 設定ダイアログが閉じられた状態でホットキーだけ確定した場合。
+                            // ドラフトが無いので共有設定へ直接書く。実際の登録は
+                            // ダイアログが閉じたあとの再開（resume）で行う
+                            if let Ok(mut settings) = self.settings.lock() {
+                                settings.set_hotkey(action, Some(candidate));
+                            }
+                            self.mark_settings_dirty();
+                        }
+                        // ドラフトへ書いた場合はここで登録しない。登録すると、
+                        // 2 秒ごとの apply_settings が共有設定側の古いホットキーを
+                        // 見て登録し直し、「適用」も押していないのに効いたり
+                        // 戻ったりする。実際の登録は「適用」か「OK」で行う
                     }
-                    self.mark_settings_dirty();
-                    self.apply_hotkeys_now();
+                    Err(reason) => {
+                        warn!(
+                            "{} に {} を割り当てられない: {}",
+                            action.label(),
+                            candidate,
+                            reason
+                        );
+                        // 閉じずにダイアログを開き直し、理由を表示する
+                        self.show_hotkey_dialog = true;
+                        self.settings_dialog
+                            .hotkey_capture_mut()
+                            .set_rejection(reason);
+                    }
                 }
-                // ドラフトへ書いた場合はここで登録しない。
-                // 登録すると、2 秒ごとの apply_settings が共有設定側の古い
-                // ホットキーを見て登録し直し、「適用」も押していないのに
-                // 効いたり戻ったりする。実際の登録は「適用」か「OK」で行う
             }
+        }
 
-            // ダイアログが閉じられた時にtemp_hotkeyをクリア
-            if !self.show_hotkey_dialog {
-                self.temp_hotkey.clear();
-                self.temp_hotkey_action = None;
-            }
+        // ホットキー入力ダイアログを閉じたフレームで、一時解除していた
+        // グローバルホットキーを登録し直す
+        if !self.show_hotkey_dialog && hotkey_dialog_was_open {
+            self.resume_hotkeys_after_capture();
         }
 
         // コンテキストメニュー
@@ -3405,33 +3405,39 @@ impl CaptureCardViewer {
         }
     }
 
-    /// 共有設定のホットキー割り当てを、その場で登録し直す。
-    ///
-    /// 2 秒ごとの `apply_settings` を待たずに反映したい経路（設定ダイアログを
-    /// 閉じた状態でホットキー入力ダイアログだけを操作した場合）で使う。
-    fn apply_hotkeys_now(&mut self) {
-        // 登録はデバイスを開くような重い処理ではないが、`apply` の中で
-        // ログを出すため settings のロックは先に手放しておく
-        let desired = match self.settings.lock() {
-            Ok(settings) => settings.hotkeys.clone(),
-            Err(_) => {
-                warn!("ホットキーの適用で settings のロックを取得できない");
-                return;
-            }
-        };
-        self.apply_hotkey_assignments(&desired);
-    }
-
     /// ホットキーの割り当てを登録し直し、失敗を画面へ出す。
     ///
     /// **`HotkeyManager::apply` を直接呼ばないこと。** 直接呼ぶと、失敗の
     /// 通知と、直ったときのエラー表示の取り下げが抜ける。
     fn apply_hotkey_assignments(&mut self, desired: &BTreeMap<HotkeyAction, String>) {
         self.hotkey_manager.apply(desired);
+        self.report_hotkey_errors();
+    }
 
-        // 登録できないものが残っているかは apply のあとにまとめて見る。
-        // 1 件ずつ通知すると、複数まとめて失敗したときにトーストが
-        // 上書きされて最後の 1 件しか読めない
+    /// ホットキー入力ダイアログを閉じたときに、一時解除していたホットキーを
+    /// 共有設定の内容で登録し直す。
+    ///
+    /// ダイアログを開いている間に確定した分は既に共有設定（またはドラフト）へ
+    /// 書き込まれているので、ここでは常に**共有設定**を見る。ドラフトへ
+    /// 書いた分（設定ダイアログが開いたままの場合）はまだ「適用」されていない
+    /// ので、共有設定には反映されておらず、ここでも登録し直されない。
+    /// 「適用」「OK」を押すまで効かない、という既存の約束どおりの挙動になる
+    fn resume_hotkeys_after_capture(&mut self) {
+        let desired = match self.settings.lock() {
+            Ok(settings) => settings.hotkeys.clone(),
+            Err(_) => {
+                warn!("ホットキーの再開で settings のロックを取得できない");
+                return;
+            }
+        };
+        self.hotkey_manager.resume(&desired);
+        self.report_hotkey_errors();
+    }
+
+    /// 登録できないものが残っているかを、いまの `hotkey_manager` の状態から
+    /// まとめて画面へ反映する。1 件ずつ通知すると、複数まとめて失敗したときに
+    /// トーストが上書きされて最後の 1 件しか読めない
+    fn report_hotkey_errors(&mut self) {
         let summary = hotkey_error_summary(self.hotkey_manager.errors());
         match summary {
             Some(reason) => self.report_error(ErrorSource::Hotkey, reason),

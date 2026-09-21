@@ -74,7 +74,7 @@ You can silence the output without dropping the volume to 0%. The volume value i
 
 ### Hotkeys
 
-The settings window → **screenshot settings** tab → ホットキー (Hotkeys) lets you assign a key to each of the following actions. **They work while other applications have focus.**
+The settings window → **ホットキー (Hotkeys) tab** lets you assign a key to each of the following actions. **They work while other applications have focus.**
 
 | Action | Description | Default |
 |---|---|---|
@@ -86,7 +86,10 @@ The settings window → **screenshot settings** tab → ホットキー (Hotkeys
 | 音量を下げる (Volume down) | Lowers the volume by 10% | unassigned |
 | ミュート切替 (Toggle mute) | Toggles mute on and off | unassigned |
 
-- Press 設定... (Set) on a row to capture a key, or クリア (Clear) to remove the assignment. Changes take effect when you press 適用 (Apply) or OK.
+- Press 設定... (Set) on a row to open the capture dialog. **It accepts a key the instant it opens: press anything other than a modifier key and it captures that combination and closes automatically.** There is no "start capturing" or OK button anymore. Use クリア (Clear) in the list to remove an assignment.
+- Global hotkeys are temporarily suspended while the dialog is open, so **you can capture a key that is already assigned to another action** — including reassigning the same key to the action you're currently editing.
+- If the key you pressed cannot be accepted, the dialog stays open and shows the reason in red: it was only modifier keys, it's already assigned to another action, or it conflicts with another application and could not be registered.
+- Changes take effect when you press 適用 (Apply) or OK.
 - A hotkey does exactly what the mouse does: changing the volume shows the volume bar at the bottom, toggling fullscreen shows the indicator at the top-left.
 - Assigning the same key to more than one action shows a warning. If you apply it anyway, only the action higher in the list stays active.
 - Keys already taken by another application cannot be registered. A notification appears and the reason is also listed below the table. Closing the other application makes the key work again without any action on your part.
@@ -109,8 +112,9 @@ Turning on 表示 (View) > "情報表示" (Show stats) in the context menu overl
 1. Right-click → "詳細設定..." (Advanced settings) to open the settings window.
 2. Select video and audio devices in the **device settings** tab.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
-3. Configure the destination, save location, file format, sound effect, and the per-action hotkeys in the **screenshot settings** tab.
-4. Manage presets, and export, import or reset the settings, in the **その他 (Other)** tab.
+3. Configure the destination, save location, file format, and sound effect in the **screenshot settings** tab.
+4. Configure the per-action hotkeys in the **ホットキー (Hotkeys)** tab.
+5. Manage presets, and export, import or reset the settings, in the **その他 (Other)** tab.
 
 Edits in the settings window are kept as a draft and do not affect the running application until you press a button.
 
@@ -241,7 +245,7 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 
 **Screenshot hotkey**
 
-- F12 cannot currently be used for screenshots. Registration fails due to a conflict with other software on the system. The reason is shown under the hotkey list in the settings window.
+- F12 cannot currently be used for screenshots. Registration fails due to a conflict with other software on the system. When registration fails, the reason is shown right in the hotkey capture dialog; if an already-applied key later conflicts, the reason is also shown under the hotkey list in the settings window.
 
 **Device connection at startup**
 
