@@ -109,7 +109,7 @@ capturecard_viewer.exe
 | `opt-level` | `3` | 速度優先 |
 | `lto` | `true` | リンク時最適化。ビルドは遅くなるがバイナリが小さく速くなる |
 | `codegen-units` | `1` | 最適化の質を上げる。ビルドは遅くなる |
-| `panic` | `"abort"` | 巻き戻しコードを省く。**`catch_unwind` が機能しなくなるため使わない**（`CLAUDE.md` の「catch_unwind は使わない」） |
+| `panic` | `"abort"` | 巻き戻しコードを省く。**`catch_unwind` が機能しなくなるため使わない**（`docs/design/logging.md` の「catch_unwind は使わない」） |
 
 release ビルドは `lto` と `codegen-units = 1` の影響で時間がかかる。反復作業には dev ビルドを使う。
 

@@ -52,7 +52,7 @@ Issue には `src/audio.rs:157` の形式で該当箇所が書かれている。
 
 ### 3. 影響範囲を洗い出す
 
-このリポジトリで特に見落としやすい観点。詳細は `CLAUDE.md` の「作業時の注意点」を参照。
+このリポジトリで特に見落としやすい観点。決まりは `GUARDRAIL.md`、その理由は `docs/design/` を参照。
 
 - **設定構造体に触るか** — `AppSettings` 配下にフィールドを足すなら `#[serde(default)]` が必須。付け忘れると既存ユーザーの設定が全消去される
 - **ロック順序に影響するか** — `settings` / `video_capture` / `audio_capture` / `screenshot_manager` の取得順。処理を別スレッドへ逃がす変更なら必ず検討する
