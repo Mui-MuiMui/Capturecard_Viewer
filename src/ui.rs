@@ -813,6 +813,13 @@ const SETTINGS_WINDOW_SCREEN_MARGIN: f32 = 40.0;
 /// 最低限操作できる大きさを確保する（内容はスクロールに任せる）
 const SETTINGS_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(320.0, 240.0);
 
+/// ホットキー入力ダイアログがこれより小さくなることはない。
+///
+/// 設定ダイアログの `SETTINGS_WINDOW_MIN_SIZE` と同じ考え方。中身が
+/// 見出し・バッジ・説明文・キャンセルボタンだけと小さいので、下限も
+/// それに合わせて小さくしてある
+const HOTKEY_CAPTURE_DIALOG_MIN_SIZE: egui::Vec2 = egui::vec2(260.0, 140.0);
+
 /// 設定ダイアログへ渡すデバイスの一覧。
 ///
 /// 3 本の借用を個別に渡していたが、引数が増えすぎたのでまとめた。
@@ -880,12 +887,17 @@ pub fn show_settings_dialog(
     let screen_rect = ctx.screen_rect();
     let max_size = (screen_rect.size() - egui::Vec2::splat(SETTINGS_WINDOW_SCREEN_MARGIN))
         .max(SETTINGS_WINDOW_MIN_SIZE);
+    // max_size は SETTINGS_WINDOW_MIN_SIZE との component-wise max で
+    // 作っているため、常に SETTINGS_WINDOW_MIN_SIZE 以上になる。
+    // min_size がこれを超えることはない
+    let min_size = SETTINGS_WINDOW_MIN_SIZE;
 
     egui::Window::new("設定")
         .open(show_settings)
         .default_size([650.0, 500.0])
         .resizable(true)
         .constrain_to(screen_rect)
+        .min_size(min_size)
         .max_size(max_size)
         .show(ctx, |ui| {
             // タブ選択
@@ -903,11 +915,36 @@ pub fn show_settings_dialog(
 
             ui.separator();
 
-            // ここでタブの中身を高さいっぱいに広げてしまうと、下の OK / キャンセル /
-            // 適用の行がスクロール領域の内側に入ってしまい、タブによっては
-            // ボタン列を見るためにスクロールが要る状態に戻ってしまう。
-            // `auto_shrink` で中身が少ないタブでは領域自体を縮め、ボタン列を
-            // 押し上げないようにする
+            // OK / キャンセル / 適用のボタン列を先に描く。egui は Ui の残り
+            // 領域を上から順に消費するだけなので、ScrollArea を先に描くと
+            // 「まだ描いていないボタン列の分」を差し引けず、ScrollArea が
+            // 残り全部を使い切ってボタン列がウィンドウの外へ押し出される。
+            // `TopBottomPanel::bottom` は呼んだ時点で自分の高さぶんを
+            // 親 Ui の下端から確保し、以降の ScrollArea が使える高さを
+            // 先に縮めてくれるので、コード上の見た目の順序とは逆に
+            // 「ボタン列 → タブの中身」の順で描く
+            egui::TopBottomPanel::bottom("settings_dialog_buttons").show_inside(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        button = SettingsDialogAction::Ok;
+                    }
+
+                    if ui.button("キャンセル").clicked() {
+                        button = SettingsDialogAction::Cancel;
+                    }
+
+                    if ui.button("適用").clicked() {
+                        button = SettingsDialogAction::Apply;
+                    }
+                });
+                ui.add_space(4.0);
+            });
+
+            // ここでタブの中身を高さいっぱいに広げてしまうと、上のボタン列の
+            // 予約が効いていても、タブによってはスクロール領域自体が必要
+            // 以上に大きく残る。`auto_shrink` で中身が少ないタブでは
+            // 領域自体を縮める
             egui::ScrollArea::vertical()
                 .auto_shrink([false, true])
                 .show(ui, |ui| match selected_tab {
@@ -944,23 +981,6 @@ pub fn show_settings_dialog(
                     }
                     SettingsTab::Status => show_status_tab(ui, connection),
                 });
-
-            ui.separator();
-
-            // OK、キャンセル、適用ボタン
-            ui.horizontal(|ui| {
-                if ui.button("OK").clicked() {
-                    button = SettingsDialogAction::Ok;
-                }
-
-                if ui.button("キャンセル").clicked() {
-                    button = SettingsDialogAction::Cancel;
-                }
-
-                if ui.button("適用").clicked() {
-                    button = SettingsDialogAction::Apply;
-                }
-            });
         });
 
     resolve_action(button, *show_settings)
@@ -2626,41 +2646,63 @@ pub fn show_hotkey_capture_dialog(
         HotkeyCaptureJudgement::Waiting => {}
     }
 
+    // 設定ダイアログと同じく、固定サイズだと極端に小さい画面で下端の
+    // 「キャンセル」が画面外へ出て押せなくなる（`fixed_size` は外側の
+    // 大きさを固定するだけで、`constrain_to` は位置しか動かさない）。
+    // `default_size` + 画面由来の `max_size` に変え、中身はスクロールできる
+    // ようにしておく
+    let screen_rect = ctx.screen_rect();
+    let max_size = (screen_rect.size() - egui::Vec2::splat(SETTINGS_WINDOW_SCREEN_MARGIN))
+        .max(HOTKEY_CAPTURE_DIALOG_MIN_SIZE);
+
     egui::Window::new("ホットキー設定")
         .open(show_dialog)
-        .fixed_size([360.0, 180.0])
+        .default_size([360.0, 180.0])
         .collapsible(false)
-        // 設定ダイアログと同じく、極端に小さい画面でも画面内に収める
-        .constrain_to(ctx.screen_rect())
+        .constrain_to(screen_rect)
+        .min_size(HOTKEY_CAPTURE_DIALOG_MIN_SIZE)
+        .max_size(max_size)
         .show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.heading(format!("ホットキー設定: {}", action.label()));
-                ui.add_space(10.0);
-
-                // 受け付けている最中であることを示すバッジ。失敗ではないので
-                // 注意ではなく、進行中を表す種別で出す
-                status_badge(
-                    ui,
-                    &format!("{} キー入力待機中...", NoticeKind::Success.symbol()),
-                    NoticeKind::Success,
-                );
-                ui.label(format!(
-                    "「{}」に割り当てるキーの組み合わせを押してください",
-                    action.label()
-                ));
-
-                if let Some(reason) = capture.rejection() {
-                    ui.add_space(10.0);
-                    notice_label(ui, NoticeKind::Error, reason.to_string());
-                }
-
-                ui.add_space(20.0);
-
-                if ui.button("キャンセル").clicked() {
-                    capture.reset();
-                    close_dialog = true;
-                }
+            // 「キャンセル」を先に確保する。理由は設定ダイアログの
+            // ボタン列と同じ（コード上の順序に関わらず、呼んだ時点で
+            // 親 Ui の下端から高さを確保するので、あとに続く ScrollArea が
+            // このぶんを押し出して隠すことがない）
+            egui::TopBottomPanel::bottom("hotkey_capture_dialog_buttons").show_inside(ui, |ui| {
+                ui.add_space(4.0);
+                ui.vertical_centered(|ui| {
+                    if ui.button("キャンセル").clicked() {
+                        capture.reset();
+                        close_dialog = true;
+                    }
+                });
+                ui.add_space(4.0);
             });
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.heading(format!("ホットキー設定: {}", action.label()));
+                        ui.add_space(10.0);
+
+                        // 受け付けている最中であることを示すバッジ。失敗ではないので
+                        // 注意ではなく、進行中を表す種別で出す
+                        status_badge(
+                            ui,
+                            &format!("{} キー入力待機中...", NoticeKind::Success.symbol()),
+                            NoticeKind::Success,
+                        );
+                        ui.label(format!(
+                            "「{}」に割り当てるキーの組み合わせを押してください",
+                            action.label()
+                        ));
+
+                        if let Some(reason) = capture.rejection() {
+                            ui.add_space(10.0);
+                            notice_label(ui, NoticeKind::Error, reason.to_string());
+                        }
+                    });
+                });
         });
 
     if close_dialog {

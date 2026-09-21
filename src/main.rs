@@ -1760,7 +1760,14 @@ impl CaptureCardViewer {
         let frame = egui::Frame::popup(&ctx.style());
         let (_, max_height) =
             context_menu_size_limits(ctx.screen_rect().size(), frame.inner_margin.sum());
-        let flat_height = estimate_flat_menu_height(&ctx.style().spacing);
+        // プリセットが 1 つでもあれば、平らな一覧に「プリセット」の行が
+        // 1 行増える（preset_submenu、詳細は estimate_flat_menu_height）
+        let has_presets = self
+            .settings
+            .lock()
+            .map(|settings| !settings.presets.is_empty())
+            .unwrap_or(false);
+        let flat_height = estimate_flat_menu_height(&ctx.style().spacing, has_presets);
         self.context_menu_layout = context_menu_layout(max_height, flat_height);
     }
 
@@ -2381,9 +2388,13 @@ enum MenuLayout {
 /// 行: 音量ラベル / 音量スライダー / ミュート / アスペクト比を維持 /
 /// 最前面表示 / フルスクリーン表示 / タイトルバーを隠す / 画面ドラッグ移動 /
 /// 情報表示 / デバイスの自動再接続 / ウィンドウサイズをリセット /
-/// デバイス再接続 / 詳細設定... / 終了 の 14 行。
+/// デバイス再接続 / 詳細設定... / 終了 の 14 行。**プリセットが 1 つでも
+/// あれば「プリセット」の行が 1 つ増える。** プリセットの有無は起動後にいつ
+/// 変わるか分からないため固定の行数には含めず、`estimate_flat_menu_height`
+/// の引数で足す。
 /// セパレータ: ミュートの下 / 自動再接続の下（ウィンドウサイズをリセットの上）/
-/// デバイス再接続の下 / 詳細設定の下 の 4 本。
+/// デバイス再接続の下 / 詳細設定の下 の 4 本。プリセットの行はセパレータを
+/// 増やさない（デバイス再接続の直後に挟まるだけ）。
 const FLAT_MENU_ROW_COUNT: usize = 14;
 const FLAT_MENU_SEPARATOR_COUNT: usize = 4;
 
@@ -2397,10 +2408,16 @@ const FLAT_MENU_SEPARATOR_COUNT: usize = 4;
 /// 見積もる。多少のずれは境界の判定に影響するだけで、実際に描画した
 /// ときにスクロールへ倒れる分には安全側（`context_menu_layout` 側で
 /// 境界を `Flat` 寄りにしてあるのはこのため）。
-fn estimate_flat_menu_height(spacing: &egui::style::Spacing) -> f32 {
+///
+/// `has_presets` はプリセットが 1 つ以上あるかどうか。あれば行数に 1 を
+/// 足す（`preset_submenu` が平らな一覧にも「プリセット」の行を描くため）。
+/// ここを固定 14 行のままにすると、プリセットがある状態でちょうど境界の
+/// 高さのとき、実際には収まらない `Flat` を選んでしまう
+fn estimate_flat_menu_height(spacing: &egui::style::Spacing, has_presets: bool) -> f32 {
+    let row_count = FLAT_MENU_ROW_COUNT + usize::from(has_presets);
     let row_height = spacing.interact_size.y + spacing.item_spacing.y;
     let separator_height = spacing.item_spacing.y * 2.0 + 1.0;
-    FLAT_MENU_ROW_COUNT as f32 * row_height + FLAT_MENU_SEPARATOR_COUNT as f32 * separator_height
+    row_count as f32 * row_height + FLAT_MENU_SEPARATOR_COUNT as f32 * separator_height
 }
 
 /// 右クリックメニューを平らな一覧にするかサブメニューへ折りたたむかを決める。
@@ -4604,7 +4621,7 @@ mod tests {
     #[test]
     fn estimate_flat_menu_height_with_default_style_is_positive() {
         let spacing = egui::Style::default().spacing;
-        assert!(estimate_flat_menu_height(&spacing) > 0.0);
+        assert!(estimate_flat_menu_height(&spacing, false) > 0.0);
     }
 
     #[test]
@@ -4612,12 +4629,42 @@ mod tests {
         // 行が高くなるほど見積もりも大きくなること。逆行すると、
         // フォントサイズを上げたときに折りたたみ判定が正しく働かなくなる
         let mut spacing = egui::Style::default().spacing;
-        let base = estimate_flat_menu_height(&spacing);
+        let base = estimate_flat_menu_height(&spacing, false);
 
         spacing.interact_size.y *= 2.0;
-        let taller = estimate_flat_menu_height(&spacing);
+        let taller = estimate_flat_menu_height(&spacing, false);
 
         assert!(taller > base);
+    }
+
+    #[test]
+    fn estimate_flat_menu_height_with_presets_adds_one_row() {
+        // プリセットがあると「プリセット」の行が 1 つ増える。ここが
+        // ずれると、プリセットがある状態でだけ折りたたみ判定を誤る
+        let spacing = egui::Style::default().spacing;
+        let without_presets = estimate_flat_menu_height(&spacing, false);
+        let with_presets = estimate_flat_menu_height(&spacing, true);
+
+        let row_height = spacing.interact_size.y + spacing.item_spacing.y;
+        assert!((with_presets - without_presets - row_height).abs() < 1e-3);
+    }
+
+    #[test]
+    fn context_menu_layout_presets_row_tips_the_boundary_to_collapsed() {
+        // プリセットが無ければちょうど収まる高さでも、プリセットの分だけ
+        // 見積もりが増えると収まらなくなり、Collapsed へ倒れる
+        let spacing = egui::Style::default().spacing;
+        let flat_without_presets = estimate_flat_menu_height(&spacing, false);
+        let flat_with_presets = estimate_flat_menu_height(&spacing, true);
+
+        assert_eq!(
+            context_menu_layout(flat_without_presets, flat_without_presets),
+            MenuLayout::Flat
+        );
+        assert_eq!(
+            context_menu_layout(flat_without_presets, flat_with_presets),
+            MenuLayout::Collapsed
+        );
     }
 
     #[test]
