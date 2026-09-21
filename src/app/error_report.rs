@@ -103,6 +103,9 @@ impl CaptureCardViewer {
                 active.output_device,
                 active.output_summary()
             ));
+            audio.details.extend(status::format_resample_status(
+                self.device_snapshot.audio_resample,
+            ));
         }
 
         ConnectionStatus { video, audio }
