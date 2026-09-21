@@ -89,6 +89,12 @@ const CONTEXT_MENU_HIT_MARGIN: f32 = 8.0;
 /// ホイールを回している間は回すたびに延びるので、これは「手を止めてから」の長さ
 const VOLUME_OSD_DURATION: Duration = Duration::from_millis(1500);
 
+/// プリセットを切り替えたときに OSD を出しておく時間。
+///
+/// 音量と同じ長さにしてある。どちらも「押した結果がこれで合っているか」を
+/// 確かめるための表示で、読み終わる前に消えても困るし、残り続けても邪魔になる
+const PRESET_OSD_DURATION: Duration = Duration::from_millis(1500);
+
 /// 音量の基準値。OSD のバーはこの位置に目盛りを引く
 const VOLUME_REFERENCE: f32 = 100.0;
 
@@ -1790,6 +1796,10 @@ impl CaptureCardViewer {
         ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
             self.view_submenu(ctx, ui, width, menu_rects);
             self.window_submenu(ctx, ui, width, menu_rects, close_menu);
+            // プリセットは映像と音声の取り込み方の切替なので、本来は下の
+            // 「デバイス再接続」に近い。それでも他のサブメニューと並べて
+            // あるのは、justified の並びから外すとボタンの幅が揃わないため
+            self.preset_submenu(ui, width, menu_rects, close_menu);
         });
 
         ui.separator();
@@ -1981,6 +1991,97 @@ impl CaptureCardViewer {
 
             menu_rects.push(ui.min_rect().expand(CONTEXT_MENU_HIT_MARGIN));
         });
+    }
+
+    /// 右クリックメニューの「プリセット」サブメニュー。
+    ///
+    /// **プリセットが 1 つも無いときは項目ごと出さない。** 押しても何も
+    /// 起きない空のサブメニューを見せるより、無いことが分かるほうがよい。
+    /// 作る場所は設定ダイアログの「その他」タブなので、ここには誘導を置かない。
+    ///
+    /// 選ぶとメニューを閉じる。デバイスを開き直すことがあり、結果は映像に
+    /// 出るため、メニューが被ったままでは確かめられない。
+    fn preset_submenu(
+        &mut self,
+        ui: &mut egui::Ui,
+        width: f32,
+        menu_rects: &mut Vec<egui::Rect>,
+        close_menu: &mut bool,
+    ) {
+        // 名前と選択状態はここで 1 度だけ読む。サブメニューの中で
+        // ロックを取ると、毎フレーム描画のたびに取り直すことになる
+        let (names, active) = match self.settings.lock() {
+            Ok(settings) => (
+                settings
+                    .presets
+                    .iter()
+                    .map(|preset| preset.name.clone())
+                    .collect::<Vec<_>>(),
+                settings::resolved_active_preset(&settings).map(str::to_string),
+            ),
+            Err(_) => {
+                warn!("プリセットの一覧で settings のロックを取得できない");
+                return;
+            }
+        };
+
+        if names.is_empty() {
+            return;
+        }
+
+        let mut selected: Option<String> = None;
+        ui.menu_button("プリセット  ⏵", |ui| {
+            ui.set_max_width(width);
+
+            for name in &names {
+                // 選択中のものにチェックを付ける。手で値を変えたあとは
+                // どれも選択中にならない（resolved_active_preset が None）
+                let is_active = active.as_deref() == Some(name.as_str());
+                if ui.selectable_label(is_active, name).clicked() {
+                    selected = Some(name.clone());
+                    ui.close_menu();
+                }
+            }
+
+            menu_rects.push(ui.min_rect().expand(CONTEXT_MENU_HIT_MARGIN));
+        });
+
+        if let Some(name) = selected {
+            self.apply_preset_by_name(&name);
+            *close_menu = true;
+        }
+    }
+
+    /// プリセットを実行中の設定へ適用する。
+    ///
+    /// 変わるのは `video` と `audio` だけ。デバイスを開き直すかどうかは
+    /// `apply_settings` の差分判定に任せるので、同じ内容のプリセットを
+    /// 選び直しても映像は途切れない。
+    fn apply_preset_by_name(&mut self, name: &str) {
+        // ロックはここで手放す。apply_settings が同じロックを取る
+        let applied = match self.settings.lock() {
+            Ok(mut settings) => settings.apply_preset(name),
+            Err(_) => {
+                warn!("プリセットの適用で settings のロックを取得できない");
+                return;
+            }
+        };
+
+        if !applied {
+            // 一覧を読んでから選ぶまでの間に消える経路は無いが、
+            // 名前で引いている以上は起こりうるものとして扱う
+            warn!("プリセット「{}」が見つからない", name);
+            return;
+        }
+
+        info!("プリセット「{}」へ切り替えた", name);
+        self.mark_settings_dirty();
+        self.apply_settings(false);
+        self.transient_overlay.show(
+            OverlayContent::Text(format!("プリセット: {}", name)),
+            PRESET_OSD_DURATION,
+            Instant::now(),
+        );
     }
 }
 
