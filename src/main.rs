@@ -915,15 +915,31 @@ impl Default for CaptureCardViewer {
                         s.video.device_name = Some(name.clone());
                     }
                 }
-                // 入力デバイスも出力と同じく未設定（None）のままにし、
-                // Windows の既定デバイスへ委ねる。
+                // **入力デバイスは出力と違い、未設定のままにしない。** 出力の
+                // 既定は「スピーカー」でまず無害だが、入力の既定は環境依存
+                // （ノート PC ならほぼ確実に内蔵マイク）で、パススルーが
+                // そのままマイクの音をスピーカーへ流してしまう。#134（PR #147）
+                // で切断時に同じことが起きる不具合を直したばかりで、初回起動で
+                // 同じ誤動作を起こすわけにいかない。列挙した先頭のデバイスへ
+                // 書き換えて確定させる。
                 //
-                // **以前は列挙した先頭のデバイスへ自動で書き換えていたが、やめた。**
-                // 直後の s.save() で確定値として保存されるため、次回起動時には
-                // 常に Some(...) になり、poll_default_audio_device の
-                // 「既定のデバイス」追従（track_input）が初回起動以降ずっと
-                // 効かなくなっていた（#135 のレビューで指摘）
+                // この結果、入力側の「既定のデバイス」追従（poll_default_audio_device
+                // の track_input）は、設定ファイルを手で編集して
+                // input_device_name を消した場合にだけ効く。設定画面の
+                // コンボボックスに「デフォルト」の選択肢を足すかどうかは
+                // 別 Issue で判断する
+                if s.audio.input_device_name.is_none() {
+                    let ac = AudioCapture::new();
+                    let list = ac.list_input_devices();
+                    debug!("利用できる入力デバイス: {:?}", list);
+                    if let Some(name) = list.first() {
+                        s.audio.input_device_name = Some(name.clone());
+                        info!("入力デバイスの既定を {} にした", name);
+                    }
+                }
                 if s.audio.output_device_name.is_none() {
+                    // 出力デバイスはデフォルト（None）で自動選択させる
+                    s.audio.output_device_name = None;
                     debug!("出力デバイスは既定（自動選択）にする");
                 }
                 // タイトルバーなしで保存されているのに画面ドラッグ移動が切れている
