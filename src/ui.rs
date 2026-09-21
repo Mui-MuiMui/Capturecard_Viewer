@@ -782,6 +782,18 @@ pub fn draft_from_defaults(current: &AppSettings) -> AppSettings {
     draft_from_imported(AppSettings::default(), current)
 }
 
+/// 設定ダイアログの上下左右に残す余白。
+///
+/// 画面ぴったりに合わせると、収まっているのかはみ出しているのか分かりにくい。
+/// 右クリックメニューの `CONTEXT_MENU_SCREEN_MARGIN` と同じ理由
+const SETTINGS_WINDOW_SCREEN_MARGIN: f32 = 40.0;
+
+/// 設定ダイアログがこれより小さくなることはない。
+///
+/// タブの見出しと下部のボタン列が読めなくなるほど小さい画面でも、
+/// 最低限操作できる大きさを確保する（内容はスクロールに任せる）
+const SETTINGS_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(320.0, 240.0);
+
 /// 設定ダイアログへ渡すデバイスの一覧。
 ///
 /// 3 本の借用を個別に渡していたが、引数が増えすぎたのでまとめた。
@@ -841,10 +853,20 @@ pub fn show_settings_dialog(
 
     let mut button = SettingsDialogAction::None;
 
+    // 画面より大きい・画面外にずれた位置で開いていると、下部のボタン列が
+    // 押せなくなる（Issue #137）。ウィンドウそのものを画面内へ収め、
+    // タブの中身だけをスクロールさせることで、OK / キャンセル / 適用は
+    // どんな高さでも必ず見える位置に残す
+    let screen_rect = ctx.screen_rect();
+    let max_size = (screen_rect.size() - egui::Vec2::splat(SETTINGS_WINDOW_SCREEN_MARGIN))
+        .max(SETTINGS_WINDOW_MIN_SIZE);
+
     egui::Window::new("設定")
         .open(show_settings)
         .default_size([650.0, 500.0])
         .resizable(true)
+        .constrain_to(screen_rect)
+        .max_size(max_size)
         .show(ctx, |ui| {
             // タブ選択
             ui.horizontal(|ui| {
@@ -860,33 +882,41 @@ pub fn show_settings_dialog(
 
             ui.separator();
 
-            egui::ScrollArea::vertical().show(ui, |ui| match selected_tab {
-                SettingsTab::Device => show_device_settings_tab(
-                    ui,
-                    draft,
-                    capabilities,
-                    &mut audio_capabilities,
-                    devices,
-                ),
-                SettingsTab::Screenshot => {
-                    if show_screenshot_settings_tab(
+            // ここでタブの中身を高さいっぱいに広げてしまうと、下の OK / キャンセル /
+            // 適用の行がスクロール領域の内側に入ってしまい、タブによっては
+            // ボタン列を見るためにスクロールが要る状態に戻ってしまう。
+            // `auto_shrink` で中身が少ないタブでは領域自体を縮め、ボタン列を
+            // 押し上げないようにする
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .show(ui, |ui| match selected_tab {
+                    SettingsTab::Device => show_device_settings_tab(
                         ui,
                         draft,
-                        show_hotkey_dialog,
-                        hotkey_capture,
-                        hotkey_errors,
-                    ) {
-                        button = SettingsDialogAction::TestSound;
+                        capabilities,
+                        &mut audio_capabilities,
+                        devices,
+                    ),
+                    SettingsTab::Screenshot => {
+                        if show_screenshot_settings_tab(
+                            ui,
+                            draft,
+                            show_hotkey_dialog,
+                            hotkey_capture,
+                            hotkey_errors,
+                        ) {
+                            button = SettingsDialogAction::TestSound;
+                        }
                     }
-                }
-                SettingsTab::Other => {
-                    let requested = show_other_tab(ui, management_message.as_ref(), reset_confirm);
-                    if requested != SettingsDialogAction::None {
-                        button = requested;
+                    SettingsTab::Other => {
+                        let requested =
+                            show_other_tab(ui, management_message.as_ref(), reset_confirm);
+                        if requested != SettingsDialogAction::None {
+                            button = requested;
+                        }
                     }
-                }
-                SettingsTab::Status => show_status_tab(ui, connection),
-            });
+                    SettingsTab::Status => show_status_tab(ui, connection),
+                });
 
             ui.separator();
 
@@ -2260,6 +2290,8 @@ pub fn show_hotkey_capture_dialog(
         .open(show_dialog)
         .fixed_size([350.0, 200.0])
         .collapsible(false)
+        // 設定ダイアログと同じく、極端に小さい画面でも画面内に収める
+        .constrain_to(ctx.screen_rect())
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.heading(format!("ホットキー設定: {}", action.label()));
