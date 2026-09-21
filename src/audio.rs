@@ -614,8 +614,8 @@ impl AudioCapture {
             .map_err(|e| format!("Failed to get output config: {}", e))?;
 
         // 対応設定の一覧。**先にワーカーが取ってあればそれを使う。**
-        // WASAPI の列挙は 300ms 前後かかるため、ここ（UI スレッド）で毎回
-        // 走らせるとデバイスの切り替えのたびにウィンドウが固まる
+        // WASAPI の列挙は 300ms 前後かかるため、開くたびにここで走らせると、
+        // ワーカーがその分だけ次のコマンドを処理できなくなる
         let input_ranges = resolve_ranges(input_capabilities, AudioDirection::Input, || {
             input_device
                 .supported_input_configs()
