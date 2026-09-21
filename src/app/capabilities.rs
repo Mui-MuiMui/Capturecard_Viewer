@@ -48,6 +48,8 @@ impl CaptureCardViewer {
         if let Ok(audio) = self.audio_capture.lock() {
             self.cached_input_devices = audio.list_input_devices();
             self.cached_output_devices = audio.list_output_devices();
+        } else {
+            warn!("デバイス一覧の更新で audio_capture のロックを取得できない");
         }
 
         // ロック取得に失敗した場合も時刻は更新する。

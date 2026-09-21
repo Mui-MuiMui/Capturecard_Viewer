@@ -504,6 +504,8 @@ impl CaptureCardViewer {
                 // ミュートも同じ扱い。ストリームの開き直しは伴わない
                 self.muted = settings.ui.muted;
                 audio.set_muted(self.muted);
+            } else {
+                warn!("パススルー・音量・ミュートの反映で audio_capture のロックを取得できない");
             }
 
             // 設定ダイアログの「適用」「OK」で音量が変わったときも OSD を出す。
@@ -572,6 +574,10 @@ impl CaptureCardViewer {
                         }
                     }
                 }
+            } else {
+                warn!(
+                    "スクリーンショットの効果音の反映で screenshot_manager のロックを取得できない"
+                );
             }
         }
 
@@ -596,6 +602,8 @@ impl CaptureCardViewer {
         if let Ok(settings) = self.settings.lock() {
             self.video_retry.request_now(video_target(&settings));
             self.audio_retry.request_now(audio_target(&settings));
+        } else {
+            warn!("デバイスの再接続で settings のロックを取得できない");
         }
         self.apply_settings(false);
     }
