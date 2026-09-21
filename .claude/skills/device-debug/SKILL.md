@@ -11,7 +11,7 @@ Capturecard_Viewer の不具合の大半は、映像（nokhwa / MediaFoundation�
 
 ## 前提
 
-ログの場所・レベル・世代管理は `CLAUDE.md` の「標準出力は届かない。ログは log クレートを使う」にある。ここでは繰り返さない。
+ログの場所・レベル・世代管理は `docs/design/logging.md` にある。ここでは繰り返さない。
 
 ## 手順 1: ログを取る
 
@@ -285,7 +285,7 @@ diff /tmp/ccv-config-backup.toml "$APPDATA/capturecard_viewer/config/default-con
 
 - **利用者が自分で試せる回避策** → `docs/TROUBLESHOOTING.md`
 - **実測値・失敗パターン・ログの読み方** → このファイル
-- **設計判断（なぜその待ち時間なのか等）** → `CLAUDE.md` か `docs/ARCHITECTURE.md`
+- **設計判断（なぜその待ち時間なのか等）** → `docs/design/` か `docs/ARCHITECTURE.md`
 
 `git log` には書かない。新しいセッションで読まれない。
 

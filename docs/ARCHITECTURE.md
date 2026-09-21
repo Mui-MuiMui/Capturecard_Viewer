@@ -4,7 +4,7 @@
 
 - 差分は「現状との差分」節にまとめ、すべて `area:refactor` の Issue に対応させている
 - 実装を変更するときは、この構造へ近づく方向を選ぶ
-- 現在のコードの具体的な注意点は `CLAUDE.md`、ビルド手順は `docs/BUILD.md` を参照
+- 現在のコードの具体的な注意点は `GUARDRAIL.md` と `docs/design/`、ビルド手順は `docs/BUILD.md` を参照
 
 ## 設計の前提
 

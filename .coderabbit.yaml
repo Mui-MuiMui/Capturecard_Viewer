@@ -41,7 +41,8 @@ reviews:
 knowledge_base:
   code_guidelines:
     enabled: true
-    # 既定でも **/CLAUDE.md は読まれるが、skill も合わせて読ませる
+    # 既定でも **/CLAUDE.md は読まれるが、GUARDRAIL.md と skill も合わせて読ませる
     filePatterns:
       - "**/CLAUDE.md"
+      - "GUARDRAIL.md"
       - ".claude/skills/**/*.md"

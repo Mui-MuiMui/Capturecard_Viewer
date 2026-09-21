@@ -22,7 +22,9 @@
 | [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) | 依存クレートの状況と更新方針、ライセンス一覧の生成手順 |
 | [docs/MANUAL-TEST.md](docs/MANUAL-TEST.md) | 実機での手動テストチェックリスト |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 既知の不具合と回避策。利用者向け |
-| `CLAUDE.md` / `.claude/` | コードの構造と作業時の注意点、検証・命名・テスト・リリースの各手順 |
+| [GUARDRAIL.md](GUARDRAIL.md) | してはいけないこと / 必ずすること。理由は書かず参照先だけを添えた一覧 |
+| [docs/design/](docs/design/) | 設計判断の理由と経緯。ワーカースレッド、再接続、映像・音声、設定、ホットキーなどテーマ別 |
+| `CLAUDE.md` / `.claude/` | コードの構造と作業の進め方、検証・命名・テスト・リリースの各手順 |
 
 ## ビルドと検証
 
@@ -89,6 +91,6 @@ CI（`.github/workflows/ci.yml`）は上の表の下 4 行（fmt → clippy → 
 
 ## AI を使った開発について
 
-このリポジトリは [Claude Code](https://claude.com/claude-code) を使って開発しています。リポジトリの構造・設計判断・作業時の注意点は `CLAUDE.md` に、検証・命名・テスト・リリースの各手順は `.claude/` 以下にまとめてあります。
+このリポジトリは [Claude Code](https://claude.com/claude-code) を使って開発しています。リポジトリの構造と作業の進め方は `CLAUDE.md` に、守るべき決まりは `GUARDRAIL.md` に、設計判断の理由は `docs/design/` に、検証・命名・テスト・リリースの各手順は `.claude/` 以下にまとめてあります。
 
 これらは AI 向けに書いてありますが、**内容は人が読んでも通る規約文書**です。この `CONTRIBUTING.md` は人向けの入口として要点と道筋だけを示し、詳細は重複させずにそちらを参照しています。
