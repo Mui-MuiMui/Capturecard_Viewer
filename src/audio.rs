@@ -385,9 +385,10 @@ pub fn nearest_channels(values: &[u16], desired: u16) -> Option<u16> {
 
 /// パススルーを開くときの要求。
 ///
-/// 引数で渡していたが、対応設定のキャッシュを加えて 6 つになったので構造体へ
-/// まとめた。`input_*` と `output_*` はどちらも同じ型で、順番を取り違えても
-/// コンパイルが通ってしまうため、名前で区別できる形にする意味もある。
+/// 引数で渡していたが、対応設定のキャッシュとバッファ長を加えて 7 つに
+/// なったので構造体へまとめた。`input_*` と `output_*` はどちらも同じ型で、
+/// 順番を取り違えてもコンパイルが通ってしまうため、名前で区別できる形に
+/// する意味もある。
 pub struct PassthroughRequest<'a> {
     pub input_device_name: Option<&'a str>,
     pub output_device_name: Option<&'a str>,
@@ -400,6 +401,26 @@ pub struct PassthroughRequest<'a> {
     pub input_capabilities: Option<&'a AudioCapabilities>,
     /// 同上、出力デバイスの対応設定
     pub output_capabilities: Option<&'a AudioCapabilities>,
+    /// 設定画面で選んだリングバッファの長さ（ミリ秒）。
+    /// `settings::MIN_BUFFER_MS`〜`MAX_BUFFER_MS` の範囲
+    pub buffer_ms: u32,
+}
+
+/// リングバッファに確保するサンプル数を決める。
+///
+/// 返すのは「目標水位ぶん」のサンプル数で、実際のリングバッファはこの 2 倍を
+/// 確保する。入力が先行しても後れても同じだけ余裕を持たせるためで、
+/// クロックドリフト補正の目標水位（`ResampleTelemetry::new`）もこの値になる。
+///
+/// **下限を 1 サンプルで止める。** `buffer_ms` は設定側で 20ms 以上に
+/// 丸めてあるので通常は効かないが、0 を返すと `HeapRb::new(0)` になり
+/// 入力も出力も 1 サンプルも運べなくなる。
+fn ring_buffer_samples(sample_rate: u32, channels: usize, buffer_ms: u32) -> usize {
+    let samples = (sample_rate as usize)
+        .saturating_mul(channels)
+        .saturating_mul(buffer_ms as usize)
+        / 1000;
+    samples.max(1)
 }
 
 /// 出力コールバックが 1 回ごとに読む共有の値。
@@ -681,6 +702,7 @@ impl AudioCapture {
             channels: desired_channels,
             input_capabilities,
             output_capabilities,
+            buffer_ms,
         } = *request;
 
         self.stop_capture();
@@ -797,18 +819,25 @@ impl AudioCapture {
             output_config.sample_format()
         );
 
-        // メモリリーク修正: リングバッファサイズを制限
+        // リングバッファの長さは設定で選べる（`settings::AudioSettings::buffer_ms`）。
+        // 小さいほど遅延が減るが、出力コールバックが間に合わずアンダーランが
+        // 出やすくなる。容量は目標水位の 2 倍にして、入力が先行しても後れても
+        // 同じだけ余裕を持たせる
         let sample_rate = input_config.sample_rate().0;
         let channels = input_config.channels() as usize;
-        let buffer_size = (sample_rate as usize * channels * 50) / 1000; // 50msバッファに削減
+        let buffer_size = ring_buffer_samples(sample_rate, channels, buffer_ms);
 
-        let ring = HeapRb::<f32>::new(buffer_size * 2); // サイズを削減
+        let ring = HeapRb::<f32>::new(buffer_size * 2);
         let (producer, consumer) = ring.split();
 
         let producer = Arc::new(Mutex::new(producer));
         let consumer = Arc::new(Mutex::new(consumer));
 
-        debug!("リングバッファを作成した（{} サンプル）", buffer_size * 2);
+        debug!(
+            "リングバッファを作成した（{} サンプル、{} ms 相当 × 2）",
+            buffer_size * 2,
+            buffer_ms
+        );
 
         // このストリーム専用のエラー旗。開き直すたびに作り直す
         let stream_error = Arc::new(AtomicBool::new(false));
@@ -1920,6 +1949,31 @@ mod tests {
         let out = drain_converter(&mut converter, &[0.0, 1.0, 2.0]);
 
         assert_eq!(out, vec![0.0, 0.5, 1.0, 1.5]);
+    }
+
+    #[test]
+    fn ring_buffer_samples_matches_the_requested_length() {
+        // 48kHz ステレオの 50ms は 4800 サンプル（= 48000 * 2 * 0.05）。
+        // 設定項目にする前のハードコードと同じ計算
+        assert_eq!(ring_buffer_samples(48_000, 2, 50), 4800);
+    }
+
+    #[test]
+    fn ring_buffer_samples_scales_with_the_buffer_length() {
+        // バッファ長を倍にしたらサンプル数も倍になる。遅延が長さに比例すること
+        let short = ring_buffer_samples(48_000, 2, 20);
+        let long = ring_buffer_samples(48_000, 2, 200);
+
+        assert_eq!(short, 1920);
+        assert_eq!(long, short * 10);
+    }
+
+    #[test]
+    fn ring_buffer_samples_never_returns_zero() {
+        // 設定側で 20ms 以上に丸めてあるので通常は起きないが、0 を返すと
+        // HeapRb::new(0) になり 1 サンプルも運べないストリームができる
+        assert_eq!(ring_buffer_samples(48_000, 2, 0), 1);
+        assert_eq!(ring_buffer_samples(0, 2, 50), 1);
     }
 
     #[test]

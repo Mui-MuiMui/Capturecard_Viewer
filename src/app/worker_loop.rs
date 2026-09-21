@@ -526,7 +526,7 @@ impl WorkerState {
         let Some(config) = self.config.clone() else {
             return;
         };
-        let (configured_input, configured_output, _, _) = config.audio.clone();
+        let (configured_input, configured_output, ..) = config.audio.clone();
         let track_input = configured_input.is_none();
         let track_output = configured_output.is_none();
         if !track_input && !track_output {
@@ -591,6 +591,7 @@ impl WorkerState {
 mod tests {
     use super::*;
     use crate::audio::AudioControls;
+    use crate::settings::DEFAULT_BUFFER_MS;
     use crate::video::VideoFrames;
     use std::sync::mpsc::channel;
     use std::sync::RwLock;
@@ -662,7 +663,13 @@ mod tests {
     fn config_for(video_device: Option<&str>, input_device: Option<&str>) -> DeviceConfig {
         DeviceConfig {
             video: (video_device.map(str::to_string), None, None, None),
-            audio: (input_device.map(str::to_string), None, None, None),
+            audio: (
+                input_device.map(str::to_string),
+                None,
+                None,
+                None,
+                DEFAULT_BUFFER_MS,
+            ),
             auto_reconnect: false,
         }
     }

@@ -33,8 +33,18 @@ pub(super) type VideoTarget = (
     Option<u32>,
 );
 
-/// 音声の接続対象。`(入力デバイス名, 出力デバイス名, サンプリングレート, チャンネル数)`
-pub(super) type AudioTarget = (Option<String>, Option<String>, Option<u32>, Option<u16>);
+/// 音声の接続対象。
+/// `(入力デバイス名, 出力デバイス名, サンプリングレート, チャンネル数, バッファ長 ms)`
+///
+/// バッファ長を含めてあるのは、リングバッファの長さがストリームを開くときに
+/// しか決まらないため。設定ダイアログで変えたら音声だけを開き直す
+pub(super) type AudioTarget = (
+    Option<String>,
+    Option<String>,
+    Option<u32>,
+    Option<u16>,
+    u32,
+);
 
 /// ワーカーがデバイスを開くために要る設定。
 ///
@@ -64,6 +74,7 @@ impl DeviceConfig {
                 settings.audio.output_device_name.clone(),
                 settings.audio.sample_rate,
                 settings.audio.channels,
+                settings.audio.buffer_ms,
             ),
             auto_reconnect: settings.video.auto_reconnect,
         }
