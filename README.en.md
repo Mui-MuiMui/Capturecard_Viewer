@@ -42,6 +42,8 @@ To also remove the settings file, delete the following directory:
   - **ウィンドウ (Window)** — submenu
     - Toggle window dragging
     - Reset the window size (back to the default 1280x720)
+  - **プリセット (Presets)** — submenu; appears once you have saved at least one preset
+    - Pick a saved preset to switch the video and audio settings
   - Reconnect device
   - Toggle automatic device reconnection
   - Advanced settings
@@ -108,7 +110,7 @@ Turning on 表示 (View) > "情報表示" (Show stats) in the context menu overl
 2. Select video and audio devices in the **device settings** tab.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
 3. Configure the destination, save location, file format, sound effect, and the per-action hotkeys in the **screenshot settings** tab.
-4. Export, import or reset the settings in the **その他 (Other)** tab.
+4. Manage presets, and export, import or reset the settings, in the **その他 (Other)** tab.
 
 Edits in the settings window are kept as a draft and do not affect the running application until you press a button.
 
@@ -124,6 +126,28 @@ Edits in the settings window are kept as a draft and do not affect the running a
 
 > **Note:** The application interface is currently Japanese only.
 
+### Presets
+
+You can name a combination of video and audio settings, save it, and switch between saved combinations from the right-click menu. This helps when you use more than one capture card, or when you move back and forth between "low latency" (720p60) and "image quality" (1080p30) on the same card.
+
+Presets are managed in the **その他 (Other)** tab of the settings window and switched from **プリセット (Presets)** in the right-click menu. While no preset exists, the プリセット entry does not appear in the menu.
+
+| Button | Behavior |
+|---|---|
+| 保存 (Save, with a name typed in) | Adds the video and audio settings you are editing as a new preset |
+| 読み込む (Load) | Puts that preset's contents into the settings you are editing |
+| 上書き保存 (Overwrite) | Replaces that preset with the video and audio settings you are editing |
+| 削除 (Delete) | Removes it from the list |
+
+- **A preset holds only the video and audio settings from the device settings tab** — device name, format, resolution, FPS, color space, color range, image adjustments (brightness / contrast / saturation), input and output devices, sample rate, channel count and audio passthrough. Screenshot settings, hotkeys and window settings are not included: having the save folder or your hotkeys change underneath you when switching presets would be hard to make sense of.
+- **Automatic device reconnection is not included either.** Whatever you set from the right-click menu stays as it is.
+- Names must be unique, and a name made only of whitespace is rejected.
+- **Adding, overwriting, deleting and loading all act on the draft**, like every other edit. They reach the running application when you press 適用 or OK, and キャンセル discards all of them.
+- If you load a preset and then change something by hand, "現在:" in the その他 tab reads "name（変更あり）" ("modified") and the check mark disappears from the right-click menu.
+- Switching from the right-click menu shows "プリセット: name" at the bottom of the screen for about 1.5 seconds. If the contents match what is already running, the device is not reopened and the video does not drop.
+- **設定を初期化... (Reset settings) does not delete your presets.** Reset restores the current settings to their defaults; it is not meant to throw away the presets you have built up. Delete them one by one from the list instead.
+- Exported settings files contain the presets, and importing replaces the preset list with the one from the file.
+
 ### Exporting, importing and resetting settings
 
 These live in the **その他 (Other)** tab of the settings window. Use them when moving to another PC, backing up your settings, or attaching your configuration to a bug report.
@@ -132,13 +156,14 @@ These live in the **その他 (Other)** tab of the settings window. Use them whe
 |---|---|
 | 設定を書き出す... (Export settings) | Saves the current settings as a TOML file. The default file name is `capturecard_viewer-settings-YYYYMMDD.toml` |
 | 設定を読み込む... (Import settings) | Reads an exported file into the settings you are currently editing |
-| 設定を初期化... (Reset settings) | Resets the settings you are editing to their defaults. It covers the same items as import, so the window position and size are left alone. Nothing happens until you press the confirmation button |
+| 設定を初期化... (Reset settings) | Resets the settings you are editing to their defaults. It covers the same items as import, so the window position and size — and your saved presets — are left alone. Nothing happens until you press the confirmation button |
 
 - **Export writes the running settings, not the draft.** Press 適用 first if you want your current edits included.
 - **Import and reset only change the draft.** Like every other edit, they reach the running application when you press 適用 or OK, and キャンセル discards them.
 - **Window position and size are never imported.** A file exported on a machine with a different display layout will not move your window off-screen. Reset leaves the position and size alone as well.
 - Of the items toggled from the right-click menu, always on top, drag to move, stats overlay, mute and borderless mode are not imported. They cannot be changed from the settings window, so importing them would have no effect. Automatic device reconnection *is* imported.
 - If a value cannot be understood, only that item falls back to its default and the rest is imported. If the file is not valid TOML, nothing changes and the reason is shown.
+- **Saved presets are included in the export and are imported as well.** Reset does not remove them.
 
 ### Screenshots
 
