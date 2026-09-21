@@ -489,6 +489,21 @@ impl AudioCapture {
         }
     }
 
+    /// Windows 側の既定の入力デバイス名。取得できなければ `None`。
+    ///
+    /// 「既定のデバイス」設定が Windows 側の切り替えに追従しているかを
+    /// 確認するために呼ぶ（3〜5 秒おき）。ストリームは開かないので
+    /// `list_input_devices` より軽いが、COM を伴うため毎フレームは避ける。
+    pub fn default_input_device_name(&self) -> Option<String> {
+        self.host.default_input_device()?.name().ok()
+    }
+
+    /// Windows 側の既定の出力デバイス名。取得できなければ `None`。
+    /// 意図は `default_input_device_name` と同じ。
+    pub fn default_output_device_name(&self) -> Option<String> {
+        self.host.default_output_device()?.name().ok()
+    }
+
     pub fn start_passthrough(&mut self, request: &PassthroughRequest<'_>) -> Result<(), String> {
         let PassthroughRequest {
             input_device_name,
