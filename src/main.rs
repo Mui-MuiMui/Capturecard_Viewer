@@ -76,13 +76,9 @@ const RESIZE_BORDER: f32 = 8.0;
 /// 「アスペクト比を維持」のような項目名が折り返してしまう）
 const CONTEXT_MENU_WIDTH: f32 = 240.0;
 
-/// 右クリックメニューの高さの上限を決めるときに、画面の上下へ空けておく余白。
+/// 右クリックメニューの大きさを決めるときに、画面の端へ空けておく余白。
 /// 端にぴったり貼り付くと、収まっているのかはみ出しているのかが見分けにくい
 const CONTEXT_MENU_SCREEN_MARGIN: f32 = 24.0;
-
-/// 右クリックメニューの高さの下限。画面が極端に低い場合でも、
-/// これより縮めるとスクロールバーばかりで中身が読めなくなる
-const CONTEXT_MENU_MIN_HEIGHT: f32 = 160.0;
 
 /// 外側クリックの判定でサブメニューの矩形に足す余白。
 /// `Ui::min_rect` はポップアップの枠の内側なので、枠の上を押しただけで
@@ -1677,9 +1673,10 @@ impl CaptureCardViewer {
     ///
     /// 中身は `context_menu_items` が描く。ここは置き場所と閉じ方だけを持つ。
     ///
-    /// **画面に収まらなくなるのを 2 段で防いでいる。** まず `constrain_to` で
-    /// メニューごと画面内へ押し戻し、それでも足りない高さは `ScrollArea` で
-    /// スクロールできるようにする。項目を足すときはどちらも壊さないこと。
+    /// **画面に収まらなくなるのを 3 段で防いでいる。** まず `constrain_to` で
+    /// メニューごと画面内へ押し戻し、幅は画面より広くならないように縮め、
+    /// それでも足りない高さは `ScrollArea` でスクロールできるようにする。
+    /// 項目を足すときはどれも壊さないこと。
     fn show_context_menu(&mut self, ctx: &egui::Context) {
         let mut close_menu = false;
         // メニュー本体と、開いているサブメニューの矩形。外側クリックの判定に使う。
@@ -1687,9 +1684,10 @@ impl CaptureCardViewer {
         // 足しておかないと、サブメニューを押しただけでメニュー全体が閉じる
         let mut menu_rects: Vec<egui::Rect> = Vec::new();
 
-        // メニューの高さの上限。これを超えた分はスクロールになる
-        let max_height =
-            (ctx.screen_rect().height() - CONTEXT_MENU_SCREEN_MARGIN).max(CONTEXT_MENU_MIN_HEIGHT);
+        // ポップアップの枠が食う分を引いてから、中身に使える大きさを決める
+        let frame = egui::Frame::popup(&ctx.style());
+        let (width, max_height) =
+            context_menu_size_limits(ctx.screen_rect().size(), frame.inner_margin.sum());
 
         egui::Area::new("context_menu")
             .fixed_pos(self.context_menu_pos)
@@ -1698,16 +1696,22 @@ impl CaptureCardViewer {
             .constrain_to(ctx.screen_rect())
             .show(ctx, |outer_ui| {
                 // 固定幅でポップアップコンテンツをラップ
-                egui::Frame::popup(&ctx.style()).show(outer_ui, |ui| {
-                    ui.set_min_width(CONTEXT_MENU_WIDTH);
-                    ui.set_max_width(CONTEXT_MENU_WIDTH);
+                frame.show(outer_ui, |ui| {
+                    ui.set_min_width(width);
+                    ui.set_max_width(width);
 
                     egui::ScrollArea::vertical()
                         .max_height(max_height)
                         // 横は縮めない。縮むと項目の幅が中身ごとに変わって揃わない
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
-                            self.context_menu_items(ctx, ui, &mut menu_rects, &mut close_menu);
+                            self.context_menu_items(
+                                ctx,
+                                ui,
+                                width,
+                                &mut menu_rects,
+                                &mut close_menu,
+                            );
                         });
                 });
                 // 構築後、エリアの完全な矩形をキャプチャ
@@ -1747,6 +1751,7 @@ impl CaptureCardViewer {
         &mut self,
         ctx: &egui::Context,
         ui: &mut egui::Ui,
+        width: f32,
         menu_rects: &mut Vec<egui::Rect>,
         close_menu: &mut bool,
     ) {
@@ -1783,8 +1788,8 @@ impl CaptureCardViewer {
         // サブメニューのボタンは既定だと文字の幅しか取らず、上下のチェック
         // ボックスと縁が揃わない。幅いっぱいに広げて 1 つの並びに見せる
         ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
-            self.view_submenu(ctx, ui, menu_rects);
-            self.window_submenu(ctx, ui, menu_rects, close_menu);
+            self.view_submenu(ctx, ui, width, menu_rects);
+            self.window_submenu(ctx, ui, width, menu_rects, close_menu);
         });
 
         ui.separator();
@@ -1852,12 +1857,13 @@ impl CaptureCardViewer {
         &mut self,
         ctx: &egui::Context,
         ui: &mut egui::Ui,
+        width: f32,
         menu_rects: &mut Vec<egui::Rect>,
     ) {
         ui.menu_button("表示  ⏵", |ui| {
             // サブメニューの幅は egui の既定が 150px で、項目名が折り返す。
-            // 本体と同じ幅に広げる
-            ui.set_max_width(CONTEXT_MENU_WIDTH);
+            // 本体と同じ幅に揃える（狭いウィンドウでは本体ごと縮んでいる）
+            ui.set_max_width(width);
 
             let aspect_response = ui.checkbox(&mut self.maintain_aspect_ratio, "アスペクト比を維持");
 
@@ -1924,11 +1930,12 @@ impl CaptureCardViewer {
         &mut self,
         ctx: &egui::Context,
         ui: &mut egui::Ui,
+        width: f32,
         menu_rects: &mut Vec<egui::Rect>,
         close_menu: &mut bool,
     ) {
         ui.menu_button("ウィンドウ  ⏵", |ui| {
-            ui.set_max_width(CONTEXT_MENU_WIDTH);
+            ui.set_max_width(width);
 
             // 画面ドラッグ移動のチェックボックス。
             // 装飾なしの間は切らせない。切ると動かす手段が残らない
@@ -1975,6 +1982,26 @@ impl CaptureCardViewer {
             menu_rects.push(ui.min_rect().expand(CONTEXT_MENU_HIT_MARGIN));
         });
     }
+}
+
+/// 右クリックメニューの中身に使える幅と、高さの上限を決める。
+///
+/// 引数は egui の画面（＝ウィンドウ）の大きさと、ポップアップの枠が
+/// 左右・上下で食う幅。戻り値は `(幅, 高さの上限)` で、どちらも枠の内側の値。
+///
+/// **`Area::constrain_to` は位置を画面内へ戻すだけで、確定した矩形の幅も
+/// 高さも縮めない。** 画面より大きいメニューはそのままはみ出すので、
+/// 幅はここで縮め、高さは呼び出し側が `ScrollArea` の上限に使う。
+///
+/// 画面が極端に小さい場合は 0 まで落とす。**「これ以下にはしない」という
+/// 下限を置かない。** 置くと、下限を割る画面では必ずはみ出す側へ倒れ、
+/// 画面に収めるという目的と逆になる。
+fn context_menu_size_limits(screen_size: egui::Vec2, frame_margin: egui::Vec2) -> (f32, f32) {
+    let available = screen_size - frame_margin - egui::Vec2::splat(CONTEXT_MENU_SCREEN_MARGIN);
+    (
+        CONTEXT_MENU_WIDTH.min(available.x).max(0.0),
+        available.y.max(0.0),
+    )
 }
 
 /// 統計オーバーレイに出す行を組み立てる。
@@ -3994,6 +4021,34 @@ mod tests {
 
         assert_eq!(text, "音量: 200%");
         assert_eq!(ratio, 1.0);
+    }
+
+    #[test]
+    fn context_menu_size_limits_wide_screen_keeps_the_fixed_width() {
+        // 1280x720 の内側。幅は既定のまま、高さだけ画面から決まる
+        let (width, max_height) =
+            context_menu_size_limits(egui::vec2(1280.0, 720.0), egui::vec2(12.0, 12.0));
+
+        assert_eq!(width, 240.0);
+        assert_eq!(max_height, 684.0);
+    }
+
+    #[test]
+    fn context_menu_size_limits_narrow_screen_shrinks_the_width() {
+        // 幅 200px のウィンドウ。既定の 240px のままだと右側が画面外へ出る
+        let (width, _) = context_menu_size_limits(egui::vec2(200.0, 720.0), egui::vec2(12.0, 12.0));
+
+        assert_eq!(width, 164.0);
+    }
+
+    #[test]
+    fn context_menu_size_limits_tiny_screen_clamps_to_zero() {
+        // 枠と余白だけで画面を使い切る大きさ。負にはしない
+        let (width, max_height) =
+            context_menu_size_limits(egui::vec2(20.0, 30.0), egui::vec2(12.0, 12.0));
+
+        assert_eq!(width, 0.0);
+        assert_eq!(max_height, 0.0);
     }
 
     #[test]
