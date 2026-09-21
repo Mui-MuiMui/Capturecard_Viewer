@@ -342,17 +342,17 @@ impl CaptureCardViewer {
         if auto_reconnect_response.changed() {
             if let Ok(mut settings) = self.settings.lock() {
                 settings.video.auto_reconnect = temp_auto_reconnect;
+                info!(
+                    "デバイスの自動再接続を{}にした",
+                    if temp_auto_reconnect {
+                        "有効"
+                    } else {
+                        "無効"
+                    }
+                );
             } else {
                 warn!("デバイスの自動再接続の設定の反映で settings のロックを取得できない");
             }
-            info!(
-                "デバイスの自動再接続を{}にした",
-                if temp_auto_reconnect {
-                    "有効"
-                } else {
-                    "無効"
-                }
-            );
             self.mark_settings_dirty();
         }
 
@@ -481,17 +481,17 @@ impl CaptureCardViewer {
         if auto_reconnect_response.changed() {
             if let Ok(mut settings) = self.settings.lock() {
                 settings.video.auto_reconnect = temp_auto_reconnect;
+                info!(
+                    "デバイスの自動再接続を{}にした",
+                    if temp_auto_reconnect {
+                        "有効"
+                    } else {
+                        "無効"
+                    }
+                );
             } else {
                 warn!("デバイスの自動再接続の設定の反映で settings のロックを取得できない");
             }
-            info!(
-                "デバイスの自動再接続を{}にした",
-                if temp_auto_reconnect {
-                    "有効"
-                } else {
-                    "無効"
-                }
-            );
             self.mark_settings_dirty();
         }
 

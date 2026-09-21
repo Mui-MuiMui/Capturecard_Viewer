@@ -124,9 +124,18 @@ impl CaptureCardViewer {
     pub(super) fn update_video_texture(&mut self, ctx: &egui::Context) -> bool {
         // 新着フレームが無ければ何もしない。既存のテクスチャをそのまま使い回す
         let new_frame = match self.video_capture.lock() {
-            Ok(video) => video.get_frame_if_newer(self.last_frame_generation),
+            Ok(video) => {
+                self.video_texture_lock_warned = false;
+                video.get_frame_if_newer(self.last_frame_generation)
+            }
             Err(_) => {
-                warn!("映像テクスチャの更新で video_capture のロックを取得できない");
+                // 毎フレーム呼ばれる経路なので、ロックが取れない間ずっと
+                // warn! を出すとログが埋まる。ポイズニングは自然に治らないため、
+                // 最初の 1 回だけ記録すれば調査には足りる
+                if !self.video_texture_lock_warned {
+                    warn!("映像テクスチャの更新で video_capture のロックを取得できない");
+                    self.video_texture_lock_warned = true;
+                }
                 None
             }
         };

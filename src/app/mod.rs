@@ -121,6 +121,10 @@ pub struct CaptureCardViewer {
     video_texture: Option<egui::TextureHandle>,
     // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
     last_frame_generation: u64,
+    // 映像テクスチャの更新で video_capture のロックが取れなかったことを、
+    // 既に警告したか。毎フレーム呼ばれる経路なので、一度記録したら次に
+    // 取得できるまで黙る（`RepaintWaker` の `warned_unbound` と同じ考え方）
+    video_texture_lock_warned: bool,
     // 最後に新しいフレームをテクスチャへ取り込んだ時刻。
     // None は起動してから 1 枚も取り込んでいないことを表す。
     // 再描画の間隔（`repaint::next_repaint_delay`）を決めるために持つ
@@ -276,6 +280,7 @@ impl Default for CaptureCardViewer {
             autosave: AutoSavePolicy::from_load_outcome(load_outcome),
             video_texture: None,
             last_frame_generation: 0,
+            video_texture_lock_warned: false,
             last_new_frame_at: None,
             last_video_link_action: VideoLinkAction::Keep,
             video_reconnect_after_loss: false,
