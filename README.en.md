@@ -33,31 +33,29 @@ To also remove the settings file, delete the following directory:
 - **Right-click**: Open the context menu
   - Volume adjustment (0–200%)
   - Toggle mute
+  - Toggle aspect ratio preservation
+  - Toggle always-on-top
   - Toggle fullscreen
-  - **表示 (View)** — submenu
-    - Toggle aspect ratio preservation
-    - Toggle always-on-top
-    - Toggle the stats overlay (shows FPS and more over the video)
-    - Toggle the title bar (borderless mode)
-  - **ウィンドウ (Window)** — submenu
-    - Toggle window dragging
-    - Reset the window size (back to the default 1280x720)
-  - Reconnect device
+  - Toggle the title bar (borderless mode)
+  - Toggle window dragging
+  - Toggle the stats overlay (shows FPS and more over the video)
   - Toggle automatic device reconnection
+  - Reset the window size (back to the default 1280x720)
+  - Reconnect device
   - Advanced settings
   - Quit
 
-  The toggles live in the 表示 (View) and ウィンドウ (Window) submenus. The flat menu had grown tall enough that on low resolutions — or with the window near the bottom of the screen — the lower entries ended up off-screen and could not be clicked. The menu is now pushed back inside the screen when it would overflow, and scrolls when it still does not fit.
+  **Only when the window is too short to fit the whole menu**, the toggles collapse into two submenus: 表示 (View) — aspect ratio preservation, always-on-top, the stats overlay, the title bar — and ウィンドウ (Window) — window dragging, resetting the window size. When there is enough height, the menu stays flat as listed above, so normally you never have to open a submenu. Whether it collapses is decided the moment the menu opens and does not change while it stays open. The menu is pushed back inside the screen when it would overflow a screen edge, and scrolls when it still does not fit.
 - **Mouse wheel**: Adjust volume (±10%). The current volume appears as a bar at the bottom of the screen and fades out after about 1.5 seconds (the same overlay appears when you change the volume from the context menu slider or the settings dialog)
 
 #### Borderless mode (hiding the title bar)
 
 You can remove the title bar and the window frame, which helps when the window sits on a second monitor as a sub-window. The state is saved to the settings file and restored on the next launch.
 
-- Toggle it with **表示 (View) > タイトルバーを隠す (Hide the title bar)** in the context menu.
+- Toggle it with **タイトルバーを隠す (Hide the title bar)** in the context menu (under 表示 (View) when the menu is collapsed).
 - **Moving**: drag the video area. Because of that, turning the title bar off also turns 画面ドラッグ移動 (window dragging) on if it was off, and a notice appears at the bottom of the screen for about two seconds. While the title bar is hidden, window dragging cannot be turned off, since it is the only way left to move the window.
 - **Resizing**: move the pointer within about 8 px of a window edge — the cursor changes — and drag. The corners resize diagonally.
-- **If the window gets too small**: use ウィンドウ (Window) > ウィンドウサイズをリセット (Reset the window size) in the context menu to go back to the default 1280x720.
+- **If the window gets too small**: use ウィンドウサイズをリセット (Reset the window size) in the context menu (under ウィンドウ (Window) when collapsed) to go back to the default 1280x720.
 - **Quitting**: there is no close button, so use 終了 (Quit) in the context menu or `Alt+F4`.
 - The item is disabled while fullscreen, which has no decorations to begin with. Leaving fullscreen restores whatever the setting says.
 
@@ -92,7 +90,7 @@ The settings window → **screenshot settings** tab → ホットキー (Hotkeys
 
 ### Stats overlay
 
-Turning on 表示 (View) > "情報表示" (Show stats) in the context menu overlays the following on the top-left of the video. The on/off state is saved to the configuration file and restored on the next launch.
+Turning on "情報表示" (Show stats) in the context menu (under 表示 (View) when collapsed) overlays the following on the top-left of the video. The on/off state is saved to the configuration file and restored on the next launch.
 
 | Item | Description |
 |---|---|
