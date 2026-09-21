@@ -174,9 +174,9 @@ pub struct CaptureCardViewer {
 impl Default for CaptureCardViewer {
     fn default() -> Self {
         let (loaded_settings, load_outcome) = AppSettings::load();
-        // 表示状態は apply_settings を待たずに反映する。
-        // apply_settings は起動から 2 秒後が最初なので、待つと
-        // オンで終了したのに起動直後だけ出ていない、という見え方になる
+        // 表示状態はここで読み込んだ値をそのままフィールドの初期値にする。
+        // apply_settings(true) も最初の update() で同じ値を書き戻すが、
+        // 構築時点で確定させておけば以降の初期化順序に依存せずに済む
         let show_stats_overlay = loaded_settings.ui.show_stats_overlay;
         let settings = Arc::new(Mutex::new(loaded_settings));
 
@@ -296,6 +296,8 @@ impl Default for CaptureCardViewer {
                         "読めなかった設定ファイルが残っているため、設定の自動保存を止める。設定画面の「適用」か「OK」で保存すると再開する"
                     );
                 }
+            } else {
+                warn!("起動時のデバイス自動選択で settings のロックを取得できない");
             }
         }
 
@@ -307,11 +309,13 @@ impl Default for CaptureCardViewer {
         // **要求を積むだけで、コマンドとして流すのは最初の `update()`。**
         // ワーカーはコマンドを受けた順に処理するので、ここで流すと
         // 数百 ms かかる能力取得の後ろで最初の接続が待たされる
-        let saved_video_device = app
-            .settings
-            .lock()
-            .ok()
-            .and_then(|s| s.video.device_name.clone());
+        let saved_video_device = match app.settings.lock() {
+            Ok(s) => s.video.device_name.clone(),
+            Err(_) => {
+                warn!("保存済みビデオデバイスの能力の先読みで settings のロックを取得できない");
+                None
+            }
+        };
         if let Some(device) = saved_video_device {
             app.settings_dialog.capabilities_mut().request(&device);
         }
@@ -429,6 +433,8 @@ impl eframe::App for CaptureCardViewer {
                 }
 
                 window_geometry_changed = changed;
+            } else {
+                warn!("ウィンドウの位置・大きさの記録で settings のロックを取得できない");
             }
         }
 
@@ -459,6 +465,8 @@ impl eframe::App for CaptureCardViewer {
             if !self.settings_dialog.has_draft() {
                 if let Ok(settings) = self.settings.lock() {
                     self.settings_dialog.begin_edit(&settings);
+                } else {
+                    warn!("設定ダイアログのドラフト作成で settings のロックを取得できない");
                 }
             }
 
@@ -514,11 +522,13 @@ impl eframe::App for CaptureCardViewer {
             // 同じ基準に揃える）
             let existing_hotkeys = match self.settings_dialog.draft() {
                 Some(draft) => draft.hotkeys.clone(),
-                None => self
-                    .settings
-                    .lock()
-                    .map(|settings| settings.hotkeys.clone())
-                    .unwrap_or_default(),
+                None => match self.settings.lock() {
+                    Ok(settings) => settings.hotkeys.clone(),
+                    Err(_) => {
+                        warn!("ホットキーの重複判定で settings のロックを取得できない");
+                        Default::default()
+                    }
+                },
             };
 
             let outcome = ui::show_hotkey_capture_dialog(
@@ -554,6 +564,8 @@ impl eframe::App for CaptureCardViewer {
                             // ダイアログが閉じたあとの再開（resume）で行う
                             if let Ok(mut settings) = self.settings.lock() {
                                 settings.set_hotkey(action, Some(candidate));
+                            } else {
+                                warn!("ホットキーの確定で settings のロックを取得できない");
                             }
                             self.mark_settings_dirty();
                         }

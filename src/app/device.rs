@@ -213,6 +213,10 @@ impl CaptureCardViewer {
                         }
                     }
                 }
+            } else {
+                warn!(
+                    "スクリーンショットの効果音の反映で screenshot_manager のロックを取得できない"
+                );
             }
         }
 

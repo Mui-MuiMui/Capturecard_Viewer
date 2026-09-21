@@ -70,6 +70,8 @@ impl CaptureCardViewer {
         if transition.commit_draft {
             if let Ok(mut settings) = self.settings.lock() {
                 self.settings_dialog.commit_into(&mut settings);
+            } else {
+                warn!("設定ダイアログの反映に失敗した: settings のロックを取れない");
             }
             // 反映した内容でデバイスを開き直す
             self.apply_settings(false);
@@ -111,6 +113,8 @@ impl CaptureCardViewer {
 
         if let Ok(ss) = self.screenshot_manager.lock() {
             ss.play_screenshot_sound(volume);
+        } else {
+            warn!("テスト再生で screenshot_manager のロックを取得できない");
         }
     }
 

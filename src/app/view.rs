@@ -8,6 +8,7 @@ use super::CaptureCardViewer;
 use crate::status::ErrorSource;
 use crate::video::FrameStats;
 use eframe::egui;
+use log::warn;
 
 /// 映像が出ていないときに画面へ出す文言を決める。
 ///
@@ -122,7 +123,11 @@ impl CaptureCardViewer {
     pub(super) fn update_video_texture(&mut self, ctx: &egui::Context) -> bool {
         // 新着フレームが無ければ何もしない。既存のテクスチャをそのまま使い回す。
         // **フレームだけはワーカーのチャネルを通さない。** コマンドの列に
-        // 並べると、接続や列挙の後ろで待たされて遅延が増える
+        // 並べると、接続や列挙の後ろで待たされて遅延が増える。
+        //
+        // **ロックが取れないときの警告も持たない。** `VideoFrames` の中で
+        // 失敗を握り潰して「新着なし」に倒すだけなので、毎フレーム呼ばれる
+        // この経路からログが出ることはない
         let new_frame = self.frames.newer_than(self.last_frame_generation);
 
         if let Some((frame, generation)) = new_frame {
@@ -202,6 +207,8 @@ impl CaptureCardViewer {
                             if settings.ui.enable_drag_move {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                             }
+                        } else {
+                            warn!("ウィンドウドラッグの判定で settings のロックを取得できない");
                         }
                     }
 
@@ -234,6 +241,8 @@ impl CaptureCardViewer {
                             if settings.ui.enable_drag_move {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                             }
+                        } else {
+                            warn!("ウィンドウドラッグの判定で settings のロックを取得できない");
                         }
                     }
 

@@ -1015,7 +1015,7 @@ fn show_device_settings_tab(
         ui.add_space(5.0);
 
         // ビデオデバイス選択
-        // 一覧は main.rs 側でキャッシュ済みのものを受け取る（毎フレームの列挙を避けるため）
+        // 一覧は app 側でキャッシュ済みのものを受け取る（毎フレームの列挙を避けるため）
         let current_device = settings.video.device_name.clone().unwrap_or_default();
 
         let mut device_changed = false;
@@ -2628,7 +2628,7 @@ pub fn show_hotkey_capture_dialog(
                 other.label()
             ));
         }
-        // 待機中でもここでは理由を消さない。呼び出し側（main.rs）が
+        // 待機中でもここでは理由を消さない。呼び出し側（app/mod.rs）が
         // `HotkeyManager::try_register` の失敗理由をこのフレームより後で
         // `set_rejection` することがあり、ここで無条件に消すと次のフレームの
         // 冒頭（このアームの判定）で即座に消えて一度も表示されない。

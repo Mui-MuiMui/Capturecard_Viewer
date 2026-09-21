@@ -506,7 +506,7 @@ toggle_fullscreen = "Ctrl+F11"
 
 - コードコメント、UI 文字列、コミットメッセージは日本語
 - 既存の命名（snake_case、モジュール構成）に合わせる
-- 実装とコメントが食い違っている箇所が複数あるので、コメントを鵜呑みにせず実コードを確認すること
+- コメントは Issue #73 で一度整理済み。ただし `src/app/device.rs` / `monitor.rs` / `retry.rs` / `capabilities.rs`、`src/video.rs`、`src/audio.rs` はワーカースレッド化の作業と競合するため対象外にしてある。これらのファイルは食い違いが残っている可能性があるので、コメントを鵜呑みにせず実コードを確認すること
 
 ブランチ名・コミットメッセージ・PR の書き方は `.claude/skills/naming-conventions/SKILL.md` にまとめてある。ブランチを切る前、コミットする前、PR を作る前に参照すること。
 

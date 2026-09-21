@@ -137,11 +137,13 @@ impl CaptureCardViewer {
             context_menu_size_limits(ctx.screen_rect().size(), frame.inner_margin.sum());
         // プリセットが 1 つでもあれば、平らな一覧に「プリセット」の行が
         // 1 行増える（preset_submenu、詳細は estimate_flat_menu_height）
-        let has_presets = self
-            .settings
-            .lock()
-            .map(|settings| !settings.presets.is_empty())
-            .unwrap_or(false);
+        let has_presets = match self.settings.lock() {
+            Ok(settings) => !settings.presets.is_empty(),
+            Err(_) => {
+                warn!("右クリックメニューの高さ見積もりで settings のロックを取得できない");
+                false
+            }
+        };
         let flat_height = estimate_flat_menu_height(&ctx.style().spacing, has_presets);
         self.context_menu_layout = context_menu_layout(max_height, flat_height);
     }
@@ -261,6 +263,8 @@ impl CaptureCardViewer {
         if aspect_response.changed() {
             if let Ok(mut settings) = self.settings.lock() {
                 settings.ui.maintain_aspect_ratio = self.maintain_aspect_ratio;
+            } else {
+                warn!("アスペクト比の設定の反映で settings のロックを取得できない");
             }
             self.mark_settings_dirty();
         }
@@ -292,6 +296,7 @@ impl CaptureCardViewer {
         let enable_drag_move = if let Ok(settings) = self.settings.lock() {
             settings.ui.enable_drag_move
         } else {
+            warn!("画面ドラッグ移動の設定の読み取りで settings のロックを取得できない");
             true
         };
         let mut temp_enable_drag_move = enable_drag_move;
@@ -306,6 +311,8 @@ impl CaptureCardViewer {
         if drag_move_response.changed() {
             if let Ok(mut settings) = self.settings.lock() {
                 settings.ui.enable_drag_move = temp_enable_drag_move;
+            } else {
+                warn!("画面ドラッグ移動の設定の反映で settings のロックを取得できない");
             }
             self.mark_settings_dirty();
         }
@@ -314,6 +321,8 @@ impl CaptureCardViewer {
         if stats_response.changed() {
             if let Ok(mut settings) = self.settings.lock() {
                 settings.ui.show_stats_overlay = self.show_stats_overlay;
+            } else {
+                warn!("情報表示の設定の反映で settings のロックを取得できない");
             }
             self.mark_settings_dirty();
         }
@@ -321,6 +330,7 @@ impl CaptureCardViewer {
         let auto_reconnect = if let Ok(settings) = self.settings.lock() {
             settings.video.auto_reconnect
         } else {
+            warn!("デバイスの自動再接続の設定の読み取りで settings のロックを取得できない");
             true
         };
         let mut temp_auto_reconnect = auto_reconnect;
@@ -332,15 +342,17 @@ impl CaptureCardViewer {
         if auto_reconnect_response.changed() {
             if let Ok(mut settings) = self.settings.lock() {
                 settings.video.auto_reconnect = temp_auto_reconnect;
+                info!(
+                    "デバイスの自動再接続を{}にした",
+                    if temp_auto_reconnect {
+                        "有効"
+                    } else {
+                        "無効"
+                    }
+                );
+            } else {
+                warn!("デバイスの自動再接続の設定の反映で settings のロックを取得できない");
             }
-            info!(
-                "デバイスの自動再接続を{}にした",
-                if temp_auto_reconnect {
-                    "有効"
-                } else {
-                    "無効"
-                }
-            );
             self.mark_settings_dirty();
             // **デバイスワーカーへも伝える。** 切断を検出したときに開き直すかの
             // 判断はワーカー側が持っているので、次の 2 秒ごとの再適用を待つと
@@ -459,6 +471,7 @@ impl CaptureCardViewer {
         let auto_reconnect = if let Ok(settings) = self.settings.lock() {
             settings.video.auto_reconnect
         } else {
+            warn!("デバイスの自動再接続の設定の読み取りで settings のロックを取得できない");
             true
         };
         let mut temp_auto_reconnect = auto_reconnect;
@@ -472,15 +485,17 @@ impl CaptureCardViewer {
         if auto_reconnect_response.changed() {
             if let Ok(mut settings) = self.settings.lock() {
                 settings.video.auto_reconnect = temp_auto_reconnect;
+                info!(
+                    "デバイスの自動再接続を{}にした",
+                    if temp_auto_reconnect {
+                        "有効"
+                    } else {
+                        "無効"
+                    }
+                );
+            } else {
+                warn!("デバイスの自動再接続の設定の反映で settings のロックを取得できない");
             }
-            info!(
-                "デバイスの自動再接続を{}にした",
-                if temp_auto_reconnect {
-                    "有効"
-                } else {
-                    "無効"
-                }
-            );
             self.mark_settings_dirty();
             // 平らな一覧側と同じく、ワーカーへもその場で伝える
             self.apply_settings(false);
@@ -524,6 +539,8 @@ impl CaptureCardViewer {
             if aspect_response.changed() {
                 if let Ok(mut settings) = self.settings.lock() {
                     settings.ui.maintain_aspect_ratio = self.maintain_aspect_ratio;
+                } else {
+                    warn!("アスペクト比の設定の反映で settings のロックを取得できない");
                 }
                 self.mark_settings_dirty();
             }
@@ -545,6 +562,8 @@ impl CaptureCardViewer {
             if stats_response.changed() {
                 if let Ok(mut settings) = self.settings.lock() {
                     settings.ui.show_stats_overlay = self.show_stats_overlay;
+                } else {
+                    warn!("情報表示の設定の反映で settings のロックを取得できない");
                 }
                 self.mark_settings_dirty();
             }
@@ -595,6 +614,7 @@ impl CaptureCardViewer {
             let enable_drag_move = if let Ok(settings) = self.settings.lock() {
                 settings.ui.enable_drag_move
             } else {
+                warn!("画面ドラッグ移動の設定の読み取りで settings のロックを取得できない");
                 true
             };
             let mut temp_enable_drag_move = enable_drag_move;
@@ -611,6 +631,8 @@ impl CaptureCardViewer {
             if drag_move_response.changed() {
                 if let Ok(mut settings) = self.settings.lock() {
                     settings.ui.enable_drag_move = temp_enable_drag_move;
+                } else {
+                    warn!("画面ドラッグ移動の設定の反映で settings のロックを取得できない");
                 }
                 self.mark_settings_dirty();
             }
