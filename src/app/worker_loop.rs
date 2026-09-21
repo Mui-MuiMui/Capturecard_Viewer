@@ -43,6 +43,25 @@ const RETRY_TICK: Duration = Duration::from_millis(100);
 /// **短くしても得るものが無く、待機中の消費電力だけが増える。**
 const IDLE_TICK: Duration = Duration::from_millis(500);
 
+/// 音声のクロックドリフト補正（レート比の微調整）を行う間隔。
+///
+/// `tick` 自体は 100〜500ms ごとに回るが、補正はもっと粗くてよい。
+/// クロックのずれは秒単位でしか積もらないので、毎 tick 動かしても
+/// 得るものが無く、ログだけ増える。
+const RESAMPLE_CORRECTION_INTERVAL: Duration = Duration::from_secs(3);
+
+/// 水位が目標から大きく外れ続けているときの `warn` を間引く間隔。
+///
+/// 補正が追いつかない状態は一過性のこともあるため、連打せず数十秒に 1 回に留める。
+const RESAMPLE_WARN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// この相対誤差（目標水位に対する比率）を超えたら「大きく外れている」とみなす。
+///
+/// 補正の上限は ±0.1% なので、通常のクロックドリフト（数十〜数百 ppm）は
+/// 吸収できる。それでもここまで外れるのは、デバイス側の極端なドリフトや
+/// バッファ長そのものが実情に合っていない可能性がある
+const RESAMPLE_WARN_RELATIVE_ERROR: f64 = 0.5;
+
 /// 次にコマンドを待つ時間を決める。
 ///
 /// 接続を追いかけている間だけ細かく起きる。判定を関数にしてあるのは、
@@ -152,6 +171,13 @@ pub(super) struct WorkerState {
     /// 設定ダイアログ用のキャッシュ（`ui::CapabilityCache`）とは別物で、
     /// こちらは問い合わせた結果をそのまま溜めるだけ
     pub(super) audio_capabilities: HashMap<(AudioDirection, String), AudioCapabilities>,
+
+    /// 音声のクロックドリフト補正を最後に行った時刻。
+    /// `RESAMPLE_CORRECTION_INTERVAL` おきにしか動かさないための記録
+    pub(super) last_resample_correction: Option<Instant>,
+    /// 水位が目標から大きく外れている旨の `warn` を最後に出した時刻。
+    /// 連打を防ぐための記録
+    pub(super) last_resample_warn: Option<Instant>,
 }
 
 impl WorkerState {
@@ -180,6 +206,8 @@ impl WorkerState {
             last_audio_error_reconnect: None,
             last_default_audio_check: None,
             audio_capabilities: HashMap::new(),
+            last_resample_correction: None,
+            last_resample_warn: None,
         }
     }
 
@@ -221,6 +249,7 @@ impl WorkerState {
                 active: self.audio_retry.is_active(),
                 attempts: self.audio_retry.attempts(),
             },
+            audio_resample: self.audio.resample_status(),
         };
         match self.snapshot.write() {
             Ok(mut slot) => *slot = next,
@@ -290,6 +319,60 @@ impl WorkerState {
         self.monitor_video_link();
         self.monitor_audio_stream();
         self.poll_default_audio_device();
+        self.adjust_resample_correction(now);
+    }
+
+    /// 音声のクロックドリフト補正。水位を見て、レート比の補正係数を
+    /// `RESAMPLE_CORRECTION_INTERVAL` ごとに動かす。
+    ///
+    /// **揃っている組み合わせ（identity）では何もしない。** `resample_telemetry`
+    /// は変換が要る場合しか作らないので、まだ音声を開いていない場合も含めて
+    /// ここで早期に諦める。
+    fn adjust_resample_correction(&mut self, now: Instant) {
+        let Some(telemetry) = self.audio.resample_telemetry().cloned() else {
+            return;
+        };
+
+        let due = self
+            .last_resample_correction
+            .map(|last| now.duration_since(last) >= RESAMPLE_CORRECTION_INTERVAL)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.last_resample_correction = Some(now);
+
+        let water_level = telemetry.water_level();
+        let target_level = telemetry.target_level();
+        // ここへ来る時点で identity ではないと分かっているので false 固定。
+        // 純粋関数側の identity 判定は主にテストのための引数
+        let ratio = audio::decide_resample_correction(false, water_level, target_level);
+        telemetry.set_correction(ratio);
+        if (ratio - 1.0).abs() > f32::EPSILON {
+            debug!(
+                "音声のリサンプル比を補正した: {:.5}（水位 {} / 目標 {}）",
+                ratio, water_level, target_level
+            );
+        }
+
+        if target_level == 0 {
+            return;
+        }
+        let relative_error = (water_level as f64 - target_level as f64).abs() / target_level as f64;
+        if relative_error < RESAMPLE_WARN_RELATIVE_ERROR {
+            return;
+        }
+        let should_warn = self
+            .last_resample_warn
+            .map(|last| now.duration_since(last) >= RESAMPLE_WARN_INTERVAL)
+            .unwrap_or(true);
+        if should_warn {
+            self.last_resample_warn = Some(now);
+            warn!(
+                "音声リングバッファの水位が目標から大きく外れている（水位 {}、目標 {}）。補正の上限（±0.1%）で追いつかない可能性がある",
+                water_level, target_level
+            );
+        }
     }
 
     /// 期限が来ているデバイスの接続を 1 回だけ試す。

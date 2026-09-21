@@ -15,7 +15,7 @@
 //! 越しに読む。イベントを取りこぼしても表示が食い違わないよう、状態は
 //! 必ずこちらを正とする。
 
-use crate::audio::{ActiveAudio, AudioCapabilities, AudioControls, AudioDirection};
+use crate::audio::{ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, ResampleStatus};
 use crate::repaint::RepaintWaker;
 use crate::settings::AppSettings;
 use crate::video::{ActiveVideo, DeviceCapabilities, SharedColorConversion, VideoFrames};
@@ -154,6 +154,11 @@ pub(super) struct DeviceSnapshot {
     pub(super) active_audio: Option<ActiveAudio>,
     pub(super) video_retry: RetryStatus,
     pub(super) audio_retry: RetryStatus,
+    /// 音声のクロックドリフト補正の現在値。「接続状態」タブへ出す想定だが、
+    /// 表示側（`ui.rs`）はまだ実装していないので読まれていない（Issue #132）。
+    /// 表示を足すまでの間、警告を黙らせる
+    #[allow(dead_code)]
+    pub(super) audio_resample: Option<ResampleStatus>,
 }
 
 /// ワーカースレッドと、UI スレッドが共有する読み取り専用のスナップショット。

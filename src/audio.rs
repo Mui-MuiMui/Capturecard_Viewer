@@ -1,7 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, SampleRate, SupportedStreamConfig, SupportedStreamConfigRange};
 use log::{debug, error, info, trace, warn};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ringbuf::HeapRb;
@@ -462,6 +462,117 @@ impl AudioControls {
     }
 }
 
+/// 目標水位からの相対誤差がこの割合未満なら補正しない（デッドゾーン）。
+///
+/// 揺らぎのたびに補正を動かすと、かえって位相が揺れる。
+const RESAMPLE_DEAD_ZONE_RATIO: f64 = 0.01;
+/// 相対誤差がこの割合以上で補正が頭打ちになる。
+const RESAMPLE_SATURATION_RATIO: f64 = 0.10;
+/// 補正係数の最大のずれ（±0.1%）。
+///
+/// 水晶発振子のずれは通常 100ppm（0.01%）以下なので、10 倍の余裕を持たせてある。
+const RESAMPLE_MAX_CORRECTION: f32 = 0.001;
+
+/// リングバッファの水位と目標から、次に使うレート比の補正係数を決める。
+///
+/// **比例制御（P制御）だけで足りる。** 積分を持たないので、呼ぶたびに水位と
+/// 目標から作り直すだけで、前回の値は参照しない。目標を追い越しても次の
+/// 呼び出しで符号が反転して自然に戻るので、これで十分。
+///
+/// 水位が目標より高い（溜まっている）ときは 1.0 より大きくして出力側の
+/// 消費を早め、低い（枯れかけている）ときは 1.0 より小さくして消費を遅らせる。
+///
+/// - `is_identity`（入出力の形が揃っている）が真なら常に `1.0`
+/// - 相対誤差が `RESAMPLE_DEAD_ZONE_RATIO` 未満なら `1.0`（目標付近では変えない）
+/// - 相対誤差が `RESAMPLE_SATURATION_RATIO` 以上は `RESAMPLE_MAX_CORRECTION` に頭打ち
+pub(crate) fn decide_resample_correction(
+    is_identity: bool,
+    water_level: usize,
+    target_level: usize,
+) -> f32 {
+    if is_identity || target_level == 0 {
+        return 1.0;
+    }
+
+    let relative_error = (water_level as f64 - target_level as f64) / target_level as f64;
+    if relative_error.abs() < RESAMPLE_DEAD_ZONE_RATIO {
+        return 1.0;
+    }
+
+    let clamped = relative_error.clamp(-RESAMPLE_SATURATION_RATIO, RESAMPLE_SATURATION_RATIO);
+    let magnitude =
+        (clamped.abs() / RESAMPLE_SATURATION_RATIO) * f64::from(RESAMPLE_MAX_CORRECTION);
+    (1.0 + magnitude.copysign(relative_error)) as f32
+}
+
+/// 出力コールバックとデバイスワーカーが共有する、リサンプル補正の状態。
+///
+/// **ロックを使わない。** 出力コールバックはリアルタイムスレッドなので、
+/// ロックを取れない／待たされると音が途切れる。水位は出力コールバックが
+/// 毎回書き、補正係数はデバイスワーカーが数秒ごとに書く（`AudioControls` の
+/// 音量と同じ、ビット表現のまま出し入れする流儀）。
+///
+/// **入出力の形が揃っている（identity）ストリームでは作らない。** 補正の
+/// しようがないので、水位を追う意味がない。
+#[derive(Debug)]
+pub struct ResampleTelemetry {
+    /// リングバッファの水位（サンプル数、インターリーブ）
+    water_level: AtomicUsize,
+    /// 目標水位（サンプル数）。ストリームを開いたときに決め、以降は変えない
+    target_level: usize,
+    /// レート比への補正係数（1.0 が無補正）。f32 のビット表現で持つ
+    correction: AtomicU32,
+}
+
+impl ResampleTelemetry {
+    fn new(target_level: usize) -> Self {
+        Self {
+            // 開いた直後は目標どおりとみなす。0 から始めると、最初の
+            // 調整が「空っぽ」と誤認して的外れな補正をかけてしまう
+            water_level: AtomicUsize::new(target_level),
+            target_level,
+            correction: AtomicU32::new(1.0f32.to_bits()),
+        }
+    }
+
+    /// 出力コールバックが呼ぶ。水位を書く。
+    fn record_water_level(&self, level: usize) {
+        self.water_level.store(level, Ordering::Relaxed);
+    }
+
+    /// 出力コールバックが呼ぶ。補正係数を読む。
+    fn correction(&self) -> f32 {
+        f32::from_bits(self.correction.load(Ordering::Relaxed))
+    }
+
+    /// デバイスワーカーが呼ぶ。水位を読む。
+    pub fn water_level(&self) -> usize {
+        self.water_level.load(Ordering::Relaxed)
+    }
+
+    /// デバイスワーカーが呼ぶ。目標水位を読む。
+    pub fn target_level(&self) -> usize {
+        self.target_level
+    }
+
+    /// デバイスワーカーが呼ぶ。補正係数を書く。
+    pub fn set_correction(&self, correction: f32) {
+        self.correction
+            .store(correction.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// 「接続状態」タブへ出すための、リサンプル補正の現在値のスナップショット。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResampleStatus {
+    /// 現在の補正係数（1.0 が無補正）
+    pub ratio: f32,
+    /// リングバッファの水位（サンプル数）
+    pub water_level: usize,
+    /// 目標水位（サンプル数）
+    pub target_level: usize,
+}
+
 pub struct AudioCapture {
     host: cpal::Host,
     input_stream: Option<cpal::Stream>,
@@ -471,6 +582,10 @@ pub struct AudioCapture {
     /// 出力コールバックと共有する音量・パススルー・ミュート。
     /// ストリームを開き直しても差し替えない
     controls: Arc<AudioControls>,
+    /// クロックドリフト補正の共有状態。変換が要らない（identity）、または
+    /// まだ音声を開いていなければ `None`。デバイスワーカーが `tick` の中で
+    /// 数秒ごとに読み書きする（`app::worker_loop`）
+    resample_telemetry: Option<Arc<ResampleTelemetry>>,
     // 稼働中のストリームでエラーが起きたことを表す旗。
     //
     // cpal のエラーコールバックはデバイスが消えた（`DeviceNotAvailable`）
@@ -524,6 +639,7 @@ impl AudioCapture {
             output_stream: None,
             active: None,
             controls,
+            resample_telemetry: None,
             stream_error: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -747,8 +863,11 @@ impl AudioCapture {
                 output_config.channels(),
             )
         };
-        if make_converter().is_identity() {
+        // クロックドリフト補正は変換が要る組み合わせだけが対象。目標水位は
+        // リングバッファのちょうど半分（`buffer_size` ぶん）に置く
+        let resample_telemetry = if make_converter().is_identity() {
             debug!("入出力の形が同じなので、サンプルはそのまま流す");
+            None
         } else {
             info!(
                 "入出力の形が違うので変換する - レート比: {:.4}、チャンネル: {} -> {}",
@@ -756,7 +875,8 @@ impl AudioCapture {
                 input_config.channels(),
                 output_config.channels()
             );
-        }
+            Some(Arc::new(ResampleTelemetry::new(buffer_size)))
+        };
 
         let output_stream = match output_config.sample_format() {
             SampleFormat::F32 => build_output_stream_with::<f32>(
@@ -765,7 +885,7 @@ impl AudioCapture {
                 consumer.clone(),
                 controls,
                 stream_error.clone(),
-                make_converter(),
+                make_converter().with_telemetry(resample_telemetry.clone()),
                 |sample| sample,
             ),
             SampleFormat::I16 => build_output_stream_with::<i16>(
@@ -774,7 +894,7 @@ impl AudioCapture {
                 consumer.clone(),
                 controls,
                 stream_error.clone(),
-                make_converter(),
+                make_converter().with_telemetry(resample_telemetry.clone()),
                 f32_to_i16,
             ),
             SampleFormat::U16 => build_output_stream_with::<u16>(
@@ -783,7 +903,7 @@ impl AudioCapture {
                 consumer.clone(),
                 controls,
                 stream_error.clone(),
-                make_converter(),
+                make_converter().with_telemetry(resample_telemetry.clone()),
                 f32_to_u16,
             ),
             SampleFormat::I32 => build_output_stream_with::<i32>(
@@ -792,7 +912,7 @@ impl AudioCapture {
                 consumer.clone(),
                 controls,
                 stream_error.clone(),
-                make_converter(),
+                make_converter().with_telemetry(resample_telemetry.clone()),
                 f32_to_i32,
             ),
             other => return Err(unsupported_sample_format_error("出力", other)),
@@ -813,6 +933,8 @@ impl AudioCapture {
         self.output_stream = Some(output_stream);
         // 監視の対象を、いま開いたストリームの旗へ差し替える
         self.stream_error = stream_error;
+        // デバイスワーカーが `tick` の中で読み書きする対象も差し替える
+        self.resample_telemetry = resample_telemetry;
         // 接続状態の表示用に、実際に開いた内容を控える
         self.active = Some(ActiveAudio {
             input_device: input_device_name,
@@ -835,8 +957,27 @@ impl AudioCapture {
         self.active.clone()
     }
 
+    /// クロックドリフト補正の共有状態。変換が要らない（identity）、または
+    /// まだ音声を開いていなければ `None`。デバイスワーカーが `tick` の中で
+    /// 水位を読み、補正係数を書く
+    pub fn resample_telemetry(&self) -> Option<&Arc<ResampleTelemetry>> {
+        self.resample_telemetry.as_ref()
+    }
+
+    /// 「接続状態」タブへ出すための、リサンプル補正の現在値。
+    pub fn resample_status(&self) -> Option<ResampleStatus> {
+        self.resample_telemetry
+            .as_ref()
+            .map(|telemetry| ResampleStatus {
+                ratio: telemetry.correction(),
+                water_level: telemetry.water_level(),
+                target_level: telemetry.target_level(),
+            })
+    }
+
     pub fn stop_capture(&mut self) {
         self.active = None;
+        self.resample_telemetry = None;
         if let Some(s) = self.input_stream.take() {
             let _ = s.pause();
         }
@@ -1082,6 +1223,8 @@ where
                 controls.muted.load(Ordering::Relaxed),
             );
             if let Ok(mut cons) = consumer.try_lock() {
+                // クロックドリフト補正の水位。この呼び出し分を消費する前の値を書く
+                converter.record_water_level(cons.len());
                 let mut pop = || cons.pop();
                 render_output_samples(
                     data,
@@ -1164,7 +1307,11 @@ fn f32_to_i32(sample: f32) -> i32 {
 /// ロックも行わない。** バッファはストリームを組み立てるときに確保する。
 ///
 /// 長時間再生で効いてくるクロックドリフト（入出力のハードウェアクロックが
-/// 厳密には一致しないこと）は扱わない。バッファ水位に応じた微調整が要る。
+/// 厳密には一致しないこと）は、リングバッファの水位に応じてレート比を
+/// ±0.1% の範囲でわずかに動かして吸収する（`ResampleTelemetry`、
+/// `decide_resample_correction`）。水位の観測とレート比の書き換えは別スレッド
+/// （デバイスワーカー、`app::worker_loop`）が数秒ごとに行うので、ここは
+/// 読み出すだけ。
 pub struct PassthroughConverter {
     /// 入出力が同じ形なので変換が要らない。リングバッファの値をそのまま出す
     identity: bool,
@@ -1190,6 +1337,9 @@ pub struct PassthroughConverter {
     /// 出力チャンネルの途中から新しいフレームの 0 番を書くことになり、
     /// 左右が入れ替わる
     starved: bool,
+    /// クロックドリフト補正の共有状態。`None` なら補正しない（無補正の
+    /// `1.0` を使い続ける）
+    telemetry: Option<Arc<ResampleTelemetry>>,
 }
 
 impl PassthroughConverter {
@@ -1226,12 +1376,28 @@ impl PassthroughConverter {
             frame: vec![0.0; out_channels],
             channel: 0,
             starved: false,
+            telemetry: None,
         }
+    }
+
+    /// クロックドリフト補正の共有状態を紐づける。`None` なら補正しない
+    /// （入出力の形が揃っている場合はこちらのまま使う）。
+    pub fn with_telemetry(mut self, telemetry: Option<Arc<ResampleTelemetry>>) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 
     /// 変換が要らない組み合わせか。ログとテストのための問い合わせ。
     pub fn is_identity(&self) -> bool {
         self.identity
+    }
+
+    /// 出力コールバックが呼ぶ。リングバッファの水位を書く。
+    /// 補正の対象外（`telemetry` が無い）ストリームでは何もしない。
+    pub fn record_water_level(&self, level: usize) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.record_water_level(level);
+        }
     }
 
     /// 出力サンプルを 1 つ取り出す。入力が足りなければ `None`。
@@ -1292,7 +1458,15 @@ impl PassthroughConverter {
             self.in_channels,
             &mut self.frame,
         );
-        self.position += self.step;
+        // クロックドリフト補正: デバイスワーカーが水位に応じて書き換えた
+        // 係数を毎フレーム読む。ロックを取らない Atomic の読み出しだけなので
+        // リアルタイムスレッドでも安全
+        let correction = self
+            .telemetry
+            .as_ref()
+            .map(|telemetry| telemetry.correction())
+            .unwrap_or(1.0);
+        self.position += self.step * f64::from(correction);
         true
     }
 }
@@ -1722,6 +1896,89 @@ mod tests {
             drain_converter(&mut converter, &[1.0, 2.0, 3.0]),
             vec![1.0, 2.0]
         );
+    }
+
+    #[test]
+    fn passthrough_converter_with_telemetry_applies_correction_to_the_step() {
+        // 24kHz -> 48kHz（無補正の step は 0.5）。補正係数を 1.5 にすると
+        // 実効の step は 0.75 になり、入力を余分に消費して早く進む
+        let telemetry = Arc::new(ResampleTelemetry::new(10));
+        telemetry.set_correction(1.5);
+        let mut converter =
+            PassthroughConverter::new(24000, 1, 48000, 1).with_telemetry(Some(telemetry));
+
+        let out = drain_converter(&mut converter, &[0.0, 1.0, 2.0, 3.0]);
+
+        assert_eq!(out, vec![0.0, 0.75, 1.5, 2.25]);
+    }
+
+    #[test]
+    fn passthrough_converter_without_telemetry_is_uncorrected() {
+        // telemetry を紐づけなければ従来どおり無補正（1.0）で進む
+        let mut converter = PassthroughConverter::new(24000, 1, 48000, 1);
+
+        let out = drain_converter(&mut converter, &[0.0, 1.0, 2.0]);
+
+        assert_eq!(out, vec![0.0, 0.5, 1.0, 1.5]);
+    }
+
+    #[test]
+    fn decide_resample_correction_identity_stays_at_one() {
+        // 揃っている組み合わせでは、水位がどれだけずれていても補正しない
+        assert_eq!(decide_resample_correction(true, 10_000, 500), 1.0);
+    }
+
+    #[test]
+    fn decide_resample_correction_zero_target_returns_identity() {
+        // 理論上は到達しない（target_level は buffer_size から作る）が、
+        // ゼロ除算を避ける防御として 1.0 に倒す
+        assert_eq!(decide_resample_correction(false, 100, 0), 1.0);
+    }
+
+    #[test]
+    fn decide_resample_correction_near_target_does_not_change() {
+        assert_eq!(decide_resample_correction(false, 500, 500), 1.0);
+        // 目標の 1% 未満のずれはデッドゾーン内
+        assert_eq!(decide_resample_correction(false, 504, 500), 1.0);
+        assert_eq!(decide_resample_correction(false, 496, 500), 1.0);
+    }
+
+    #[test]
+    fn decide_resample_correction_buffer_too_full_speeds_up() {
+        // 水位が目標を上回る（溜まっている）ときは 1.0 より大きくして早く消費する
+        let ratio = decide_resample_correction(false, 600, 500);
+        assert!(ratio > 1.0, "{ratio}");
+        assert!(ratio <= 1.0 + RESAMPLE_MAX_CORRECTION, "{ratio}");
+    }
+
+    #[test]
+    fn decide_resample_correction_buffer_too_empty_slows_down() {
+        // 水位が目標を下回る（枯れかけている）ときは 1.0 より小さくして消費を遅らせる
+        let ratio = decide_resample_correction(false, 400, 500);
+        assert!(ratio < 1.0, "{ratio}");
+        assert!(ratio >= 1.0 - RESAMPLE_MAX_CORRECTION, "{ratio}");
+    }
+
+    #[test]
+    fn decide_resample_correction_saturates_at_the_bound() {
+        // 目標から大きく外れていても ±0.1% を超えない
+        assert_eq!(
+            decide_resample_correction(false, 10_000, 500),
+            1.0 + RESAMPLE_MAX_CORRECTION
+        );
+        assert_eq!(
+            decide_resample_correction(false, 1, 500),
+            1.0 - RESAMPLE_MAX_CORRECTION
+        );
+    }
+
+    #[test]
+    fn decide_resample_correction_scales_between_dead_zone_and_saturation() {
+        // デッドゾーンと頭打ちの間では、ずれの大きさに応じて滑らかに動く
+        let small = decide_resample_correction(false, 525, 500); // 相対誤差 5%
+        let large = decide_resample_correction(false, 550, 500); // 相対誤差 10%（頭打ち）
+        assert!(small > 1.0 && small < large, "{small} {large}");
+        assert_eq!(large, 1.0 + RESAMPLE_MAX_CORRECTION);
     }
 
     #[test]
