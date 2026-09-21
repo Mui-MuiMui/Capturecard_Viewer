@@ -88,6 +88,21 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($body)) {
             throw "CHANGELOG.md の $version の節が空になっている"
           }
+
+          # 節が長いので、最初の `### ` より前（版の要約）だけを見せ、
+          # 分類ごとの一覧は <details> で折りたたむ。要約が無ければ全文をそのまま出す
+          $sectionLines = $lines[($start + 1)..($end - 1)]
+          $firstHeading = -1
+          for ($i = 0; $i -lt $sectionLines.Length; $i++) {
+            if ($sectionLines[$i] -match '^###\s') { $firstHeading = $i; break }
+          }
+          if ($firstHeading -gt 0) {
+            $intro = ($sectionLines[0..($firstHeading - 1)] -join "`n").Trim()
+            $rest = ($sectionLines[$firstHeading..($sectionLines.Length - 1)] -join "`n").Trim()
+            if (-not [string]::IsNullOrWhiteSpace($intro)) {
+              $body = "$intro`n`n<details>`n<summary>変更の一覧（追加・変更・修正の詳細）</summary>`n`n$rest`n`n</details>"
+            }
+          }
           Set-Content -Path release-notes.md -Value $body -Encoding utf8
 
           Write-Host "リリースノート ($version):"
