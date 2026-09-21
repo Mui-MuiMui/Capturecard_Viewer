@@ -6,7 +6,8 @@
 
 ## 対応する Issue
 
-<!-- Closes / Fixes は使わない。リリースで dev → main を入れた瞬間に、実機確認の済んでいない Issue まで閉じてしまうため。 -->
+<!-- Closes / Fixes は使わない。実機確認が済む前に Issue が閉じるのを防ぐため、参照は全て Refs に揃えている。
+     詳しい理由は .claude/skills/naming-conventions/SKILL.md の「Closes ではなく Refs を使う」を参照。 -->
 
 Refs #
 

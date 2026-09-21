@@ -29,10 +29,16 @@ gh issue list --state open --search "<キーワード>" --limit 20
 引数が空なら、何に着手するかを尋ねて止まる。推測で始めない。候補を出すなら **Project の Status が「未着手」のもの**から見る。**`gh issue list` だけで選ばないこと。** open な Issue には実装済みで人の確認を待っているだけのものが混ざっており、それを選ぶと作り直すことになる。
 
 ```bash
-gh project item-list 2 --owner Mui-MuiMui --format json --limit 300 --jq '.items[]|select(.status=="未着手")|"#\(.content.number) \(.content.title)"'
+gh project item-list 2 --owner Mui-MuiMui --format json --limit 300 --jq '.items[]|select(.status=="未着手" and .content.type=="Issue")|"#\(.content.number) \(.content.title)"'
 ```
 
-優先度で絞りたいときは、この一覧と `gh issue list --state open --label P1` の結果を突き合わせる。
+**`.content.type=="Issue"` を外さないこと。** Project には Issue のほかに Pull Request と下書き（draft issue）も入る。下書きには Issue 番号が無いので、外すと `#null` が候補に並ぶ。
+
+優先度で絞りたいときは、この一覧と次の結果を突き合わせる。**`--limit` を省略すると 30 件で切れる。**
+
+```bash
+gh issue list --state open --label P1 --limit 100
+```
 
 ### 2. Issue の記述が今も有効か確認する
 

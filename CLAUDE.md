@@ -398,7 +398,7 @@ toggle_fullscreen = "Ctrl+F11"
 Status で絞った一覧は Project から引く。着手候補は **Status が「未着手」のもの**から選ぶ。open な Issue には実装済みで人の確認を待っているだけのものが混ざっているため、`gh issue list` だけで選ばない。
 
 ```bash
-gh project item-list 2 --owner Mui-MuiMui --format json --limit 300 --jq '.items[]|select(.status=="未着手")|"#\(.content.number) \(.content.title)"'
+gh project item-list 2 --owner Mui-MuiMui --format json --limit 300 --jq '.items[]|select(.status=="未着手" and .content.type=="Issue")|"#\(.content.number) \(.content.title)"'
 ```
 
 Status の変更はユーザーレベルの `github-issues` skill にあるヘルパーを使う。**このスクリプトは個人環境の手順なのでリポジトリには置かない。**
@@ -413,11 +413,21 @@ Project の Workflows（Item closed → 完了、Item reopened → 未着手、a
 
 ### PR と Issue のリンク
 
-**PR 本文には `Refs #<番号>` を書く。`Closes` / `Fixes` は使わない。**
+**PR 本文にもコミットメッセージにも `Refs #<番号>` を書く。`Closes` / `Fixes` は使わない。**
 
-GitHub のキーワードによる自動クローズは、**その PR が既定ブランチ（`main`）へマージされたとき**に起きる。このリポジトリの PR のマージ先は `dev` なので、`Closes #n` を書いてもその場では閉じない。**問題はリリースのとき。** `dev` → `main` の PR を入れた瞬間、そこに含まれる全ての `Closes` がまとめて発火し、人間の実機確認が済んでいない Issue まで閉じてしまう。キャプチャーデバイス依存の不具合が多く CI で確かめられる範囲が狭いため、確認されないまま「完了」に流れるのは困る。だから `Refs` にする。
+GitHub の自動クローズは、キーワードを書く場所によって挙動が違う。**どちらも「既定ブランチ（`main`）に入ったとき」に閉じる**が、`dev` 経由でそこへ至る道筋が別なので分けて理解する。
 
-PR 本文の雛形は `.github/pull_request_template.md`。GitHub 上で PR を作ると自動で差し込まれる。
+| 書く場所 | `dev` 向け PR をマージした時点 | リリースで `dev` → `main` を入れた時点 |
+|---|---|---|
+| `dev` 向け PR の本文 | **何も起きない。** 既定ブランチ以外を対象にした PR のキーワードは無視され、リンクすら張られない | 何も起きない。その PR は既にマージ済みで、後から再評価されない |
+| コミットメッセージ | 閉じない（`main` に載っていないため） | **閉じる。** 履歴に含まれるキーワード付きコミットが `main` に載った瞬間にまとめて発火する |
+| `dev` → `main` のリリース PR の本文 | — | **閉じる。** これだけは既定ブランチ向けの PR なのでキーワードが効く |
+
+つまり危ないのは**コミットメッセージとリリース PR の本文**の 2 つ。ここに `Closes` が紛れていると、リリースの瞬間に人間の実機確認が済んでいない Issue まで閉じる。キャプチャーデバイス依存の不具合が多く CI で確かめられる範囲が狭いため、確認されないまま「完了」へ流れるのは困る。
+
+`dev` 向け PR の本文に書いた `Closes` は実際には無視されるだけで害が無い。**それでも書かないのは、場所ごとに可否を覚える運用が事故の元だから。** 全ての場所で `Refs` に揃える。
+
+PR 本文の雛形は `.github/pull_request_template.md`。**GitHub が自動で差し込むのは既定ブランチ（`main`）にある版なので、この仕組みが効くのは次のリリースで `main` に入ってから。** それまでは見出しを自分で並べる。`gh pr create --body-file` で本文を渡す経路では、いずれにせよテンプレートは差し込まれない。
 
 したがって流れはこうなる。
 
