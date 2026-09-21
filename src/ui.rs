@@ -2384,6 +2384,10 @@ mod tests {
     /// 据え置かれるかを区別できるようにするためのもの。
     fn sample_settings() -> AppSettings {
         AppSettings {
+            // プリセットは持たない状態。プリセットを見るテストは
+            // それぞれの中で足す
+            active_preset: None,
+            presets: Vec::new(),
             video: VideoSettings {
                 device_name: Some("Capture Device".to_string()),
                 resolution: Some((1920, 1080)),
