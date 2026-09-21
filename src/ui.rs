@@ -3,7 +3,8 @@ use crate::hotkey::{HotkeyAction, HotkeyError};
 use crate::settings::{
     resolved_active_preset, validate_preset_name, AppSettings, ColorRange, ColorSpace, Preset,
     ScreenshotDestination, ScreenshotFormat, DEFAULT_CHANNELS, DEFAULT_SAMPLE_RATE,
-    MAX_JPEG_QUALITY, MAX_VIDEO_ADJUSTMENT, MIN_JPEG_QUALITY, MIN_VIDEO_ADJUSTMENT,
+    MAX_AUDIO_BUFFER_MS, MAX_JPEG_QUALITY, MAX_VIDEO_ADJUSTMENT, MIN_AUDIO_BUFFER_MS,
+    MIN_JPEG_QUALITY, MIN_VIDEO_ADJUSTMENT,
 };
 use crate::status::{ConnectionStatus, ErrorSource, LinkStatus};
 use crate::video::{DeviceCapabilities, VideoMode};
@@ -1776,6 +1777,25 @@ fn show_device_settings_tab(
 
         ui.add_space(10.0);
 
+        // 音声バッファ（遅延）
+        //
+        // ここで書き換わるのはドラフト。デバイスを開き直すのは「適用」または
+        // 「OK」のときで、スライダーを動かしている間は何も起きない。
+        // サンプリングレートやチャンネル数と同じ経路に乗せてある
+        ui.horizontal(|ui| {
+            ui.label("音声バッファ:");
+            ui.add(
+                egui::Slider::new(
+                    &mut settings.audio.audio_buffer_ms,
+                    MIN_AUDIO_BUFFER_MS..=MAX_AUDIO_BUFFER_MS,
+                )
+                .suffix(" ms"),
+            );
+        });
+        ui.label("小さいほど低遅延だがノイズが出やすい（既定: 50 ms）");
+
+        ui.add_space(10.0);
+
         // オーディオパススルー制御
         ui.horizontal(|ui| {
             ui.label("音声パススルー:");
@@ -2953,6 +2973,8 @@ mod tests {
                 sample_rate: Some(44100),
                 channels: Some(1),
                 passthrough_enabled: false,
+                // 既定値（50ms）と異なる値にして、反映の有無を見分けられるようにする
+                audio_buffer_ms: 120,
             },
             screenshot: ScreenshotSettings {
                 destination: ScreenshotDestination::Both,

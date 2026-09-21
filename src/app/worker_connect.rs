@@ -135,11 +135,12 @@ impl WorkerState {
     /// **開けなくても、別のデバイスへは倒さない。** 失敗が続いたときの扱いは
     /// `monitor::decide_audio_fallback` を参照。
     pub(super) fn try_connect_audio(&mut self, config: &DeviceConfig, now: Instant) {
-        let (input_device_name, output_device_name, sample_rate, channels) = config.audio.clone();
+        let (input_device_name, output_device_name, sample_rate, channels, buffer_ms) =
+            config.audio.clone();
         let attempt = self.audio_retry.attempts() + 1;
         info!(
-            "音声デバイスへの接続を試す（{} 回目）- 入力: {:?}、出力: {:?}",
-            attempt, input_device_name, output_device_name
+            "音声デバイスへの接続を試す（{} 回目）- 入力: {:?}、出力: {:?}、バッファ: {} ms",
+            attempt, input_device_name, output_device_name, buffer_ms
         );
 
         // デバイスの列挙は実測で 300ms 前後かかる。設定値との突き合わせに要るのは
@@ -174,6 +175,7 @@ impl WorkerState {
             output_capabilities: self
                 .audio_capabilities
                 .get(&(AudioDirection::Output, output_key.clone())),
+            buffer_ms,
         });
 
         match result {
