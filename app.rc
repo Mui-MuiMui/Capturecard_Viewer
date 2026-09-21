@@ -1,8 +1,17 @@
+#pragma code_page(65001)
+// 上の 1 行は必ず先頭に置く。rc.exe は既定でシステムのコードページ（日本語環境では
+// 932）としてこのファイルを読むため、UTF-8 の日本語コメントが Shift-JIS の 2 バイト
+// 文字と解釈されて改行を食い、次の行まで巻き込む
+
+// バージョン番号は build.rs が Cargo.toml の version から生成する（OUT_DIR/version.h）。
+// このファイルに数値を直接書かないこと。更新するのは Cargo.toml だけ
+#include "version.h"
+
 1 ICON "icon.ico"
 
 1 VERSIONINFO
-FILEVERSION 0,1,0,6
-PRODUCTVERSION 0,1,0,6
+FILEVERSION CV_VERSION_NUM
+PRODUCTVERSION CV_VERSION_NUM
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -15,12 +24,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Mui"
             VALUE "FileDescription", "Capturecard Viewer"
-            VALUE "FileVersion", "1.0.6"
+            VALUE "FileVersion", CV_VERSION_STR
             VALUE "InternalName", "capturecard_viewer"
             VALUE "LegalCopyright", "Copyright (C) 2025 Mui"
             VALUE "OriginalFilename", "capturecard_viewer.exe"
             VALUE "ProductName", "Capturecard Viewer"
-            VALUE "ProductVersion", "1.0.6"
+            VALUE "ProductVersion", CV_VERSION_STR
         END
     END
     BLOCK "VarFileInfo"

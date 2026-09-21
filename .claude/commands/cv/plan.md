@@ -1,7 +1,7 @@
 ---
 name: plan
-description: "Asana タスクまたは説明を受け取り、着手前の計画を立てて承認を求める"
-argument-hint: "<Asana タスクの URL、またはやりたいことの説明>"
+description: "GitHub Issue または説明を受け取り、着手前の計画を立てて承認を求める"
+argument-hint: "<Issue の番号・URL、またはやりたいことの説明>"
 ---
 
 # /cv:plan — 計画
@@ -14,16 +14,37 @@ argument-hint: "<Asana タスクの URL、またはやりたいことの説明>"
 
 ### 1. 対象を特定する
 
-引数が Asana タスクの URL なら、URL 末尾の gid で `get_task` を呼んで内容を取得する。
-引数が自由記述なら、対応する Asana タスクが既にないか `get_tasks` で確認する。なければ、計画提示時に「新規タスクとして登録するか」を併せて確認する。
+引数が Issue の番号か URL なら、本文とコメントを取得する。
 
-引数が空なら、何に着手するかを尋ねて止まる。推測で始めない。
+```bash
+gh issue view <番号> --json title,body,labels,comments
+```
 
-### 2. タスクの記述が今も有効か確認する
+引数が自由記述なら、対応する Issue が既にないか探す。なければ、計画提示時に「新規 Issue として起票するか」を併せて確認する。
+
+```bash
+gh issue list --state open --search "<キーワード>" --limit 20
+```
+
+引数が空なら、何に着手するかを尋ねて止まる。推測で始めない。候補を出すなら **Project の Status が「未着手」のもの**から見る。**`gh issue list` だけで選ばないこと。** open な Issue には実装済みで人の確認を待っているだけのものが混ざっており、それを選ぶと作り直すことになる。
+
+```bash
+gh project item-list 2 --owner Mui-MuiMui --format json --limit 300 --jq '.items[]|select(.status=="未着手" and .content.type=="Issue")|"#\(.content.number) \(.content.title)"'
+```
+
+**`.content.type=="Issue"` を外さないこと。** Project には Issue のほかに Pull Request と下書き（draft issue）も入る。下書きには Issue 番号が無いので、外すと `#null` が候補に並ぶ。
+
+優先度で絞りたいときは、この一覧と次の結果を突き合わせる。**`--limit` を省略すると 30 件で切れる。**
+
+```bash
+gh issue list --state open --label P1 --limit 100
+```
+
+### 2. Issue の記述が今も有効か確認する
 
 **必須。省略しない。**
 
-Asana のタスクには `src/audio.rs:157` の形式で該当箇所が書かれている。バックログは作成時点のスナップショットなので、別の変更で既に解消されていることがある。
+Issue には `src/audio.rs:157` の形式で該当箇所が書かれている。バックログは起票時点のスナップショットなので、別の変更で既に解消されていることがある。Asana から移行した Issue は特に古い。
 
 - 記載された箇所を実際に読む
 - 症状の原因が今もそこにあるか確認する

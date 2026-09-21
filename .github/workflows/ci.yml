@@ -1,0 +1,97 @@
+# Rust の検証を GitHub Actions で回す。
+#
+# ランナーは windows-latest 固定。build.rs が embed_resource で app.rc を
+# コンパイルするため rc.exe（Windows SDK）が要り、Linux/macOS ではビルドできない。
+# 依存の nokhwa（Media Foundation）と cpal（WASAPI）も Windows 専用。
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - main
+  push:
+    branches:
+      - dev
+      - main
+
+# 同一ブランチ・同一 PR で新しい push があったら、実行中の古いジョブを打ち切る。
+# release ビルドが重いため、無駄な実行を残さない。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# チェックアウトするだけなので読み取りのみ
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: fmt / clippy / build / test
+    runs-on: windows-latest
+
+    steps:
+      # 第三者の Action はタグやブランチではなく不変のコミット SHA で固定する。
+      # タグは後から付け替えられるため、上流が乗っ取られるとランナーで任意の
+      # コードが動く。更新するときは行末のコメントのバージョンを手掛かりにする。
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # ビルドするだけで git への書き込みをしないため、
+          # 認証情報を .git/config に残さない
+          persist-credentials: false
+
+      # SHA で固定すると ref からツールチェインを推測できなくなるので、
+      # master を指して toolchain を明示する（この Action の README が案内する方法）
+      - name: Rust ツールチェインを用意する
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master (2026-09-12)
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: cargo のキャッシュを復元する
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: 整形を確認する
+        run: cargo fmt --check
+
+      # 警告はエラー扱いにする。警告ゼロが前提なので、混入したらここで落とす。
+      # --locked はコミット済みの Cargo.lock をそのまま使うため。付けないと
+      # Cargo.toml と食い違っていても勝手に再解決され、手元と違う依存で
+      # CI が通ってしまう（以降の cargo コマンドも同じ理由で付けている）
+      - name: clippy をかける
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: release ビルドする
+        run: cargo build --locked --release
+
+      # #[ignore] を付けた実機テスト（キャプチャーデバイスが要る）は走らせない
+      - name: テストを実行する
+        run: cargo test --locked
+
+      # THIRD-PARTY-LICENSES.txt は about.hbs と Cargo.lock から生成している。
+      # 依存を足したり上げたりして再生成し忘れると、配布物とライセンス表記が
+      # 食い違う。生成し直してコミット済みのファイルと突き合わせる。
+      #
+      # 第三者の Action を増やさずに cargo install で入れる。初回は数分
+      # かかるが、Swatinem/rust-cache が ~/.cargo/bin もキャッシュ対象に
+      # するため 2 回目以降は復元されて終わる。
+      # cli フィーチャを付けないと実行ファイルが作られない点に注意。
+      # 版を固定するのは、cargo-about の版が変わると出力も変わりうるため。
+      - name: cargo-about を用意する
+        run: cargo install cargo-about --locked --version 0.9.2 --features cli
+
+      # git diff は未追跡のファイルを見ない。一覧ごと消された変更では
+      # 生成で作り直されて「差分なし」と判定されてしまうため、
+      # 追跡対象であることを先に確かめる
+      - name: ライセンス一覧が追跡対象か確認する
+        run: git ls-files --error-unmatch -- THIRD-PARTY-LICENSES.txt
+
+      # 生成と確認を分けているのは、windows ランナーの既定シェルが pwsh で、
+      # 1 つの run にまとめると前半の失敗が握り潰されるため
+      - name: ライセンス一覧を生成し直す
+        run: cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES.txt
+
+      # 差分があれば、依存を変えたあとの再生成とコミットを忘れている
+      - name: ライセンス一覧が Cargo.lock と一致するか確認する
+        run: git diff --exit-code -- THIRD-PARTY-LICENSES.txt

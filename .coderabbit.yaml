@@ -1,0 +1,47 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+# CodeRabbit のレビュー設定。
+# このファイルはリポジトリのルートに置く必要があり、レビュー対象 PR の
+# head ブランチにあるものが読まれる。
+
+language: "ja-JP"
+
+reviews:
+  profile: "chill"
+
+  # 装飾的な出力は切る。要約は残す
+  poem: false
+  in_progress_fortune: false
+  high_level_summary: true
+
+  auto_review:
+    enabled: true
+    # 既定ブランチ（main）以外でレビュー対象にするベースブランチ。正規表現。
+    # このリポジトリの PR は原則 dev へ向けるため、dev を含めないと
+    # 「Auto reviews are disabled on base/target branches other than the
+    # default branch」でスキップされる
+    base_branches:
+      - "^dev$"
+
+  path_instructions:
+    - path: "src/**/*.rs"
+      instructions: |
+        - コードコメントと UI 文字列は日本語で書く。
+        - `println!` / `eprintln!` を新たに追加しない。`#![windows_subsystem = "windows"]` によりコンソールが無く、出力はどこにも届かない。代わりに `log` クレートのマクロ（`error!` / `warn!` / `info!` / `debug!` / `trace!`）を使う。出力先は `src/logging.rs` がファイルへ向けている。例外は `#[cfg(test)]` の中で、テストバイナリの標準出力は `cargo test -- --nocapture` で読めるため `println!` を使ってよい。
+        - serde で読み書きする設定構造体（`AppSettings` など）にフィールドを追加するときは `#[serde(default)]` を必ず付ける。付けないと既存ユーザーの設定ファイルが丸ごと初期化される。
+        - 複数の `Mutex` を同時にロックする場合、順序は settings → video_capture → audio_capture → screenshot_manager に揃える。
+
+  tools:
+    # CI（.github/workflows/ci.yml）で cargo clippy --all-targets を回しているため、
+    # 指摘の重複を避けて clippy 連携は切る。
+    # CodeRabbit には設計・可読性・見落としのレビューを担当させる
+    clippy:
+      enabled: false
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    # 既定でも **/CLAUDE.md は読まれるが、skill も合わせて読ませる
+    filePatterns:
+      - "**/CLAUDE.md"
+      - ".claude/skills/**/*.md"

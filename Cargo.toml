@@ -1,7 +1,19 @@
 [package]
 name = "capturecard_viewer"
-version = "1.0.6"
+version = "1.1.0"
 edition = "2021"
+# 配布するアプリであってライブラリではない。crates.io へ公開しないことを明示する。
+# cargo-about の private.ignore がこの指定を見て、本体を
+# THIRD-PARTY-LICENSES.txt の一覧から除外する。
+publish = false
+
+# println! / eprintln! を足し直すのを CI で止める。
+# #![windows_subsystem = "windows"] でコンソールが無く、標準出力はどこにも
+# 届かないため、ログは log クレートのマクロを使う（src/logging.rs）。
+# CI は -D warnings なので、warn にしておけば混入した時点で落ちる。
+[lints.clippy]
+print_stdout = "warn"
+print_stderr = "warn"
 
 [dependencies]
 eframe = "0.26"
@@ -9,6 +21,8 @@ egui = "0.26"
 nokhwa = { version = "0.10", features = ["input-msmf", "output-threaded", "decoding"] }
 cpal = "0.15"
 confy = "0.6"
+# ログのファサード。出力先の実装は src/logging.rs にある
+log = "0.4.34"
 global-hotkey = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 image = "0.24"
@@ -17,12 +31,21 @@ rodio = "0.17"
 dirs = "5.0"
 rfd = "0.11"
 ringbuf = "0.3"
+# スクリーンショットをクリップボードへコピーする。egui-winit が既に同じ版を
+# 使っているため、クレート自体は増えない（image-data フィーチャの分だけ増える）
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+
+# テスト専用。設定の TOML を直接読み書きして検証するため
+[dev-dependencies]
+tempfile = "3.27"
+toml = "1.1"
 
 [build-dependencies]
 embed-resource = "2.4"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["winuser", "windef"] }
+# ウィンドウ位置の復元時にモニタの作業領域を列挙する（src/main.rs の monitor_work_areas）
+winapi = { version = "0.3", features = ["minwindef", "winuser", "windef"] }
 
 [[bin]]
 name = "capturecard_viewer"
