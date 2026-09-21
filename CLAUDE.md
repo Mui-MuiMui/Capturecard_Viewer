@@ -129,7 +129,7 @@ Project の Workflows（Item closed → 完了、Item reopened → 未着手、a
 
 ### PR と Issue のリンク
 
-**PR 本文にもコミットメッセージにも `Refs #<番号>` を書く。`Closes` / `Fixes` は使わない。** 場所ごとに GitHub の自動クローズがどう働くか、なぜ全ての場所で `Refs` に揃えるかは `.claude/skills/naming-conventions/SKILL.md` の「`Closes` ではなく `Refs` を使う」にある。
+**PR 本文には `Refs #<番号>`、コミットメッセージには `Refs: #<番号>` を書く。`Closes` / `Fixes` は使わない。** 場所ごとに GitHub の自動クローズがどう働くか、なぜ全ての場所で `Refs` に揃えるかは `.claude/skills/naming-conventions/SKILL.md` の「`Closes` ではなく `Refs` を使う」にある。
 
 PR 本文の雛形は `.github/pull_request_template.md`。**GitHub が自動で差し込むのは既定ブランチ（`main`）にある版なので、この仕組みが効くのは次のリリースで `main` に入ってから。** それまでは見出しを自分で並べる。`gh pr create --body-file` で本文を渡す経路では、いずれにせよテンプレートは差し込まれない。
 

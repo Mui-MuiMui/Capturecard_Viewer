@@ -8,7 +8,7 @@
 
 - `GUARDRAIL.md` — してはいけないこと / 必ずすることだけを集めた一覧。理由は書かず、参照先だけを添えてある
 - `docs/design/` — 設計判断の理由と経緯。ワーカースレッド、再接続、映像・音声、設定、ホットキーなどテーマ別に分けた 13 ファイル
-- `AGENTS.md` — Claude Code 以外の AI エージェント向けの入口。`CLAUDE.md` と `GUARDRAIL.md` への道案内だけを持つ
+- `AGENTS.md` — Claude Code 以外の AI エージェント向けの入口。`CLAUDE.md` / `GUARDRAIL.md` / `CONTRIBUTING.md` / `docs/design/` / `docs/ARCHITECTURE.md` と検証手順への道案内だけを持つ
 
 ## [1.1.0] - 2026-09-21
 

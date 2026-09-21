@@ -13,9 +13,4 @@ AI エージェント向けの入口です。**このファイルは道案内だ
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 目指す構造と現状との差分 |
 | [.claude/skills/verify/SKILL.md](.claude/skills/verify/SKILL.md) | ビルドと検証の手順。**コマンドと順番はここが持ちます** |
 
-補足。
-
-- Windows 10/11 専用です。他の OS ではビルドも実行もできません
-- コードコメント、UI 文字列、コミットメッセージは日本語で書きます
-- Issue 番号の前に置いてよいのは `Refs` だけです。`Closes` / `Fixes` は使いません
-- `CLAUDE.md` は Claude Code が `@GUARDRAIL.md` で `GUARDRAIL.md` を取り込む形になっています。この記法を解釈しないツールを使う場合は、2 つのファイルを自分で読んでください
+`CLAUDE.md` は Claude Code が `@GUARDRAIL.md` で `GUARDRAIL.md` を取り込む形になっています。**この記法を解釈しないツールを使う場合は、2 つのファイルを自分で読んでください。**

@@ -74,6 +74,6 @@
 - Issue を閉じるのは人が実機で確認したとき。Claude は閉じない（理由: 同上）
 - 進行状況は Project の Status だけで管理する。ラベルでは表さない（理由: `CLAUDE.md` の「タスク管理」）
 - 各コミットはビルドとテストが通る状態にする。push 済みの履歴を force push で作り直さない（理由: `.claude/skills/naming-conventions/SKILL.md`）
-- 設計判断や方針は `git log` ではなく `CLAUDE.md` / `GUARDRAIL.md` / `docs/` に書く（理由: `.claude/skills/naming-conventions/SKILL.md`）
+- 設計判断や方針は `git log` ではなく `CLAUDE.md` / `GUARDRAIL.md` / `docs/design/` に書く（理由: `.claude/skills/naming-conventions/SKILL.md`）
 - `CHANGELOG.md` に書くのはユーザーから見える変更だけ（新しいドキュメントは「増えるもの」として書く）（理由: `CONTRIBUTING.md` の「CHANGELOG」）
 - バージョン番号を `Cargo.toml` の `version` 以外に書かない。通常の PR で `version` を触らない（理由: `docs/BUILD.md`、`docs/RELEASE.md`）
