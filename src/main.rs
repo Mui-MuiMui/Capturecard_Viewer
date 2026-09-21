@@ -2511,30 +2511,102 @@ fn main() -> Result<(), eframe::Error> {
     )
 }
 
+/// 日本語フォントの候補。優先度順（先頭ほど優先）。
+/// (ログ・フォント名として使う表示名, フォントファイル名)
+///
+/// Meiryo が入っていない環境（Windows の言語パックを最小構成にした場合など）でも
+/// 日本語が豆腐（□）にならないよう、Windows に同梱されていることが多いフォントを
+/// 順に候補として並べてある。
+const JAPANESE_FONT_CANDIDATES: &[(&str, &str)] = &[
+    ("Meiryo", "meiryo.ttc"),
+    ("Yu Gothic UI (Medium)", "YuGothM.ttc"),
+    ("Yu Gothic UI (Regular)", "YuGothR.ttc"),
+    ("Yu Gothic", "yugothic.ttf"),
+    ("MS Gothic", "msgothic.ttc"),
+    ("BIZ UDGothic", "BIZ-UDGothicR.ttc"),
+];
+
+/// `JAPANESE_FONT_CANDIDATES` を優先度順に、`font_dirs` を引数の順に探し、
+/// 最初に実在したファイルを返す。デバイスや `%AppData%` に触らない純粋関数にするため、
+/// 探索対象のディレクトリ一覧は呼び出し側から渡す。
+fn find_japanese_font(font_dirs: &[PathBuf]) -> Option<(&'static str, PathBuf)> {
+    for (name, filename) in JAPANESE_FONT_CANDIDATES {
+        for dir in font_dirs {
+            let path = dir.join(filename);
+            if path.is_file() {
+                return Some((name, path));
+            }
+        }
+    }
+    None
+}
+
+/// 日本語フォントを探すディレクトリ一覧。システム共通のフォントディレクトリに加えて、
+/// 管理者権限なしでユーザー単位にインストールされたフォント（「自分のみにインストール」）
+/// も見る。パスは `%WINDIR%` / `%LOCALAPPDATA%` から組み立て、`C:\Windows` のように
+/// 決め打ちにしない。通常の Windows 環境ではどちらも設定されているが、
+/// 万一 `%WINDIR%` が取れない場合はシステム共通のフォントディレクトリを諦め、
+/// ユーザー単位のフォントディレクトリだけを見る
+#[cfg(target_os = "windows")]
+fn japanese_font_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    match std::env::var_os("WINDIR") {
+        Some(windir) => dirs.push(PathBuf::from(windir).join("Fonts")),
+        None => warn!(
+            "環境変数 WINDIR が取得できないため、システム共通のフォントディレクトリは探索しません"
+        ),
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(local_app_data).join(r"Microsoft\Windows\Fonts"));
+    }
+    dirs
+}
+
 fn configure_japanese_font(ctx: &egui::Context) {
-    // WindowsフォントディレクトリからMeiryoの読み込みを試行
     #[cfg(target_os = "windows")]
     {
-        let candidate_paths = [
-            "C:/Windows/Fonts/meiryo.ttc",
-            "C:/Windows/Fonts/Meiryo.ttc",
-            "C:/Windows/Fonts/meiryob.ttc",
-        ];
-        for p in candidate_paths.iter() {
-            if let Ok(data) = std::fs::read(p) {
-                let mut fonts = egui::FontDefinitions::default();
-                fonts
-                    .font_data
-                    .insert("meiryo".to_string(), egui::FontData::from_owned(data));
-                // 優先度のためにプロポーショナル・等幅フォントファミリーの先頭に挿入
-                if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                    fam.insert(0, "meiryo".to_string());
+        let font_dirs = japanese_font_search_dirs();
+        match find_japanese_font(&font_dirs) {
+            Some((name, path)) => match std::fs::read(&path) {
+                Ok(data) => {
+                    info!(
+                        "日本語フォントとして {} を使用します ({})",
+                        name,
+                        path.display()
+                    );
+                    let mut fonts = egui::FontDefinitions::default();
+                    fonts
+                        .font_data
+                        .insert("japanese".to_string(), egui::FontData::from_owned(data));
+                    // 優先度のためにプロポーショナル・等幅フォントファミリーの先頭に挿入する。
+                    // egui 既定の絵文字フォント等はそのまま残るため、Meiryo 等に無い記号は
+                    // 引き続きフォールバックで描画される
+                    if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                        fam.insert(0, "japanese".to_string());
+                    }
+                    if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                        fam.insert(0, "japanese".to_string());
+                    }
+                    ctx.set_fonts(fonts);
                 }
-                if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                    fam.insert(0, "meiryo".to_string());
+                Err(e) => {
+                    warn!(
+                        "日本語フォント候補 {} の読み込みに失敗しました: {}",
+                        path.display(),
+                        e
+                    );
                 }
-                ctx.set_fonts(fonts);
-                break;
+            },
+            None => {
+                let tried: Vec<&str> = JAPANESE_FONT_CANDIDATES
+                    .iter()
+                    .map(|(_, filename)| *filename)
+                    .collect();
+                warn!(
+                    "日本語フォント候補が 1 つも見つかりませんでした（探索先: {:?}, 候補: {}）。既定フォントのまま起動します",
+                    font_dirs,
+                    tried.join(", ")
+                );
             }
         }
     }
@@ -5897,5 +5969,50 @@ mod tests {
             .remove(0)
             .join()
             .expect("実行中だったスレッドを回収できること");
+    }
+
+    #[test]
+    fn find_japanese_font_prefers_earlier_candidate_when_multiple_exist() {
+        // Meiryo と Yu Gothic が両方入っている環境では、優先度が高い Meiryo を選ぶこと
+        let dir = tempdir().expect("tempdir を作れること");
+        std::fs::write(dir.path().join("meiryo.ttc"), b"dummy").unwrap();
+        std::fs::write(dir.path().join("YuGothR.ttc"), b"dummy").unwrap();
+
+        let found = find_japanese_font(&[dir.path().to_path_buf()]);
+
+        assert_eq!(
+            found,
+            Some(("Meiryo", dir.path().join("meiryo.ttc"))),
+            "候補リストで先に並ぶ Meiryo が選ばれること"
+        );
+    }
+
+    #[test]
+    fn find_japanese_font_returns_none_when_no_candidate_exists() {
+        // 候補が 1 つも無い環境（フォントを削除・最小構成にした等）では落ちずに None を返すこと
+        let dir = tempdir().expect("tempdir を作れること");
+
+        let found = find_japanese_font(&[dir.path().to_path_buf()]);
+
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn find_japanese_font_finds_font_in_user_installed_directory() {
+        // システム共通のフォントディレクトリ（1 つ目）には無く、
+        // ユーザー単位でインストールされたフォントディレクトリ（2 つ目）にだけある場合も見つかること
+        let system_dir = tempdir().expect("tempdir を作れること");
+        let user_dir = tempdir().expect("tempdir を作れること");
+        std::fs::write(user_dir.path().join("BIZ-UDGothicR.ttc"), b"dummy").unwrap();
+
+        let found = find_japanese_font(&[
+            system_dir.path().to_path_buf(),
+            user_dir.path().to_path_buf(),
+        ]);
+
+        assert_eq!(
+            found,
+            Some(("BIZ UDGothic", user_dir.path().join("BIZ-UDGothicR.ttc"))),
+        );
     }
 }
