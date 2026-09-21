@@ -46,8 +46,111 @@ pub enum SettingsDialogAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagementMessage {
     pub text: String,
-    /// 失敗を伝えるものか。表示色を分ける
+    /// 失敗を伝えるものか。表示の種別を分ける
     pub is_error: bool,
+}
+
+/// 注意・失敗・成功を伝える表示の種別。
+///
+/// **固定色（`egui::Color32::YELLOW` など）を直接書かないためにある。** 彩度の高い
+/// 色を文字そのものへ使うと、テーマの背景との差が強すぎて読みづらくなる。ライトと
+/// ダークのどちらかでしか成立しない色にもなりやすい。ここを通せば、文字色は通常の
+/// ままで、薄い背景と記号によって種別が分かる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeKind {
+    /// 続行はできるが想定と違う
+    Warning,
+    /// その操作が成立していない
+    Error,
+    /// 意図した状態になっている
+    Success,
+}
+
+impl NoticeKind {
+    /// 背景と枠線の元にする色。
+    ///
+    /// 注意と失敗は `egui::Visuals` 由来の色をそのまま使うため、ライトでもダークでも
+    /// 地の色との関係が保たれる。成功に当たる色だけは `Visuals` に無いので、ここで
+    /// テーマごとの明度を持つ。**固定色を書いてよいのはこの 1 か所だけ。**
+    fn accent(self, visuals: &egui::Visuals) -> egui::Color32 {
+        match self {
+            NoticeKind::Warning => visuals.warn_fg_color,
+            NoticeKind::Error => visuals.error_fg_color,
+            // ダークの地に沈まない明るめの緑と、ライトの地で浮かない濃い緑
+            NoticeKind::Success if visuals.dark_mode => egui::Color32::from_rgb(0x5c, 0xb8, 0x5c),
+            NoticeKind::Success => egui::Color32::from_rgb(0x2e, 0x7d, 0x32),
+        }
+    }
+
+    /// 文言の先頭に付ける記号。
+    ///
+    /// **色を見分けられなくても種別が分かるようにする。** 背景の濃さは控えめなので、
+    /// 記号が無いと注意と失敗の区別が色だけに頼ることになる。
+    fn symbol(self) -> &'static str {
+        match self {
+            NoticeKind::Warning => "⚠",
+            NoticeKind::Error => "×",
+            NoticeKind::Success => "●",
+        }
+    }
+}
+
+/// 背景に敷く濃さ。文字は通常色のままなので、地と区別が付く程度に留める。
+const NOTICE_FILL_FACTOR: f32 = 0.18;
+
+/// 枠線の濃さ。背景だけでは輪郭が沈むため、縁は少し強めに出す。
+const NOTICE_STROKE_FACTOR: f32 = 0.55;
+
+/// 注意書きと状態表示を入れる枠。
+fn notice_frame(ui: &egui::Ui, kind: NoticeKind) -> egui::Frame {
+    let accent = kind.accent(ui.visuals());
+    egui::Frame::none()
+        .fill(accent.gamma_multiply(NOTICE_FILL_FACTOR))
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            accent.gamma_multiply(NOTICE_STROKE_FACTOR),
+        ))
+        .rounding(egui::Rounding::same(4.0))
+        .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+}
+
+/// 種別を指定して注意書きを描く。失敗なら `NoticeKind::Error` を渡す。
+///
+/// 記号は種別から付くので、**呼び出し側の文言に「⚠」などを書かない。**
+fn notice_label(ui: &mut egui::Ui, kind: NoticeKind, text: impl Into<String>) {
+    let text = text.into();
+    notice_frame(ui, kind).show(ui, |ui| {
+        ui.label(format!("{} {}", kind.symbol(), text));
+    });
+}
+
+/// 続行できるが想定と違うことを伝える。設定ダイアログの注意書きはほぼこれ。
+fn warning_label(ui: &mut egui::Ui, text: impl Into<String>) {
+    notice_label(ui, NoticeKind::Warning, text);
+}
+
+/// 状態を短いバッジで描く。文言は記号を含んだ状態で渡す。
+///
+/// 注意書きと違って読み飛ばされては困るので、文字を太字にする。色は付けない。
+fn status_badge(ui: &mut egui::Ui, text: &str, kind: NoticeKind) {
+    notice_frame(ui, kind).show(ui, |ui| {
+        ui.label(egui::RichText::new(text).strong());
+    });
+}
+
+/// 接続状態を、記号を付けた見出しと表示の種別へ変換する。
+///
+/// **色だけで区別しない。** 記号（`●` / `⚠` / `×`）と `LinkStatus::headline` の
+/// 文言だけで、接続中・再接続中・未接続を見分けられるようにしてある。
+fn link_status_badge(status: &LinkStatus) -> (String, NoticeKind) {
+    let kind = match (status.connected, status.reconnecting) {
+        (true, _) => NoticeKind::Success,
+        // 追いかけている最中で、復帰する見込みがある
+        (false, true) => NoticeKind::Warning,
+        // 映像も音声も出ていない。注意より強く出す
+        (false, false) => NoticeKind::Error,
+    };
+    (format!("{} {}", kind.symbol(), status.headline()), kind)
 }
 
 /// 設定ダイアログのタブ。
@@ -900,15 +1003,12 @@ fn show_device_settings_tab(
                 });
             }
             Some(CapabilityState::Failed(reason)) => {
-                ui.horizontal(|ui| {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        format!("⚠ 対応形式を取得できませんでした: {}", reason),
-                    );
-                    if ui.button("再取得").clicked() {
-                        retry_requested = true;
-                    }
-                });
+                // 理由はデバイス由来の長い文字列になることがある。ボタンと横に並べると
+                // 折り返せずダイアログからはみ出すので、行を分ける
+                warning_label(ui, format!("対応形式を取得できませんでした: {}", reason));
+                if ui.button("再取得").clicked() {
+                    retry_requested = true;
+                }
                 ui.label("下の選択肢は既定値です。");
             }
             _ => {}
@@ -1387,7 +1487,7 @@ fn show_device_settings_tab(
             settings.audio.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE),
             " Hz",
         ) {
-            ui.colored_label(egui::Color32::YELLOW, note);
+            warning_label(ui, note);
         }
 
         // チャンネル数
@@ -1427,7 +1527,7 @@ fn show_device_settings_tab(
             u32::from(settings.audio.channels.unwrap_or(DEFAULT_CHANNELS)),
             " ch",
         ) {
-            ui.colored_label(egui::Color32::YELLOW, note);
+            warning_label(ui, note);
         }
 
         ui.add_space(10.0);
@@ -1448,10 +1548,7 @@ fn show_device_settings_tab(
         });
 
         if !settings.audio.passthrough_enabled {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                "⚠ 音声パススルーが無効です（音は出力されません）",
-            );
+            warning_label(ui, "音声パススルーが無効です（音は出力されません）");
         }
     });
 
@@ -1517,10 +1614,7 @@ fn show_other_tab(
         ui.add_space(5.0);
 
         if *reset_confirm {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                "⚠ 編集中の設定を初期値に戻します。よろしいですか？",
-            );
+            warning_label(ui, "編集中の設定を初期値に戻します。よろしいですか？");
             ui.horizontal(|ui| {
                 if ui.button("初期化する").clicked() {
                     action = SettingsDialogAction::ResetDraft;
@@ -1544,12 +1638,12 @@ fn show_other_tab(
     if let Some(message) = message {
         ui.add_space(15.0);
         ui.separator();
-        let color = if message.is_error {
-            egui::Color32::LIGHT_RED
+        let kind = if message.is_error {
+            NoticeKind::Error
         } else {
-            egui::Color32::LIGHT_GREEN
+            NoticeKind::Success
         };
-        ui.colored_label(color, &message.text);
+        notice_label(ui, kind, &message.text);
     }
 
     action
@@ -1572,13 +1666,15 @@ fn channel_label(channels: u16) -> String {
 ///
 /// `values` が空のときは何も出さない。選択肢を作れていない状況なので、
 /// どの値へ寄るかをここで断定できない。
+///
+/// 先頭の記号は `warning_label` が付けるので、ここでは文言だけを返す。
 pub fn out_of_range_note(values: &[u32], current: u32, unit: &str) -> Option<String> {
     if values.is_empty() || values.contains(&current) {
         return None;
     }
     let nearest = values.iter().copied().min_by_key(|v| v.abs_diff(current))?;
     Some(format!(
-        "⚠ {current}{unit} はこの組み合わせでは使えません。最も近い {nearest}{unit} で開きます"
+        "{current}{unit} はこの組み合わせでは使えません。最も近い {nearest}{unit} で開きます"
     ))
 }
 
@@ -1594,10 +1690,10 @@ fn show_choice_note(ui: &mut egui::Ui, source: ChoiceSource, label: &str) {
             ));
         }
         ChoiceSource::Disjoint => {
-            ui.colored_label(
-                egui::Color32::YELLOW,
+            warning_label(
+                ui,
                 format!(
-                    "⚠ 入力と出力で共通の{}がありません。それぞれ最も近い値で開き、変換して出力します（音質がわずかに落ちます）",
+                    "入力と出力で共通の{}がありません。それぞれ最も近い値で開き、変換して出力します（音質がわずかに落ちます）",
                     label
                 ),
             );
@@ -1647,15 +1743,14 @@ fn show_audio_capability_state(
             });
         }
         Some(CapabilityState::Failed(reason)) => {
-            ui.horizontal(|ui| {
-                ui.colored_label(
-                    egui::Color32::YELLOW,
-                    format!("⚠ {}デバイスの対応設定を取得できません: {}", label, reason),
-                );
-                if ui.button("再取得").clicked() {
-                    retry_requested = true;
-                }
-            });
+            // ビデオ側と同じく、理由が長くなっても折り返せるよう行を分ける
+            warning_label(
+                ui,
+                format!("{}デバイスの対応設定を取得できません: {}", label, reason),
+            );
+            if ui.button("再取得").clicked() {
+                retry_requested = true;
+            }
         }
         _ => {}
     }
@@ -1688,11 +1783,8 @@ fn show_link_status(ui: &mut egui::Ui, title: &str, status: &LinkStatus) {
 
         ui.horizontal(|ui| {
             ui.label("状態:");
-            if status.connected {
-                ui.colored_label(egui::Color32::LIGHT_GREEN, status.headline());
-            } else {
-                ui.colored_label(egui::Color32::YELLOW, status.headline());
-            }
+            let (text, kind) = link_status_badge(status);
+            status_badge(ui, &text, kind);
         });
 
         for line in &status.details {
@@ -1706,8 +1798,10 @@ fn show_link_status(ui: &mut egui::Ui, title: &str, status: &LinkStatus) {
 
         match &status.error {
             Some((message, time)) => {
-                // 長いエラー文でダイアログの幅が広がらないよう折り返す
-                ui.colored_label(egui::Color32::YELLOW, format!("⚠ {}", message));
+                // 長いエラー文でダイアログの幅が広がらないよう折り返す。
+                // 繋がったあとも記録として残り続けるため、今まさに失敗している
+                // わけではない。失敗ではなく注意として出す
+                warning_label(ui, message);
                 ui.label(format!("発生時刻: {}", time));
             }
             None => {
@@ -1930,11 +2024,20 @@ fn show_hotkey_assignments(
 
                     match settings.hotkey(action) {
                         Some(hotkey) => {
-                            let text = egui::RichText::new(hotkey).monospace();
                             if duplicates.contains(&action) {
-                                ui.label(text.color(egui::Color32::YELLOW));
+                                // 表のセルなので枠は付けない。記号と太字で示し、
+                                // 何が起きるかは表の下の注意書きで説明する
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} {}",
+                                        NoticeKind::Warning.symbol(),
+                                        hotkey
+                                    ))
+                                    .monospace()
+                                    .strong(),
+                                );
                             } else {
-                                ui.label(text);
+                                ui.label(egui::RichText::new(hotkey).monospace());
                             }
                         }
                         None => {
@@ -1968,10 +2071,10 @@ fn show_hotkey_assignments(
         if !duplicates.is_empty() {
             let names: Vec<&str> = duplicates.iter().map(|action| action.label()).collect();
             ui.add_space(5.0);
-            ui.colored_label(
-                egui::Color32::YELLOW,
+            warning_label(
+                ui,
                 format!(
-                    "注意: 同じキーが複数のアクションに割り当てられています（{}）。適用しても、上にある側だけが有効になります。",
+                    "同じキーが複数のアクションに割り当てられています（{}）。適用しても、上にある側だけが有効になります。",
                     names.join("、")
                 ),
             );
@@ -1982,16 +2085,23 @@ fn show_hotkey_assignments(
         // 見出しは status.rs の定型文をそのまま使い、通知と表現を揃える
         if !hotkey_errors.is_empty() {
             ui.add_space(5.0);
-            ui.colored_label(
-                egui::Color32::LIGHT_RED,
-                format!("{}:", ErrorSource::Hotkey.headline()),
-            );
-            for (action, error) in hotkey_errors {
-                ui.colored_label(
-                    egui::Color32::LIGHT_RED,
-                    format!("{}（{}）— {}", action.label(), error.hotkey, error.message),
-                );
-            }
+            // 失敗が複数あっても枠は 1 つにまとめる。1 行ごとに枠を重ねると、
+            // 縁ばかりが並んで読みづらくなる
+            notice_frame(ui, NoticeKind::Error).show(ui, |ui| {
+                ui.label(format!(
+                    "{} {}:",
+                    NoticeKind::Error.symbol(),
+                    ErrorSource::Hotkey.headline()
+                ));
+                for (action, error) in hotkey_errors {
+                    ui.label(format!(
+                        "{}（{}）— {}",
+                        action.label(),
+                        error.hotkey,
+                        error.message
+                    ));
+                }
+            });
         }
     });
 }
@@ -2179,7 +2289,13 @@ pub fn show_hotkey_capture_dialog(
                         capture.start();
                     }
                 } else {
-                    ui.colored_label(egui::Color32::YELLOW, "キー入力待機中...");
+                    // 受け付けている最中であることを示すバッジ。失敗ではないので
+                    // 注意ではなく、進行中を表す種別で出す
+                    status_badge(
+                        ui,
+                        &format!("{} キー入力待機中...", NoticeKind::Success.symbol()),
+                        NoticeKind::Success,
+                    );
                     ui.label("任意のキーコンビネーションを押してください");
 
                     // キーボード入力をキャプチャ
@@ -3366,6 +3482,63 @@ mod tests {
     fn out_of_range_note_empty_choices_returns_none() {
         // 選択肢を作れていない状況では、どの値へ寄るかを断定できない
         assert_eq!(out_of_range_note(&[], 44100, " Hz"), None);
+    }
+
+    // ---- 接続状態のバッジ ----
+
+    fn link_status(connected: bool, reconnecting: bool) -> LinkStatus {
+        LinkStatus {
+            connected,
+            reconnecting,
+            ..LinkStatus::default()
+        }
+    }
+
+    #[test]
+    fn link_status_badge_connected_is_success_with_a_filled_circle() {
+        let (text, kind) = link_status_badge(&link_status(true, false));
+
+        assert_eq!(kind, NoticeKind::Success);
+        assert_eq!(text, "● 接続中");
+    }
+
+    #[test]
+    fn link_status_badge_reconnecting_is_a_warning() {
+        // 追いかけている最中は復帰する見込みがあるので、失敗まで強めない
+        let (text, kind) = link_status_badge(&link_status(false, true));
+
+        assert_eq!(kind, NoticeKind::Warning);
+        assert_eq!(text, "⚠ 未接続（再接続を試しています）");
+    }
+
+    #[test]
+    fn link_status_badge_disconnected_is_an_error() {
+        let (text, kind) = link_status_badge(&link_status(false, false));
+
+        assert_eq!(kind, NoticeKind::Error);
+        assert_eq!(text, "× 未接続");
+    }
+
+    #[test]
+    fn link_status_badge_connected_ignores_the_reconnecting_flag() {
+        // 繋がったあとにフラグが落ちるまでの間があるため、接続中を優先する
+        let (text, kind) = link_status_badge(&link_status(true, true));
+
+        assert_eq!(kind, NoticeKind::Success);
+        assert_eq!(text, "● 接続中");
+    }
+
+    #[test]
+    fn notice_kind_symbols_are_all_different() {
+        // 色を見分けられなくても種別が分かるようにするための記号なので、
+        // 重複すると意味が無くなる
+        let symbols = [
+            NoticeKind::Warning.symbol(),
+            NoticeKind::Error.symbol(),
+            NoticeKind::Success.symbol(),
+        ];
+
+        assert_eq!(BTreeSet::from(symbols).len(), symbols.len());
     }
 
     #[test]

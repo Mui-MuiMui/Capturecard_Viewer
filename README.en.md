@@ -33,27 +33,31 @@ To also remove the settings file, delete the following directory:
 - **Right-click**: Open the context menu
   - Volume adjustment (0–200%)
   - Toggle mute
-  - Toggle aspect ratio preservation
-  - Toggle always-on-top
   - Toggle fullscreen
-  - Toggle the title bar (borderless mode)
-  - Toggle window dragging
-  - Toggle the stats overlay (shows FPS and more over the video)
-  - Toggle automatic device reconnection
-  - Reset the window size (back to the default 1280x720)
+  - **表示 (View)** — submenu
+    - Toggle aspect ratio preservation
+    - Toggle always-on-top
+    - Toggle the stats overlay (shows FPS and more over the video)
+    - Toggle the title bar (borderless mode)
+  - **ウィンドウ (Window)** — submenu
+    - Toggle window dragging
+    - Reset the window size (back to the default 1280x720)
   - Reconnect device
+  - Toggle automatic device reconnection
   - Advanced settings
   - Quit
+
+  The toggles live in the 表示 (View) and ウィンドウ (Window) submenus. The flat menu had grown tall enough that on low resolutions — or with the window near the bottom of the screen — the lower entries ended up off-screen and could not be clicked. The menu is now pushed back inside the screen when it would overflow, and scrolls when it still does not fit.
 - **Mouse wheel**: Adjust volume (±10%). The current volume appears as a bar at the bottom of the screen and fades out after about 1.5 seconds (the same overlay appears when you change the volume from the context menu slider or the settings dialog)
 
 #### Borderless mode (hiding the title bar)
 
 You can remove the title bar and the window frame, which helps when the window sits on a second monitor as a sub-window. The state is saved to the settings file and restored on the next launch.
 
-- Toggle it with **タイトルバーを隠す (Hide the title bar)** in the context menu.
+- Toggle it with **表示 (View) > タイトルバーを隠す (Hide the title bar)** in the context menu.
 - **Moving**: drag the video area. Because of that, turning the title bar off also turns 画面ドラッグ移動 (window dragging) on if it was off, and a notice appears at the bottom of the screen for about two seconds. While the title bar is hidden, window dragging cannot be turned off, since it is the only way left to move the window.
 - **Resizing**: move the pointer within about 8 px of a window edge — the cursor changes — and drag. The corners resize diagonally.
-- **If the window gets too small**: use ウィンドウサイズをリセット (Reset the window size) in the context menu to go back to the default 1280x720.
+- **If the window gets too small**: use ウィンドウ (Window) > ウィンドウサイズをリセット (Reset the window size) in the context menu to go back to the default 1280x720.
 - **Quitting**: there is no close button, so use 終了 (Quit) in the context menu or `Alt+F4`.
 - The item is disabled while fullscreen, which has no decorations to begin with. Leaving fullscreen restores whatever the setting says.
 
@@ -88,7 +92,7 @@ The settings window → **screenshot settings** tab → ホットキー (Hotkeys
 
 ### Stats overlay
 
-Turning on "情報表示" (Show stats) in the context menu overlays the following on the top-left of the video. The on/off state is saved to the configuration file and restored on the next launch.
+Turning on 表示 (View) > "情報表示" (Show stats) in the context menu overlays the following on the top-left of the video. The on/off state is saved to the configuration file and restored on the next launch.
 
 | Item | Description |
 |---|---|
@@ -244,7 +248,7 @@ Bug reports are welcome via [Issues](https://github.com/Mui-MuiMui/Capturecard_V
 
 This application depends heavily on the capture card and audio devices you are using, and the author has access to only a limited set of hardware. Please fill in as much of the issue template as you can; without that information, reproducing the problem is usually not possible.
 
-This project is not currently looking for contributors.
+This project is not currently looking for contributors. The conventions the project follows — building, verifying, branching, versioning and the changelog — are written up in [CONTRIBUTING.md](CONTRIBUTING.md) (in Japanese).
 
 ## Documentation
 
@@ -255,6 +259,7 @@ The documents below are written in Japanese.
 - [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) — dependency status and upgrade plan
 - [docs/MANUAL-TEST.md](docs/MANUAL-TEST.md) — manual test checklist
 - [CHANGELOG.md](CHANGELOG.md) — release history
+- [CONTRIBUTING.md](CONTRIBUTING.md) — where each document lives, and the conventions for building, branching, versioning and the changelog
 
 ## Buy me a coffee
 

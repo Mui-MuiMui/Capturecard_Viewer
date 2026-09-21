@@ -278,6 +278,8 @@ toggle_fullscreen = "Ctrl+F11"
 
 「テスト再生」は `SettingsDialogAction::TestSound` として呼び出し側へ返し、`CaptureCardViewer` が鳴らす。ダイアログは閉じず、設定も保存もしない。
 
+**警告や状態の表示は `ui.rs` のヘルパー（`warning_label` / `notice_label` / `status_badge`）を使い、`Color32::YELLOW` のような固定色を直接書かないこと。** 彩度の高い色を文字に使うとテーマの背景と合わずに読めなくなる。ヘルパーはテーマ由来の色を薄く敷いた背景と記号（`⚠` / `×` / `●`）で種別を示す。
+
 ### 設定の書き出し・読み込み・初期化は「その他」タブ
 
 `SettingsTab::Other`（`ui::show_other_tab`）に 3 つのボタンを置いてある。下部の「OK / キャンセル / 適用」の並びへ足さなかったのは、**「初期化」が「OK」の隣に来る並びを作らないため。** 説明をボタンの真下に書けることも理由。
@@ -474,6 +476,8 @@ PR 本文の雛形は `.github/pull_request_template.md`。**GitHub が自動で
 コマンドは「やること」だけを持ち、書式や基準は skill を参照する。**同じ内容を両方に書かない。** 片方を直したときにもう片方が古くなるため。
 
 リリースはこの 4 段階の外側にある。手順は `docs/RELEASE.md`、Claude がなぞる場合は `.claude/skills/release/SKILL.md` を使う。
+
+**`CONTRIBUTING.md` は人向けの入口。** 規約の要約と各ドキュメントへの道案内だけを持ち、`CLAUDE.md` や skill と同じ内容を重複させない。
 
 ### ブランチとコミット
 
