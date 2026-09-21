@@ -353,7 +353,7 @@ toggle_fullscreen = "Ctrl+F11"
 
 **設定を書き換える処理を足すときは `AppSettings::save()` を直接呼ばず `mark_settings_dirty()` を使うこと。** 直接呼ぶと、ウィンドウをドラッグしている間ずっと毎フレーム TOML を書き出す元の問題に戻る。
 
-例外は 2 つ。起動時の書き戻し（`may_write_defaults_on_startup()` で守られている）と、設定ダイアログの「適用」「OK」（`src/app/settings_dialog.rs` の `handle_settings_dialog_action`）。後者はユーザーの明示的な保存操作なので即座に書き出す。
+例外は 2 つ。起動時の書き戻し（`may_write_defaults_on_startup()` で守られている）と、設定ダイアログの「適用」「OK」（`src/app/settings_dialog.rs` の `apply_dialog_action`）。後者はユーザーの明示的な保存操作なので即座に書き出す。
 
 #### 壊れた設定ファイルが残っている間は自動保存しない
 
