@@ -60,6 +60,8 @@ flowchart TD
 | `platform` | Windows 固有処理（フォント、アイコン、モニタ情報） | 汎用ロジック |
 | `logging` | ログの初期化と出力先 | — |
 
+`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。**この図の `device` レイヤーと、現在の `src/app/device.rs` は別物。** 前者は目指すワーカー層、後者は `app` の中でデバイスの接続を受け持つ部分で、いまは `Arc<Mutex<..>>` 越しに `video` / `audio` を直接触っている。
+
 ## 状態管理
 
 ### 単一の所有者
@@ -336,7 +338,7 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 | 目指す姿 | 現状 | 対応するタスク |
 |---|---|---|
-| レイヤー分離 | `main.rs` にアプリ状態・UI・デバイス制御が同居 | main.rs のモジュール分割 |
+| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `menu` / `window` / `device` / `monitor` / `retry` / `capabilities` / `screenshot` / `settings_dialog` / `settings_store` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。`device` はまだワーカー層ではなく、`app` から `Arc<Mutex<..>>` 越しに `video` / `audio` を直接操作する | デバイスアクセスをワーカースレッド + チャネルにする |
 | UI は状態を持たない | `ui.rs` から `static` / `static mut` は消え、タブ選択・デバイス能力キャッシュ・ホットキー入力の待機状態（編集中のアクションを含む）は `CaptureCardViewer` が持つ `SettingsDialogState` にある。ダイアログの開閉フラグと確定済みのホットキーは `CaptureCardViewer` が直接持つ。ホットキー入力ダイアログはまだ `&mut` で受けた値を直接書き換える | UI 層をイベント返却型にする |
 | イベント駆動 | 2 秒ごとに設定を再適用するポーリング | apply_settings の 2 秒ごとの再登録 |
 | チャネルでの隔離 | UI から `Arc<Mutex<..>>` 越しにデバイスを直接操作 | デバイスアクセスをワーカースレッド + チャネルにする |

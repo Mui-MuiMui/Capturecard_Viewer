@@ -29,7 +29,7 @@ CAPTURECARD_VIEWER_LOG=debug ./target/release/capturecard_viewer.exe
 grep -E '\] capturecard_viewer(::| )' "$APPDATA/capturecard_viewer/logs/<ファイル名>.log" | grep -vE 'eframe|winit'
 ```
 
-`capturecard_viewer::audio` のようにモジュールまで入るのは `audio` / `video` / `screenshot` / `settings` / `logging` の行で、`main.rs` の行はターゲットが `capturecard_viewer` だけになる。**`grep 'capturecard_viewer::'` だと `main.rs` の行が丸ごと落ちる。** 接続の開始・成否は `main.rs` の `apply_settings` が出しているので、これを落とすと何も分からなくなる。
+ターゲットはモジュールのパスがそのまま入るので、アプリ本体の行は `capturecard_viewer::app::device` のように `app::` から始まる。`main.rs` にはログを出す処理が残っていないため、ターゲットが `capturecard_viewer` だけの行は出ない。接続の開始・成否は `capturecard_viewer::app::device`（`apply_settings` / `try_connect_video` / `try_connect_audio`）、切断の検出は `capturecard_viewer::app::monitor` が出している。
 
 ## 手順 2: 正常時の目安と突き合わせる
 
@@ -60,7 +60,7 @@ AVerMedia Live Gamer EXTREME 3 + Windows 11 での実測（2026-09、release ビ
 
 ## 手順 3: 待ちとリトライの実装を思い出す
 
-`src/main.rs` の `update()` → `poll_device_connection()` と `ConnectRetry`。**`sleep` は使っていないので、リトライで秒単位止まることはない。** 「数秒〜ずっと応答しない」という報告が来たらリトライ以外を疑う。
+`src/app/mod.rs` の `update()` → `src/app/device.rs` の `poll_device_connection()` と `src/app/retry.rs` の `ConnectRetry`。**`sleep` は使っていないので、リトライで秒単位止まることはない。** 「数秒〜ずっと応答しない」という報告が来たらリトライ以外を疑う。
 
 ただし**デバイスを開く処理は UI スレッド上に残っている**ので、1 回の試行ぶんは描画が飛ぶ。実測は次のとおり。
 
@@ -166,7 +166,7 @@ flowchart TD
 
 ### 設定画面に選択肢が出ない
 
-`VideoCapture::get_device_capabilities` は `capability-query` スレッドで走り、結果はチャネルで UI スレッドへ返る（`main.rs` の `dispatch_capability_requests` / `drain_capability_results`）。
+`VideoCapture::get_device_capabilities` は `capability-query` スレッドで走り、結果はチャネルで UI スレッドへ返る（`src/app/capabilities.rs` の `dispatch_capability_requests` / `drain_capability_results`）。
 
 - 成否は呼び出し側が残す。成功なら `info` の `デバイス能力を取得した: <デバイス名>（N フォーマット, N ms）`、失敗なら `warn` の `デバイス能力を取得できない: <デバイス名>: <理由>`。**失敗は設定ダイアログにも「⚠ 対応形式を取得できませんでした」として出る**ので、ユーザーの報告と突き合わせられる
 - フォーマットごとの件数は `video.rs` が `debug` の `デバイス能力の内訳（<デバイス名>、N ms）: YUY2: n 件、…` に残す。`Camera::new` の所要時間は `能力取得のためにデバイスを開いた（N ms）`
