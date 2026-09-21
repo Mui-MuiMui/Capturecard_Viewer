@@ -205,11 +205,13 @@ const CONNECT_BACKOFF_BASE: Duration = Duration::from_millis(200);
 /// ときの反応が悪くなる。5 秒で頭打ちにして、挿してから最大 5 秒で繋がるようにする。
 const CONNECT_BACKOFF_MAX: Duration = Duration::from_millis(5000);
 
-/// 音声で、この回数だけ連続して失敗したあとに既定のデバイスを試す。
+/// 音声で、この回数だけ連続して失敗したあとに形（レート・チャンネル数）を緩める。
 ///
-/// 設定に残っているデバイス名が古くて存在しない場合、そのまま待ち続けても
-/// 永久に音が出ない。元の実装と同じ 3 回目に合わせてある。
-const AUDIO_DEFAULT_FALLBACK_AFTER: u32 = 3;
+/// **デバイスは変えない。** 設定が「既定のデバイス」（入力・出力とも未指定）の
+/// ときに限り、サンプリングレートとチャンネル数をデバイス任せにして 1 度だけ
+/// 開き直す。設定にデバイス名が書かれている場合は何もせず、そのデバイスが
+/// 戻るまで再試行を続ける（`decide_audio_fallback` を参照）。
+const AUDIO_FORMAT_RELAX_AFTER: u32 = 3;
 
 /// フレームが途絶えてから「映像が切れた」と判断するまでの時間。
 ///
@@ -345,6 +347,70 @@ fn decide_audio_reconnect(
         return AudioErrorAction::Wait;
     }
     AudioErrorAction::Reconnect
+}
+
+/// 音声の接続に失敗したあと、その場で何をするか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioFallbackAction {
+    /// 何もしない。`ConnectRetry` のバックオフで次の回を待つ
+    Retry,
+    /// 設定のデバイスに繋がらないまま再試行を続けることを 1 度だけ記録し、
+    /// あとは `Retry` と同じ
+    WarnAndRetry,
+    /// **同じ（既定の）デバイスを**、レートとチャンネル数だけデバイス任せに
+    /// してその場で開き直す
+    RelaxFormat,
+}
+
+/// 音声の接続に失敗したときに、既定のデバイスへ倒してよいかを判定する。
+///
+/// **設定にデバイス名が書かれている場合は倒さない。** 以前は 3 回失敗した
+/// 時点で入出力とも Windows の既定デバイスで開き直していたが、これが
+/// USB を抜いた直後の再接続でも効いていた。設定のデバイスが消えている間は
+/// 必ず 3 回失敗する（1.5 秒）一方、USB の再列挙には 10 秒以上かかるため、
+/// **フォールバックが必ず勝って PC のマイクを入力として掴み、接続成功として
+/// 確定してしまう**（#134）。以後は設定のデバイスを試さないので音は戻らず、
+/// おまけにマイクの音がスピーカーへ流れ続ける。
+///
+/// 起動時も同じ扱いにしてある。設定のデバイスが見つからないときに黙って
+/// 別のデバイスを開くのは、音が出ないことより分かりにくい誤動作のため。
+/// 繋がらないことは「接続状態」タブと通知に出るので、気付く手段はある。
+///
+/// 倒す先が無い（入力・出力とも未指定＝既定のデバイス）ときだけ、形の緩和を
+/// 1 度試す。開く相手は変わらないので、意図しないデバイスを掴むことはない。
+fn decide_audio_fallback(
+    attempt: u32,
+    input_device_name: Option<&str>,
+    output_device_name: Option<&str>,
+) -> AudioFallbackAction {
+    if attempt != AUDIO_FORMAT_RELAX_AFTER {
+        return AudioFallbackAction::Retry;
+    }
+    if input_device_name.is_some() || output_device_name.is_some() {
+        return AudioFallbackAction::WarnAndRetry;
+    }
+    AudioFallbackAction::RelaxFormat
+}
+
+/// 映像が復帰したときに、音声にも再接続を要求するかを判定する。
+///
+/// 映像と音声は同じ USB 機器なので、映像が戻ったなら音声のデバイスも戻って
+/// いる。音声側のバックオフ（最大 5 秒）を待たせる理由が無いため、そこで
+/// 待ち時間を飛ばす。**保険であって主経路ではない。** 音声の切断は cpal の
+/// エラーコールバックが拾い、`monitor_audio_stream` が再接続を要求する。
+///
+/// **音声が開けていて再試行も走っていないなら何もしない。** 映像だけが
+/// 消える構成（音声は別のマイク）で、無事だったストリームを開き直すと
+/// その都度 UI スレッドが 300ms 止まる。
+fn should_resync_audio_after_video(
+    video_recovered: bool,
+    audio_connected: bool,
+    audio_retry_active: bool,
+) -> bool {
+    if !video_recovered {
+        return false;
+    }
+    !audio_connected || audio_retry_active
 }
 
 /// 映像が出ていないときに画面へ出す文言を決める。
@@ -610,6 +676,10 @@ pub struct CaptureCardViewer {
     // 真偽値ではなく「何をしたか」で持つ。新しいフレームが届いた時点で
     // `Keep` へ戻す
     last_video_link_action: VideoLinkAction,
+    // 途絶を検出して映像を開き直している最中か。
+    // 次に映像が繋がったときだけ音声の再接続も要求するための目印で、
+    // 起動時の接続と区別するために持つ（`should_resync_audio_after_video`）
+    video_reconnect_after_loss: bool,
     // 直近に観測した「映像ストリームを開けているか」。
     // 描画のたびに video_capture のロックを取らずに済ませるため、
     // 毎フレームの監視で拾った値をここに写しておく
@@ -754,6 +824,7 @@ impl Default for CaptureCardViewer {
             last_frame_generation: 0,
             last_new_frame_at: None,
             last_video_link_action: VideoLinkAction::Keep,
+            video_reconnect_after_loss: false,
             video_capturing: false,
             last_audio_error_reconnect: None,
             audio_stream_error_pending: false,
@@ -2562,6 +2633,9 @@ impl CaptureCardViewer {
         // 確かめる。再試行の間隔は最大 5 秒で頭打ちなので、
         // MediaFoundation への問い合わせもその頻度を超えない
         self.last_video_device = None;
+        // 次に繋がったときは、同じ USB 機器の音声も戻っているとみなして
+        // 音声の再接続も要求する。起動時の接続と区別するためにここで立てる
+        self.video_reconnect_after_loss = true;
         self.video_retry.request_now(target);
         info!("映像デバイスの再接続を要求した");
     }
@@ -2662,6 +2736,11 @@ impl CaptureCardViewer {
                 self.last_video_res = settings.video.resolution;
                 self.last_video_format = settings.video.format.clone();
                 self.last_video_fps = settings.video.fps;
+                // 途絶から復帰したのであれば、音声も同時に戻っているはず。
+                // **旗はここで落とす。** 残すと、以降の接続のたびに音声を
+                // 開き直してしまう
+                let recovered = std::mem::take(&mut self.video_reconnect_after_loss);
+                self.resync_audio_after_video_recovery(settings, recovered);
             }
             Err(e) => {
                 warn!("映像デバイスへの接続に失敗した（{} 回目）: {}", attempt, e);
@@ -2675,11 +2754,43 @@ impl CaptureCardViewer {
         }
     }
 
+    /// 映像が途絶から復帰したときに、音声の再接続も要求する。
+    ///
+    /// 音声の切断は cpal のエラーコールバックが拾うのが主経路で、これはその
+    /// 保険。映像が戻った時点でバックオフの残り（最大 5 秒）を飛ばす。
+    ///
+    /// **ここでもデバイスを開かない。** 要求を立てるだけにして、実際に開くのは
+    /// 次のフレームの `poll_device_connection`。
+    ///
+    /// ロックは video を手放したあとに audio を取る（settings → video → audio）。
+    fn resync_audio_after_video_recovery(&mut self, settings: &AppSettings, recovered: bool) {
+        if !recovered {
+            return;
+        }
+        let audio_connected = match self.audio_capture.lock() {
+            Ok(audio) => audio.active().is_some(),
+            Err(_) => {
+                warn!("映像の復帰にあわせた音声の確認で audio_capture のロックを取得できない");
+                return;
+            }
+        };
+        if !should_resync_audio_after_video(
+            recovered,
+            audio_connected,
+            self.audio_retry.is_active(),
+        ) {
+            debug!("音声は繋がっているので、映像の復帰にあわせた開き直しはしない");
+            return;
+        }
+        self.last_audio_device = None;
+        self.audio_retry.request_now(audio_target(settings));
+        info!("映像が戻ったので、音声デバイスの再接続も要求した");
+    }
+
     /// 音声デバイスへの接続を 1 回だけ試す。
     ///
-    /// 設定のデバイス名で開けない状態が続くと永久に音が出ないため、
-    /// `AUDIO_DEFAULT_FALLBACK_AFTER` 回目の失敗の直後だけ、Windows の
-    /// 既定デバイスで 1 度開き直す。
+    /// **設定のデバイスで開けなくても、別のデバイスへは倒さない。** 何をするかは
+    /// `decide_audio_fallback` が決める。
     fn try_connect_audio(&mut self, settings: &AppSettings, now: Instant) {
         let attempt = self.audio_retry.attempts() + 1;
         info!(
@@ -2751,24 +2862,39 @@ impl CaptureCardViewer {
             }
         };
 
-        // 既定デバイスへのフォールバック。何を試したかをログに残す
-        let fallback_error = if error.is_some() && attempt == AUDIO_DEFAULT_FALLBACK_AFTER {
-            info!(
-                "設定のデバイスで {} 回続けて失敗したので、既定のデバイス（入力・出力とも Windows の既定、レートとチャンネル数もデバイス任せ）で試す",
-                attempt
-            );
-            match audio.start_passthrough(&PassthroughRequest::defaults()) {
-                Ok(()) => {
-                    info!("既定のデバイスで音声に接続した");
-                    None
+        // 失敗したあとに何をするか。何を試した（試さなかった）かをログに残す
+        let fallback_error = match error {
+            None => None,
+            Some(e) => match decide_audio_fallback(
+                attempt,
+                settings.audio.input_device_name.as_deref(),
+                settings.audio.output_device_name.as_deref(),
+            ) {
+                AudioFallbackAction::Retry => Some(e),
+                AudioFallbackAction::WarnAndRetry => {
+                    warn!(
+                        "設定の音声デバイスに {} 回続けて接続できない。既定のデバイスへは倒さず、戻るまで再試行を続ける",
+                        attempt
+                    );
+                    Some(e)
                 }
-                Err(e2) => {
-                    warn!("既定のデバイスでも音声に接続できない: {}", e2);
-                    Some(e2)
+                AudioFallbackAction::RelaxFormat => {
+                    info!(
+                        "既定のデバイスで {} 回続けて失敗したので、レートとチャンネル数をデバイス任せにして試す",
+                        attempt
+                    );
+                    match audio.start_passthrough(&PassthroughRequest::defaults()) {
+                        Ok(()) => {
+                            info!("既定のデバイスで音声に接続した（レートとチャンネル数はデバイス任せ）");
+                            None
+                        }
+                        Err(e2) => {
+                            warn!("レートとチャンネル数を緩めても音声に接続できない: {}", e2);
+                            Some(e2)
+                        }
+                    }
                 }
-            }
-        } else {
-            error.clone()
+            },
         };
 
         drop(audio);
@@ -2778,9 +2904,10 @@ impl CaptureCardViewer {
                 self.audio_retry.record_success();
                 // 繋がったので直前の失敗は消す
                 self.errors.clear(ErrorSource::Audio);
-                // 既定のデバイスで繋がった場合も、設定に書かれている値を記録する。
-                // ここで実際に開いた値（None）を入れると、設定のデバイスが
-                // 現れても need_audio_restart が立たず繋ぎ直せなくなる
+                // 形を緩めて繋がった場合も、設定に書かれている値を記録する。
+                // ここで実際に開いた値（None）を入れると、設定のレートや
+                // チャンネル数へ戻せるようになっても need_audio_restart が
+                // 立たず、緩めたままになる
                 self.last_audio_device = settings.audio.input_device_name.clone();
                 self.last_audio_output = settings.audio.output_device_name.clone();
                 self.last_audio_rate = settings.audio.sample_rate;
@@ -4562,6 +4689,75 @@ mod tests {
             decide_audio_reconnect(true, true, Some(Duration::from_secs(5))),
             AudioErrorAction::Reconnect
         );
+    }
+
+    #[test]
+    fn decide_audio_fallback_named_device_never_falls_back() {
+        // #134 の本体。設定のデバイスが消えている間は必ず 3 回失敗するが、
+        // ここで既定のデバイス（＝PC のマイク）へ倒すと、それを接続成功として
+        // 確定してしまい、設定のデバイスが戻っても繋ぎ直さない
+        assert_eq!(
+            decide_audio_fallback(3, Some("Live Gamer EXTREME 3"), None),
+            AudioFallbackAction::WarnAndRetry
+        );
+        // 出力だけを指定している場合も、入力を既定（マイク）へ倒さない
+        assert_eq!(
+            decide_audio_fallback(3, None, Some("Realtek Digital Output")),
+            AudioFallbackAction::WarnAndRetry
+        );
+        assert_eq!(
+            decide_audio_fallback(3, Some("Live Gamer EXTREME 3"), Some("スピーカー")),
+            AudioFallbackAction::WarnAndRetry
+        );
+    }
+
+    #[test]
+    fn decide_audio_fallback_default_device_relaxes_format_once() {
+        // 入出力とも未指定＝既定のデバイス。開く相手は変わらないので、
+        // レートとチャンネル数だけ緩めて 1 度試す
+        assert_eq!(
+            decide_audio_fallback(3, None, None),
+            AudioFallbackAction::RelaxFormat
+        );
+    }
+
+    #[test]
+    fn decide_audio_fallback_before_and_after_threshold_retries() {
+        for attempt in [1, 2, 4, 5, 100] {
+            assert_eq!(
+                decide_audio_fallback(attempt, None, None),
+                AudioFallbackAction::Retry,
+                "attempt = {}",
+                attempt
+            );
+            assert_eq!(
+                decide_audio_fallback(attempt, Some("マイク"), None),
+                AudioFallbackAction::Retry,
+                "attempt = {}",
+                attempt
+            );
+        }
+    }
+
+    #[test]
+    fn should_resync_audio_after_video_without_recovery_returns_false() {
+        // 起動時の接続では立てない。毎回音声を開き直すと UI が 300ms 止まる
+        assert!(!should_resync_audio_after_video(false, false, true));
+        assert!(!should_resync_audio_after_video(false, false, false));
+    }
+
+    #[test]
+    fn should_resync_audio_after_video_when_audio_is_down_returns_true() {
+        // 音声が開けていない、または再試行中なら、映像の復帰にあわせて試す
+        assert!(should_resync_audio_after_video(true, false, false));
+        assert!(should_resync_audio_after_video(true, false, true));
+        assert!(should_resync_audio_after_video(true, true, true));
+    }
+
+    #[test]
+    fn should_resync_audio_after_video_when_audio_is_healthy_returns_false() {
+        // 音声が別のデバイス（マイクなど）で無事なら触らない
+        assert!(!should_resync_audio_after_video(true, true, false));
     }
 
     #[test]
