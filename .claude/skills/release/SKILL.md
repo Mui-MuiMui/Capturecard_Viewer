@@ -44,10 +44,17 @@ description: 版を切って GitHub Release を出すときの進め方。バー
 
 同じ理由で、**`dev` に積まれたコミットメッセージにキーワードが紛れていないか**も確認する。コミット側のキーワードは `main` に載った時点で発火する。
 
-**`Closes` だけを見ないこと。** GitHub が拾うのは `close` / `closes` / `closed` / `fix` / `fixes` / `fixed` / `resolve` / `resolves` / `resolved` の 9 語で、大文字小文字は区別しない。
+**`Closes` だけを見ないこと。** GitHub が拾うのは `close` / `closes` / `closed` / `fix` / `fixes` / `fixed` / `resolve` / `resolves` / `resolved` の 9 語で、大文字小文字は区別しない。番号の書き方も `#90` だけでなく `Fixes: #90` のようにコロンを挟む形と、`Closes Mui-MuiMui/Capturecard_Viewer#90` の他リポジトリ形式がある。**このリポジトリのコミットは `Refs: #90` とコロンを付ける書式なので、釣られて `Closes: #90` と書く事故が一番起きやすい。**
 
 ```bash
-git log origin/main..origin/dev --format='%h %s%n%b' | grep -inE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?) +#[0-9]+'
+git fetch origin
+git log origin/main..origin/dev --format='%h %s%n%b' | grep -inE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)(:[[:space:]]*|[[:space:]]+)([[:alnum:]_.-]+/[[:alnum:]_.-]+)?#[0-9]+'
+```
+
+**この検査はマージ直前に行う。** PR を作った時点で回しても、そのあと `dev` にコミットが積まれれば素通りする。検査してからユーザーがマージするまでの間に `dev` が動いたら、やり直す。動いたかどうかは PR の head で見る。
+
+```bash
+gh pr view <番号> --json headRefOid --jq .headRefOid
 ```
 
 ヒットしたら、その Issue が実機確認済みかを確認する。**未確認のものが含まれるなら、リリース前にユーザーへ報告して判断を仰ぐ。** 履歴は書き換えない。
