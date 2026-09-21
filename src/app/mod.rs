@@ -480,16 +480,23 @@ impl eframe::App for CaptureCardViewer {
             };
             // 接続状態はダイアログを開いている間だけ集める
             let connection = self.connection_status();
-            let action = ui::show_settings_dialog(
-                ctx,
-                &mut self.show_settings,
-                &mut self.settings_dialog,
-                &mut self.show_hotkey_dialog,
-                &devices,
-                &connection,
-                self.hotkey_manager.errors(),
-            );
-            self.handle_settings_dialog_action(action);
+            // ダイアログの描画はドラフトを可変で借りるため、`self` を不変で
+            // 借りたままにできない。開いている間だけの複製なので、
+            // 失敗の一覧が長くても負担にならない
+            let hotkey_errors = self.hotkey_manager.errors().clone();
+            // ドラフトがまだ無ければ描かない。`begin_edit` が済むまで待つ
+            let events = match self.settings_dialog.split_for_draw() {
+                Some((draft, view)) => ui::show_settings_dialog(
+                    ctx,
+                    draft,
+                    &view,
+                    &devices,
+                    &connection,
+                    &hotkey_errors,
+                ),
+                None => Vec::new(),
+            };
+            self.handle_settings_events(events);
         }
 
         // 溜まったデバイス能力の取得要求をワーカーへ流す。
@@ -531,15 +538,36 @@ impl eframe::App for CaptureCardViewer {
                 },
             };
 
-            let outcome = ui::show_hotkey_capture_dialog(
+            let events = ui::show_hotkey_capture_dialog(
                 ctx,
-                &mut self.show_hotkey_dialog,
                 action,
                 &existing_hotkeys,
-                self.settings_dialog.hotkey_capture_mut(),
+                self.settings_dialog.hotkey_capture().rejection(),
             );
 
-            if let ui::HotkeyDialogOutcome::Captured(candidate) = outcome {
+            // **クローズを先に済ませてから確定を処理する。** 登録に失敗した
+            // ときはこのあと開き直すので、順序が逆だと開き直した直後に閉じる
+            let mut captured = None;
+            let mut close_dialog = false;
+            for event in events {
+                match event {
+                    ui::HotkeyDialogEvent::Rejected(reason) => {
+                        self.settings_dialog
+                            .hotkey_capture_mut()
+                            .set_rejection(reason);
+                    }
+                    ui::HotkeyDialogEvent::Cancelled => {
+                        self.settings_dialog.hotkey_capture_mut().reset();
+                    }
+                    ui::HotkeyDialogEvent::Close => close_dialog = true,
+                    ui::HotkeyDialogEvent::Captured(candidate) => captured = Some(candidate),
+                }
+            }
+            if close_dialog {
+                self.show_hotkey_dialog = false;
+            }
+
+            if let Some(candidate) = captured {
                 // 一時停止で自分自身の登録は解除済みなので、ここでの試し登録が
                 // 自分の他のアクションと衝突することはない。他のアプリが既に
                 // 使っているキー（F12 など）だけを弾ける

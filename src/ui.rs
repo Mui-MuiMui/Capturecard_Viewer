@@ -1,4 +1,4 @@
-use crate::audio::{self, AudioCapabilities, ChoiceSource};
+use crate::audio::{self, AudioCapabilities, AudioDirection, ChoiceSource};
 use crate::hotkey::{HotkeyAction, HotkeyError};
 use crate::settings::{
     resolved_active_preset, validate_preset_name, AppSettings, ColorRange, ColorSpace, Preset,
@@ -11,10 +11,15 @@ use eframe::egui;
 use log::debug;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-/// 設定ダイアログで行われた操作。
+/// 設定ダイアログの開閉と反映を決める操作。
 ///
 /// 各ボタンの意味は `README.md` の「設定」と
 /// `docs/ARCHITECTURE.md` の「適用の境界を明確にする」に合わせている。
+///
+/// **ここにあるのはダイアログの一生に関わる 3 つだけ。** テスト再生や
+/// 書き出しのようにダイアログの状態を動かさない操作は `SettingsEvent` の
+/// 別の変種で表す。混ぜると `transition_for` が「何もしない」変種ばかりに
+/// なり、追加した操作が誤って反映や保存を引き起こす余地が残る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsDialogAction {
     /// まだ何も押されていない（編集中）
@@ -26,6 +31,24 @@ pub enum SettingsDialogAction {
     /// キャンセル: ドラフトを捨てて閉じる。タイトルバーの × も同じ扱い。
     /// 「適用」で既に反映したぶんは元に戻さない
     Cancel,
+}
+
+/// 設定ダイアログの 1 フレームで起きたこと。
+///
+/// 描画関数は状態を書き換えず、起きたことをこの列で返す。実際に状態を
+/// 動かすのは `app::settings_dialog::handle_settings_events`
+/// （`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
+///
+/// **1 フレームで複数起きうるので `Vec` で返す。** 例えば名前を打ちながら
+/// 「保存」を押した場合は `SetNewPresetName` と `SaveNewPreset` が並ぶ。
+/// **並び順が意味を持つ**ので、受け取った側は順番どおりに処理すること。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsEvent {
+    /// 適用 / OK / キャンセル（タイトルバーの × を含む）。
+    /// **必ず列の最後に来る。** 他の操作を反映してから閉じるため
+    Dialog(SettingsDialogAction),
+    /// タブを切り替えた
+    SelectTab(SettingsTab),
     /// テスト再生: 効果音を編集中の音量で鳴らすだけ。
     /// 設定は動かさないしダイアログも閉じない
     TestSound,
@@ -37,6 +60,46 @@ pub enum SettingsDialogAction {
     ImportSettings,
     /// 設定を初期化: ドラフトを既定値に戻す。こちらも反映は「適用」「OK」
     ResetDraft,
+    /// 「設定を初期化...」の確認待ちにする（`true`）／やめる（`false`）
+    SetResetConfirm(bool),
+    /// 新しいプリセットの名前入力欄の内容が変わった
+    SetNewPresetName(String),
+    /// 入力欄の名前で、ドラフトをプリセットとして保存する
+    SaveNewPreset,
+    /// プリセット一覧の行のボタンが押された
+    PresetRow(PresetRowAction),
+    /// ホットキー入力ダイアログをこのアクションで開く
+    OpenHotkeyCapture(HotkeyAction),
+    /// スクリーンショットの保存フォルダーをファイルダイアログで選ぶ
+    PickScreenshotFolder,
+    /// 効果音のファイルをファイルダイアログで選ぶ
+    PickSoundFile,
+    /// デバイス能力のキャッシュに対する要求
+    Capability(CapabilityEvent),
+}
+
+/// デバイス能力のキャッシュに対する要求。
+///
+/// キャッシュは `SettingsDialogState` が持つが、書き換えるのは `app` だけ。
+/// 描画側は「取得したい」「目印を落としてよい」を返すに留める。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityEvent {
+    /// まだ問い合わせていなければ取得を要求する（`CapabilityCache::request`）
+    RequestVideo(String),
+    /// 取得済み・失敗済みでも問い合わせ直す（「再取得」）
+    RetryVideo(String),
+    /// デバイスを切り替えた。能力が届いたら既定値を選び直す目印を立てる
+    ExpectVideoDefaults(String),
+    /// 既定値の選び直しを済ませたので目印を落とす
+    ClearVideoDefaults(String),
+    /// オーディオ側の `RequestVideo` 相当。文字列は `audio::cache_key`
+    RequestAudio(AudioDirection, String),
+    /// オーディオ側の `RetryVideo` 相当
+    RetryAudio(AudioDirection, String),
+    /// オーディオ側の `ExpectVideoDefaults` 相当
+    ExpectAudioDefaults(AudioDirection, String),
+    /// オーディオ側の `ClearVideoDefaults` 相当
+    ClearAudioDefaults(AudioDirection, String),
 }
 
 /// 「その他」タブに出す 1 行のメッセージ。
@@ -297,17 +360,25 @@ impl<T> CapabilityCache<T> {
 
     /// `device` の能力が届いていて、切り替え直後の選び直しがまだなら `true`。
     ///
-    /// 一度 `true` を返したら目印を消す。消さないと、ユーザーが選び直した
-    /// フォーマットを毎フレーム先頭へ戻してしまう。
-    pub fn should_apply_defaults(&mut self, device: &str) -> bool {
+    /// **目印は消さない。** 描画中に読むため `&self` で済ませ、消すのは
+    /// `CapabilityEvent::ClearVideoDefaults` を受けた `app` の仕事にしてある。
+    /// 消さずに放っておくと、ユーザーが選び直したフォーマットを毎フレーム
+    /// 先頭へ戻してしまうので、読んだ側は必ず消す要求を返すこと。
+    pub fn awaits_defaults(&self, device: &str) -> bool {
         if self.awaiting_defaults.as_deref() != Some(device) {
             return false;
         }
-        if !matches!(self.states.get(device), Some(CapabilityState::Ready(_))) {
-            return false;
+        matches!(self.states.get(device), Some(CapabilityState::Ready(_)))
+    }
+
+    /// 既定値の選び直しの目印を落とす。`device` が目印の相手でなければ何もしない。
+    ///
+    /// 相手を確かめるのは、読んだときと消すときの間にユーザーがもう一度
+    /// デバイスを切り替えた場合に、新しい目印まで巻き添えで消さないため。
+    pub fn clear_awaiting_defaults(&mut self, device: &str) {
+        if self.awaiting_defaults.as_deref() == Some(device) {
+            self.awaiting_defaults = None;
         }
-        self.awaiting_defaults = None;
-        true
     }
 }
 
@@ -516,6 +587,94 @@ impl SettingsDialogState {
         &mut self.audio_output_capabilities
     }
 
+    /// 入出力を指定してオーディオの対応設定を取り出す。
+    ///
+    /// `CapabilityEvent` が `AudioDirection` を持って届くので、入口を 1 つに
+    /// してある。入力と出力で同じ処理を 2 回書かないため。
+    pub fn audio_capabilities_mut(
+        &mut self,
+        direction: AudioDirection,
+    ) -> &mut AudioCapabilityCache {
+        match direction {
+            AudioDirection::Input => &mut self.audio_input_capabilities,
+            AudioDirection::Output => &mut self.audio_output_capabilities,
+        }
+    }
+
+    /// 選択中のタブを切り替える。
+    pub fn select_tab(&mut self, tab: SettingsTab) {
+        self.selected_tab = tab;
+    }
+
+    /// 「設定を初期化」の確認待ちにするかを切り替える。
+    pub fn set_reset_confirm(&mut self, confirming: bool) {
+        self.reset_confirm = confirming;
+    }
+
+    /// 新しいプリセットの名前入力欄を差し替える。
+    pub fn set_new_preset_name(&mut self, name: String) {
+        self.new_preset_name = name;
+    }
+
+    /// 入力欄の名前で、ドラフトを新しいプリセットとして保存する。
+    ///
+    /// 成功したときだけ入力欄を空へ戻す。名前が重複して弾かれたときに
+    /// 入力が消えると直せないため（`save_new_preset`）。
+    pub fn save_new_preset(&mut self) {
+        let Some(draft) = self.draft.as_mut() else {
+            return;
+        };
+        save_new_preset(
+            draft,
+            &mut self.new_preset_name,
+            &mut self.management_message,
+        );
+    }
+
+    /// プリセット一覧の行のボタンをドラフトへ反映する。
+    pub fn apply_preset_row(&mut self, action: PresetRowAction) {
+        let Some(draft) = self.draft.as_mut() else {
+            return;
+        };
+        apply_preset_row_action(draft, action, &mut self.management_message);
+    }
+
+    /// 描画のために、ドラフトの `&mut` とそれ以外の読み取り専用の借用へ分ける。
+    ///
+    /// ドラフトを編集しながら能力キャッシュやメッセージも読むため、
+    /// `&mut SettingsDialogState` のままでは二重の借用になる。
+    /// **ドラフト以外を `&mut` で渡さないのがこの分け方の目的。**
+    /// 描画側が書き換えてよいのはドラフトだけで、他は
+    /// `SettingsEvent` を通して `app` が動かす。
+    ///
+    /// ドラフトがまだ無ければ `None`。呼び出し側は描画を見送る。
+    pub fn split_for_draw(&mut self) -> Option<(&mut AppSettings, SettingsDialogView<'_>)> {
+        let Self {
+            draft,
+            selected_tab,
+            capabilities,
+            audio_input_capabilities,
+            audio_output_capabilities,
+            management_message,
+            reset_confirm,
+            new_preset_name,
+            ..
+        } = self;
+        let draft = draft.as_mut()?;
+        let view = SettingsDialogView {
+            selected_tab: *selected_tab,
+            video_capabilities: capabilities,
+            audio_capabilities: AudioCapabilityCaches {
+                input: audio_input_capabilities,
+                output: audio_output_capabilities,
+            },
+            management_message: management_message.as_ref(),
+            reset_confirm: *reset_confirm,
+            new_preset_name,
+        };
+        Some((draft, view))
+    }
+
     /// ドラフトを実行中の設定へ反映する。ドラフトを持っていなければ何もしない。
     pub fn commit_into(&self, target: &mut AppSettings) {
         if let (Some(draft), Some(original)) = (&self.draft, &self.original) {
@@ -546,27 +705,29 @@ impl SettingsDialogState {
                 save_to_file: false,
                 close: true,
             },
-            // 効果音を鳴らすだけなので、ドラフトもファイルもダイアログも動かさない
-            SettingsDialogAction::TestSound => SettingsDialogTransition {
-                commit_draft: false,
-                save_to_file: false,
-                close: false,
-            },
-            // 書き出し・読み込み・初期化は、呼び出し側が別に処理する。
-            //
-            // **`save_to_file` を立てない。** ここでの保存は
-            // `%AppData%` の設定ファイルへの書き出しを指しており、
-            // ユーザーが選んだ場所への書き出しとは別物。読み込みと初期化も
-            // ドラフトを差し替えるだけで、反映は「適用」「OK」に任せる
-            SettingsDialogAction::ExportSettings
-            | SettingsDialogAction::ImportSettings
-            | SettingsDialogAction::ResetDraft => SettingsDialogTransition {
-                commit_draft: false,
-                save_to_file: false,
-                close: false,
-            },
         }
     }
+}
+
+/// 設定ダイアログの描画に要る、ドラフト以外の状態。
+///
+/// **すべて読み取り専用。** ここを `&mut` にすると、描画の途中で状態が
+/// 変わる経路が復活する。書き換えは `SettingsEvent` を返して `app` に任せる。
+///
+/// 中身は `SettingsDialogState` の一部で、`split_for_draw` が作る。
+pub struct SettingsDialogView<'a> {
+    /// 選択中のタブ
+    pub selected_tab: SettingsTab,
+    /// ビデオデバイスの能力
+    pub video_capabilities: &'a VideoCapabilityCache,
+    /// オーディオデバイスの対応設定（入力・出力）
+    pub audio_capabilities: AudioCapabilityCaches<'a>,
+    /// 「その他」タブに出す直近の結果
+    pub management_message: Option<&'a ManagementMessage>,
+    /// 「設定を初期化」の確認待ちか
+    pub reset_confirm: bool,
+    /// 新しいプリセットの名前入力欄の内容
+    pub new_preset_name: &'a str,
 }
 
 /// 描画後の状態から、実際に行われた操作を決める。
@@ -828,48 +989,35 @@ pub struct DeviceLists<'a> {
     pub output: &'a [String],
 }
 
-/// 設定ダイアログを描画し、行われた操作を返す。
+/// 設定ダイアログを描画し、このフレームで起きたことを返す。
 ///
-/// 編集対象は `dialog` が持つドラフトで、実行中の設定はここでは触らない。
-/// ドラフトの反映・保存・クローズは呼び出し側が `transition_for` の結果に
-/// 従って行う。
+/// 書き換えてよいのは `draft` だけ。タブの選択・能力キャッシュ・ダイアログの
+/// 開閉といった `app` 側の状態はここでは動かさず、`SettingsEvent` で返す
+/// （`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
+///
+/// ドラフトの反映・保存・クローズは、呼び出し側が
+/// `SettingsEvent::Dialog` を `transition_for` にかけて行う。
 pub fn show_settings_dialog(
     ctx: &egui::Context,
-    show_settings: &mut bool,
-    dialog: &mut SettingsDialogState,
-    show_hotkey_dialog: &mut bool,
+    draft: &mut AppSettings,
+    view: &SettingsDialogView<'_>,
     devices: &DeviceLists<'_>,
     connection: &ConnectionStatus,
     hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
-) -> SettingsDialogAction {
-    // フィールドごとに分解して受ける。ドラフトを編集しながら
-    // デバイス能力のキャッシュやホットキー入力の状態も書き換えるため、
-    // dialog をまるごと借りると二重の可変借用になる
-    let SettingsDialogState {
-        draft,
-        selected_tab,
-        capabilities,
-        audio_input_capabilities,
-        audio_output_capabilities,
-        hotkey_capture,
-        management_message,
-        reset_confirm,
-        new_preset_name,
-        ..
-    } = dialog;
-
-    let mut audio_capabilities = AudioCapabilityCaches {
-        input: audio_input_capabilities,
-        output: audio_output_capabilities,
-    };
-
-    // ドラフトが用意できていなければ描画しない。呼び出し側が begin_edit を
-    // 呼ぶまで待つ
-    let Some(draft) = draft.as_mut() else {
-        return SettingsDialogAction::None;
-    };
-
+) -> Vec<SettingsEvent> {
+    let mut events: Vec<SettingsEvent> = Vec::new();
     let mut button = SettingsDialogAction::None;
+
+    // タブは `selectable_value` に `&mut` が要るので複製を渡し、変わったら
+    // イベントで返す。**このフレームの描画にはこの複製を使う。** 呼び出し側の
+    // 値を見ると、切り替えた直後の 1 フレームだけ前のタブが描かれる
+    let mut selected_tab = view.selected_tab;
+
+    // タイトルバーの × を拾うためのローカル。`egui::Window::open` は
+    // `&mut bool` を要求するが、呼び出し側の開閉フラグを直接渡すと
+    // ここからダイアログを閉じられてしまう。閉じるのは
+    // `SettingsEvent::Dialog` を受け取った `app` の仕事
+    let mut window_open = true;
 
     // 画面より大きい・画面外にずれた位置で開いていると、下部のボタン列が
     // 押せなくなる（Issue #137）。ウィンドウそのものを画面内へ収め、
@@ -884,7 +1032,7 @@ pub fn show_settings_dialog(
     let min_size = SETTINGS_WINDOW_MIN_SIZE;
 
     egui::Window::new("設定")
-        .open(show_settings)
+        .open(&mut window_open)
         .default_size([650.0, 500.0])
         .resizable(true)
         .constrain_to(screen_rect)
@@ -893,15 +1041,15 @@ pub fn show_settings_dialog(
         .show(ctx, |ui| {
             // タブ選択
             ui.horizontal(|ui| {
-                ui.selectable_value(selected_tab, SettingsTab::Device, "デバイス設定");
+                ui.selectable_value(&mut selected_tab, SettingsTab::Device, "デバイス設定");
                 ui.selectable_value(
-                    selected_tab,
+                    &mut selected_tab,
                     SettingsTab::Screenshot,
                     "スクリーンショット設定",
                 );
-                ui.selectable_value(selected_tab, SettingsTab::Hotkeys, "ホットキー");
-                ui.selectable_value(selected_tab, SettingsTab::Other, "その他");
-                ui.selectable_value(selected_tab, SettingsTab::Status, "接続状態");
+                ui.selectable_value(&mut selected_tab, SettingsTab::Hotkeys, "ホットキー");
+                ui.selectable_value(&mut selected_tab, SettingsTab::Other, "その他");
+                ui.selectable_value(&mut selected_tab, SettingsTab::Status, "接続状態");
             });
 
             ui.separator();
@@ -942,48 +1090,41 @@ pub fn show_settings_dialog(
                     SettingsTab::Device => show_device_settings_tab(
                         ui,
                         draft,
-                        capabilities,
-                        &mut audio_capabilities,
+                        view.video_capabilities,
+                        &view.audio_capabilities,
                         devices,
+                        &mut events,
                     ),
-                    SettingsTab::Screenshot => {
-                        if show_screenshot_settings_tab(ui, draft) {
-                            button = SettingsDialogAction::TestSound;
-                        }
+                    SettingsTab::Screenshot => show_screenshot_settings_tab(ui, draft, &mut events),
+                    SettingsTab::Hotkeys => {
+                        show_hotkey_settings_tab(ui, draft, hotkey_errors, &mut events)
                     }
-                    SettingsTab::Hotkeys => show_hotkey_settings_tab(
-                        ui,
-                        draft,
-                        show_hotkey_dialog,
-                        hotkey_capture,
-                        hotkey_errors,
-                    ),
-                    SettingsTab::Other => {
-                        let requested = show_other_tab(
-                            ui,
-                            draft,
-                            new_preset_name,
-                            management_message,
-                            reset_confirm,
-                        );
-                        if requested != SettingsDialogAction::None {
-                            button = requested;
-                        }
-                    }
+                    SettingsTab::Other => show_other_tab(ui, draft, view, &mut events),
                     SettingsTab::Status => show_status_tab(ui, connection),
                 });
         });
 
-    resolve_action(button, *show_settings)
+    if selected_tab != view.selected_tab {
+        events.push(SettingsEvent::SelectTab(selected_tab));
+    }
+
+    // **必ず最後に積む。** 「適用」を押したフレームに起きた他の操作
+    // （プリセットの読み込みなど）を先に処理しないと、反映が 1 フレーム遅れる
+    let action = resolve_action(button, window_open);
+    if action != SettingsDialogAction::None {
+        events.push(SettingsEvent::Dialog(action));
+    }
+
+    events
 }
 
 /// オーディオの入力・出力の能力キャッシュをまとめて渡すための束。
 ///
-/// 2 本の `&mut` を個別に引数へ並べると入れ替えても型が合ってしまうため、
+/// 2 本の借用を個別に引数へ並べると入れ替えても型が合ってしまうため、
 /// 名前で区別できる形にする（`DeviceLists` と同じ理由）。
 pub struct AudioCapabilityCaches<'a> {
-    pub input: &'a mut AudioCapabilityCache,
-    pub output: &'a mut AudioCapabilityCache,
+    pub input: &'a AudioCapabilityCache,
+    pub output: &'a AudioCapabilityCache,
 }
 
 /// 映像調整のスライダー 1 本。明るさ・コントラスト・彩度で見た目を揃える。
@@ -1002,9 +1143,10 @@ fn video_adjustment_slider(ui: &mut egui::Ui, value: &mut i32, label: &str, hint
 fn show_device_settings_tab(
     ui: &mut egui::Ui,
     settings: &mut AppSettings,
-    capabilities: &mut VideoCapabilityCache,
-    audio_capabilities: &mut AudioCapabilityCaches<'_>,
+    capabilities: &VideoCapabilityCache,
+    audio_capabilities: &AudioCapabilityCaches<'_>,
     devices: &DeviceLists<'_>,
+    events: &mut Vec<SettingsEvent>,
 ) {
     ui.heading("デバイス設定");
     ui.add_space(10.0);
@@ -1053,12 +1195,16 @@ fn show_device_settings_tab(
 
         if device_changed {
             // 能力が届いた時点でフォーマットを選び直させる
-            capabilities.expect_defaults(&selected_device);
+            events.push(SettingsEvent::Capability(
+                CapabilityEvent::ExpectVideoDefaults(selected_device.clone()),
+            ));
         }
 
         // 能力の取得を要求する。デバイスを開くのはワーカーなので UI は止まらない。
         // 要求済み・取得済み・失敗済みのときは何も起きない
-        capabilities.request(&selected_device);
+        events.push(SettingsEvent::Capability(CapabilityEvent::RequestVideo(
+            selected_device.clone(),
+        )));
 
         // 取得の進行状況。失敗を黙って捨てると、選択肢が既定値のまま出る理由が
         // ユーザーに分からない
@@ -1082,7 +1228,9 @@ fn show_device_settings_tab(
             _ => {}
         }
         if retry_requested {
-            capabilities.retry(&selected_device);
+            events.push(SettingsEvent::Capability(CapabilityEvent::RetryVideo(
+                selected_device.clone(),
+            )));
         }
 
         // 切り替えたデバイスの能力が届いたら、フォーマット・解像度・FPS を
@@ -1094,7 +1242,13 @@ fn show_device_settings_tab(
         // 目印が残るため、`Ready` になったフレームで入れ直される。
         // 取得に失敗したときは入れ直さない（選択肢が既定値のままなので、
         // そこへ寄せても実態に合わない）。
-        if capabilities.should_apply_defaults(&selected_device) {
+        //
+        // 目印を落とすのは `app`。**入れ直せたかどうかに関わらず落とす。**
+        // 残すと、ユーザーが選び直したフォーマットを毎フレーム先頭へ戻す
+        if capabilities.awaits_defaults(&selected_device) {
+            events.push(SettingsEvent::Capability(
+                CapabilityEvent::ClearVideoDefaults(selected_device.clone()),
+            ));
             if let Some((format, resolution, fps)) =
                 capabilities.ready(&selected_device).and_then(|caps| {
                     select_default_video_mode(caps, settings.video.resolution, settings.video.fps)
@@ -1452,17 +1606,27 @@ fn show_device_settings_tab(
         let output_key = audio::cache_key(settings.audio.output_device_name.as_deref());
 
         if input_changed {
-            audio_capabilities.input.expect_defaults(&input_key);
+            events.push(SettingsEvent::Capability(
+                CapabilityEvent::ExpectAudioDefaults(AudioDirection::Input, input_key.clone()),
+            ));
         }
         if output_changed {
-            audio_capabilities.output.expect_defaults(&output_key);
+            events.push(SettingsEvent::Capability(
+                CapabilityEvent::ExpectAudioDefaults(AudioDirection::Output, output_key.clone()),
+            ));
         }
 
         // 対応設定の取得を要求する。列挙はワーカーなので UI は止まらない
-        audio_capabilities.input.request(&input_key);
-        audio_capabilities.output.request(&output_key);
+        events.push(SettingsEvent::Capability(CapabilityEvent::RequestAudio(
+            AudioDirection::Input,
+            input_key.clone(),
+        )));
+        events.push(SettingsEvent::Capability(CapabilityEvent::RequestAudio(
+            AudioDirection::Output,
+            output_key.clone(),
+        )));
 
-        show_audio_capability_progress(ui, audio_capabilities, &input_key, &output_key);
+        show_audio_capability_progress(ui, audio_capabilities, &input_key, &output_key, events);
 
         // 入出力の両方が対応する値だけを選択肢にする。取得できていない側は
         // 制約にしない（片側だけ、どちらも無ければ固定の既定一覧）
@@ -1482,10 +1646,22 @@ fn show_device_settings_tab(
             .map(|caps| (caps.default_sample_rate(), caps.default_channels()));
 
         // デバイスを切り替えたあとに能力が届いたら、対応する値へ寄せ直す。
-        // **`|` で書いて両方を必ず評価する。** `||` だと入力側が真のときに
-        // 出力側の目印が消えず、次のフレームでもう一度寄せ直してしまう
-        let repick = audio_capabilities.input.should_apply_defaults(&input_key)
-            | audio_capabilities.output.should_apply_defaults(&output_key);
+        // **両方を必ず調べて、立っている目印は両方とも落とす要求を返す。**
+        // 片方で早期に打ち切ると、残った目印のせいで次のフレームでも
+        // もう一度寄せ直してしまう
+        let input_awaits = audio_capabilities.input.awaits_defaults(&input_key);
+        let output_awaits = audio_capabilities.output.awaits_defaults(&output_key);
+        if input_awaits {
+            events.push(SettingsEvent::Capability(
+                CapabilityEvent::ClearAudioDefaults(AudioDirection::Input, input_key.clone()),
+            ));
+        }
+        if output_awaits {
+            events.push(SettingsEvent::Capability(
+                CapabilityEvent::ClearAudioDefaults(AudioDirection::Output, output_key.clone()),
+            ));
+        }
+        let repick = input_awaits || output_awaits;
         if repick {
             let desired_rate = settings
                 .audio
@@ -1636,11 +1812,15 @@ fn show_device_settings_tab(
     });
 }
 
-/// 「その他」タブを描画し、押されたボタンを返す。
+/// 「その他」タブを描画する。
 ///
 /// 設定の書き出し・読み込み・初期化を置いてある。**ここでは何も実行しない。**
 /// ファイルダイアログもファイル I/O も `CaptureCardViewer` が行う
 /// （`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
+///
+/// `draft` を読み取りで受けるのは、このタブが設定を書き換えないため。
+/// プリセットの追加・上書き・削除も、名前入力欄も、起きたことを
+/// `SettingsEvent` で返して `app` が反映する。
 ///
 /// タブに分けてあるのは、下部の「OK / キャンセル / 適用」の並びへ足すと
 /// 「初期化」が「OK」の隣に来るため。押し間違いで設定が消える並びにしない。
@@ -1648,17 +1828,14 @@ fn show_device_settings_tab(
 /// ボタンの真下に書けるほうが伝わる。
 fn show_other_tab(
     ui: &mut egui::Ui,
-    draft: &mut AppSettings,
-    new_preset_name: &mut String,
-    message: &mut Option<ManagementMessage>,
-    reset_confirm: &mut bool,
-) -> SettingsDialogAction {
+    draft: &AppSettings,
+    view: &SettingsDialogView<'_>,
+    events: &mut Vec<SettingsEvent>,
+) {
     ui.heading("その他");
     ui.add_space(10.0);
 
-    let mut action = SettingsDialogAction::None;
-
-    show_preset_group(ui, draft, new_preset_name, message);
+    show_preset_group(ui, draft, view.new_preset_name, events);
 
     ui.add_space(15.0);
 
@@ -1668,10 +1845,10 @@ fn show_other_tab(
 
         ui.horizontal(|ui| {
             if ui.button("設定を書き出す...").clicked() {
-                action = SettingsDialogAction::ExportSettings;
+                events.push(SettingsEvent::ExportSettings);
             }
             if ui.button("設定を読み込む...").clicked() {
-                action = SettingsDialogAction::ImportSettings;
+                events.push(SettingsEvent::ImportSettings);
             }
         });
 
@@ -1687,19 +1864,19 @@ fn show_other_tab(
         ui.strong("初期化");
         ui.add_space(5.0);
 
-        if *reset_confirm {
+        if view.reset_confirm {
             warning_label(ui, "編集中の設定を初期値に戻します。よろしいですか？");
             ui.horizontal(|ui| {
                 if ui.button("初期化する").clicked() {
-                    action = SettingsDialogAction::ResetDraft;
-                    *reset_confirm = false;
+                    events.push(SettingsEvent::ResetDraft);
+                    events.push(SettingsEvent::SetResetConfirm(false));
                 }
                 if ui.button("やめる").clicked() {
-                    *reset_confirm = false;
+                    events.push(SettingsEvent::SetResetConfirm(false));
                 }
             });
         } else if ui.button("設定を初期化...").clicked() {
-            *reset_confirm = true;
+            events.push(SettingsEvent::SetResetConfirm(true));
         }
 
         ui.add_space(5.0);
@@ -1709,7 +1886,7 @@ fn show_other_tab(
         ui.small("戻る範囲は読み込みと同じです。ウィンドウの位置とサイズ、右クリックメニューで切り替える項目は初期化しません。");
     });
 
-    if let Some(message) = message.as_ref() {
+    if let Some(message) = view.management_message {
         ui.add_space(15.0);
         ui.separator();
         let kind = if message.is_error {
@@ -1719,16 +1896,15 @@ fn show_other_tab(
         };
         notice_label(ui, kind, &message.text);
     }
-
-    action
 }
 
 /// プリセット一覧の 1 行で押されたボタン。
 ///
 /// ループの中でドラフトを書き換えると、一覧を借りたまま変更することになる。
-/// 押されたことだけを持ち帰り、実際の変更はループを抜けてから行う。
+/// 押されたことだけを持ち帰り、実際の変更は `app` が
+/// `SettingsDialogState::apply_preset_row` で行う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PresetRowAction {
+pub enum PresetRowAction {
     /// ドラフトの video / audio をこのプリセットで置き換える
     Load(usize),
     /// このプリセットの中身を、いまのドラフトの video / audio で置き換える
@@ -1748,9 +1924,9 @@ enum PresetRowAction {
 /// 使う頻度が高いため。
 fn show_preset_group(
     ui: &mut egui::Ui,
-    draft: &mut AppSettings,
-    new_preset_name: &mut String,
-    message: &mut Option<ManagementMessage>,
+    draft: &AppSettings,
+    new_preset_name: &str,
+    events: &mut Vec<SettingsEvent>,
 ) {
     ui.group(|ui| {
         ui.strong("プリセット");
@@ -1799,25 +1975,33 @@ fn show_preset_group(
         }
 
         if let Some(row_action) = row_action {
-            apply_preset_row_action(draft, row_action, message);
+            events.push(SettingsEvent::PresetRow(row_action));
         }
 
         ui.add_space(10.0);
         ui.label("現在の設定を新しいプリセットとして保存:");
         ui.horizontal(|ui| {
+            // `TextEdit` は `&mut String` を要求するので、呼び出し側が持つ
+            // 入力欄を複製して渡し、変わったらイベントで返す。**このフレームの
+            // 表示にはこの複製を使う**ので、打った文字はその場で出る
+            let mut name = new_preset_name.to_string();
             // Enter でも保存できるようにする。名前を打った直後に
             // マウスへ持ち替えさせない
-            let entered = ui
-                .add(
-                    egui::TextEdit::singleline(new_preset_name)
-                        .desired_width(200.0)
-                        .hint_text("例: 低遅延優先"),
-                )
-                .lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut name)
+                    .desired_width(200.0)
+                    .hint_text("例: 低遅延優先"),
+            );
+            if response.changed() {
+                events.push(SettingsEvent::SetNewPresetName(name));
+            }
+            let entered =
+                response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
+            // **入力欄の内容は載せない。** 直前の `SetNewPresetName` を
+            // 先に処理した呼び出し側が、自分の持つ値を使う
             if ui.button("保存").clicked() || entered {
-                save_new_preset(draft, new_preset_name, message);
+                events.push(SettingsEvent::SaveNewPreset);
             }
         });
 
@@ -1848,6 +2032,9 @@ fn active_preset_label(settings: &AppSettings) -> String {
 }
 
 /// 一覧の行で押されたボタンをドラフトへ反映する。
+///
+/// 描画からは切り離してあり、呼ぶのは `SettingsDialogState::apply_preset_row`
+/// （`commit_draft` などと同じく、設定を組み替えるだけの関数）。
 fn apply_preset_row_action(
     draft: &mut AppSettings,
     action: PresetRowAction,
@@ -1999,18 +2186,25 @@ fn show_choice_note(ui: &mut egui::Ui, source: ChoiceSource, label: &str) {
 /// 黙って既定の一覧を出すと選択肢が実態と違う理由が分からない。
 fn show_audio_capability_progress(
     ui: &mut egui::Ui,
-    caches: &mut AudioCapabilityCaches<'_>,
+    caches: &AudioCapabilityCaches<'_>,
     input_key: &str,
     output_key: &str,
+    events: &mut Vec<SettingsEvent>,
 ) {
     let retry_input = show_audio_capability_state(ui, caches.input.state(input_key), "入力");
     let retry_output = show_audio_capability_state(ui, caches.output.state(output_key), "出力");
 
     if retry_input {
-        caches.input.retry(input_key);
+        events.push(SettingsEvent::Capability(CapabilityEvent::RetryAudio(
+            AudioDirection::Input,
+            input_key.to_string(),
+        )));
     }
     if retry_output {
-        caches.output.retry(output_key);
+        events.push(SettingsEvent::Capability(CapabilityEvent::RetryAudio(
+            AudioDirection::Output,
+            output_key.to_string(),
+        )));
     }
 }
 
@@ -2097,15 +2291,20 @@ fn show_link_status(ui: &mut egui::Ui, title: &str, status: &LinkStatus) {
     });
 }
 
-/// スクリーンショット設定タブを描画し、「テスト再生」が押されたかを返す。
+/// スクリーンショット設定タブを描画する。
 ///
-/// 効果音の再生はダイアログの仕事ではないので、ここでは鳴らさずに
-/// イベントとして上へ返す（`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
-fn show_screenshot_settings_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> bool {
+/// 効果音の再生もファイルダイアログもここでは行わず、イベントとして
+/// 上へ返す（`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
+/// **`rfd` のファイルダイアログは UI スレッドを止めるモーダル**なので、
+/// 描画の途中で開くと止まった位置のフレームが表示されたままになる。
+/// 設定の書き出し・読み込みと同じく、フレームを描き終えてから開く。
+fn show_screenshot_settings_tab(
+    ui: &mut egui::Ui,
+    settings: &mut AppSettings,
+    events: &mut Vec<SettingsEvent>,
+) {
     ui.heading("スクリーンショット設定");
     ui.add_space(10.0);
-
-    let mut test_sound_requested = false;
 
     // 出力先
     ui.group(|ui| {
@@ -2161,9 +2360,7 @@ fn show_screenshot_settings_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -
                 settings.screenshot.save_folder = std::path::PathBuf::from(folder_str);
 
                 if ui.button("参照...").clicked() {
-                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        settings.screenshot.save_folder = folder;
-                    }
+                    events.push(SettingsEvent::PickScreenshotFolder);
                 }
             });
         });
@@ -2233,12 +2430,7 @@ fn show_screenshot_settings_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -
             ui.label(&sound_file_str);
 
             if ui.button("ファイル選択...").clicked() {
-                if let Some(file) = rfd::FileDialog::new()
-                    .add_filter("音声ファイル", &["mp3", "wav", "ogg"])
-                    .pick_file()
-                {
-                    settings.screenshot.sound_file = Some(file);
-                }
+                events.push(SettingsEvent::PickSoundFile);
             }
         });
 
@@ -2253,7 +2445,7 @@ fn show_screenshot_settings_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -
 
             ui.horizontal(|ui| {
                 if ui.button("テスト再生").clicked() {
-                    test_sound_requested = true;
+                    events.push(SettingsEvent::TestSound);
                 }
                 if ui.button("クリア").clicked() {
                     settings.screenshot.sound_file = None;
@@ -2261,8 +2453,6 @@ fn show_screenshot_settings_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -
             });
         }
     });
-
-    test_sound_requested
 }
 
 /// 「ホットキー」タブを描く。
@@ -2274,14 +2464,13 @@ fn show_screenshot_settings_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -
 fn show_hotkey_settings_tab(
     ui: &mut egui::Ui,
     settings: &mut AppSettings,
-    show_hotkey_dialog: &mut bool,
-    capture: &mut HotkeyCaptureState,
     hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
+    events: &mut Vec<SettingsEvent>,
 ) {
     ui.heading("ホットキー設定");
     ui.add_space(10.0);
 
-    show_hotkey_assignments(ui, settings, show_hotkey_dialog, capture, hotkey_errors);
+    show_hotkey_assignments(ui, settings, hotkey_errors, events);
 }
 
 /// アクションごとのホットキー割り当ての一覧を描く。
@@ -2291,9 +2480,8 @@ fn show_hotkey_settings_tab(
 fn show_hotkey_assignments(
     ui: &mut egui::Ui,
     settings: &mut AppSettings,
-    show_hotkey_dialog: &mut bool,
-    capture: &mut HotkeyCaptureState,
     hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
+    events: &mut Vec<SettingsEvent>,
 ) {
     ui.group(|ui| {
         ui.strong("ホットキー");
@@ -2340,9 +2528,11 @@ fn show_hotkey_assignments(
                     }
 
                     if ui.button("設定...").clicked() {
-                        // どのアクションを編集しているかを入力ダイアログへ渡す
-                        capture.begin_for(action);
-                        *show_hotkey_dialog = true;
+                        // どのアクションを編集するかは呼び出し側が
+                        // `HotkeyCaptureState::begin_for` で記録する。
+                        // **ダイアログもここでは開かない。** 開くのは
+                        // このイベントを受けた `app`
+                        events.push(SettingsEvent::OpenHotkeyCapture(action));
                     }
 
                     let can_clear = settings.hotkey(action).is_some();
@@ -2573,35 +2763,47 @@ fn judge_hotkey_capture(
     }
 }
 
-/// ホットキー入力ダイアログの結果。
+/// ホットキー入力ダイアログの 1 フレームで起きたこと。
 ///
 /// 開いた瞬間から受付状態で、修飾キー以外のキーが押されて `judge_hotkey_capture`
 /// が `Accepted` を返した時点で自動的に確定する（「キャプチャ開始」「OK」は無い）。
-/// 呼び出し側は `Captured` を受け取ったら `HotkeyManager::try_register` で
-/// 実際に登録できるか試し、失敗したら閉じずにダイアログを開き直して理由を
-/// `HotkeyCaptureState::set_rejection` で伝えること。
+///
+/// 受け取った側は**まず `Close` を反映してから `Captured` を処理すること。**
+/// `Captured` は `HotkeyManager::try_register` で実際に登録できるか試し、
+/// 失敗したら開き直して理由を `HotkeyCaptureState::set_rejection` で伝える。
+/// 順序が逆だと、開き直したはずのダイアログを `Close` が閉じてしまう。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HotkeyDialogOutcome {
-    /// 何も確定していない。待機中、拒否、キャンセル、× で閉じた場合
-    None,
+pub enum HotkeyDialogEvent {
     /// このホットキー文字列で確定した
     Captured(String),
+    /// 入力を受け付けられなかった理由。表示のために覚えておく
+    Rejected(String),
+    /// キャンセル・× で閉じた。入力中の状態を捨てる
+    Cancelled,
+    /// ダイアログを閉じる
+    Close,
 }
 
-/// ホットキー入力ダイアログを描画する。
+/// ホットキー入力ダイアログを描画し、このフレームで起きたことを返す。
 ///
 /// `action` は編集対象のアクション、`existing` は現在の全アクションの割り当て
 /// （重複判定に使う。`action` 自身の分が入っていても、判定側で除外する）、
-/// `capture` は編集対象と拒否理由を持つ状態。
+/// `rejection` は前のフレームまでに覚えている拒否の理由。
+///
+/// 状態は何も書き換えない。開閉も拒否理由の記憶も `HotkeyDialogEvent` で返す
+/// （`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
 pub fn show_hotkey_capture_dialog(
     ctx: &egui::Context,
-    show_dialog: &mut bool,
     action: HotkeyAction,
     existing: &BTreeMap<HotkeyAction, String>,
-    capture: &mut HotkeyCaptureState,
-) -> HotkeyDialogOutcome {
+    rejection: Option<&str>,
+) -> Vec<HotkeyDialogEvent> {
+    let mut events: Vec<HotkeyDialogEvent> = Vec::new();
     let mut close_dialog = false;
-    let mut outcome = HotkeyDialogOutcome::None;
+
+    // タイトルバーの × を拾うためのローカル。設定ダイアログと同じ理由で、
+    // 呼び出し側の開閉フラグはここからは触らない
+    let mut window_open = true;
 
     // 判定はウィンドウを描く前に行う。**表示に使うのはこのフレームの判定結果。**
     // ui クロージャの中で ctx.input を呼んでから notice を描くと、表示が
@@ -2614,28 +2816,34 @@ pub fn show_hotkey_capture_dialog(
         judge_hotkey_capture(&i.modifiers, &keys_down, action, existing)
     });
 
-    match &judgement {
-        HotkeyCaptureJudgement::Accepted(candidate) => {
-            outcome = HotkeyDialogOutcome::Captured(candidate.clone());
-            close_dialog = true;
-        }
-        HotkeyCaptureJudgement::ModifiersOnly => {
-            capture.set_rejection("修飾キーだけでは登録できません".to_string());
-        }
-        HotkeyCaptureJudgement::Duplicate { other, .. } => {
-            capture.set_rejection(format!(
-                "同じキーが「{}」に割り当てられています",
-                other.label()
-            ));
-        }
+    // このフレームの判定から出る拒否の理由。
+    //
+    // **表示にはこちらを優先して使う。** 覚えてもらうのは呼び出し側なので、
+    // `Rejected` を返しただけでは `rejection` に入るのは次のフレーム。
+    // キーを押したまま次の再描画が来ないと、理由が一度も出ないことがある
+    let judged_rejection = match &judgement {
+        HotkeyCaptureJudgement::ModifiersOnly => Some("修飾キーだけでは登録できません".to_string()),
+        HotkeyCaptureJudgement::Duplicate { other, .. } => Some(format!(
+            "同じキーが「{}」に割り当てられています",
+            other.label()
+        )),
         // 待機中でもここでは理由を消さない。呼び出し側（app/mod.rs）が
         // `HotkeyManager::try_register` の失敗理由をこのフレームより後で
         // `set_rejection` することがあり、ここで無条件に消すと次のフレームの
-        // 冒頭（このアームの判定）で即座に消えて一度も表示されない。
+        // 冒頭（この判定）で即座に消えて一度も表示されない。
         // 理由を消すのは `begin_for`（編集対象の切り替え）と `reset`
         // （キャンセル・× で閉じる）の役目
-        HotkeyCaptureJudgement::Waiting => {}
+        HotkeyCaptureJudgement::Waiting | HotkeyCaptureJudgement::Accepted(_) => None,
+    };
+    if let Some(reason) = &judged_rejection {
+        events.push(HotkeyDialogEvent::Rejected(reason.clone()));
     }
+    if let HotkeyCaptureJudgement::Accepted(candidate) = &judgement {
+        events.push(HotkeyDialogEvent::Captured(candidate.clone()));
+        close_dialog = true;
+    }
+
+    let shown_rejection = judged_rejection.as_deref().or(rejection);
 
     // 設定ダイアログと同じく、固定サイズだと極端に小さい画面で下端の
     // 「キャンセル」が画面外へ出て押せなくなる（`fixed_size` は外側の
@@ -2647,7 +2855,7 @@ pub fn show_hotkey_capture_dialog(
         .max(HOTKEY_CAPTURE_DIALOG_MIN_SIZE);
 
     egui::Window::new("ホットキー設定")
-        .open(show_dialog)
+        .open(&mut window_open)
         .default_size([360.0, 180.0])
         .collapsible(false)
         .constrain_to(screen_rect)
@@ -2662,7 +2870,7 @@ pub fn show_hotkey_capture_dialog(
                 ui.add_space(4.0);
                 ui.vertical_centered(|ui| {
                     if ui.button("キャンセル").clicked() {
-                        capture.reset();
+                        events.push(HotkeyDialogEvent::Cancelled);
                         close_dialog = true;
                     }
                 });
@@ -2688,7 +2896,7 @@ pub fn show_hotkey_capture_dialog(
                             action.label()
                         ));
 
-                        if let Some(reason) = capture.rejection() {
+                        if let Some(reason) = shown_rejection {
                             ui.add_space(10.0);
                             notice_label(ui, NoticeKind::Error, reason.to_string());
                         }
@@ -2697,15 +2905,16 @@ pub fn show_hotkey_capture_dialog(
         });
 
     if close_dialog {
-        *show_dialog = false;
-    } else if !*show_dialog {
-        // × で閉じられた場合。`egui::Window::open` が `show_dialog` を
+        events.push(HotkeyDialogEvent::Close);
+    } else if !window_open {
+        // × で閉じられた場合。`egui::Window::open` が渡した bool を
         // false にするだけでボタンは押されないため、設定ダイアログの ×
         // と同じくキャンセル扱いにして入力中の状態を捨てる
-        capture.reset();
+        events.push(HotkeyDialogEvent::Cancelled);
+        events.push(HotkeyDialogEvent::Close);
     }
 
-    outcome
+    events
 }
 
 #[cfg(test)]
@@ -2933,39 +3142,10 @@ mod tests {
         assert!(transition.close);
     }
 
-    #[test]
-    fn transition_for_test_sound_changes_nothing() {
-        // テスト再生は効果音を鳴らすだけ。ドラフトの反映も保存もクローズもしない
-        let transition = SettingsDialogState::transition_for(SettingsDialogAction::TestSound);
-        assert!(!transition.commit_draft);
-        assert!(!transition.save_to_file);
-        assert!(!transition.close);
-    }
-
-    #[test]
-    fn transition_for_settings_file_actions_change_nothing() {
-        // 書き出し・読み込み・初期化はダイアログの外側が別に処理する。
-        // ここで save_to_file を立てると %AppData% の設定ファイルまで
-        // 書き換わり、読み込んだだけで取り消せなくなる
-        for action in [
-            SettingsDialogAction::ExportSettings,
-            SettingsDialogAction::ImportSettings,
-            SettingsDialogAction::ResetDraft,
-        ] {
-            let transition = SettingsDialogState::transition_for(action);
-            assert!(
-                !transition.commit_draft,
-                "{:?} が反映を要求している",
-                action
-            );
-            assert!(
-                !transition.save_to_file,
-                "{:?} が保存を要求している",
-                action
-            );
-            assert!(!transition.close, "{:?} がクローズを要求している", action);
-        }
-    }
+    // テスト再生・書き出し・読み込み・初期化が反映や保存を起こさないことは、
+    // `SettingsDialogAction` にその変種が無い（`SettingsEvent` の別の変種で
+    // 表す）ことで構造的に保証されている。以前はここに
+    // `transition_for` が何もしないことを確かめるテストがあった
 
     #[test]
     fn draft_from_imported_takes_device_and_screenshot_sections() {
@@ -3262,7 +3442,6 @@ mod tests {
             SettingsDialogAction::Ok,
             SettingsDialogAction::Cancel,
             SettingsDialogAction::Apply,
-            SettingsDialogAction::TestSound,
         ] {
             assert_eq!(resolve_action(action, true), action);
             assert_eq!(resolve_action(action, false), action);
@@ -4136,29 +4315,61 @@ mod tests {
     }
 
     #[test]
-    fn capability_cache_should_apply_defaults_is_true_once_after_result_arrives() {
-        // 目印を消さないと、ユーザーが選び直したフォーマットを毎フレーム戻してしまう
+    fn capability_cache_awaits_defaults_is_true_after_result_arrives() {
         let mut cache = VideoCapabilityCache::default();
         cache.request("Capture Device");
         cache.take_requests();
         cache.expect_defaults("Capture Device");
         cache.apply_result("Capture Device".to_string(), Ok(sample_capabilities()));
 
-        assert!(cache.should_apply_defaults("Capture Device"));
-        assert!(!cache.should_apply_defaults("Capture Device"));
+        assert!(cache.awaits_defaults("Capture Device"));
     }
 
     #[test]
-    fn capability_cache_should_apply_defaults_is_false_while_pending() {
+    fn capability_cache_awaits_defaults_stays_true_until_cleared() {
+        // 読むだけでは消えない。描画は何度でも読めるが、消す要求を返さないと
+        // ユーザーが選び直したフォーマットを毎フレーム戻してしまう
+        let mut cache = VideoCapabilityCache::default();
+        cache.request("Capture Device");
+        cache.take_requests();
+        cache.expect_defaults("Capture Device");
+        cache.apply_result("Capture Device".to_string(), Ok(sample_capabilities()));
+
+        assert!(cache.awaits_defaults("Capture Device"));
+        assert!(cache.awaits_defaults("Capture Device"));
+
+        cache.clear_awaiting_defaults("Capture Device");
+
+        assert!(!cache.awaits_defaults("Capture Device"));
+    }
+
+    #[test]
+    fn capability_cache_clear_awaiting_defaults_ignores_another_device() {
+        // 読んでから消すまでの間にもう一度切り替えた場合。古いデバイスに
+        // 対する消去で、新しい目印まで落とさない
+        let mut cache = VideoCapabilityCache::default();
+        cache.request("A");
+        cache.request("B");
+        cache.take_requests();
+        cache.apply_result("B".to_string(), Ok(sample_capabilities()));
+        cache.expect_defaults("B");
+
+        cache.clear_awaiting_defaults("A");
+
+        assert!(cache.awaits_defaults("B"));
+    }
+
+    #[test]
+    fn capability_cache_awaits_defaults_is_false_while_pending() {
         let mut cache = VideoCapabilityCache::default();
         cache.request("Capture Device");
         cache.expect_defaults("Capture Device");
 
-        assert!(!cache.should_apply_defaults("Capture Device"));
+        assert!(!cache.awaits_defaults("Capture Device"));
     }
 
     #[test]
-    fn capability_cache_should_apply_defaults_is_false_for_another_device() {
+    fn capability_cache_awaits_defaults_is_false_for_another_device() {
         // 取得を待っている間にもう一度切り替えた場合。先に届いた別デバイスの
         // 能力で選択を書き換えない
         let mut cache = VideoCapabilityCache::default();
@@ -4168,11 +4379,11 @@ mod tests {
         cache.expect_defaults("B");
         cache.apply_result("A".to_string(), Ok(sample_capabilities()));
 
-        assert!(!cache.should_apply_defaults("A"));
+        assert!(!cache.awaits_defaults("A"));
     }
 
     #[test]
-    fn capability_cache_should_apply_defaults_is_false_when_failed() {
+    fn capability_cache_awaits_defaults_is_false_when_failed() {
         // 失敗したときは選択を書き換えない。既定の選択肢のまま残す
         let mut cache = VideoCapabilityCache::default();
         cache.request("Capture Device");
@@ -4180,7 +4391,7 @@ mod tests {
         cache.expect_defaults("Capture Device");
         cache.apply_result("Capture Device".to_string(), Err("開けません".to_string()));
 
-        assert!(!cache.should_apply_defaults("Capture Device"));
+        assert!(!cache.awaits_defaults("Capture Device"));
     }
 
     #[test]
