@@ -312,35 +312,35 @@ impl<T> CapabilityCache<T> {
 
 /// ホットキー入力ダイアログの入力状態。
 ///
+/// 開いた瞬間からキー入力を受け付けるため、以前あった「キャプチャ開始」待ちの
+/// 状態（`capturing` / `temp`）は持たない。持つのは編集対象と、直前の入力が
+/// 拒否された理由だけ。
+///
 /// 以前は `static mut CAPTURING` / `static mut TEMP_HOTKEY` に持っていた。
 /// `static_mut_refs` が Rust 2024 edition でエラーになるほか、
 /// 参照のたびに `unsafe` が要るため構造体へ移した。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HotkeyCaptureState {
-    /// キー入力の待機中か
-    capturing: bool,
-    /// 待機中に確定したホットキー文字列。
-    /// OK を押すまで呼び出し側へは渡さない
-    temp: String,
     /// どのアクションのホットキーを編集しているか。
     ///
-    /// **`reset` でも消さない。** 「クリア」で閉じたときに、呼び出し側が
-    /// どのアクションを未設定にすればよいか分からなくなるため。
-    /// 次に一覧の「設定...」が押されたときに入れ替わる。
+    /// **`reset` でも消さない。** ダイアログを開いたまま一覧の別の行の
+    /// 「設定...」を押したときに参照されるほか、閉じたあとも直前に何を
+    /// 編集していたかが分かるようにしてある。
     editing: Option<HotkeyAction>,
+    /// 直前に確定を試みたキー入力が拒否された理由。
+    ///
+    /// 修飾キーのみ・他のアクションとの重複・（呼び出し側からの）登録失敗の
+    /// いずれかで、確定しないまま次のフレームでも表示し続けるために持つ。
+    /// 新しい判定が出るたびに置き換わり、待機状態に戻ったら消える。
+    rejection: Option<String>,
 }
 
 impl HotkeyCaptureState {
-    pub fn is_capturing(&self) -> bool {
-        self.capturing
-    }
-
     /// 編集対象のアクションを決めて、入力状態を初期化する。
     /// 一覧の「設定...」から呼ぶ。
     pub fn begin_for(&mut self, action: HotkeyAction) {
         self.editing = Some(action);
-        self.capturing = false;
-        self.temp.clear();
+        self.rejection = None;
     }
 
     /// 編集中のアクション。まだ一度も開いていなければ `None`。
@@ -348,43 +348,27 @@ impl HotkeyCaptureState {
         self.editing
     }
 
-    /// 待機中に確定したホットキー文字列。まだ何も取れていなければ空。
-    pub fn temp(&self) -> &str {
-        &self.temp
+    /// 直前に拒否された理由。無ければ `None`。
+    pub fn rejection(&self) -> Option<&str> {
+        self.rejection.as_deref()
     }
 
-    /// キー入力の待機を始める。前回の取得結果は捨てる。
-    pub fn start(&mut self) {
-        self.capturing = true;
-        self.temp.clear();
+    /// 拒否の理由を差し替える。
+    pub fn set_rejection(&mut self, reason: String) {
+        self.rejection = Some(reason);
     }
 
-    /// キー入力の待機をやめる。取得済みの文字列は残す。
-    pub fn stop(&mut self) {
-        self.capturing = false;
+    /// 拒否の理由を消す。判定が「待機中」に戻ったときに使う。
+    pub fn clear_rejection(&mut self) {
+        self.rejection = None;
     }
 
-    /// キーの組み合わせが確定したので待機を終える。
-    pub fn finish(&mut self, hotkey: String) {
-        self.temp = hotkey;
-        self.capturing = false;
-    }
-
-    /// 確定した文字列を取り出して状態を空に戻す。
-    /// 何も取れていなければ `None` を返し、呼び出し側の値を書き換えさせない。
-    pub fn take_captured(&mut self) -> Option<String> {
-        self.capturing = false;
-        if self.temp.is_empty() {
-            None
-        } else {
-            Some(std::mem::take(&mut self.temp))
-        }
-    }
-
-    /// 取得結果ごと状態を捨てる。キャンセルとクリアで使う。
+    /// 拒否の理由を捨てる。キャンセル・× で閉じたときに使う。
+    ///
+    /// `editing` は残す。ダイアログを開き直しても直前の編集対象が分かるように
+    /// するためで、実害も無い（次に一覧の「設定...」が押されたときに入れ替わる）。
     pub fn reset(&mut self) {
-        self.capturing = false;
-        self.temp.clear();
+        self.rejection = None;
     }
 }
 
@@ -2241,136 +2225,152 @@ fn build_hotkey_string(modifiers: &egui::Modifiers, keys_down: &[egui::Key]) -> 
     Some(parts.join("+"))
 }
 
+/// ホットキー入力ダイアログで、確定候補のキー入力をどう扱うかの判定。
+///
+/// 実機のキー入力を経由せずテストできるよう、`egui::Context` から取り出した
+/// 値だけを引数に取る純粋関数（`judge_hotkey_capture`）の戻り値にしてある。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HotkeyCaptureJudgement {
+    /// まだ判定できる入力がない（通常キーが押されていない）
+    Waiting,
+    /// 修飾キーだけが押されている。通常キーが無いと登録できない
+    ModifiersOnly,
+    /// 受け付けられる
+    Accepted(String),
+    /// 他のアクションに割り当て済みのキーなので拒否する
+    Duplicate { hotkey: String, other: HotkeyAction },
+}
+
+/// 押されている修飾キー・通常キーから、確定候補のキー入力をどう扱うか判定する。
+///
+/// - 通常キーが押されていなければ `Waiting`。修飾キーだけが押されているなら
+///   `ModifiersOnly`（`Waiting` と区別するのは、ダイアログ側で「修飾キーだけでは
+///   登録できません」と理由を出し分けるため）
+/// - 候補が組み立てられても、`action` 以外のアクションに同じキーが
+///   割り当て済みなら `Duplicate`。**`action` 自身への再割当て（変更なし、
+///   または同じキーの入力し直し）は許す**
+/// - それ以外は `Accepted`。ただし実際に OS へ登録できるかはここでは分からない。
+///   呼び出し側が `HotkeyManager::try_register` で試すこと
+fn judge_hotkey_capture(
+    modifiers: &egui::Modifiers,
+    keys_down: &[egui::Key],
+    action: HotkeyAction,
+    existing: &BTreeMap<HotkeyAction, String>,
+) -> HotkeyCaptureJudgement {
+    match build_hotkey_string(modifiers, keys_down) {
+        Some(candidate) => {
+            let normalized = normalize_hotkey(&candidate);
+            for (other_action, other_hotkey) in existing {
+                if *other_action == action {
+                    continue;
+                }
+                if normalize_hotkey(other_hotkey) == normalized {
+                    return HotkeyCaptureJudgement::Duplicate {
+                        hotkey: candidate,
+                        other: *other_action,
+                    };
+                }
+            }
+            HotkeyCaptureJudgement::Accepted(candidate)
+        }
+        None if keys_down.is_empty() && modifiers.any() => HotkeyCaptureJudgement::ModifiersOnly,
+        None => HotkeyCaptureJudgement::Waiting,
+    }
+}
+
 /// ホットキー入力ダイアログの結果。
 ///
-/// 「クリア」を `Captured` と区別できるようにしてある。以前は
-/// 「確定したか」の `bool` だけを返しており、クリアしても呼び出し側は
-/// 何も受け取れず、設定のホットキーが `None` にならなかった。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 開いた瞬間から受付状態で、修飾キー以外のキーが押されて `judge_hotkey_capture`
+/// が `Accepted` を返した時点で自動的に確定する（「キャプチャ開始」「OK」は無い）。
+/// 呼び出し側は `Captured` を受け取ったら `HotkeyManager::try_register` で
+/// 実際に登録できるか試し、失敗したら閉じずにダイアログを開き直して理由を
+/// `HotkeyCaptureState::set_rejection` で伝えること。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HotkeyDialogOutcome {
-    /// 何も確定していない。開いたまま、キャンセル、× で閉じた場合
+    /// 何も確定していない。待機中、拒否、キャンセル、× で閉じた場合
     None,
-    /// `captured_hotkey` の値で確定した
-    Captured,
-    /// クリアされた。ホットキーを未設定にする
-    Cleared,
+    /// このホットキー文字列で確定した
+    Captured(String),
 }
 
 /// ホットキー入力ダイアログを描画する。
 ///
-/// `action` は編集対象のアクション、`captured_hotkey` は呼び出し側が持つ
-/// 確定済みのホットキー、`capture` は入力待機中の一時状態。
-/// いずれも呼び出し側が保持する。
+/// `action` は編集対象のアクション、`existing` は現在の全アクションの割り当て
+/// （重複判定に使う。`action` 自身の分が入っていても、判定側で除外する）、
+/// `capture` は編集対象と拒否理由を持つ状態。
 pub fn show_hotkey_capture_dialog(
     ctx: &egui::Context,
     show_dialog: &mut bool,
     action: HotkeyAction,
-    captured_hotkey: &mut String,
+    existing: &BTreeMap<HotkeyAction, String>,
     capture: &mut HotkeyCaptureState,
 ) -> HotkeyDialogOutcome {
     let mut close_dialog = false;
     let mut outcome = HotkeyDialogOutcome::None;
 
+    // 判定はウィンドウを描く前に行う。**表示に使うのはこのフレームの判定結果。**
+    // ui クロージャの中で ctx.input を呼んでから notice を描くと、表示が
+    // 1 フレーム遅れて前回の判定のままになる
+    let judgement = ctx.input(|i| {
+        // HashSet の反復順は不定なので、同じ組み合わせから常に同じ
+        // ホットキー文字列が得られるよう並べてから渡す
+        let mut keys_down: Vec<egui::Key> = i.keys_down.iter().copied().collect();
+        keys_down.sort();
+        judge_hotkey_capture(&i.modifiers, &keys_down, action, existing)
+    });
+
+    match &judgement {
+        HotkeyCaptureJudgement::Accepted(candidate) => {
+            capture.clear_rejection();
+            outcome = HotkeyDialogOutcome::Captured(candidate.clone());
+            close_dialog = true;
+        }
+        HotkeyCaptureJudgement::ModifiersOnly => {
+            capture.set_rejection("修飾キーだけでは登録できません".to_string());
+        }
+        HotkeyCaptureJudgement::Duplicate { other, .. } => {
+            capture.set_rejection(format!(
+                "同じキーが「{}」に割り当てられています",
+                other.label()
+            ));
+        }
+        HotkeyCaptureJudgement::Waiting => {
+            capture.clear_rejection();
+        }
+    }
+
     egui::Window::new("ホットキー設定")
         .open(show_dialog)
-        .fixed_size([350.0, 200.0])
+        .fixed_size([360.0, 180.0])
         .collapsible(false)
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.heading(format!("ホットキー設定: {}", action.label()));
                 ui.add_space(10.0);
 
-                if !capture.is_capturing() {
-                    ui.label(format!(
-                        "『キャプチャ開始』を押して「{}」に割り当てるキーを入力してください",
-                        action.label()
-                    ));
+                // 受け付けている最中であることを示すバッジ。失敗ではないので
+                // 注意ではなく、進行中を表す種別で出す
+                status_badge(
+                    ui,
+                    &format!("{} キー入力待機中...", NoticeKind::Success.symbol()),
+                    NoticeKind::Success,
+                );
+                ui.label(format!(
+                    "「{}」に割り当てるキーの組み合わせを押してください",
+                    action.label()
+                ));
 
+                if let Some(reason) = capture.rejection() {
                     ui.add_space(10.0);
-
-                    ui.horizontal(|ui| {
-                        ui.label("現在のホットキー:");
-                        let hotkey_text = if captured_hotkey.is_empty() {
-                            "未設定"
-                        } else {
-                            captured_hotkey.as_str()
-                        };
-                        ui.monospace(hotkey_text);
-                    });
-
-                    ui.add_space(15.0);
-
-                    if ui.button("キャプチャ開始").clicked() {
-                        capture.start();
-                    }
-                } else {
-                    // 受け付けている最中であることを示すバッジ。失敗ではないので
-                    // 注意ではなく、進行中を表す種別で出す
-                    status_badge(
-                        ui,
-                        &format!("{} キー入力待機中...", NoticeKind::Success.symbol()),
-                        NoticeKind::Success,
-                    );
-                    ui.label("任意のキーコンビネーションを押してください");
-
-                    // キーボード入力をキャプチャ
-                    ctx.input(|i| {
-                        // HashSet の反復順は不定なので、同じ組み合わせから常に同じ
-                        // ホットキー文字列が得られるよう並べてから渡す
-                        let mut keys_down: Vec<egui::Key> = i.keys_down.iter().copied().collect();
-                        keys_down.sort();
-
-                        if let Some(hotkey) = build_hotkey_string(&i.modifiers, &keys_down) {
-                            capture.finish(hotkey);
-                        }
-                    });
-
-                    if !capture.temp().is_empty() {
-                        ui.add_space(10.0);
-                        ui.horizontal(|ui| {
-                            ui.label("取得:");
-                            ui.monospace(capture.temp());
-                        });
-                    }
-
-                    ui.add_space(10.0);
-
-                    if ui.button("停止").clicked() {
-                        capture.stop();
-                    }
+                    notice_label(ui, NoticeKind::Error, reason.to_string());
                 }
 
                 ui.add_space(20.0);
 
-                ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
-                        // 何も取れていなければ現在のホットキーをそのまま残す
-                        if let Some(hotkey) = capture.take_captured() {
-                            *captured_hotkey = hotkey;
-                        }
-                        // 取り直していなくても確定として返す。呼び出し側は
-                        // 同じ値なら登録し直さないので、二重登録にはならない
-                        if !captured_hotkey.is_empty() {
-                            outcome = HotkeyDialogOutcome::Captured;
-                        }
-                        close_dialog = true;
-                    }
-
-                    if ui.button("キャンセル").clicked() {
-                        capture.reset();
-                        close_dialog = true;
-                    }
-
-                    if ui.button("クリア").clicked() {
-                        captured_hotkey.clear();
-                        capture.reset();
-                        // クリアしたことを呼び出し側へ伝える。伝えないと
-                        // 設定のホットキーが残ったままになり、そのキーが
-                        // 効き続ける
-                        outcome = HotkeyDialogOutcome::Cleared;
-                        close_dialog = true;
-                    }
-                });
+                if ui.button("キャンセル").clicked() {
+                    capture.reset();
+                    close_dialog = true;
+                }
             });
         });
 
@@ -2379,9 +2379,7 @@ pub fn show_hotkey_capture_dialog(
     } else if !*show_dialog {
         // × で閉じられた場合。`egui::Window::open` が `show_dialog` を
         // false にするだけでボタンは押されないため、設定ダイアログの ×
-        // と同じくキャンセル扱いにして入力中の状態を捨てる。
-        // 捨てないと、次に開いたときに前回の取得結果が残ったままになり、
-        // 何も入力せず OK を押しただけでそのキーが確定してしまう
+        // と同じくキャンセル扱いにして入力中の状態を捨てる
         capture.reset();
     }
 
@@ -2531,36 +2529,36 @@ mod tests {
         capture.begin_for(HotkeyAction::VolumeUp);
 
         assert_eq!(capture.editing(), Some(HotkeyAction::VolumeUp));
-        assert!(!capture.is_capturing());
-        assert!(capture.temp().is_empty());
+        assert_eq!(capture.rejection(), None);
     }
 
     #[test]
-    fn hotkey_capture_begin_for_discards_the_previous_input() {
-        // 別のアクションを編集し始めたときに、前のアクションで取得した
-        // キーが残っていると、そのまま OK を押しただけで確定してしまう
+    fn hotkey_capture_begin_for_discards_the_previous_rejection() {
+        // 別のアクションを編集し始めたときに、前のアクションで拒否された
+        // 理由が残っていると、新しいアクションの入力がまだ何も起きていないのに
+        // エラーが表示されたままになる
         let mut capture = HotkeyCaptureState::default();
         capture.begin_for(HotkeyAction::Screenshot);
-        capture.finish("Ctrl+S".to_string());
+        capture.set_rejection("同じキーが「フルスクリーン切替」に割り当てられています".to_string());
 
         capture.begin_for(HotkeyAction::VolumeDown);
 
-        assert!(capture.temp().is_empty());
+        assert_eq!(capture.rejection(), None);
         assert_eq!(capture.editing(), Some(HotkeyAction::VolumeDown));
     }
 
     #[test]
-    fn hotkey_capture_reset_keeps_the_editing_action() {
-        // 「クリア」やキャンセルで閉じたあとも、呼び出し側がどのアクションを
-        // 未設定にすればよいか分かる必要がある
+    fn hotkey_capture_reset_keeps_the_editing_action_but_clears_rejection() {
+        // キャンセルや × で閉じたあとも、呼び出し側がどのアクションを
+        // 編集していたか分かる必要がある。拒否の理由は残さない
         let mut capture = HotkeyCaptureState::default();
         capture.begin_for(HotkeyAction::ReconnectDevices);
-        capture.finish("F9".to_string());
+        capture.set_rejection("修飾キーだけでは登録できません".to_string());
 
         capture.reset();
 
         assert_eq!(capture.editing(), Some(HotkeyAction::ReconnectDevices));
-        assert!(capture.temp().is_empty());
+        assert_eq!(capture.rejection(), None);
     }
 
     #[test]
@@ -3347,86 +3345,160 @@ mod tests {
         );
     }
 
+    // ---- ホットキー入力ダイアログの確定判定 ----
+
+    fn no_modifiers() -> egui::Modifiers {
+        modifiers(false, false, false)
+    }
+
     #[test]
-    fn hotkey_capture_state_default_is_idle_and_empty() {
+    fn judge_hotkey_capture_no_keys_is_waiting() {
+        assert_eq!(
+            judge_hotkey_capture(
+                &no_modifiers(),
+                &[],
+                HotkeyAction::Screenshot,
+                &BTreeMap::new()
+            ),
+            HotkeyCaptureJudgement::Waiting
+        );
+    }
+
+    #[test]
+    fn judge_hotkey_capture_modifiers_only_is_rejected_as_modifiers_only() {
+        assert_eq!(
+            judge_hotkey_capture(
+                &modifiers(true, false, false),
+                &[],
+                HotkeyAction::Screenshot,
+                &BTreeMap::new()
+            ),
+            HotkeyCaptureJudgement::ModifiersOnly
+        );
+        assert_eq!(
+            judge_hotkey_capture(
+                &modifiers(true, true, true),
+                &[],
+                HotkeyAction::Screenshot,
+                &BTreeMap::new()
+            ),
+            HotkeyCaptureJudgement::ModifiersOnly
+        );
+    }
+
+    #[test]
+    fn judge_hotkey_capture_unsupported_key_only_is_waiting() {
+        // Tab は hotkey_key_name の対象外。修飾キーの単独入力とは区別しなくてよい
+        // （build_hotkey_string が None を返す点は同じで、実害も無い）
+        assert_eq!(
+            judge_hotkey_capture(
+                &no_modifiers(),
+                &[egui::Key::Tab],
+                HotkeyAction::Screenshot,
+                &BTreeMap::new()
+            ),
+            HotkeyCaptureJudgement::Waiting
+        );
+    }
+
+    #[test]
+    fn judge_hotkey_capture_new_key_without_conflict_is_accepted() {
+        let existing = BTreeMap::from([(HotkeyAction::VolumeUp, "F8".to_string())]);
+
+        assert_eq!(
+            judge_hotkey_capture(
+                &no_modifiers(),
+                &[egui::Key::F5],
+                HotkeyAction::Screenshot,
+                &existing
+            ),
+            HotkeyCaptureJudgement::Accepted("F5".to_string())
+        );
+    }
+
+    #[test]
+    fn judge_hotkey_capture_key_assigned_to_another_action_is_rejected() {
+        let existing = BTreeMap::from([(HotkeyAction::ToggleFullscreen, "F5".to_string())]);
+
+        assert_eq!(
+            judge_hotkey_capture(
+                &no_modifiers(),
+                &[egui::Key::F5],
+                HotkeyAction::Screenshot,
+                &existing
+            ),
+            HotkeyCaptureJudgement::Duplicate {
+                hotkey: "F5".to_string(),
+                other: HotkeyAction::ToggleFullscreen,
+            }
+        );
+    }
+
+    #[test]
+    fn judge_hotkey_capture_key_assigned_to_the_same_action_is_accepted() {
+        // 同じアクションへの再割当て（変更なし、または同じキーの入力し直し）は
+        // 重複として扱わない
+        let existing = BTreeMap::from([(HotkeyAction::Screenshot, "F5".to_string())]);
+
+        assert_eq!(
+            judge_hotkey_capture(
+                &no_modifiers(),
+                &[egui::Key::F5],
+                HotkeyAction::Screenshot,
+                &existing
+            ),
+            HotkeyCaptureJudgement::Accepted("F5".to_string())
+        );
+    }
+
+    #[test]
+    fn judge_hotkey_capture_duplicate_check_ignores_case_and_modifier_order() {
+        // 表記のゆれがあっても同じキーとみなす（一覧の警告と同じ正規化）
+        let existing =
+            BTreeMap::from([(HotkeyAction::ToggleFullscreen, "shift+ctrl+a".to_string())]);
+
+        assert_eq!(
+            judge_hotkey_capture(
+                &modifiers(true, true, false),
+                &[egui::Key::A],
+                HotkeyAction::Screenshot,
+                &existing
+            ),
+            HotkeyCaptureJudgement::Duplicate {
+                hotkey: "Ctrl+Shift+A".to_string(),
+                other: HotkeyAction::ToggleFullscreen,
+            }
+        );
+    }
+
+    #[test]
+    fn hotkey_capture_state_default_has_no_editing_action_or_rejection() {
         let capture = HotkeyCaptureState::default();
-        assert!(!capture.is_capturing());
-        assert_eq!(capture.temp(), "");
+        assert_eq!(capture.editing(), None);
+        assert_eq!(capture.rejection(), None);
     }
 
     #[test]
-    fn hotkey_capture_state_start_enters_capturing_and_clears_previous_result() {
-        // 『キャプチャ開始』を押し直したときに、前回取ったキーが
-        // 残っていると、何も押さずに OK しただけで古い値が確定してしまう
+    fn hotkey_capture_state_set_rejection_replaces_the_previous_reason() {
         let mut capture = HotkeyCaptureState::default();
-        capture.finish("Ctrl+S".to_string());
+        capture.set_rejection("修飾キーだけでは登録できません".to_string());
 
-        capture.start();
+        capture.set_rejection("同じキーが「スクリーンショット」に割り当てられています".to_string());
 
-        assert!(capture.is_capturing());
-        assert_eq!(capture.temp(), "");
+        assert_eq!(
+            capture.rejection(),
+            Some("同じキーが「スクリーンショット」に割り当てられています")
+        );
     }
 
     #[test]
-    fn hotkey_capture_state_finish_leaves_capturing_and_keeps_key() {
+    fn hotkey_capture_state_clear_rejection_removes_the_reason() {
         let mut capture = HotkeyCaptureState::default();
-        capture.start();
+        capture.set_rejection("修飾キーだけでは登録できません".to_string());
 
-        capture.finish("Ctrl+Shift+A".to_string());
+        capture.clear_rejection();
 
-        assert!(!capture.is_capturing());
-        assert_eq!(capture.temp(), "Ctrl+Shift+A");
-    }
-
-    #[test]
-    fn hotkey_capture_state_stop_keeps_captured_key() {
-        // 『停止』は待機をやめるだけで、取得済みのキーは捨てない
-        let mut capture = HotkeyCaptureState::default();
-        capture.finish("F5".to_string());
-        capture.start();
-        capture.finish("F6".to_string());
-
-        capture.stop();
-
-        assert!(!capture.is_capturing());
-        assert_eq!(capture.temp(), "F6");
-    }
-
-    #[test]
-    fn hotkey_capture_state_take_captured_returns_key_and_empties_state() {
-        let mut capture = HotkeyCaptureState::default();
-        capture.start();
-        capture.finish("Ctrl+S".to_string());
-
-        assert_eq!(capture.take_captured(), Some("Ctrl+S".to_string()));
-        assert!(!capture.is_capturing());
-        assert_eq!(capture.temp(), "");
-        // 2 度目は何も返さない。返すと同じキーを再度確定させてしまう
-        assert_eq!(capture.take_captured(), None);
-    }
-
-    #[test]
-    fn hotkey_capture_state_take_captured_without_key_returns_none() {
-        // 何も入力せずに OK を押した場合。呼び出し側の現在値を消さないよう None を返す
-        let mut capture = HotkeyCaptureState::default();
-        capture.start();
-
-        assert_eq!(capture.take_captured(), None);
-        assert!(!capture.is_capturing());
-    }
-
-    #[test]
-    fn hotkey_capture_state_reset_discards_capturing_and_key() {
-        // キャンセルとクリア。次に開いたときへ入力中の状態を持ち越さない
-        let mut capture = HotkeyCaptureState::default();
-        capture.start();
-        capture.finish("Alt+F4".to_string());
-        capture.start();
-
-        capture.reset();
-
-        assert!(!capture.is_capturing());
-        assert_eq!(capture.temp(), "");
+        assert_eq!(capture.rejection(), None);
     }
 
     #[test]
@@ -3435,12 +3507,24 @@ mod tests {
         // 入力中の状態を失わない（static だったときと同じ振る舞い）
         let mut state = SettingsDialogState::default();
         state.begin_edit(&sample_settings());
-        state.hotkey_capture_mut().start();
+        state
+            .hotkey_capture_mut()
+            .begin_for(HotkeyAction::Screenshot);
+        state
+            .hotkey_capture_mut()
+            .set_rejection("修飾キーだけでは登録できません".to_string());
 
         state.end_edit();
 
         assert!(!state.has_draft());
-        assert!(state.hotkey_capture_mut().is_capturing());
+        assert_eq!(
+            state.hotkey_capture_mut().editing(),
+            Some(HotkeyAction::Screenshot)
+        );
+        assert_eq!(
+            state.hotkey_capture_mut().rejection(),
+            Some("修飾キーだけでは登録できません")
+        );
     }
 
     #[test]

@@ -166,6 +166,12 @@ pub struct HotkeyManager {
     listener_shutdown: Arc<AtomicBool>,
     /// リスナースレッドのハンドル。`Drop` で join するために持つ
     listener: Option<JoinHandle<()>>,
+    /// ホットキー入力ダイアログのために一時解除しているか。
+    ///
+    /// 一時停止中は `apply` を呼んでも何もしない。2 秒ごとの再適用
+    /// （`apply_settings`）が動き続けていても、一時停止中に登録し直されて
+    /// しまわないようにするため。
+    paused: bool,
 }
 
 // ホットキー文字列の解析。`HotkeyManager` の状態に依存しないためフリー関数に
@@ -407,6 +413,7 @@ impl HotkeyManager {
             last_trigger: HashMap::new(),
             listener_shutdown,
             listener: Some(listener),
+            paused: false,
         }
     }
 
@@ -431,6 +438,12 @@ impl HotkeyManager {
     /// ときに再試行する。他のアプリがキーを離せば、操作しなくても効くようになる。
     /// ログは理由が変わったときだけ出す（同じ失敗が 2 秒ごとに積もらないように）。
     pub fn apply(&mut self, desired: &BTreeMap<HotkeyAction, String>) {
+        // 一時停止中は何もしない。ホットキー入力ダイアログを開いている間に
+        // 2 秒ごとの再適用が割り込むと、解除したはずのキーが登録し直されてしまう
+        if self.paused {
+            return;
+        }
+
         // 解除するのは、割り当てが消えたアクションとキーが変わったアクション
         let stale: Vec<HotkeyAction> = self
             .registered
@@ -508,6 +521,81 @@ impl HotkeyManager {
     /// のは「いまも登録できていないもの」だけ。
     pub fn errors(&self) -> &BTreeMap<HotkeyAction, HotkeyError> {
         &self.errors
+    }
+
+    /// 登録中のホットキーをすべて一時解除する。ホットキー入力ダイアログを開くときに使う。
+    ///
+    /// **押しても効かなくなるのはグローバルホットキーだけ。** リスナースレッドは
+    /// 止めない（止めると再開が重くなるうえ、アプリ全体で 1 本という前提が崩れる）。
+    ///
+    /// 既に一時停止中なら何もしない。二重に呼んでも安全にしておくことで、
+    /// 呼び出し側でダイアログの開閉検出が多少ずれても壊れない。
+    pub fn pause(&mut self) {
+        if self.paused {
+            return;
+        }
+        self.paused = true;
+
+        let actions: Vec<HotkeyAction> = self.registered.keys().copied().collect();
+        for action in actions {
+            self.unregister(action);
+        }
+        info!("ホットキー入力ダイアログのためグローバルホットキーを一時解除した");
+    }
+
+    /// 一時停止を終え、`desired` の内容で登録し直す。
+    ///
+    /// 一時停止していなければ何もしない（`pause` を呼んでいないのに解除中の
+    /// キーが無いのに登録し直そうとする、という状況を防ぐ）。
+    pub fn resume(&mut self, desired: &BTreeMap<HotkeyAction, String>) {
+        if !self.paused {
+            return;
+        }
+        self.paused = false;
+        info!("グローバルホットキーの一時解除を終える");
+        self.apply(desired);
+    }
+
+    /// 候補のホットキーを実際に登録できるか試す。
+    ///
+    /// ホットキー入力ダイアログでキーが確定したときに使う。**`pause` で
+    /// 自分自身の登録をすべて解除したあとに呼ぶことを想定している。** そうして
+    /// おけば、ここでの試し登録が自分の他のアクションと衝突することはなく、
+    /// 純粋に「他のアプリと競合していないか」だけを確かめられる。
+    ///
+    /// 登録に成功したら直ちに解除する。ここでの登録は `registered` へ記録しない。
+    /// 実際に使い続けるための登録は、この呼び出しのあとに行う `resume` が行う。
+    pub fn try_register(&mut self, hotkey_str: &str) -> Result<(), String> {
+        let hotkey = parse_hotkey(hotkey_str)?;
+
+        if self.manager.is_none() {
+            debug!("ホットキーマネージャーを作成する");
+            match GlobalHotKeyManager::new() {
+                Ok(manager) => self.manager = Some(manager),
+                Err(e) => {
+                    return Err(format!("ホットキーの仕組みを初期化できません: {}", e));
+                }
+            }
+        }
+
+        let Some(manager) = &self.manager else {
+            // 直前に作っているので通常は来ない
+            return Err("ホットキーの仕組みを初期化できません".to_string());
+        };
+
+        match manager.register(hotkey) {
+            Ok(()) => {
+                if let Err(e) = manager.unregister(hotkey) {
+                    // 試し登録の解除に失敗しても、実際の登録は resume が
+                    // 改めて行うので致命的ではない。原因が追えるよう残す
+                    warn!("試し登録したホットキーを解除できない: {}", e);
+                }
+                Ok(())
+            }
+            Err(e) => Err(format!(
+                "登録できません（他のアプリと競合している可能性があります）: {e}"
+            )),
+        }
     }
 
     /// 1 つのアクションにホットキーを登録する。失敗は `errors` に記録する。
@@ -1142,6 +1230,100 @@ mod tests {
             .insert(HotkeyAction::Screenshot);
 
         assert!(manager.take_pressed().is_empty());
+    }
+
+    // ---- 一時停止と再開 ----
+
+    #[test]
+    fn pause_clears_currently_registered_actions() {
+        // 実際の登録成否に依存せず、bookkeeping だけを直接組み立てて確かめる
+        let mut manager = HotkeyManager::new();
+        let hotkey = parse_hotkey("F5").expect("F5 は解析できる");
+        manager
+            .registered
+            .insert(HotkeyAction::Screenshot, ("F5".to_string(), hotkey));
+        manager
+            .state
+            .lock()
+            .expect("ロックが毒されていないこと")
+            .registered
+            .insert(hotkey.id(), HotkeyAction::Screenshot);
+
+        manager.pause();
+
+        assert!(manager.registered.is_empty());
+        assert!(manager
+            .state
+            .lock()
+            .expect("ロックが毒されていないこと")
+            .registered
+            .is_empty());
+        assert!(manager.paused);
+    }
+
+    #[test]
+    fn pause_twice_is_a_no_op() {
+        let mut manager = HotkeyManager::new();
+        manager.pause();
+        manager.pause();
+
+        assert!(manager.paused);
+    }
+
+    #[test]
+    fn apply_while_paused_does_nothing() {
+        // 一時停止中に 2 秒ごとの再適用が割り込んでも、登録し直されないこと
+        let mut manager = HotkeyManager::new();
+        manager.pause();
+
+        manager.apply(&assignments(&[(HotkeyAction::Screenshot, "Ctrl+Shift")]));
+
+        assert!(manager.registered.is_empty());
+        assert!(
+            manager.errors.is_empty(),
+            "一時停止中は apply が何もしないこと"
+        );
+    }
+
+    #[test]
+    fn resume_without_pause_does_nothing() {
+        // pause を呼んでいない状態で resume しても apply は走らない
+        let mut manager = HotkeyManager::new();
+
+        manager.resume(&assignments(&[(HotkeyAction::Screenshot, "Ctrl+Shift")]));
+
+        assert!(manager.errors.is_empty());
+    }
+
+    #[test]
+    fn resume_after_pause_applies_the_given_assignments() {
+        // 解析に失敗するキーを使い、実際の OS 登録に依存せず「apply が走ったこと」
+        // だけを確かめる（登録そのものの成否は他のテストと同じ理由で見ない）
+        let mut manager = HotkeyManager::new();
+        manager.pause();
+
+        manager.resume(&assignments(&[(HotkeyAction::Screenshot, "Ctrl+Shift")]));
+
+        assert!(!manager.paused);
+        let error = manager
+            .errors
+            .get(&HotkeyAction::Screenshot)
+            .expect("再開後は apply が走り、失敗が記録されること");
+        assert_eq!(error.hotkey, "Ctrl+Shift");
+    }
+
+    // ---- 試し登録 ----
+
+    #[test]
+    fn try_register_unparsable_hotkey_returns_error_without_creating_manager() {
+        let mut manager = HotkeyManager::new();
+
+        let result = manager.try_register("Ctrl+Shift");
+
+        assert!(result.is_err());
+        // GlobalHotKeyManager は実際に Windows へ触るため、解析の時点で
+        // 弾ける入力では作らないことを確かめる
+        assert!(manager.manager.is_none());
     }
 
     #[test]
