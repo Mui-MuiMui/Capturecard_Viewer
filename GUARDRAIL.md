@@ -64,6 +64,7 @@
 - 日本語への変換は `status.rs` で行う。下位モジュールは `Result<_, String>` のままにする（理由: `docs/design/error-reporting.md`）
 - カレントディレクトリ基準でファイルを解決する処理を新たに足さない（理由: `docs/design/assets.md`）
 - `src/app/` の子モジュールにフィールドや `static` を持たせない（理由: `CLAUDE.md` の「モジュール構成」）
+- `src/app/menu/items.rs` の描画関数から状態を書き換えない。起きたことは `MenuAction` で返す（理由: `CLAUDE.md` の「モジュール構成」）
 - 1 ファイル 800 行以内を目安にする（理由: `CLAUDE.md` の「モジュール構成」）
 - テストは対象と同じファイルの末尾の `#[cfg(test)] mod tests` に置く。**1 ファイルに `mod tests` は 1 つだけ**（理由: `.claude/skills/testing-conventions/SKILL.md`）
 - コードコメント・UI 文字列・コミットメッセージは日本語で書く（理由: `CLAUDE.md` の「コーディング規約」）

@@ -31,7 +31,8 @@ cargo build --release
 | `src/platform.rs` | Windows 固有処理。日本語フォントの探索、埋め込みアイコンの読み込み、モニタの作業領域の列挙、保存されたウィンドウの大きさ・位置が使えるかの判定 |
 | `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`Default`、`eframe::App` 実装（`update` / `on_exit`） |
 | `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、プレースホルダーの文言、統計 OSD、テクスチャの取り込み |
-| `src/app/menu.rs` | 右クリックメニューの中身と、平らな一覧／サブメニューの出し分け |
+| `src/app/menu/mod.rs` | 右クリックメニューの置き場所と閉じ方、平らな一覧／サブメニューの出し分け、描画が返した `MenuAction` の処理 |
+| `src/app/menu/items.rs` | 右クリックメニューの項目の描画。**状態を持たず、書き換えもしない。** 起きたことは `MenuAction` の列で返す |
 | `src/app/window.rs` | 最前面表示、タイトルバーの有無、装飾なしのときの端のドラッグによるリサイズ、大きさのリセット、フルスクリーンの切り替え |
 | `src/app/device.rs` | `apply_settings`（設定をワーカーへ渡す）と、ワーカーから届いたイベントの取り込み |
 | `src/app/worker.rs` | デバイスワーカーとやり取りする型（コマンド / イベント / `DeviceConfig` / `DeviceSnapshot`）と、UI 側の窓口 `DeviceWorker` |
