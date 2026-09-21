@@ -1,9 +1,9 @@
 use crate::audio::{self, AudioCapabilities, ChoiceSource};
 use crate::hotkey::{HotkeyAction, HotkeyError};
 use crate::settings::{
-    AppSettings, ColorRange, ColorSpace, ScreenshotDestination, ScreenshotFormat, DEFAULT_CHANNELS,
-    DEFAULT_SAMPLE_RATE, MAX_JPEG_QUALITY, MAX_VIDEO_ADJUSTMENT, MIN_JPEG_QUALITY,
-    MIN_VIDEO_ADJUSTMENT,
+    resolved_active_preset, validate_preset_name, AppSettings, ColorRange, ColorSpace, Preset,
+    ScreenshotDestination, ScreenshotFormat, DEFAULT_CHANNELS, DEFAULT_SAMPLE_RATE,
+    MAX_JPEG_QUALITY, MAX_VIDEO_ADJUSTMENT, MIN_JPEG_QUALITY, MIN_VIDEO_ADJUSTMENT,
 };
 use crate::status::{ConnectionStatus, ErrorSource, LinkStatus};
 use crate::video::{DeviceCapabilities, VideoMode};
@@ -417,6 +417,11 @@ pub struct SettingsDialogState {
     // 「設定を初期化」の確認待ちか。押し間違いで設定が消えないよう、
     // 1 段目のボタンではこれを立てるだけにして、2 段目で確定させる
     reset_confirm: bool,
+    // 「現在の設定を新しいプリセットとして保存」の名前入力欄。
+    //
+    // 設定の中身ではないのでドラフトには入れない。保存に成功したときだけ
+    // 空へ戻す（名前が重複して弾かれたときに入力が消えると直せない）
+    new_preset_name: String,
 }
 
 impl SettingsDialogState {
@@ -451,6 +456,7 @@ impl SettingsDialogState {
     fn forget_management_state(&mut self) {
         self.management_message = None;
         self.reset_confirm = false;
+        self.new_preset_name.clear();
     }
 
     /// 「その他」タブに出すメッセージを差し替える。
@@ -716,6 +722,10 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
     target.screenshot = draft.screenshot.clone();
     // ホットキーの割り当てもダイアログの中だけで変わる
     target.hotkeys = draft.hotkeys.clone();
+    // プリセットの追加・上書き・削除もダイアログの中だけで行う。
+    // 右クリックメニューからは選ぶだけで一覧を触らない
+    target.presets = draft.presets.clone();
+    target.active_preset = draft.active_preset.clone();
 
     // ダイアログの「ユーザーインターフェース」グループが編集する 2 項目
     if draft.ui.maintain_aspect_ratio != original.ui.maintain_aspect_ratio {
@@ -724,6 +734,11 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
     if draft.ui.volume != original.ui.volume {
         target.ui.volume = draft.ui.volume;
     }
+
+    // video / audio を入れ替えたあとなので、ここで選択中のプリセットの
+    // 辻褄を合わせる。**この 1 行が無いと、プリセットを読み込んでから
+    // 解像度を変えて「適用」したときに選択が残る**
+    target.refresh_active_preset();
 }
 
 /// 読み込んだ設定からドラフトを作る。
@@ -746,6 +761,11 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
 /// **読み込んだ値をそのまま採る。** 読み込みも初期化もドラフトの編集なので、
 /// 反映される側が正しい。
 ///
+/// プリセット（`presets` / `active_preset`）は**読み込んだファイルのものを採る。**
+/// 書き出しは設定ファイル丸ごとなのでプリセットも含まれており、読み込みで
+/// 落とすと往復にならない。別の PC で作ったプリセットを持ち込むのも、
+/// 書き出し・読み込みの主な用途のひとつ。
+///
 /// **`commit_draft` が反映しない項目を増やすときは、ここでも `current` の値を
 /// 保つこと。逆に反映する項目を増やすときは、ここでも `imported` から採ること。**
 /// 2 つが食い違うと、読み込んだのに反映されない項目が生まれる。
@@ -767,8 +787,18 @@ pub fn draft_from_imported(imported: AppSettings, current: &AppSettings) -> AppS
 ///
 /// 初期化でウィンドウが既定の大きさに戻らないのは意図した動作。位置と
 /// サイズは設定ダイアログで触れる項目ではなく、初期化したい対象でもない。
+///
+/// **プリセットも消さない。** 初期化は「いまの設定を既定へ戻す」操作で、
+/// ユーザーが作り溜めた名前付きの設定を捨てる操作ではない。捨ててしまうと
+/// 復旧の手段が書き出したファイルしかなく、初期化を押しにくくなる。
+/// 消したいときは「その他」タブのプリセット一覧から 1 つずつ削除する。
 pub fn draft_from_defaults(current: &AppSettings) -> AppSettings {
-    draft_from_imported(AppSettings::default(), current)
+    let mut draft = draft_from_imported(AppSettings::default(), current);
+    draft.presets = current.presets.clone();
+    draft.active_preset = current.active_preset.clone();
+    // video / audio は既定値へ戻っているので、たいていここで選択が外れる
+    draft.refresh_active_preset();
+    draft
 }
 
 /// 設定ダイアログへ渡すデバイスの一覧。
@@ -814,6 +844,7 @@ pub fn show_settings_dialog(
         hotkey_capture,
         management_message,
         reset_confirm,
+        new_preset_name,
         ..
     } = dialog;
 
@@ -871,7 +902,13 @@ pub fn show_settings_dialog(
                     hotkey_errors,
                 ),
                 SettingsTab::Other => {
-                    let requested = show_other_tab(ui, management_message.as_ref(), reset_confirm);
+                    let requested = show_other_tab(
+                        ui,
+                        draft,
+                        new_preset_name,
+                        management_message,
+                        reset_confirm,
+                    );
                     if requested != SettingsDialogAction::None {
                         button = requested;
                     }
@@ -1571,13 +1608,19 @@ fn show_device_settings_tab(
 /// ボタンの真下に書けるほうが伝わる。
 fn show_other_tab(
     ui: &mut egui::Ui,
-    message: Option<&ManagementMessage>,
+    draft: &mut AppSettings,
+    new_preset_name: &mut String,
+    message: &mut Option<ManagementMessage>,
     reset_confirm: &mut bool,
 ) -> SettingsDialogAction {
     ui.heading("その他");
     ui.add_space(10.0);
 
     let mut action = SettingsDialogAction::None;
+
+    show_preset_group(ui, draft, new_preset_name, message);
+
+    ui.add_space(15.0);
 
     ui.group(|ui| {
         ui.strong("設定ファイル");
@@ -1626,7 +1669,7 @@ fn show_other_tab(
         ui.small("戻る範囲は読み込みと同じです。ウィンドウの位置とサイズ、右クリックメニューで切り替える項目は初期化しません。");
     });
 
-    if let Some(message) = message {
+    if let Some(message) = message.as_ref() {
         ui.add_space(15.0);
         ui.separator();
         let kind = if message.is_error {
@@ -1638,6 +1681,218 @@ fn show_other_tab(
     }
 
     action
+}
+
+/// プリセット一覧の 1 行で押されたボタン。
+///
+/// ループの中でドラフトを書き換えると、一覧を借りたまま変更することになる。
+/// 押されたことだけを持ち帰り、実際の変更はループを抜けてから行う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresetRowAction {
+    /// ドラフトの video / audio をこのプリセットで置き換える
+    Load(usize),
+    /// このプリセットの中身を、いまのドラフトの video / audio で置き換える
+    Overwrite(usize),
+    /// 一覧から消す
+    Delete(usize),
+}
+
+/// 「その他」タブのプリセット節を描く。
+///
+/// **ここでの操作はすべてドラフトに対して行う。** 一覧の編集（新規保存・
+/// 上書き・削除）も、選択中のプリセットの切替も、実行中の設定へ移るのは
+/// 「適用」か「OK」のとき。読み込み・初期化と同じ扱いにしてあるので、
+/// 「キャンセル」で丸ごと取り消せる。
+///
+/// 節をタブの先頭に置いてあるのは、書き出し・読み込み・初期化よりも
+/// 使う頻度が高いため。
+fn show_preset_group(
+    ui: &mut egui::Ui,
+    draft: &mut AppSettings,
+    new_preset_name: &mut String,
+    message: &mut Option<ManagementMessage>,
+) {
+    ui.group(|ui| {
+        ui.strong("プリセット");
+        ui.add_space(5.0);
+
+        ui.label(format!("現在: {}", active_preset_label(draft)));
+        ui.add_space(5.0);
+
+        let mut row_action: Option<PresetRowAction> = None;
+
+        if draft.presets.is_empty() {
+            ui.small("プリセットはまだありません。下の入力欄から作れます。");
+        } else {
+            egui::Grid::new("preset_list")
+                .num_columns(2)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    for (index, preset) in draft.presets.iter().enumerate() {
+                        ui.label(&preset.name);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button("読み込む")
+                                .on_hover_text(
+                                    "このプリセットのビデオ・オーディオ設定を編集中の設定へ入れます",
+                                )
+                                .clicked()
+                            {
+                                row_action = Some(PresetRowAction::Load(index));
+                            }
+                            if ui
+                                .button("上書き保存")
+                                .on_hover_text(
+                                    "編集中のビデオ・オーディオ設定でこのプリセットを置き換えます",
+                                )
+                                .clicked()
+                            {
+                                row_action = Some(PresetRowAction::Overwrite(index));
+                            }
+                            if ui.button("削除").clicked() {
+                                row_action = Some(PresetRowAction::Delete(index));
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+        }
+
+        if let Some(row_action) = row_action {
+            apply_preset_row_action(draft, row_action, message);
+        }
+
+        ui.add_space(10.0);
+        ui.label("現在の設定を新しいプリセットとして保存:");
+        ui.horizontal(|ui| {
+            // Enter でも保存できるようにする。名前を打った直後に
+            // マウスへ持ち替えさせない
+            let entered = ui
+                .add(
+                    egui::TextEdit::singleline(new_preset_name)
+                        .desired_width(200.0)
+                        .hint_text("例: 低遅延優先"),
+                )
+                .lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+            if ui.button("保存").clicked() || entered {
+                save_new_preset(draft, new_preset_name, message);
+            }
+        });
+
+        ui.add_space(5.0);
+        ui.small("プリセットに入るのは「デバイス設定」タブのビデオとオーディオだけです。スクリーンショット・ホットキー・ウィンドウの設定は含みません。");
+        ui.small("デバイスの自動再接続もプリセットには含みません。右クリックメニューで切り替えた状態がそのまま残ります。");
+        ui.small("追加・上書き・削除・読み込みは編集中の設定に対して行います。「適用」か「OK」を押すまで反映されません。");
+        ui.small("切り替えは右クリックメニューの「プリセット」からも行えます。");
+    });
+}
+
+/// 「現在:」の右に出す文言。
+///
+/// プリセットを読み込んだあとに手で値を変えた場合は「（変更あり）」を添える。
+/// 選択そのものを外さないのは、どれを土台にしているかが分かるほうが
+/// 「上書き保存」を押すときに迷わないため。
+fn active_preset_label(settings: &AppSettings) -> String {
+    match (
+        settings.active_preset.as_deref(),
+        resolved_active_preset(settings),
+    ) {
+        (_, Some(name)) => name.to_string(),
+        (Some(name), None) if settings.preset(name).is_some() => {
+            format!("{}（変更あり）", name)
+        }
+        _ => "なし".to_string(),
+    }
+}
+
+/// 一覧の行で押されたボタンをドラフトへ反映する。
+fn apply_preset_row_action(
+    draft: &mut AppSettings,
+    action: PresetRowAction,
+    message: &mut Option<ManagementMessage>,
+) {
+    match action {
+        PresetRowAction::Load(index) => {
+            let Some(name) = draft.presets.get(index).map(|preset| preset.name.clone()) else {
+                return;
+            };
+            draft.apply_preset(&name);
+            debug!("プリセット「{}」を編集中の設定へ読み込んだ", name);
+            *message = Some(ManagementMessage {
+                text: format!(
+                    "プリセット「{}」を読み込みました。「適用」または「OK」で反映します",
+                    name
+                ),
+                is_error: false,
+            });
+        }
+        PresetRowAction::Overwrite(index) => {
+            let Some(name) = draft.presets.get(index).map(|preset| preset.name.clone()) else {
+                return;
+            };
+            draft.upsert_preset(Preset::from_settings(name.clone(), draft));
+            // 中身をいまの設定から作ったので、このプリセットが選択中になる
+            draft.active_preset = Some(name.clone());
+            debug!("プリセット「{}」を編集中の設定で上書きした", name);
+            *message = Some(ManagementMessage {
+                text: format!(
+                    "プリセット「{}」を上書きしました。「適用」または「OK」で反映します",
+                    name
+                ),
+                is_error: false,
+            });
+        }
+        PresetRowAction::Delete(index) => {
+            let Some(name) = draft.presets.get(index).map(|preset| preset.name.clone()) else {
+                return;
+            };
+            draft.remove_preset(&name);
+            debug!("プリセット「{}」を削除した", name);
+            *message = Some(ManagementMessage {
+                text: format!(
+                    "プリセット「{}」を削除しました。取り消すには「キャンセル」を押してください",
+                    name
+                ),
+                is_error: false,
+            });
+        }
+    }
+}
+
+/// 入力された名前で、いまのドラフトをプリセットとして保存する。
+///
+/// 名前が使えない場合はドラフトも入力欄も動かさない。入力欄を消すと
+/// 打ち直しになるので、直せる状態のまま理由だけを出す。
+fn save_new_preset(
+    draft: &mut AppSettings,
+    new_preset_name: &mut String,
+    message: &mut Option<ManagementMessage>,
+) {
+    let name = match validate_preset_name(new_preset_name, &draft.presets, None) {
+        Ok(name) => name,
+        Err(e) => {
+            *message = Some(ManagementMessage {
+                text: e.message().to_string(),
+                is_error: true,
+            });
+            return;
+        }
+    };
+
+    draft.upsert_preset(Preset::from_settings(name.clone(), draft));
+    draft.active_preset = Some(name.clone());
+    new_preset_name.clear();
+
+    debug!("プリセット「{}」を編集中の設定へ追加した", name);
+    *message = Some(ManagementMessage {
+        text: format!(
+            "プリセット「{}」を追加しました。「適用」または「OK」で反映します",
+            name
+        ),
+        is_error: false,
+    });
 }
 
 /// チャンネル数の表示名。
@@ -2400,6 +2655,10 @@ mod tests {
     /// 据え置かれるかを区別できるようにするためのもの。
     fn sample_settings() -> AppSettings {
         AppSettings {
+            // プリセットは持たない状態。プリセットを見るテストは
+            // それぞれの中で足す
+            active_preset: None,
+            presets: Vec::new(),
             video: VideoSettings {
                 device_name: Some("Capture Device".to_string()),
                 resolution: Some((1920, 1080)),
@@ -4068,5 +4327,272 @@ mod tests {
         ];
 
         assert_eq!(select_default_video_mode(&caps, None, None), None);
+    }
+
+    // ---- プリセット ----
+
+    /// 解像度と fps だけが違うプリセットを作る。
+    fn preset_named(name: &str, width: u32, height: u32, fps: u32) -> Preset {
+        let mut settings = AppSettings::default();
+        settings.video.resolution = Some((width, height));
+        settings.video.fps = Some(fps);
+        Preset::from_settings(name.to_string(), &settings)
+    }
+
+    /// 既定値にプリセットの一覧だけを足した設定。
+    fn defaults_with_presets(presets: Vec<Preset>) -> AppSettings {
+        AppSettings {
+            presets,
+            ..AppSettings::default()
+        }
+    }
+
+    #[test]
+    fn draft_from_defaults_keeps_presets() {
+        // **初期化でプリセットを消さない。** 消すと復旧の手段が
+        // 書き出したファイルしかなくなり、初期化を押しにくくなる
+        let mut current = sample_settings();
+        current.presets = vec![
+            preset_named("低遅延優先", 1280, 720, 60),
+            preset_named("画質優先", 1920, 1080, 30),
+        ];
+
+        let draft = draft_from_defaults(&current);
+
+        assert_eq!(draft.presets, current.presets);
+        // 他の項目は既定値へ戻る
+        assert_eq!(
+            draft.video.resolution,
+            AppSettings::default().video.resolution
+        );
+    }
+
+    #[test]
+    fn draft_from_defaults_clears_the_active_preset_that_no_longer_matches() {
+        // 初期化で video / audio が既定値へ戻るので、選択中のままにはできない
+        let mut current = sample_settings();
+        current.presets = vec![preset_named("画質優先", 1920, 1080, 30)];
+        current.active_preset = Some("画質優先".to_string());
+
+        let draft = draft_from_defaults(&current);
+
+        assert_eq!(draft.active_preset, None);
+        assert_eq!(draft.presets.len(), 1);
+    }
+
+    #[test]
+    fn draft_from_defaults_keeps_an_active_preset_that_still_matches() {
+        // 既定値と同じ中身のプリセットを選んでいた場合は選択が残る
+        let mut current = sample_settings();
+        current.presets = vec![Preset::from_settings(
+            "既定と同じ".to_string(),
+            &AppSettings::default(),
+        )];
+        current.active_preset = Some("既定と同じ".to_string());
+
+        let draft = draft_from_defaults(&current);
+
+        assert_eq!(draft.active_preset.as_deref(), Some("既定と同じ"));
+    }
+
+    #[test]
+    fn draft_from_imported_takes_presets_from_the_file() {
+        // 書き出しは設定ファイル丸ごとなのでプリセットも含まれる。
+        // 読み込みで落とすと往復にならない
+        let mut imported = sample_settings();
+        imported.presets = vec![preset_named("持ち込み", 1920, 1080, 30)];
+        imported.active_preset = Some("持ち込み".to_string());
+        let current = defaults_with_presets(vec![preset_named("手元", 1280, 720, 60)]);
+
+        let draft = draft_from_imported(imported.clone(), &current);
+
+        assert_eq!(draft.presets, imported.presets);
+        assert_eq!(draft.active_preset.as_deref(), Some("持ち込み"));
+    }
+
+    #[test]
+    fn commit_draft_replaces_the_preset_list() {
+        let mut target = sample_settings();
+        target.presets = vec![preset_named("消えるはず", 1280, 720, 60)];
+        let original = target.clone();
+        let mut draft = target.clone();
+        draft.presets = vec![preset_named("残るはず", 1920, 1080, 30)];
+
+        commit_draft(&mut target, &draft, &original);
+
+        assert_eq!(target.presets.len(), 1);
+        assert_eq!(target.presets[0].name, "残るはず");
+    }
+
+    #[test]
+    fn commit_draft_keeps_the_active_preset_when_the_values_match() {
+        let mut target = AppSettings::default();
+        let original = target.clone();
+        let mut draft = target.clone();
+        draft.presets = vec![preset_named("画質優先", 1920, 1080, 30)];
+        assert!(draft.apply_preset("画質優先"));
+
+        commit_draft(&mut target, &draft, &original);
+
+        assert_eq!(target.active_preset.as_deref(), Some("画質優先"));
+        assert_eq!(target.video.resolution, Some((1920, 1080)));
+    }
+
+    #[test]
+    fn commit_draft_clears_the_active_preset_when_the_values_were_edited() {
+        // プリセットを読み込んだあと「デバイス設定」タブで解像度を変えて
+        // 「適用」した場合。選択が残ると、右クリックメニューのチェックが
+        // 実際の設定と食い違う
+        let mut target = AppSettings::default();
+        let original = target.clone();
+        let mut draft = target.clone();
+        draft.presets = vec![preset_named("画質優先", 1920, 1080, 30)];
+        assert!(draft.apply_preset("画質優先"));
+        draft.video.fps = Some(24);
+
+        commit_draft(&mut target, &draft, &original);
+
+        assert_eq!(target.active_preset, None);
+        assert_eq!(target.video.fps, Some(24));
+    }
+
+    #[test]
+    fn active_preset_label_without_selection_reads_none() {
+        let settings = AppSettings::default();
+
+        assert_eq!(active_preset_label(&settings), "なし");
+    }
+
+    #[test]
+    fn active_preset_label_matching_selection_is_the_name() {
+        let mut settings = defaults_with_presets(vec![preset_named("画質優先", 1920, 1080, 30)]);
+        assert!(settings.apply_preset("画質優先"));
+
+        assert_eq!(active_preset_label(&settings), "画質優先");
+    }
+
+    #[test]
+    fn active_preset_label_after_editing_says_modified() {
+        let mut settings = defaults_with_presets(vec![preset_named("画質優先", 1920, 1080, 30)]);
+        assert!(settings.apply_preset("画質優先"));
+        settings.video.fps = Some(24);
+
+        assert_eq!(active_preset_label(&settings), "画質優先（変更あり）");
+    }
+
+    #[test]
+    fn active_preset_label_for_a_removed_preset_reads_none() {
+        // 名前だけが残っている状態。「（変更あり）」ではなく「なし」にする。
+        // 戻す先のプリセットが無いので、変更という言い方が合わない
+        let settings = AppSettings {
+            active_preset: Some("もう無い".to_string()),
+            ..AppSettings::default()
+        };
+
+        assert_eq!(active_preset_label(&settings), "なし");
+    }
+
+    #[test]
+    fn save_new_preset_adds_the_current_video_and_audio() {
+        let mut draft = sample_settings();
+        let mut name = "  低遅延優先 ".to_string();
+        let mut message = None;
+
+        save_new_preset(&mut draft, &mut name, &mut message);
+
+        assert_eq!(draft.presets.len(), 1);
+        // 前後の空白は落とす
+        assert_eq!(draft.presets[0].name, "低遅延優先");
+        assert_eq!(draft.presets[0].video.resolution, draft.video.resolution);
+        assert_eq!(draft.presets[0].audio.sample_rate, draft.audio.sample_rate);
+        assert_eq!(draft.active_preset.as_deref(), Some("低遅延優先"));
+        // 成功したら入力欄を空にする
+        assert!(name.is_empty());
+        assert_eq!(message.map(|m| m.is_error), Some(false));
+    }
+
+    #[test]
+    fn save_new_preset_with_a_duplicate_name_changes_nothing() {
+        let mut draft = sample_settings();
+        draft.presets = vec![preset_named("低遅延優先", 1280, 720, 60)];
+        let mut name = "低遅延優先".to_string();
+        let mut message = None;
+
+        save_new_preset(&mut draft, &mut name, &mut message);
+
+        assert_eq!(draft.presets.len(), 1);
+        assert_eq!(draft.presets[0].video.resolution, Some((1280, 720)));
+        // 打ち直しにならないよう入力は残す
+        assert_eq!(name, "低遅延優先");
+        assert_eq!(message.map(|m| m.is_error), Some(true));
+    }
+
+    #[test]
+    fn save_new_preset_with_an_empty_name_changes_nothing() {
+        let mut draft = sample_settings();
+        let mut name = "   ".to_string();
+        let mut message = None;
+
+        save_new_preset(&mut draft, &mut name, &mut message);
+
+        assert!(draft.presets.is_empty());
+        assert_eq!(message.map(|m| m.is_error), Some(true));
+    }
+
+    #[test]
+    fn preset_row_load_replaces_only_video_and_audio() {
+        let mut draft = sample_settings();
+        draft.presets = vec![preset_named("低遅延優先", 1280, 720, 60)];
+        let screenshot_before = draft.screenshot.clone();
+        let hotkeys_before = draft.hotkeys.clone();
+        let mut message = None;
+
+        apply_preset_row_action(&mut draft, PresetRowAction::Load(0), &mut message);
+
+        assert_eq!(draft.video.resolution, Some((1280, 720)));
+        assert_eq!(draft.active_preset.as_deref(), Some("低遅延優先"));
+        assert_eq!(draft.screenshot.format, screenshot_before.format);
+        assert_eq!(draft.hotkeys, hotkeys_before);
+    }
+
+    #[test]
+    fn preset_row_overwrite_stores_the_current_values() {
+        let mut draft = sample_settings();
+        draft.presets = vec![preset_named("低遅延優先", 1280, 720, 60)];
+        let mut message = None;
+
+        apply_preset_row_action(&mut draft, PresetRowAction::Overwrite(0), &mut message);
+
+        assert_eq!(draft.presets.len(), 1);
+        assert_eq!(draft.presets[0].name, "低遅延優先");
+        assert_eq!(draft.presets[0].video.resolution, draft.video.resolution);
+        assert_eq!(draft.active_preset.as_deref(), Some("低遅延優先"));
+    }
+
+    #[test]
+    fn preset_row_delete_removes_the_entry_and_the_selection() {
+        let mut draft = sample_settings();
+        draft.presets = vec![preset_named("低遅延優先", 1280, 720, 60)];
+        assert!(draft.apply_preset("低遅延優先"));
+        let mut message = None;
+
+        apply_preset_row_action(&mut draft, PresetRowAction::Delete(0), &mut message);
+
+        assert!(draft.presets.is_empty());
+        assert_eq!(draft.active_preset, None);
+    }
+
+    #[test]
+    fn preset_row_action_with_a_stale_index_changes_nothing() {
+        // 一覧を描いてから反映するまでの間は 1 フレームも空かないが、
+        // 添字で触る以上は範囲外でも落ちないようにしておく
+        let mut draft = sample_settings();
+        draft.presets = vec![preset_named("低遅延優先", 1280, 720, 60)];
+        let mut message = None;
+
+        apply_preset_row_action(&mut draft, PresetRowAction::Delete(5), &mut message);
+
+        assert_eq!(draft.presets.len(), 1);
+        assert!(message.is_none());
     }
 }
