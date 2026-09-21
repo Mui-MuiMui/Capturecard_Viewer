@@ -205,13 +205,13 @@ const CONNECT_BACKOFF_BASE: Duration = Duration::from_millis(200);
 /// ときの反応が悪くなる。5 秒で頭打ちにして、挿してから最大 5 秒で繋がるようにする。
 const CONNECT_BACKOFF_MAX: Duration = Duration::from_millis(5000);
 
-/// 音声で、この回数だけ連続して失敗したあとに形（レート・チャンネル数）を緩める。
+/// 音声で、この回数だけ連続して失敗したら「繋がっていない」ことをログに残す。
 ///
-/// **デバイスは変えない。** 設定が「既定のデバイス」（入力・出力とも未指定）の
-/// ときに限り、サンプリングレートとチャンネル数をデバイス任せにして 1 度だけ
-/// 開き直す。設定にデバイス名が書かれている場合は何もせず、そのデバイスが
-/// 戻るまで再試行を続ける（`decide_audio_fallback` を参照）。
-const AUDIO_FORMAT_RELAX_AFTER: u32 = 3;
+/// **ここで別のデバイスへ倒したりはしない。** 以前は同じ 3 回目に既定の
+/// デバイスへフォールバックしていた（`decide_audio_fallback` を参照）。
+/// 残したのはログだけで、回数を合わせてあるのは、以前のログと同じ位置に
+/// 「ここで方針が分かれていた」という目印を置くため。
+const AUDIO_RETRY_WARN_AFTER: u32 = 3;
 
 /// フレームが途絶えてから「映像が切れた」と判断するまでの時間。
 ///
@@ -354,42 +354,31 @@ fn decide_audio_reconnect(
 enum AudioFallbackAction {
     /// 何もしない。`ConnectRetry` のバックオフで次の回を待つ
     Retry,
-    /// 設定のデバイスに繋がらないまま再試行を続けることを 1 度だけ記録し、
-    /// あとは `Retry` と同じ
+    /// 繋がらないまま再試行を続けることを 1 度だけ記録し、あとは `Retry` と同じ
     WarnAndRetry,
-    /// **同じ（既定の）デバイスを**、レートとチャンネル数だけデバイス任せに
-    /// してその場で開き直す
-    RelaxFormat,
 }
 
-/// 音声の接続に失敗したときに、既定のデバイスへ倒してよいかを判定する。
+/// 音声の接続に失敗したときに、その回で何をするかを決める。
 ///
-/// **設定にデバイス名が書かれている場合は倒さない。** 以前は 3 回失敗した
-/// 時点で入出力とも Windows の既定デバイスで開き直していたが、これが
-/// USB を抜いた直後の再接続でも効いていた。設定のデバイスが消えている間は
-/// 必ず 3 回失敗する（1.5 秒）一方、USB の再列挙には 10 秒以上かかるため、
-/// **フォールバックが必ず勝って PC のマイクを入力として掴み、接続成功として
-/// 確定してしまう**（#134）。以後は設定のデバイスを試さないので音は戻らず、
-/// おまけにマイクの音がスピーカーへ流れ続ける。
+/// **どの回でも接続先は変えない。** 以前は 3 回失敗した時点で入出力とも
+/// Windows の既定デバイスで開き直していたが、これが USB を抜いた直後の
+/// 再接続でも効いていた。設定のデバイスが消えている間は必ず 3 回失敗する
+/// （1.5 秒）一方、USB の再列挙には 10 秒以上かかるため、**フォールバックが
+/// 必ず勝って PC のマイクを入力として掴み、接続成功として確定してしまう**
+/// （#134）。以後は設定のデバイスを試さないので音は戻らず、おまけにマイクの
+/// 音がスピーカーへ流れ続ける。
 ///
 /// 起動時も同じ扱いにしてある。設定のデバイスが見つからないときに黙って
 /// 別のデバイスを開くのは、音が出ないことより分かりにくい誤動作のため。
 /// 繋がらないことは「接続状態」タブと通知に出るので、気付く手段はある。
 ///
-/// 倒す先が無い（入力・出力とも未指定＝既定のデバイス）ときだけ、形の緩和を
-/// 1 度試す。開く相手は変わらないので、意図しないデバイスを掴むことはない。
-fn decide_audio_fallback(
-    attempt: u32,
-    input_device_name: Option<&str>,
-    output_device_name: Option<&str>,
-) -> AudioFallbackAction {
-    if attempt != AUDIO_FORMAT_RELAX_AFTER {
-        return AudioFallbackAction::Retry;
-    }
-    if input_device_name.is_some() || output_device_name.is_some() {
+/// 残っているのは「繋がらないまま再試行を続けている」ことをログへ 1 度だけ
+/// 残す判断だけ。毎回出すとログが埋まり、一度も出さないと調査で気付けない。
+fn decide_audio_fallback(attempt: u32) -> AudioFallbackAction {
+    if attempt == AUDIO_RETRY_WARN_AFTER {
         return AudioFallbackAction::WarnAndRetry;
     }
-    AudioFallbackAction::RelaxFormat
+    AudioFallbackAction::Retry
 }
 
 /// 映像が復帰したときに、音声にも再接続を要求するかを判定する。
@@ -2789,8 +2778,8 @@ impl CaptureCardViewer {
 
     /// 音声デバイスへの接続を 1 回だけ試す。
     ///
-    /// **設定のデバイスで開けなくても、別のデバイスへは倒さない。** 何をするかは
-    /// `decide_audio_fallback` が決める。
+    /// **開けなくても、別のデバイスへは倒さない。** 失敗が続いたときの扱いは
+    /// `decide_audio_fallback` を参照。
     fn try_connect_audio(&mut self, settings: &AppSettings, now: Instant) {
         let attempt = self.audio_retry.attempts() + 1;
         info!(
@@ -2862,44 +2851,18 @@ impl CaptureCardViewer {
             }
         };
 
-        // 失敗したあとに何をするか。何を試した（試さなかった）かをログに残す
-        let fallback_error = match error {
-            None => None,
-            Some(e) => match decide_audio_fallback(
-                attempt,
-                settings.audio.input_device_name.as_deref(),
-                settings.audio.output_device_name.as_deref(),
-            ) {
-                AudioFallbackAction::Retry => Some(e),
-                AudioFallbackAction::WarnAndRetry => {
-                    warn!(
-                        "設定の音声デバイスに {} 回続けて接続できない。既定のデバイスへは倒さず、戻るまで再試行を続ける",
-                        attempt
-                    );
-                    Some(e)
-                }
-                AudioFallbackAction::RelaxFormat => {
-                    info!(
-                        "既定のデバイスで {} 回続けて失敗したので、レートとチャンネル数をデバイス任せにして試す",
-                        attempt
-                    );
-                    match audio.start_passthrough(&PassthroughRequest::defaults()) {
-                        Ok(()) => {
-                            info!("既定のデバイスで音声に接続した（レートとチャンネル数はデバイス任せ）");
-                            None
-                        }
-                        Err(e2) => {
-                            warn!("レートとチャンネル数を緩めても音声に接続できない: {}", e2);
-                            Some(e2)
-                        }
-                    }
-                }
-            },
-        };
+        // 失敗が続いていることを 1 度だけ記録する。倒す先が無いので、
+        // ここで開く相手が変わることはない
+        if error.is_some() && decide_audio_fallback(attempt) == AudioFallbackAction::WarnAndRetry {
+            warn!(
+                "音声デバイスに {} 回続けて接続できない。既定のデバイスへは倒さず、戻るまで再試行を続ける",
+                attempt
+            );
+        }
 
         drop(audio);
 
-        match fallback_error {
+        match error {
             None => {
                 self.audio_retry.record_success();
                 // 繋がったので直前の失敗は消す
@@ -4692,46 +4655,35 @@ mod tests {
     }
 
     #[test]
-    fn decide_audio_fallback_named_device_never_falls_back() {
+    fn decide_audio_fallback_never_switches_devices() {
         // #134 の本体。設定のデバイスが消えている間は必ず 3 回失敗するが、
         // ここで既定のデバイス（＝PC のマイク）へ倒すと、それを接続成功として
-        // 確定してしまい、設定のデバイスが戻っても繋ぎ直さない
-        assert_eq!(
-            decide_audio_fallback(3, Some("Live Gamer EXTREME 3"), None),
-            AudioFallbackAction::WarnAndRetry
-        );
-        // 出力だけを指定している場合も、入力を既定（マイク）へ倒さない
-        assert_eq!(
-            decide_audio_fallback(3, None, Some("Realtek Digital Output")),
-            AudioFallbackAction::WarnAndRetry
-        );
-        assert_eq!(
-            decide_audio_fallback(3, Some("Live Gamer EXTREME 3"), Some("スピーカー")),
-            AudioFallbackAction::WarnAndRetry
-        );
+        // 確定してしまい、設定のデバイスが戻っても繋ぎ直さない。
+        // **どの回数でも接続先を変える選択肢が無いこと**を、網羅で確かめる
+        for attempt in [1, 2, 3, 4, 5, 100, u32::MAX] {
+            assert!(
+                matches!(
+                    decide_audio_fallback(attempt),
+                    AudioFallbackAction::Retry | AudioFallbackAction::WarnAndRetry
+                ),
+                "attempt = {}",
+                attempt
+            );
+        }
     }
 
     #[test]
-    fn decide_audio_fallback_default_device_relaxes_format_once() {
-        // 入出力とも未指定＝既定のデバイス。開く相手は変わらないので、
-        // レートとチャンネル数だけ緩めて 1 度試す
-        assert_eq!(
-            decide_audio_fallback(3, None, None),
-            AudioFallbackAction::RelaxFormat
-        );
+    fn decide_audio_fallback_at_threshold_warns_once() {
+        // 3 回目だけ記録する。毎回出すとログが埋まり、一度も出さないと
+        // 「音が出ない」の調査でこの状態に気付けない
+        assert_eq!(decide_audio_fallback(3), AudioFallbackAction::WarnAndRetry);
     }
 
     #[test]
     fn decide_audio_fallback_before_and_after_threshold_retries() {
         for attempt in [1, 2, 4, 5, 100] {
             assert_eq!(
-                decide_audio_fallback(attempt, None, None),
-                AudioFallbackAction::Retry,
-                "attempt = {}",
-                attempt
-            );
-            assert_eq!(
-                decide_audio_fallback(attempt, Some("マイク"), None),
+                decide_audio_fallback(attempt),
                 AudioFallbackAction::Retry,
                 "attempt = {}",
                 attempt

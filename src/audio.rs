@@ -400,20 +400,6 @@ pub struct PassthroughRequest<'a> {
     pub output_capabilities: Option<&'a AudioCapabilities>,
 }
 
-impl PassthroughRequest<'_> {
-    /// デバイスも設定も指定しない要求。既定デバイスへのフォールバックで使う。
-    pub fn defaults() -> Self {
-        Self {
-            input_device_name: None,
-            output_device_name: None,
-            sample_rate: None,
-            channels: None,
-            input_capabilities: None,
-            output_capabilities: None,
-        }
-    }
-}
-
 pub struct AudioCapture {
     host: cpal::Host,
     input_stream: Option<cpal::Stream>,
