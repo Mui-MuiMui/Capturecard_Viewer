@@ -1,6 +1,6 @@
 [package]
 name = "capturecard_viewer"
-version = "1.0.6"
+version = "1.1.0"
 edition = "2021"
 # 配布するアプリであってライブラリではない。crates.io へ公開しないことを明示する。
 # cargo-about の private.ignore がこの指定を見て、本体を
