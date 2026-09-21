@@ -84,8 +84,14 @@ impl From<RawAppSettings> for AppSettings {
         let legacy_hotkey = screenshot.legacy_hotkey.take();
         let hotkeys = migrate_hotkeys(hotkeys, legacy_hotkey);
 
+        // 設定ファイルは手で書き換えられる。名前が無い、あるいは重複した
+        // プリセットをそのまま持ち込ませない
+        let presets = sanitize_presets(presets);
+
         let mut settings = Self {
-            active_preset,
+            // 名前の前後の空白は落としてある（sanitize_presets）ので、
+            // 選択側も同じ形に揃える。揃えないと空白の有無だけで引けなくなる
+            active_preset: active_preset.map(|name| name.trim().to_string()),
             video,
             audio,
             screenshot,
@@ -98,6 +104,39 @@ impl From<RawAppSettings> for AppSettings {
         settings.refresh_active_preset();
         settings
     }
+}
+
+// 設定ファイルから読んだプリセットの一覧を、扱える形に整える。
+//
+// 名前の前後の空白を落とし、名前が空のものと、既出の名前と重なるものを捨てる。
+// **ここで弾かないと、設定ダイアログの `validate_preset_name` を通さずに
+// 不正な状態を作れる。** 空の名前はメニューに空の項目として並び、重複した
+// 名前は `preset()` も `remove_preset` も先頭しか見ないため、2 つ目以降を
+// 選ぶことも消すこともできなくなる。
+//
+// 捨てるだけでエラーにはしない。他の項目と同じで、読めないところだけを
+// 落として残りは活かす。
+fn sanitize_presets(presets: Vec<Preset>) -> Vec<Preset> {
+    let mut kept: Vec<Preset> = Vec::with_capacity(presets.len());
+    for preset in presets {
+        let name = preset.name.trim();
+        if name.is_empty() {
+            warn!("設定のプリセットに名前が無いので無視する");
+            continue;
+        }
+        if kept.iter().any(|existing| existing.name == name) {
+            warn!(
+                "設定に同じ名前のプリセット \"{}\" が複数あるので後のほうを無視する",
+                name
+            );
+            continue;
+        }
+        kept.push(Preset {
+            name: name.to_string(),
+            ..preset
+        });
+    }
+    kept
 }
 
 // 既定のホットキー割り当て。
@@ -2963,6 +3002,79 @@ input_device_name = "Line In"
 
         assert!(!settings.remove_preset("無い名前"));
         assert_eq!(settings.presets.len(), 1);
+    }
+
+    #[test]
+    fn load_drops_a_preset_without_a_name() {
+        // 手で書き換えた設定ファイル。名前が無いプリセットをそのまま持つと、
+        // 右クリックメニューと一覧に空の項目が並ぶ
+        let config = r#"
+[[presets]]
+name = "   "
+
+[presets.video]
+fps = 30
+
+[[presets]]
+name = "画質優先"
+
+[presets.video]
+fps = 30
+"#;
+
+        let settings: AppSettings = toml::from_str(config).expect("読めること");
+
+        assert_eq!(settings.presets.len(), 1);
+        assert_eq!(settings.presets[0].name, "画質優先");
+    }
+
+    #[test]
+    fn load_drops_a_duplicated_preset_name_keeping_the_first() {
+        // 重複した名前を残すと、preset() も remove_preset() も先頭しか
+        // 見ないため 2 つ目以降を選ぶことも消すこともできない
+        let config = r#"
+[[presets]]
+name = "画質優先"
+
+[presets.video]
+fps = 30
+
+[[presets]]
+name = " 画質優先 "
+
+[presets.video]
+fps = 24
+"#;
+
+        let settings: AppSettings = toml::from_str(config).expect("読めること");
+
+        assert_eq!(settings.presets.len(), 1);
+        assert_eq!(settings.presets[0].video.fps, Some(30));
+    }
+
+    #[test]
+    fn load_trims_preset_names_and_the_active_selection() {
+        // 名前と選択の両方から空白を落とす。片方だけだと空白の有無で引けなくなる
+        let config = r#"
+active_preset = "  画質優先  "
+
+[video]
+resolution = [1920, 1080]
+fps = 30
+
+[[presets]]
+name = "  画質優先  "
+
+[presets.video]
+resolution = [1920, 1080]
+fps = 30
+"#;
+
+        let settings: AppSettings = toml::from_str(config).expect("読めること");
+
+        assert_eq!(settings.presets[0].name, "画質優先");
+        assert_eq!(settings.active_preset.as_deref(), Some("画質優先"));
+        assert_eq!(resolved_active_preset(&settings), Some("画質優先"));
     }
 
     #[test]

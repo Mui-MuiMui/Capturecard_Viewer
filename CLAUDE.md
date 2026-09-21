@@ -227,6 +227,8 @@ toggle_fullscreen = "Ctrl+F11"
 
 `active_preset` は「いま選んでいるプリセット名」。`resolved_active_preset` が実際の `video` / `audio` と突き合わせ、食い違っていれば `None` を返す（これが「（変更あり）」表示の判定そのもの）。`video` / `audio` を書き換えたあとは `refresh_active_preset()` を呼んで辻褄を合わせる。**`commit_draft` の末尾で呼んでいるのを外さないこと。** 外すと、プリセットを読み込んだあと解像度を変えて「適用」したときに選択が残り、右クリックメニューのチェックが実際の設定と食い違う。
 
+**名前の検証は 2 か所にある。** 設定ダイアログの入力は `validate_preset_name`、設定ファイルから読んだ一覧は `sanitize_presets`（`From<RawAppSettings>` の中）。後者が無いと、手で書き換えた設定ファイルからダイアログを通さずに不正な状態を作れる。空の名前はメニューに空の項目として並び、重複した名前は `preset()` も `remove_preset()` も先頭しか見ないため 2 つ目以降を選ぶことも消すこともできない。名前の前後の空白は両方で落とし、`active_preset` も同じ形に揃える。
+
 **`active_preset` は `AppSettings` の先頭に宣言してある。** TOML はテーブルのあとに素の値を書けないため、`video` などの後ろへ移すと保存で落ちる（`presets_survive_a_save_and_load_roundtrip` が検出する）。`Preset` の `name` も同じ理由で `video` / `audio` より前に置いてある。
 
 書き出し・読み込み・初期化との関係。
