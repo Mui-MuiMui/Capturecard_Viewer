@@ -72,14 +72,31 @@ flowchart TD
 
 ### UI は状態を持たない
 
-`ui` の各関数は、描画に必要なデータを借りて受け取り、**発生したイベントを戻り値で返す**。`ui` 側から設定を書き換えたりデバイスを操作したりしない。
+`ui` の各関数は、描画に必要なデータを借りて受け取り、**発生したイベントを戻り値で返す**。`ui` 側から設定を書き換えたりデバイスを操作したりしない。**実装済み。**
 
 ```rust
-// 概念。実際のシグネチャは実装時に決める
-fn show_settings_dialog(ctx: &Context, state: &SettingsDialogState) -> Vec<SettingsEvent>;
+pub fn show_settings_dialog(
+    ctx: &egui::Context,
+    draft: &mut AppSettings,
+    view: &SettingsDialogView<'_>,
+    devices: &DeviceLists<'_>,
+    connection: &ConnectionStatus,
+    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
+) -> Vec<SettingsEvent>;
 ```
 
+書き換えてよいのは編集中のドラフトだけ。それ以外は `SettingsDialogState::split_for_draw` が作る読み取り専用の `SettingsDialogView` として渡す。共有設定の `Arc<Mutex<AppSettings>>` は `ui` へ渡さない。
+
 状態を変えるのは `app` だけ、という一点を守る。これによって「設定ダイアログが共有設定を直接書き換えていて、別経路の保存に巻き込まれる」類の問題が構造的に起きなくなる。
+
+1 フレームで複数の操作が起きうるので `Vec` で返す。**並び順が意味を持つ**ので、受け取る側は順番どおりに処理する。
+
+| イベント | 意味 | 受け取る側 |
+|---|---|---|
+| `SettingsEvent` | 設定ダイアログで起きたこと | `app::settings_dialog::handle_settings_events` |
+| `HotkeyDialogEvent` | ホットキー入力ダイアログで起きたこと | `app/mod.rs` の `update()` |
+
+ファイルダイアログ（`rfd`）も `ui` からは開かない。`PickScreenshotFolder` / `PickSoundFile` / `ExportSettings` / `ImportSettings` を返し、フレームを描き終えた `app` が開く。UI スレッドを止めるモーダルなので、描画の途中で開くと止まった位置のフレームが画面に残る。
 
 ### 変更はイベント駆動
 
@@ -343,7 +360,6 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 | 目指す姿 | 現状 | 対応するタスク |
 |---|---|---|
 | レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_connect` / `monitor` / `retry` / `capabilities` / `screenshot` / `settings_dialog` / `settings_store` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
-| UI は状態を持たない | `ui.rs` から `static` / `static mut` は消え、タブ選択・デバイス能力キャッシュ・ホットキー入力の待機状態（編集中のアクションを含む）は `CaptureCardViewer` が持つ `SettingsDialogState` にある。ダイアログの開閉フラグと確定済みのホットキーは `CaptureCardViewer` が直接持つ。ホットキー入力ダイアログはまだ `&mut` で受けた値を直接書き換える | UI 層をイベント返却型にする |
 | イベント駆動 | 2 秒ごとに設定を再適用するポーリング | apply_settings の 2 秒ごとの再登録 |
 | チャネルでの隔離 | UI と `device` ワーカーの間はコマンドとイベントを mpsc でやり取りする。**この境界で**チャネルを通さず共有するのは 3 つ（映像フレーム、コールバックが読む Atomic、観測値の `Arc<RwLock<DeviceSnapshot>>`）。`settings` や `screenshot_manager` のようにデバイスを跨がない共有はこの話の外 | 完了 |
 | UI をブロックしない | デバイスを開く・閉じる・列挙する処理も含めてワーカースレッドへ移した。スクリーンショットのエンコードは撮影ごとのスレッド。`update()` に残るブロッキングは `rfd` のファイルダイアログだけ | 完了 |

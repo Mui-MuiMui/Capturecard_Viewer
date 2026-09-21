@@ -52,19 +52,120 @@ impl CaptureCardViewer {
         );
     }
 
-    /// 設定ダイアログの操作を処理する。
+    /// 設定ダイアログの 1 フレームのイベントを処理する。
+    ///
+    /// 状態を書き換えるのも副作用を起こすのもここだけ
+    /// （`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
+    ///
+    /// **受け取った順に処理する。** 名前を打ちながら「保存」を押した場合の
+    /// `SetNewPresetName` → `SaveNewPreset` のように、並びが意味を持つ。
+    /// `Dialog`（適用 / OK / キャンセル）は必ず最後に来る。
+    pub(super) fn handle_settings_events(&mut self, events: Vec<ui::SettingsEvent>) {
+        for event in events {
+            match event {
+                ui::SettingsEvent::Dialog(action) => self.apply_dialog_action(action),
+                ui::SettingsEvent::SelectTab(tab) => self.settings_dialog.select_tab(tab),
+                ui::SettingsEvent::TestSound => self.play_test_sound(),
+                ui::SettingsEvent::ExportSettings => self.export_settings_to_file(),
+                ui::SettingsEvent::ImportSettings => self.import_settings_into_draft(),
+                ui::SettingsEvent::ResetDraft => self.reset_draft_to_defaults(),
+                ui::SettingsEvent::SetResetConfirm(confirming) => {
+                    self.settings_dialog.set_reset_confirm(confirming)
+                }
+                ui::SettingsEvent::SetNewPresetName(name) => {
+                    self.settings_dialog.set_new_preset_name(name)
+                }
+                ui::SettingsEvent::SaveNewPreset => self.settings_dialog.save_new_preset(),
+                ui::SettingsEvent::PresetRow(action) => {
+                    self.settings_dialog.apply_preset_row(action)
+                }
+                ui::SettingsEvent::OpenHotkeyCapture(action) => {
+                    // どのアクションを編集しているかを入力ダイアログへ渡す。
+                    // 実際の描画はこのフレームの後半（`update` のホットキー
+                    // ダイアログの節）なので、開くのは今で間に合う
+                    self.settings_dialog.hotkey_capture_mut().begin_for(action);
+                    self.show_hotkey_dialog = true;
+                }
+                ui::SettingsEvent::PickScreenshotFolder => self.pick_screenshot_folder(),
+                ui::SettingsEvent::PickSoundFile => self.pick_sound_file(),
+                ui::SettingsEvent::Capability(event) => self.apply_capability_event(event),
+            }
+        }
+    }
+
+    /// デバイス能力のキャッシュに対する要求を反映する。
+    ///
+    /// キャッシュを触るのは UI スレッドだけなのでロックは要らない。実際の
+    /// 問い合わせは、溜まった要求を `dispatch_capability_requests` が
+    /// ワーカーへ流したときに始まる。
+    fn apply_capability_event(&mut self, event: ui::CapabilityEvent) {
+        let dialog = &mut self.settings_dialog;
+        match event {
+            ui::CapabilityEvent::RequestVideo(device) => {
+                dialog.capabilities_mut().request(&device);
+            }
+            ui::CapabilityEvent::RetryVideo(device) => {
+                dialog.capabilities_mut().retry(&device);
+            }
+            ui::CapabilityEvent::ExpectVideoDefaults(device) => {
+                dialog.capabilities_mut().expect_defaults(&device)
+            }
+            ui::CapabilityEvent::ClearVideoDefaults(device) => {
+                dialog.capabilities_mut().clear_awaiting_defaults(&device)
+            }
+            ui::CapabilityEvent::RequestAudio(direction, key) => {
+                dialog.audio_capabilities_mut(direction).request(&key);
+            }
+            ui::CapabilityEvent::RetryAudio(direction, key) => {
+                dialog.audio_capabilities_mut(direction).retry(&key);
+            }
+            ui::CapabilityEvent::ExpectAudioDefaults(direction, key) => dialog
+                .audio_capabilities_mut(direction)
+                .expect_defaults(&key),
+            ui::CapabilityEvent::ClearAudioDefaults(direction, key) => dialog
+                .audio_capabilities_mut(direction)
+                .clear_awaiting_defaults(&key),
+        }
+    }
+
+    /// スクリーンショットの保存フォルダーをファイルダイアログで選ぶ。
+    ///
+    /// 入れるのはドラフトなので、反映は「適用」か「OK」のとき。
+    /// `rfd` は UI スレッドを止めるモーダルだが、描画を終えたあとに開くので
+    /// 止まった途中のフレームが画面に残ることはない。
+    fn pick_screenshot_folder(&mut self) {
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            debug!("スクリーンショットの保存先の選択がキャンセルされた");
+            return;
+        };
+        let Some(draft) = self.settings_dialog.draft_mut() else {
+            warn!("ドラフトが無い状態で保存先の選択が要求された");
+            return;
+        };
+        draft.screenshot.save_folder = folder;
+    }
+
+    /// スクリーンショットの効果音をファイルダイアログで選ぶ。
+    fn pick_sound_file(&mut self) {
+        let Some(file) = rfd::FileDialog::new()
+            .add_filter("音声ファイル", &["mp3", "wav", "ogg"])
+            .pick_file()
+        else {
+            debug!("効果音ファイルの選択がキャンセルされた");
+            return;
+        };
+        let Some(draft) = self.settings_dialog.draft_mut() else {
+            warn!("ドラフトが無い状態で効果音ファイルの選択が要求された");
+            return;
+        };
+        draft.screenshot.sound_file = Some(file);
+    }
+
+    /// 「適用」「OK」「キャンセル」を処理する。
     ///
     /// ドラフトの反映・保存・クローズをここで行うのは、UI 側に状態と副作用を
     /// 持たせないため（`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
-    pub(super) fn handle_settings_dialog_action(&mut self, action: ui::SettingsDialogAction) {
-        match action {
-            ui::SettingsDialogAction::TestSound => self.play_test_sound(),
-            ui::SettingsDialogAction::ExportSettings => self.export_settings_to_file(),
-            ui::SettingsDialogAction::ImportSettings => self.import_settings_into_draft(),
-            ui::SettingsDialogAction::ResetDraft => self.reset_draft_to_defaults(),
-            _ => {}
-        }
-
+    fn apply_dialog_action(&mut self, action: ui::SettingsDialogAction) {
         let transition = ui::SettingsDialogState::transition_for(action);
 
         if transition.commit_draft {
