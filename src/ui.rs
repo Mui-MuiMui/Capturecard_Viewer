@@ -177,7 +177,7 @@ pub enum SettingsTab {
 /// デバイス能力の取得状態。
 ///
 /// 取得はデバイスを開いて対応表を引く重い処理なので、描画スレッドでは行わず
-/// 使い捨てのスレッドへ投げる。ダイアログは進行状況をこの型で受け取って描き分ける。
+/// デバイスワーカーへ投げる。ダイアログは進行状況をこの型で受け取って描き分ける。
 ///
 /// 型引数はビデオ（`DeviceCapabilities`）とオーディオ（`AudioCapabilities`）で
 /// 中身が違うため。取得と受け渡しの手順は同じなので、キャッシュは共有する。
@@ -199,8 +199,10 @@ pub type AudioCapabilityCache = CapabilityCache<AudioCapabilities>;
 /// デバイス能力のキャッシュと、まだワーカーへ渡していない取得要求。
 ///
 /// 触るのは UI スレッド（`CaptureCardViewer`）だけなのでロックを持たない。
-/// 実際の取得は `CaptureCardViewer::dispatch_capability_requests` が別スレッドへ
-/// 投げ、結果はチャネル経由で `apply_result` に入る。
+/// 実際の取得は `CaptureCardViewer::dispatch_capability_requests` が
+/// デバイスワーカーへコマンドとして流し、結果はイベント経由で `apply_result`
+/// に入る。**これは設定ダイアログの選択肢のためのキャッシュで、音声を開く
+/// ときに使う一覧はワーカーが別に持っている。**
 pub struct CapabilityCache<T> {
     /// デバイス名 → 取得状態
     states: HashMap<String, CapabilityState<T>>,
@@ -282,7 +284,6 @@ impl<T> CapabilityCache<T> {
 
     /// 結果待ちか。**まだ要求していない場合は `false`。**
     ///
-    /// 音声の接続はこれが `false` になるまで待つ（`poll_device_connection`）。
     /// 未要求を `true` にすると、要求を積む経路が無い状態で永久に待ってしまう。
     pub fn is_pending(&self, device: &str) -> bool {
         matches!(self.states.get(device), Some(CapabilityState::Pending))
@@ -403,7 +404,7 @@ pub struct SettingsDialogState {
     // 選択中のタブ
     selected_tab: SettingsTab,
     // デバイス名 → そのデバイスが扱えるフォーマット・解像度・FPS の取得状態。
-    // 取得はデバイスを開く重い処理なので別スレッドへ投げ、一度取ったら保持する
+    // 取得はデバイスを開く重い処理なのでワーカーへ投げ、一度取ったら保持する
     capabilities: VideoCapabilityCache,
     // 音声デバイスの対応設定。入力と出力で別に持つ。
     // **名前で引くので、入力と出力に同名のデバイスがあっても混ざらないよう分ける。**
@@ -504,8 +505,8 @@ impl SettingsDialogState {
     /// オーディオ入力デバイスの対応設定。
     ///
     /// ビデオ側と同じく、取得要求の取り出しと結果の反映は `CaptureCardViewer`
-    /// が行う。音声の接続も開く直前にここを読むため、ダイアログを開いていない
-    /// 間も触られる。
+    /// が行う。**ここにあるのは設定ダイアログの選択肢のため。** 音声を開く
+    /// ときに使う一覧はデバイスワーカーが別に持っている（`app::worker_loop`）。
     pub fn audio_input_capabilities_mut(&mut self) -> &mut AudioCapabilityCache {
         &mut self.audio_input_capabilities
     }
@@ -513,16 +514,6 @@ impl SettingsDialogState {
     /// オーディオ出力デバイスの対応設定。
     pub fn audio_output_capabilities_mut(&mut self) -> &mut AudioCapabilityCache {
         &mut self.audio_output_capabilities
-    }
-
-    /// オーディオ入力デバイスの対応設定（読み取り）。
-    pub fn audio_input_capabilities(&self) -> &AudioCapabilityCache {
-        &self.audio_input_capabilities
-    }
-
-    /// オーディオ出力デバイスの対応設定（読み取り）。
-    pub fn audio_output_capabilities(&self) -> &AudioCapabilityCache {
-        &self.audio_output_capabilities
     }
 
     /// ドラフトを実行中の設定へ反映する。ドラフトを持っていなければ何もしない。
@@ -1065,7 +1056,7 @@ fn show_device_settings_tab(
             capabilities.expect_defaults(&selected_device);
         }
 
-        // 能力の取得を要求する。デバイスを開くのは別スレッドなので UI は止まらない。
+        // 能力の取得を要求する。デバイスを開くのはワーカーなので UI は止まらない。
         // 要求済み・取得済み・失敗済みのときは何も起きない
         capabilities.request(&selected_device);
 
@@ -1097,7 +1088,7 @@ fn show_device_settings_tab(
         // 切り替えたデバイスの能力が届いたら、フォーマット・解像度・FPS を
         // まとめて選び直す。
         //
-        // 能力の取得は別スレッドなので、切り替えた直後はまだ `Pending` で
+        // 能力の取得はワーカー側なので、切り替えた直後はまだ `Pending` で
         // ここを通らない。その間は前のデバイスの値が出たままになるが、
         // 入れ直しの手掛かりとして必要なので消さない。`expect_defaults` の
         // 目印が残るため、`Ready` になったフレームで入れ直される。
@@ -1467,7 +1458,7 @@ fn show_device_settings_tab(
             audio_capabilities.output.expect_defaults(&output_key);
         }
 
-        // 対応設定の取得を要求する。列挙は別スレッドなので UI は止まらない
+        // 対応設定の取得を要求する。列挙はワーカーなので UI は止まらない
         audio_capabilities.input.request(&input_key);
         audio_capabilities.output.request(&output_key);
 
@@ -2056,7 +2047,7 @@ fn show_audio_capability_state(
 ///
 /// **ここでは何も編集しない。** 映像と音声が実際に何へ繋がっているかと、
 /// 直近の失敗を読むためのタブで、値は呼び出し側が複製して渡す
-/// （描画中に `video_capture` / `audio_capture` のロックを取らないため）。
+/// （描画中にデバイスへ問い合わせないため）。
 fn show_status_tab(ui: &mut egui::Ui, connection: &ConnectionStatus) {
     ui.heading("接続状態");
     ui.add_space(10.0);

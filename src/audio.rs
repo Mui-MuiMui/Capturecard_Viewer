@@ -98,7 +98,7 @@ pub fn device_name_from_key(key: &str) -> Option<&str> {
 ///
 /// `supported_input_configs()` / `supported_output_configs()` は WASAPI で
 /// 13 レート × 5 形式の `IsFormatSupported`（実測 300ms 前後）になるため、
-/// UI スレッドでは呼ばない。別スレッドで一度取ってこの型で持ち回す。
+/// UI スレッドでは呼ばない。デバイスワーカーが一度取ってこの型で持ち回す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioCapabilities {
     /// デバイスが列挙した対応設定。`select_best_config` へそのまま渡せる
@@ -138,11 +138,12 @@ impl AudioCapabilities {
 /// 指定したデバイスの対応設定を取り、`AudioCapabilities` にまとめる。
 ///
 /// **UI スレッドから直接呼ばないこと。** 列挙は WASAPI への問い合わせを
-/// 繰り返すため実測 300ms 前後かかる。`CaptureCardViewer` が使い捨ての
-/// スレッドへ投げ、結果をチャネルで受け取る。
+/// 繰り返すため実測 300ms 前後かかる。呼ぶのはデバイスワーカースレッド
+/// （`app::worker_connect`）で、結果はチャネルで UI スレッドへ返る。
 ///
-/// `AudioCapture` のホストは使わず、この関数の中で新しく作る。`audio_capture`
-/// のロックを別スレッドから握ると、その間 UI スレッドの再接続が止まるため。
+/// `AudioCapture` のホストは使わず、この関数の中で新しく作る。`AudioCapture`
+/// を持たないスレッドからも呼べるようにしてあり、実際 `query_capabilities`
+/// だけを別スレッドへ切り出すことになっても手を入れずに済む。
 pub fn query_capabilities(
     direction: AudioDirection,
     device_name: Option<&str>,
@@ -181,7 +182,8 @@ pub fn query_capabilities(
 }
 
 /// ホストの一覧から名前でデバイスを探す。`AudioCapture::find_device_by_name` と
-/// 同じことを、`AudioCapture` を持たない別スレッドから行うためのもの。
+/// 同じことを、`AudioCapture` を持たない場所（`query_capabilities`）から
+/// 行うためのもの。
 fn find_device_in_host(
     host: &cpal::Host,
     name: &str,
@@ -393,11 +395,71 @@ pub struct PassthroughRequest<'a> {
     pub sample_rate: Option<u32>,
     /// 設定画面で選んだチャンネル数。`None` ならデバイスの既定に従う
     pub channels: Option<u16>,
-    /// 別スレッドで先に取っておいた入力デバイスの対応設定。
-    /// `None` のときだけ、この場（UI スレッド）で列挙する
+    /// デバイスワーカーが先に取っておいた入力デバイスの対応設定。
+    /// `None` のときだけ、この場で列挙する（そのぶん開くのが 300ms 遅れる）
     pub input_capabilities: Option<&'a AudioCapabilities>,
     /// 同上、出力デバイスの対応設定
     pub output_capabilities: Option<&'a AudioCapabilities>,
+}
+
+/// 出力コールバックが 1 回ごとに読む共有の値。
+///
+/// **ロックを使わない。** `Mutex` だと、値を書き換えている最中にリアルタイム
+/// スレッドが待たされ、バッファを埋め損ねて音が途切れる。
+///
+/// ストリームを開き直しても中身は引き継ぐので、`AudioCapture` より長く生きる。
+/// デバイス操作はワーカースレッドが行うが、**ここへ書くのは UI スレッドで
+/// よい。** デバイスを開く処理を挟まないため、チャネルを経由させる理由がない。
+#[derive(Debug)]
+pub struct AudioControls {
+    /// 出力に掛ける倍率。`0.0`〜`2.0`。
+    ///
+    /// f32 の値を直接持てる Atomic 型が無いため、`to_bits` / `from_bits` で
+    /// ビット表現のまま出し入れする。
+    volume: AtomicU32,
+    passthrough_enabled: AtomicBool,
+    /// ミュート中か。
+    ///
+    /// **音量とは独立に持つ。** 音量 0% で代用すると、ミュートを解除したときに
+    /// 戻すべき値が残らない。
+    muted: AtomicBool,
+}
+
+impl Default for AudioControls {
+    fn default() -> Self {
+        Self {
+            volume: AtomicU32::new(DEFAULT_VOLUME.to_bits()),
+            // 既定では音声パススルーを有効にする（音が出る状態で起動する）
+            passthrough_enabled: AtomicBool::new(true),
+            // 既定はミュート解除。設定から読んだ値は apply_settings が入れ直す
+            muted: AtomicBool::new(false),
+        }
+    }
+}
+
+impl AudioControls {
+    /// 音量をパーセント指定で入れる。範囲外や `nan` は `normalize_volume` が倒す。
+    pub fn set_volume(&self, volume_percent: f32) {
+        // apply_settings から 2 秒ごとに呼ばれるため trace に落とす
+        trace!("音量を設定する: {}%", volume_percent);
+        store_volume(&self.volume, normalize_volume(volume_percent));
+    }
+
+    pub fn set_passthrough_enabled(&self, enabled: bool) {
+        // apply_settings から 2 秒ごとに呼ばれる。変化の有無を判別できないので trace に落とす
+        trace!("音声パススルーの有効/無効を設定する: {}", enabled);
+        self.passthrough_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// ミュートの入切を設定する。
+    ///
+    /// **音量には触らない。** ミュート中も `volume` は元の値のまま残り、
+    /// 解除するとその音量で鳴り始める。
+    pub fn set_muted(&self, muted: bool) {
+        // apply_settings から 2 秒ごとに呼ばれるため trace に落とす
+        trace!("ミュートを設定する: {}", muted);
+        self.muted.store(muted, Ordering::Relaxed);
+    }
 }
 
 pub struct AudioCapture {
@@ -406,21 +468,9 @@ pub struct AudioCapture {
     output_stream: Option<cpal::Stream>,
     /// いま開いているストリームの内容。閉じているときは `None`
     active: Option<ActiveAudio>,
-    /// 出力に掛ける倍率。`0.0`〜`2.0`。
-    ///
-    /// **出力コールバック（リアルタイムスレッド）が 1 回ごとに読むので、
-    /// ロックを使わない。** f32 の値を直接持てる Atomic 型が無いため、
-    /// `to_bits` / `from_bits` でビット表現のまま出し入れする。
-    /// `Mutex` だと、UI スレッドが音量を書き換えている最中に
-    /// コールバックが待たされ、バッファを埋め損ねて音が途切れうる。
-    volume: Arc<AtomicU32>,
-    audio_passthrough_enabled: Arc<AtomicBool>,
-    /// ミュート中か。
-    ///
-    /// **音量とは独立に持つ。** 音量 0% で代用すると、ミュートを解除したときに
-    /// 戻すべき値が残らない。出力コールバックから読むので、パススルーの旗と
-    /// 同じく `AtomicBool` にしてロックを避ける。
-    muted: Arc<AtomicBool>,
+    /// 出力コールバックと共有する音量・パススルー・ミュート。
+    /// ストリームを開き直しても差し替えない
+    controls: Arc<AudioControls>,
     // 稼働中のストリームでエラーが起きたことを表す旗。
     //
     // cpal のエラーコールバックはデバイスが消えた（`DeviceNotAvailable`）
@@ -431,6 +481,8 @@ pub struct AudioCapture {
     // **ストリームを開き直すたびに新しい `Arc` へ差し替える。** 使い回すと、
     // 閉じたストリームのエラーコールバックが後から旗を立て、開き直した直後の
     // 正常なストリームを切断と誤判定する
+    //
+    // 読むのはデバイスワーカースレッド（`app::worker_loop`）だけ
     stream_error: Arc<AtomicBool>,
 }
 
@@ -457,7 +509,12 @@ fn normalize_volume(volume_percent: f32) -> f32 {
 }
 
 impl AudioCapture {
-    pub fn new() -> Self {
+    /// 音量などの共有パラメータを受け取って作る。
+    ///
+    /// **`cpal::Stream` はスレッドをまたげない（`!Send`）ので、実際に使う
+    /// スレッドで作ること。** いまはデバイスワーカースレッドが唯一の持ち主で、
+    /// `AudioControls` だけを UI スレッドと共有する。
+    pub fn new(controls: Arc<AudioControls>) -> Self {
         let host = cpal::default_host();
         debug!("AudioCapture を作成した（ホスト: {:?}）", host.id());
 
@@ -466,11 +523,7 @@ impl AudioCapture {
             input_stream: None,
             output_stream: None,
             active: None,
-            volume: Arc::new(AtomicU32::new(DEFAULT_VOLUME.to_bits())),
-            // 既定では音声パススルーを有効にする（音が出る状態で起動する）
-            audio_passthrough_enabled: Arc::new(AtomicBool::new(true)),
-            // 既定はミュート解除。設定から読んだ値は apply_settings が入れ直す
-            muted: Arc::new(AtomicBool::new(false)),
+            controls,
             stream_error: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -560,9 +613,9 @@ impl AudioCapture {
             .default_output_config()
             .map_err(|e| format!("Failed to get output config: {}", e))?;
 
-        // 対応設定の一覧。**先に別スレッドで取ってあればそれを使う。**
-        // WASAPI の列挙は 300ms 前後かかるため、ここ（UI スレッド）で毎回
-        // 走らせるとデバイスの切り替えのたびにウィンドウが固まる
+        // 対応設定の一覧。**先にワーカーが取ってあればそれを使う。**
+        // WASAPI の列挙は 300ms 前後かかるため、開くたびにここで走らせると、
+        // ワーカーがその分だけ次のコマンドを処理できなくなる
         let input_ranges = resolve_ranges(input_capabilities, AudioDirection::Input, || {
             input_device
                 .supported_input_configs()
@@ -680,11 +733,7 @@ impl AudioCapture {
         .map_err(|e| format!("Failed to build input stream: {}", e))?;
 
         // 出力ストリーム
-        let controls = OutputControls {
-            volume: self.volume.clone(),
-            passthrough_enabled: self.audio_passthrough_enabled.clone(),
-            muted: self.muted.clone(),
-        };
+        let controls = Arc::clone(&self.controls);
         let output_stream_config = output_config.config();
 
         // 入出力の形が違う場合の変換器。**ここで作る（ストリームの構築時）。**
@@ -809,32 +858,6 @@ impl AudioCapture {
         self.stream_error.swap(false, Ordering::Relaxed)
     }
 
-    pub fn set_volume(&mut self, volume_percent: f32) {
-        // apply_settings から 2 秒ごとに呼ばれるため trace に落とす
-        trace!("音量を設定する: {}%", volume_percent);
-        // 出力コールバック（リアルタイムスレッド）から読むため、ロックを取らない
-        store_volume(&self.volume, normalize_volume(volume_percent));
-    }
-
-    pub fn set_audio_passthrough_enabled(&mut self, enabled: bool) {
-        // apply_settings から 2 秒ごとに呼ばれる。変化の有無を判別できないので trace に落とす
-        trace!("音声パススルーの有効/無効を設定する: {}", enabled);
-        // 出力コールバック（リアルタイムスレッド）から読むため、ロックを取らない
-        self.audio_passthrough_enabled
-            .store(enabled, Ordering::Relaxed);
-    }
-
-    /// ミュートの入切を設定する。
-    ///
-    /// **音量には触らない。** ミュート中も `volume` は元の値のまま残り、
-    /// 解除するとその音量で鳴り始める。
-    pub fn set_muted(&mut self, muted: bool) {
-        // apply_settings から 2 秒ごとに呼ばれるため trace に落とす
-        trace!("ミュートを設定する: {}", muted);
-        // 出力コールバック（リアルタイムスレッド）から読むため、ロックを取らない
-        self.muted.store(muted, Ordering::Relaxed);
-    }
-
     fn find_device_by_name(&self, name: &str, input: bool) -> Result<Device, String> {
         let iter = if input {
             self.host.input_devices()
@@ -953,7 +976,7 @@ fn select_aligned_configs(
 
 /// 対応設定の一覧を用意する。
 ///
-/// 別スレッドで取ったキャッシュがあればそれを使い、無いときだけその場で列挙する。
+/// ワーカーが先に取ったものがあればそれを使い、無いときだけその場で列挙する。
 /// 列挙に失敗したら空を返す。空なら `select_best_config` が `None` を返し、
 /// 呼び出し側がデバイスの既定設定へ落ちる（従来の挙動）。
 fn resolve_ranges<E: std::fmt::Display>(
@@ -1034,16 +1057,6 @@ where
     )
 }
 
-/// 出力コールバックが 1 回ごとに読む共有の値。
-///
-/// 個別の引数で渡していたが数が増えたのでまとめた。どれも `Arc` の複製を
-/// コールバックへ移すだけなので、束ねても寿命の扱いは変わらない。
-struct OutputControls {
-    volume: Arc<AtomicU32>,
-    passthrough_enabled: Arc<AtomicBool>,
-    muted: Arc<AtomicBool>,
-}
-
 /// 出力ストリームを組み立てる。
 ///
 /// `to_sample` はリングバッファの f32 をデバイスのサンプル型へ戻す。
@@ -1052,7 +1065,7 @@ fn build_output_stream_with<T>(
     device: &Device,
     config: &cpal::StreamConfig,
     consumer: Arc<Mutex<AudioConsumer>>,
-    controls: OutputControls,
+    controls: Arc<AudioControls>,
     stream_error: Arc<AtomicBool>,
     mut converter: PassthroughConverter,
     to_sample: impl Fn(f32) -> T + Send + 'static,

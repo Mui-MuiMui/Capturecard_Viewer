@@ -247,14 +247,7 @@ impl CaptureCardViewer {
         // 最新フレームを取り出したらすぐロックを手放す。Arc の複製なので
         // 画素データは複製されず、フレームコールバック側の push を待たせない。
         // スクリーンショットはいま画面に出ている画を保存するので、新着でなくてよい
-        let latest_frame = match self.video_capture.lock() {
-            Ok(video) => video.get_latest_frame(),
-            Err(_) => {
-                warn!("スクリーンショットの出力で video_capture のロックを取得できない");
-                return;
-            }
-        };
-        let Some(frame) = latest_frame else {
+        let Some(frame) = self.frames.latest() else {
             warn!("映像フレームが無いのでスクリーンショットを撮れない");
             // ホットキーを押しても何も起きないように見えるので画面にも出す。
             // 非同期の結果と同じ経路を通して、先に始めた保存の結果に

@@ -146,7 +146,6 @@ impl CaptureCardViewer {
     /// **OSD はここでは出さない。** 音量変更に巻き込まれた解除では、
     /// ミュートの OSD ではなく音量の OSD を出したいため。
     ///
-    /// ロックは settings → audio の順に 1 つずつ取り、重ねない。
     fn apply_muted(&mut self, muted: bool) {
         self.muted = muted;
         if let Ok(mut settings) = self.settings.lock() {
@@ -154,11 +153,7 @@ impl CaptureCardViewer {
         } else {
             warn!("ミュートの設定の反映で settings のロックを取得できない");
         }
-        if let Ok(mut audio) = self.audio_capture.lock() {
-            audio.set_muted(muted);
-        } else {
-            warn!("ミュートの反映で audio_capture のロックを取得できない");
-        }
+        self.audio_controls.set_muted(muted);
         self.mark_settings_dirty();
     }
 

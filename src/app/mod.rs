@@ -17,15 +17,15 @@ mod settings_dialog;
 mod settings_store;
 mod view;
 mod window;
+mod worker;
+mod worker_connect;
+mod worker_loop;
 
-use self::capabilities::{AudioCapabilityResult, CapabilityResult};
-use self::device::{AudioTarget, VideoTarget};
 use self::menu::MenuLayout;
-use self::monitor::VideoLinkAction;
-use self::retry::ConnectRetry;
 use self::screenshot::ScreenshotResult;
 use self::window::needs_drag_move_guard;
-use crate::audio::AudioCapture;
+use self::worker::{DeviceSnapshot, DeviceWorker};
+use crate::audio::AudioControls;
 use crate::hotkey::{HotkeyAction, HotkeyManager};
 use crate::overlay::TransientOverlay;
 use crate::repaint::{next_repaint_delay, should_wake_on_event, RepaintCondition, RepaintWaker};
@@ -33,7 +33,7 @@ use crate::screenshot::ScreenshotManager;
 use crate::settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace};
 use crate::status::ErrorCenter;
 use crate::ui;
-use crate::video::{VideoAdjustments, VideoCapture};
+use crate::video::{SharedColorConversion, VideoAdjustments, VideoFrames};
 use eframe::egui;
 use log::{debug, info, warn};
 use std::path::PathBuf;
@@ -44,8 +44,23 @@ use std::time::Instant;
 
 pub struct CaptureCardViewer {
     settings: Arc<Mutex<AppSettings>>,
-    video_capture: Arc<Mutex<VideoCapture>>,
-    audio_capture: Arc<Mutex<AudioCapture>>,
+    // デバイスを開く・閉じる・列挙する処理の窓口。
+    //
+    // **`VideoCapture` / `AudioCapture` を UI スレッドが直接持たない。**
+    // どちらもワーカースレッドの中にあり、ここからはコマンドを送って
+    // イベントを受け取るだけ（`app::worker`）
+    device: DeviceWorker,
+    // ワーカーが定期的に更新する観測値。update() の先頭で 1 回だけ読む
+    device_snapshot: DeviceSnapshot,
+    // 映像フレームの共有ハンドル。**ここだけはチャネルを通さない。**
+    // コマンドの列に並べると遅延が増えるため、フレームコールバックスレッドと
+    // 直接共有する
+    frames: VideoFrames,
+    // 色空間・レンジ・明るさ・コントラスト・彩度。
+    // フレームコールバックが毎フレーム読む Atomic で、デバイスを開き直さずに効く
+    color_conversion: Arc<SharedColorConversion>,
+    // 音量・ミュート・パススルー。出力コールバックが 1 回ごとに読む Atomic
+    audio_controls: Arc<AudioControls>,
     screenshot_manager: Arc<Mutex<ScreenshotManager>>,
     // グローバルホットキーの登録と押下の検出。
     //
@@ -58,20 +73,6 @@ pub struct CaptureCardViewer {
     // 映像のフレームコールバックとホットキーのリスナーへ複製を渡してある。
     // 最初の update() で egui::Context と結びつく
     repaint_waker: RepaintWaker,
-
-    // デバイス能力の取得結果を受け取るチャネル。
-    // 取得はデバイスを開く重い処理なので使い捨てのスレッドへ投げ、
-    // UI スレッドは update() で try_recv するだけにする
-    capability_tx: Sender<CapabilityResult>,
-    capability_rx: Receiver<CapabilityResult>,
-
-    // オーディオデバイスの対応設定を受け取るチャネル。ビデオと同じ仕組み。
-    // WASAPI の列挙は実測 300ms 前後かかるため、UI スレッドでは行わない
-    audio_capability_tx: Sender<AudioCapabilityResult>,
-    audio_capability_rx: Receiver<AudioCapabilityResult>,
-    // 対応設定が届くのを待ち始めた時刻。`AUDIO_CAPABILITY_WAIT_LIMIT` を
-    // 超えたら待つのをやめ、その場で列挙してでも音声を開く
-    audio_capability_wait_since: Option<Instant>,
 
     // スクリーンショットの保存結果を受け取るチャネル。
     // 保存は別スレッドで行うため、失敗をその場で画面に出せない。
@@ -121,49 +122,15 @@ pub struct CaptureCardViewer {
     video_texture: Option<egui::TextureHandle>,
     // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
     last_frame_generation: u64,
-    // 映像テクスチャの更新で video_capture のロックが取れなかったことを、
-    // 既に警告したか。毎フレーム呼ばれる経路なので、一度記録したら次に
-    // 取得できるまで黙る（`RepaintWaker` の `warned_unbound` と同じ考え方）
-    video_texture_lock_warned: bool,
     // 最後に新しいフレームをテクスチャへ取り込んだ時刻。
     // None は起動してから 1 枚も取り込んでいないことを表す。
     // 再描画の間隔（`repaint::next_repaint_delay`）を決めるために持つ
     last_new_frame_at: Option<Instant>,
-    // フレームの途絶に対して最後に行った処置。
-    // 毎フレーム同じ判定に当たるため、同じ処置を繰り返さないための番人。
-    // 判定が変わったとき（自動再接続を有効にし直したとき）は動けるように、
-    // 真偽値ではなく「何をしたか」で持つ。新しいフレームが届いた時点で
-    // `Keep` へ戻す
-    last_video_link_action: VideoLinkAction,
-    // 途絶を検出して映像を開き直している最中か。
-    // 次に映像が繋がったときだけ音声の再接続も要求するための目印で、
-    // 起動時の接続と区別するために持つ（`should_resync_audio_after_video`）
-    video_reconnect_after_loss: bool,
-    // 直近に観測した「映像ストリームを開けているか」。
-    // 描画のたびに video_capture のロックを取らずに済ませるため、
-    // 毎フレームの監視で拾った値をここに写しておく
-    video_capturing: bool,
-    // ストリームのエラーを理由に音声を開き直した時刻。
-    // 開いた直後に必ず落ちるデバイスで、毎フレーム開き直さないための下限
-    last_audio_error_reconnect: Option<Instant>,
-    // 未処理の音声ストリームのエラーがあるか。
-    // `take_stream_error` は読んだ時点で旗を下ろすため、見送ったエラーを
-    // ここへ移しておかないと、そのまま音が戻らなくなる
-    audio_stream_error_pending: bool,
-    // 最後に適用した実行時パラメータ（差分ベースの再起動回避用）
-    last_video_device: Option<String>,
-    last_video_res: Option<(u32, u32)>,
-    last_video_format: Option<String>,
-    last_audio_device: Option<String>,
-    last_audio_output: Option<String>,
-    last_audio_rate: Option<u32>,
-    last_audio_channels: Option<u16>,
-    last_video_fps: Option<u32>,
-    // 最後に VideoCapture へ渡した色変換の設定。
-    // キャプチャの開き直しは伴わないが、2 秒ごとに video_capture の
-    // ロックを取らずに済むよう、他と同じく差分で判定する
+    // 最後に共有 Atomic へ入れた色変換の設定。
+    // デバイスの開き直しは伴わないが、2 秒ごとの再適用で同じ値を
+    // ログへ出さないよう差分で判定する
     last_color_conversion: Option<(ColorSpace, ColorRange)>,
-    // 最後に VideoCapture へ渡した映像調整（明るさ・コントラスト・彩度）。
+    // 最後に共有 Atomic へ入れた映像調整（明るさ・コントラスト・彩度）。
     // 色変換と同じ理由で差分を取る
     last_video_adjustments: Option<VideoAdjustments>,
     // 最後に適用したスクリーンショットの効果音。
@@ -179,25 +146,17 @@ pub struct CaptureCardViewer {
     // 自分で差分を取るため
     last_sound_file: Option<Option<PathBuf>>,
 
-    // デバイス接続の再試行。映像と音声で別々に持ち、片方が失敗しても
-    // もう片方の再試行に引きずられないようにする
-    video_retry: ConnectRetry<VideoTarget>,
-    audio_retry: ConnectRetry<AudioTarget>,
-
     // 起動直後に 1 度だけ行う処理を済ませたか
     startup_applied: bool,
 
-    // UI性能向上のためのデバイスリストキャッシュ
+    // 設定ダイアログの選択肢に出すデバイス一覧。
+    // 列挙はワーカーが行い、結果が届いたらここへ写す。
     // ビデオは (デバイス名, 説明) の組
     cached_video_devices: Vec<(String, String)>,
     cached_input_devices: Vec<String>,
     cached_output_devices: Vec<String>,
+    // 最後に取り直しを要求した時刻。結果の到着ではなく要求で進める
     last_device_list_update: Option<Instant>,
-
-    // 「既定のデバイス」設定（音声）が Windows 側の既定切り替えに
-    // 追従しているかを確認した最後の時刻。設定ダイアログの開閉に関係なく
-    // 動くので、`last_device_list_update` とは別に持つ
-    last_default_audio_check: Option<Instant>,
 
     // ウィンドウ管理
     always_on_top: bool,
@@ -226,36 +185,36 @@ impl Default for CaptureCardViewer {
         // 複製した先にも最初の update() の bind がそのまま効く
         let repaint_waker = RepaintWaker::new();
 
-        let video_capture = {
-            let mut video_capture = VideoCapture::new();
-            // **start_capture より前に渡すこと。** フレームコールバックは
-            // 開始時点の複製を持つため、あとから渡しても届かない
-            video_capture.set_repaint_waker(repaint_waker.clone());
-            Arc::new(Mutex::new(video_capture))
-        };
-
         let mut hotkey_manager = HotkeyManager::new();
         hotkey_manager.set_repaint_waker(repaint_waker.clone());
 
-        #[allow(clippy::arc_with_non_send_sync)] // 音声キャプチャは非同期処理で必要
-        let audio_capture = Arc::new(Mutex::new(AudioCapture::new()));
         let screenshot_manager = Arc::new(Mutex::new(ScreenshotManager::new()));
-        let (capability_tx, capability_rx) = std::sync::mpsc::channel();
-        let (audio_capability_tx, audio_capability_rx) = std::sync::mpsc::channel();
         let (screenshot_tx, screenshot_rx) = std::sync::mpsc::channel();
+
+        // デバイスに触るものは、すべてワーカースレッドの中で作る。
+        // ここから渡すのは UI スレッドとも共有する 3 つだけ
+        let frames = VideoFrames::new();
+        let color_conversion = Arc::new(SharedColorConversion::new());
+        let audio_controls = Arc::new(AudioControls::default());
+        let device = DeviceWorker::spawn(
+            frames.clone(),
+            Arc::clone(&color_conversion),
+            Arc::clone(&audio_controls),
+            // **フレームコールバックへ渡る窓口。** キャプチャを開くより前に
+            // 渡す必要があるので、ワーカーの起動時に持たせる
+            repaint_waker.clone(),
+        );
 
         let mut app = Self {
             settings,
-            video_capture,
-            audio_capture,
+            device,
+            device_snapshot: DeviceSnapshot::default(),
+            frames,
+            color_conversion,
+            audio_controls,
             screenshot_manager,
             hotkey_manager,
             repaint_waker,
-            capability_tx,
-            capability_rx,
-            audio_capability_tx,
-            audio_capability_rx,
-            audio_capability_wait_since: None,
             screenshot_tx,
             screenshot_rx,
             errors: ErrorCenter::default(),
@@ -280,35 +239,18 @@ impl Default for CaptureCardViewer {
             autosave: AutoSavePolicy::from_load_outcome(load_outcome),
             video_texture: None,
             last_frame_generation: 0,
-            video_texture_lock_warned: false,
             last_new_frame_at: None,
-            last_video_link_action: VideoLinkAction::Keep,
-            video_reconnect_after_loss: false,
-            video_capturing: false,
-            last_audio_error_reconnect: None,
-            audio_stream_error_pending: false,
-            last_video_device: None,
-            last_video_res: None,
-            last_video_format: None,
-            last_audio_device: None,
-            last_audio_output: None,
-            last_audio_rate: None,
-            last_audio_channels: None,
-            last_video_fps: None,
             last_color_conversion: None,
             last_video_adjustments: None,
             last_sound_file: None,
 
-            video_retry: ConnectRetry::default(),
-            audio_retry: ConnectRetry::default(),
             startup_applied: false,
 
-            // UI性能向上のためのデバイスリストキャッシュ
+            // デバイス一覧のキャッシュ。ワーカーの列挙結果が届いたら入る
             cached_video_devices: Vec::new(),
             cached_input_devices: Vec::new(),
             cached_output_devices: Vec::new(),
             last_device_list_update: None,
-            last_default_audio_check: None,
 
             // ウィンドウ管理
             always_on_top: false,
@@ -317,42 +259,23 @@ impl Default for CaptureCardViewer {
             screenshot_save_threads: Vec::new(),
         };
 
-        // 保存されたデバイスがない場合は自動選択
+        // **未設定のデバイス名はここで埋めない。** 列挙は映像で 1〜3ms、
+        // 音声で 300ms 前後かかり、ウィンドウが出る前にその分だけ待たせる
+        // ことになる。ワーカーが最初の `ApplyConfig` で列挙して決め、
+        // `DefaultDevicesResolved` で返してくる（`device::store_resolved_devices`）。
+        //
+        // **入力デバイスは出力と違い、未設定のままにしない。** 出力の
+        // 既定は「スピーカー」でまず無害だが、入力の既定は環境依存
+        // （ノート PC ならほぼ確実に内蔵マイク）で、パススルーが
+        // そのままマイクの音をスピーカーへ流してしまう。#134（PR #147）
+        // で切断時に同じことが起きる不具合を直したばかりで、初回起動で
+        // 同じ誤動作を起こすわけにいかない。
+        //
+        // この結果、入力側の「既定のデバイス」追従は、設定ファイルを手で
+        // 編集して input_device_name を消した場合にだけ効く。設定画面の
+        // コンボボックスに「デフォルト」の選択肢を足すかどうかは別 Issue で判断する
         {
             if let Ok(mut s) = app.settings.lock() {
-                if s.video.device_name.is_none() {
-                    let devices = VideoCapture::list_devices();
-                    if let Some((name, _)) = devices.first() {
-                        s.video.device_name = Some(name.clone());
-                    }
-                }
-                // **入力デバイスは出力と違い、未設定のままにしない。** 出力の
-                // 既定は「スピーカー」でまず無害だが、入力の既定は環境依存
-                // （ノート PC ならほぼ確実に内蔵マイク）で、パススルーが
-                // そのままマイクの音をスピーカーへ流してしまう。#134（PR #147）
-                // で切断時に同じことが起きる不具合を直したばかりで、初回起動で
-                // 同じ誤動作を起こすわけにいかない。列挙した先頭のデバイスへ
-                // 書き換えて確定させる。
-                //
-                // この結果、入力側の「既定のデバイス」追従（poll_default_audio_device
-                // の track_input）は、設定ファイルを手で編集して
-                // input_device_name を消した場合にだけ効く。設定画面の
-                // コンボボックスに「デフォルト」の選択肢を足すかどうかは
-                // 別 Issue で判断する
-                if s.audio.input_device_name.is_none() {
-                    let ac = AudioCapture::new();
-                    let list = ac.list_input_devices();
-                    debug!("利用できる入力デバイス: {:?}", list);
-                    if let Some(name) = list.first() {
-                        s.audio.input_device_name = Some(name.clone());
-                        info!("入力デバイスの既定を {} にした", name);
-                    }
-                }
-                if s.audio.output_device_name.is_none() {
-                    // 出力デバイスはデフォルト（None）で自動選択させる
-                    s.audio.output_device_name = None;
-                    debug!("出力デバイスは既定（自動選択）にする");
-                }
                 // タイトルバーなしで保存されているのに画面ドラッグ移動が切れている
                 // 場合を直す。右クリックメニューからの切替では set_borderless が
                 // 同じ判定で守っているが、設定ファイルは手で編集できるため、
@@ -382,7 +305,10 @@ impl Default for CaptureCardViewer {
         // 設定画面を開いた時点で選択肢が揃っているようにするためで、
         // 以前はデバイスを切り替えたときしか取得していなかったため、
         // 起動後に設定画面を開いても解像度や FPS の選択肢が出なかった。
-        // 接続と並行して走るので、設定画面を開く頃には揃っている
+        //
+        // **要求を積むだけで、コマンドとして流すのは最初の `update()`。**
+        // ワーカーはコマンドを受けた順に処理するので、ここで流すと
+        // 数百 ms かかる能力取得の後ろで最初の接続が待たされる
         let saved_video_device = match app.settings.lock() {
             Ok(s) => s.video.device_name.clone(),
             Err(_) => {
@@ -394,16 +320,12 @@ impl Default for CaptureCardViewer {
             app.settings_dialog.capabilities_mut().request(&device);
         }
 
-        // 音声デバイスの対応設定も先に取りに行く。
-        //
-        // **設定画面のためだけではない。** 音声を開く `start_passthrough` は
-        // 対応設定の一覧を要るので、キャッシュが無いと UI スレッドで列挙する
-        // ことになる（実測 300ms）。最初の接続はこの結果が届くまで待つ
-        app.request_audio_capabilities();
-        app.dispatch_capability_requests();
+        // 音声デバイスの対応設定はワーカーが開く直前に自分で取りに行くので、
+        // ここからは要求しない。設定画面を開いたときの一覧にも、そのとき
+        // 返ってきた結果がそのまま入る
 
-        // 注: デバイスの接続は最初の update() で始まり、失敗したら
-        // ConnectRetry のバックオフで繋がるまで再試行する
+        // 注: デバイスの接続は最初の update() の apply_settings(true) で
+        // 要求され、失敗したらワーカー側のバックオフで繋がるまで再試行する
         app
     }
 }
@@ -420,9 +342,15 @@ impl eframe::App for CaptureCardViewer {
         // 最初のフレームの到着を知らせる先が無い
         self.repaint_waker.bind(ctx);
 
-        // 別スレッドで取得したデバイス能力を取り込む。
-        // 設定ダイアログを開いていなくても受け取る（起動時の先読み分があるため）
-        self.drain_capability_results();
+        // ワーカーから届いた結果（接続の成否、デバイス能力、デバイス一覧）を
+        // 取り込む。設定ダイアログを開いていなくても受け取る
+        self.drain_device_events();
+
+        // デバイスワーカーの観測値を 1 回だけ読む。以降の描画や
+        // 「接続状態」タブはここから引く（ロックを取り直さない）。
+        // **イベントを取り込んだ後に読む。** ワーカーはイベントを送る前に
+        // 観測値を書き出すので、この順なら少なくともそのイベントの時点の値が入る
+        self.device_snapshot = self.device.snapshot();
 
         // 別スレッドで行ったスクリーンショットの保存結果を取り込む。
         // 失敗はここでトーストになる
@@ -432,8 +360,8 @@ impl eframe::App for CaptureCardViewer {
         //
         // 以前はここで「起動から 2 秒」待ってからデバイスを開いていた。
         // 待つ根拠がコードにもコミットにも残っておらず、実測でも接続自体は
-        // 0.1 秒で終わるため、最初のフレームで始める。開けなかった場合は
-        // ConnectRetry のバックオフが繋がるまで面倒を見る
+        // 0.1 秒で終わるため、最初のフレームで要求する。開けなかった場合は
+        // ワーカー側のバックオフが繋がるまで面倒を見る
         if !self.startup_applied {
             self.startup_applied = true;
             info!("起動直後の設定適用とデバイスの接続を始める");
@@ -448,22 +376,15 @@ impl eframe::App for CaptureCardViewer {
             }));
         }
 
-        // 期限が来ているデバイスの接続を 1 回だけ試す。
-        // 繋がっている間は bool を 2 つ見るだけで抜ける
-        self.poll_device_connection();
-
         // ビデオフレームを更新。新着の時刻は末尾の再描画の予約で使う
         if self.update_video_texture(ctx) {
             self.last_new_frame_at = Some(Instant::now());
         }
 
-        // フレームの途絶と音声ストリームのエラーを見て、必要なら開き直しを要求する。
-        // 実際に開くのは次のフレームの poll_device_connection
-        self.monitor_device_health();
-
-        // 「既定のデバイス」設定が Windows 側の既定切り替えに追従しているかを
-        // 確認する。設定ダイアログの開閉に関係なく、数秒おきに動く
-        self.poll_default_audio_device();
+        // 接続の再試行、フレームの途絶の検出、音声ストリームのエラーの回収、
+        // Windows 側の既定デバイスの追従は、どれもワーカースレッドが自前の
+        // タイマーで回す。**`update()` からは何も駆動しない。** 最小化中は
+        // ここが呼ばれないため、駆動すると自動再接続が止まる（#133）
 
         // グローバルホットキーを処理
         self.handle_hotkeys(ctx);
@@ -473,13 +394,9 @@ impl eframe::App for CaptureCardViewer {
             self.apply_settings(false);
         }
 
-        // 音量が変更された場合、オーディオバックエンドに伝播
+        // 音量が変更された場合、出力コールバックが読む Atomic へ伝播
         if (self.volume - self.last_volume_sent).abs() > 0.5 {
-            if let Ok(mut audio) = self.audio_capture.lock() {
-                audio.set_volume(self.volume);
-            } else {
-                warn!("音量の伝播で audio_capture のロックを取得できない");
-            }
+            self.audio_controls.set_volume(self.volume);
             self.last_volume_sent = self.volume;
         }
 
@@ -573,10 +490,13 @@ impl eframe::App for CaptureCardViewer {
                 self.hotkey_manager.errors(),
             );
             self.handle_settings_dialog_action(action);
-
-            // ダイアログが積んだ取得要求を別スレッドへ渡す
-            self.dispatch_capability_requests();
         }
+
+        // 溜まったデバイス能力の取得要求をワーカーへ流す。
+        // **設定ダイアログの描画より後に置く。** 起動直後の先読み分も
+        // ここで初めて流れるので、最初の `ApplyConfig`（＝接続の要求）が
+        // 数百 ms かかる能力取得に追い越されない
+        self.dispatch_capability_requests();
 
         // ホットキー入力ダイアログを開いた最初のフレームで、グローバルホットキーを
         // 一時解除する。**ダイアログの描画より前に行う。** こうしないと、開いた
@@ -715,6 +635,10 @@ impl eframe::App for CaptureCardViewer {
         } else {
             warn!("読めなかった設定ファイルを残しているため、終了時の保存を行わない");
         }
+
+        // デバイスワーカーにストリームを閉じさせ、終わるまで待つ。
+        // 待たないと、閉じる途中でプロセスごと落ちる
+        self.device.shutdown();
 
         // 撮った直後に閉じても最後の 1 枚が残るように、保存の完了を待ってから抜ける。
         // ここで待たないと、main が返った時点でプロセスごと落ちて

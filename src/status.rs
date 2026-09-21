@@ -240,8 +240,8 @@ pub fn truncate(text: &str, limit: usize) -> String {
 
 /// 映像か音声、片方の接続状態。設定ダイアログの「接続状態」タブへ渡す。
 ///
-/// **`VideoCapture` / `AudioCapture` から値を複製して作る。** 描画中に
-/// ロックを取らないようにするためで、`stats()` / `link_state()` と同じ流儀。
+/// **デバイスワーカーが書き出した観測値（`DeviceSnapshot`）から作る。**
+/// 描画中にデバイスへ問い合わせないようにするため。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinkStatus {
     /// ストリームを開けているか
