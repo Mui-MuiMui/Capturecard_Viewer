@@ -50,7 +50,7 @@ cargo build --release
 | `src/screenshot.rs` | rodio による効果音の読み込みと再生 |
 | `src/settings.rs` | `AppSettings` とその serde 定義、confy による読み書き、保存パスの決定、旧形式からの移行 |
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |
-| `src/ui.rs` | 設定ダイアログとホットキー設定ダイアログの描画 |
+| `src/ui.rs` | 設定ダイアログとホットキー設定ダイアログの描画。**状態を持たず、書き換えるのもドラフトだけ。** 起きたことは `SettingsEvent` / `HotkeyDialogEvent` の列で返す |
 | `src/status.rs` | 失敗の記録（`ErrorCenter`）とトーストの間引き判定、設定ダイアログへ渡す接続状態（`ConnectionStatus`）、日本語の定型文 |
 | `src/repaint.rs` | 次の再描画までの間隔の判定（`next_repaint_delay`）と、UI スレッド以外から再描画を促す窓口（`RepaintWaker`） |
 
@@ -367,6 +367,15 @@ toggle_fullscreen = "Ctrl+F11"
 
 設定ダイアログは共有の `AppSettings` を直接書き換えない。開いたときに複製した `SettingsDialogState` のドラフトを編集し、実行中の設定へ移るのは「適用」と「OK」のときだけ。閉じるときは必ずドラフトを捨てる。
 
+**描画関数が書き換えてよいのはそのドラフトだけ。** `ui::show_settings_dialog` が受け取るのは `&mut AppSettings`（ドラフト）と、`SettingsDialogState::split_for_draw` が作る読み取り専用の `SettingsDialogView`（タブの選択、デバイス能力キャッシュ、「その他」タブのメッセージ、プリセットの名前入力）だけで、**共有設定の `Arc<Mutex<AppSettings>>` は渡さない。** ダイアログの開閉・タブの切り替え・能力の取得要求・ファイルダイアログといった副作用は `SettingsEvent` の列で返し、`app::settings_dialog::handle_settings_events` が処理する。
+
+- **イベントは受け取った順に処理する。** 並びに意味がある。名前を打ちながら「保存」を押すと `SetNewPresetName` → `SaveNewPreset` の順で並び、後者は呼び出し側が持つ入力欄の値を使う
+- **`SettingsEvent::Dialog`（適用 / OK / キャンセル）は必ず列の最後。** 同じフレームに起きた他の操作（プリセットの読み込みなど）を反映してから閉じるため
+- `SettingsDialogAction` に入れてよいのはダイアログの開閉と反映に関わる 3 つだけ。テスト再生や書き出しのようにダイアログを動かさない操作は `SettingsEvent` の別の変種にする。混ぜると `transition_for` が「何もしない」変種ばかりになり、足した操作が誤って反映や保存を引き起こす余地が残る
+- **タブの選択とタイトルバーの × は、複製したローカルへ書かせてからイベントで返す。** `selectable_value` と `egui::Window::open()` が `&mut` を要求するため。このフレームの描画にはローカルの値を使うので、切り替えた直後の 1 フレームだけ前のタブが出ることはない
+- ホットキー入力ダイアログも同じ。`ui::show_hotkey_capture_dialog` は `HotkeyDialogEvent` の列を返し、**受け取る側は `Close` を反映してから `Captured` を処理する。** 登録に失敗したときはそのあと開き直すので、順序が逆だと開き直した直後に閉じてしまう
+- 拒否の理由は、そのフレームの判定結果を表示に使い、覚えてもらうために `Rejected` も返す。イベントの反映を待って表示すると、キーを押したまま次の再描画が来ないときに一度も出ない
+
 | 操作 | 反映 | ファイルへ保存 | 閉じる |
 |---|---|---|---|
 | 適用 | する | する | しない |
@@ -374,7 +383,7 @@ toggle_fullscreen = "Ctrl+F11"
 | キャンセル | しない | しない | する |
 | ×（タイトルバー） | しない | しない | する（キャンセルと同じ） |
 
-- × は `egui::Window::open()` が `show_settings` を false にするだけでボタンが押されないため、描画後の開閉状態から `ui::resolve_action` が拾ってキャンセルへ倒している
+- × は `egui::Window::open()` に渡したローカルの bool を false にするだけでボタンが押されないため、描画後の開閉状態から `ui::resolve_action` が拾ってキャンセルへ倒している
 - **「適用」と「OK」の違いは閉じるかどうかだけ。** 保存の有無で分けると「適用したのに再起動で戻る」という曖昧さが残るため、Windows のプロパティシートと同じ意味に揃えてある
 - **キャンセルは「適用」で反映済みの内容を戻さない。** 戻すには反映前の状態をもう 1 つ持つ必要があり、デバイスの開き直しも 2 度走る
 - 反映は `ui::commit_draft` が `video` / `audio` / `screenshot` / `hotkeys` / `presets` / `active_preset` と、ダイアログが編集する `ui` の 2 項目（`maintain_aspect_ratio` / `volume`）だけに限っている。`ui` を丸ごと入れると、ダイアログを開いている間に動かしたウィンドウの位置が巻き戻る。**ダイアログに `ui` の項目を足すときは `commit_draft` にも足すこと**
@@ -384,9 +393,13 @@ toggle_fullscreen = "Ctrl+F11"
 - ホットキー入力ダイアログと効果音のテスト再生もドラフトを見る。ドラフトへ書いたホットキーはその場で登録しない（2 秒ごとの `apply_settings` が共有設定側の古い値で登録し直してしまうため）
 - ホットキー入力ダイアログは**どのアクションを編集中か**を `HotkeyCaptureState::editing` で持つ。`reset()` でも消さないのは、「クリア」で閉じたときに呼び出し側がどのアクションを未設定にすべきか分からなくなるため
 
-タブ選択・デバイス能力キャッシュ・ホットキー入力も `SettingsDialogState` が持つ。これらは設定の中身ではないので「キャンセル」や `end_edit` では捨てず、ダイアログを開き直しても引き継ぐ。**`ui.rs` に `static` を追加しないこと。** ダイアログの新しい状態は `SettingsDialogState` へ追加する。
+タブ選択・デバイス能力キャッシュ・ホットキー入力・「その他」タブの表示状態も `SettingsDialogState` が持つ。これらは設定の中身ではないので「キャンセル」や `end_edit` では捨てず、ダイアログを開き直しても引き継ぐ（「その他」タブのメッセージと確認待ち、プリセットの名前入力だけは例外で、ドラフトについての表示なので `begin_edit` / `end_edit` で捨てる）。**`ui.rs` に `static` を追加しないこと。** ダイアログの新しい状態は `SettingsDialogState` へ追加し、**描画側へは `SettingsDialogView` の読み取り専用の借用として渡すこと。**
 
-「テスト再生」は `SettingsDialogAction::TestSound` として呼び出し側へ返し、`CaptureCardViewer` が鳴らす。ダイアログは閉じず、設定も保存もしない。
+「テスト再生」は `SettingsEvent::TestSound` として呼び出し側へ返し、`CaptureCardViewer` が鳴らす。ダイアログは閉じず、設定も保存もしない。
+
+デバイス能力のキャッシュも描画中には触らない。描画は `CapabilityCache::awaits_defaults` のような `&self` のメソッドで読み、「取得したい」「既定値の選び直しを済ませたので目印を落としてよい」を `SettingsEvent::Capability` で返す。**目印（`awaiting_defaults`）を読んだら必ず落とす要求を返すこと。** 残すと、ユーザーが選び直したフォーマットを毎フレーム先頭へ戻してしまう。
+
+`rfd` のファイルダイアログも描画の中からは開かない。`PickScreenshotFolder` / `PickSoundFile` を返し、フレームを描き終えた `app` が開く。UI スレッドを止めるモーダルなので、描画の途中で開くと止まった位置のフレームが画面に残る。
 
 **警告や状態の表示は `ui.rs` のヘルパー（`warning_label` / `notice_label` / `status_badge`）を使い、`Color32::YELLOW` のような固定色を直接書かないこと。** 彩度の高い色を文字に使うとテーマの背景と合わずに読めなくなる。ヘルパーはテーマ由来の色を薄く敷いた背景と記号（`⚠` / `×` / `●`）で種別を示す。
 
@@ -394,7 +407,7 @@ toggle_fullscreen = "Ctrl+F11"
 
 `SettingsTab::Other`（`ui::show_other_tab`）に 3 つのボタンを置いてある。下部の「OK / キャンセル / 適用」の並びへ足さなかったのは、**「初期化」が「OK」の隣に来る並びを作らないため。** 説明をボタンの真下に書けることも理由。
 
-`ui.rs` は何も実行しない。`SettingsDialogAction::ExportSettings` / `ImportSettings` / `ResetDraft` を返し、`CaptureCardViewer` がファイルダイアログとファイル I/O を行う。
+`ui.rs` は何も実行しない。`SettingsEvent::ExportSettings` / `ImportSettings` / `ResetDraft` を返し、`CaptureCardViewer` がファイルダイアログとファイル I/O を行う。
 
 | 操作 | 対象 | 反映のタイミング |
 |---|---|---|
