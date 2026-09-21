@@ -25,7 +25,22 @@ cargo build --release
 
 | ファイル | 役割 |
 |---|---|
-| `src/main.rs` | アプリ状態 `CaptureCardViewer`、`eframe::App` 実装、映像描画、コンテキストメニュー、デバイス接続の要求とバックオフ再試行、スクリーンショット処理、エントリポイント |
+| `src/main.rs` | エントリポイント。ロガーの初期化、`NativeOptions` の組み立て、`run_native` だけ |
+| `src/platform.rs` | Windows 固有処理。日本語フォントの探索、埋め込みアイコンの読み込み、モニタの作業領域の列挙、保存されたウィンドウの大きさ・位置が使えるかの判定 |
+| `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`Default`、`eframe::App` 実装（`update` / `on_exit`） |
+| `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、プレースホルダーの文言、統計 OSD、テクスチャの取り込み |
+| `src/app/menu.rs` | 右クリックメニューの中身と、平らな一覧／サブメニューの出し分け |
+| `src/app/window.rs` | 最前面表示、タイトルバーの有無、装飾なしのときの端のドラッグによるリサイズ、大きさのリセット、フルスクリーンの切り替え |
+| `src/app/device.rs` | 接続（`poll_device_connection` / `try_connect_video` / `try_connect_audio`）と `apply_settings` |
+| `src/app/monitor.rs` | 一度繋がったあとの切断の検出、既定デバイスの切り替えの追従 |
+| `src/app/retry.rs` | `ConnectRetry` とバックオフ。「いつ試してよいか」だけを持つ |
+| `src/app/capabilities.rs` | デバイス一覧のキャッシュと、デバイス能力・対応設定の取得（別スレッド + チャネル） |
+| `src/app/screenshot.rs` | 撮影、保存スレッドの管理、結果の取り込み |
+| `src/app/settings_dialog.rs` | 設定ダイアログの操作の受け止め、インポート / エクスポート / 初期化、プリセットの適用 |
+| `src/app/settings_store.rs` | 設定のデバウンス保存と即時保存 |
+| `src/app/hotkeys.rs` | ホットキーの適用と、押されたときのアクションの実行 |
+| `src/app/audio_control.rs` | 音量とミュートの操作、その OSD |
+| `src/app/error_report.rs` | 失敗の記録と、トースト・「接続状態」タブへの出し方 |
 | `src/video.rs` | nokhwa `CallbackCamera` によるキャプチャ、YUY2→RGB 変換、`FrameBuffer`（`Arc` によるフレーム共有と世代番号）、デバイス能力の取得 |
 | `src/audio.rs` | cpal による入力→リングバッファ→出力のパススルー、音量制御 |
 | `src/hotkey.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）、global-hotkey によるアクション別の登録とリスナースレッド、押下の検出とデバウンス、ホットキー文字列のパース |
@@ -35,6 +50,10 @@ cargo build --release
 | `src/ui.rs` | 設定ダイアログとホットキー設定ダイアログの描画 |
 | `src/status.rs` | 失敗の記録（`ErrorCenter`）とトーストの間引き判定、設定ダイアログへ渡す接続状態（`ConnectionStatus`）、日本語の定型文 |
 | `src/repaint.rs` | 次の再描画までの間隔の判定（`next_repaint_delay`）と、UI スレッド以外から再描画を促す窓口（`RepaintWaker`） |
+
+`src/app/` の子モジュールは**どれも `impl CaptureCardViewer` を足す形**で、状態そのものは `app/mod.rs` の構造体 1 つに集めてある。**子モジュール側にフィールドや `static` を持たせないこと。** 他の子モジュールから呼ぶメソッドにだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
+
+1 ファイル 800 行以内を目安にする。超えそうなら分け方を見直す。
 
 ### 映像パイプライン
 
@@ -237,7 +256,7 @@ toggle_fullscreen = "Ctrl+F11"
 - 知らないアクション名は読み飛ばしてログに残す。エラーにすると設定ファイル全体が読めなくなる
 - **読み込みは `#[serde(from = "RawAppSettings")]` を通る。** どの経路で読んでも移行が走るようにするためで、`AppSettings` に項目を足すときは `RawAppSettings` と `From` にも足すこと
 
-アクションを増やすときは `HotkeyAction` に variant を足し、`ALL` / `as_str` / `label` の 3 か所と、`main.rs` の `run_hotkey_action` を埋める。**`as_str` の文字列は設定ファイルに書かれるので、一度出した名前は変えない。** 実行は右クリックメニューや映像上の操作と同じメソッドを呼ぶこと（`set_always_on_top` / `adjust_volume` / `reconnect_devices` / `toggle_fullscreen`）。独自に書くと、同じ操作なのに設定の保存やオーバーレイ表示の有無が経路で変わる。
+アクションを増やすときは `HotkeyAction` に variant を足し、`ALL` / `as_str` / `label` の 3 か所と、`src/app/hotkeys.rs` の `run_hotkey_action` を埋める。**`as_str` の文字列は設定ファイルに書かれるので、一度出した名前は変えない。** 実行は右クリックメニューや映像上の操作と同じメソッドを呼ぶこと（`set_always_on_top` / `adjust_volume` / `reconnect_devices` / `toggle_fullscreen`）。独自に書くと、同じ操作なのに設定の保存やオーバーレイ表示の有無が経路で変わる。
 
 登録は `HotkeyManager::apply` が差分だけ行う。2 秒ごとに呼ばれるため、無条件に登録し直すとその瞬間の入力を取りこぼす。登録できなかったものは `errors()` に残り、設定画面に理由が出る。**直るまで毎回試し直すが、ログに出すのは理由が変わったときだけ**（同じ失敗が 2 秒ごとに積もらないように）。
 
@@ -273,7 +292,7 @@ toggle_fullscreen = "Ctrl+F11"
 
 **設定を書き換える処理を足すときは `AppSettings::save()` を直接呼ばず `mark_settings_dirty()` を使うこと。** 直接呼ぶと、ウィンドウをドラッグしている間ずっと毎フレーム TOML を書き出す元の問題に戻る。
 
-例外は 2 つ。起動時の書き戻し（`may_write_defaults_on_startup()` で守られている）と、設定ダイアログの「適用」「OK」（`main.rs` の `handle_settings_dialog_action`）。後者はユーザーの明示的な保存操作なので即座に書き出す。
+例外は 2 つ。起動時の書き戻し（`may_write_defaults_on_startup()` で守られている）と、設定ダイアログの「適用」「OK」（`src/app/settings_dialog.rs` の `handle_settings_dialog_action`）。後者はユーザーの明示的な保存操作なので即座に書き出す。
 
 #### 壊れた設定ファイルが残っている間は自動保存しない
 
