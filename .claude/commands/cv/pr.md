@@ -25,7 +25,7 @@ PR をまだ作っていなければ「初回」、既にある PR にレビュ�
 
 **マージ先は `dev`。** `gh pr create --base dev` を明示する。既定が `main` になっていることがあるため、毎回指定する。
 
-PR 本文の書式は `naming-conventions` skill の「PR タイトル」「PR 本文」に従う。**対応する Issue は `Refs #<番号>` で参照する。`Closes` / `Fixes` は使わない**（理由は同 skill の「`Closes` ではなく `Refs` を使う」）。
+PR タイトルは `naming-conventions` skill の「PR タイトル」に従う。**本文は `.github/pull_request_template.md` の見出しに沿って書く。** 埋めるときの決まりは同 skill の「PR 本文」。**対応する Issue は `Refs #<番号>` で参照する。`Closes` / `Fixes` は使わない**（理由は同 skill の「`Closes` ではなく `Refs` を使う」）。
 
 本文を `gh pr create` に渡すとき、ヒアドキュメントに `git` という語が含まれると worktree 分離の保護に引っかかることがある。その場合は本文を一時ファイルに書いて `--body-file` で渡し、作成後に削除する。
 
@@ -90,7 +90,7 @@ PR の題意が変わった場合はタイトルと本文も更新する。
 
 1. `dev` を同期する
 2. worktree とブランチを削除する（ローカルとリモートの両方）
-3. Issue に `status:人間確認待ち` ラベルを付け、Project の Status を「人間確認待ち」にする。**部分実装だった場合はラベルを付けず、残りをコメントして「作業中」のままにする**
+3. Project の Status を「人間確認待ち」にする。**部分実装だった場合は変えず、残りをコメントして「作業中」のままにする**
 
 **Issue は閉じない。** 閉じるのは人が実機で確認したとき。
 
