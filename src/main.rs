@@ -694,6 +694,10 @@ pub struct CaptureCardViewer {
     show_context_menu: bool,
     show_hotkey_dialog: bool,
     context_menu_pos: egui::Pos2,
+    // 右クリックメニューを平らな一覧にするかサブメニューへ折りたたむか。
+    // メニューを開いた瞬間に決めて、開いている間は変えない（詳細は
+    // `open_context_menu` のコメント）
+    context_menu_layout: MenuLayout,
     is_fullscreen: bool,
     maintain_aspect_ratio: bool,
     // 映像に統計を重ねて表示するか。設定の ui.show_stats_overlay と対応する
@@ -858,6 +862,9 @@ impl Default for CaptureCardViewer {
             show_context_menu: false,
             show_hotkey_dialog: false,
             context_menu_pos: egui::Pos2::ZERO,
+            // メニューが閉じている間は使われない。開くときに必ず
+            // open_context_menu が上書きする
+            context_menu_layout: MenuLayout::Collapsed,
             is_fullscreen: false,
             maintain_aspect_ratio: true,
             show_stats_overlay,
@@ -1581,9 +1588,8 @@ impl CaptureCardViewer {
                     }
 
                     if response.secondary_clicked() {
-                        self.show_context_menu = true;
-                        self.context_menu_pos =
-                            ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+                        let pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+                        self.open_context_menu(ctx, pos);
                     }
 
                     self.handle_middle_click_mute(&response);
@@ -1610,9 +1616,8 @@ impl CaptureCardViewer {
 
                     // 空エリアでの右クリックを処理
                     if response.secondary_clicked() {
-                        self.show_context_menu = true;
-                        self.context_menu_pos =
-                            ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+                        let pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+                        self.open_context_menu(ctx, pos);
                     }
 
                     self.handle_middle_click_mute(&response);
@@ -1671,9 +1676,8 @@ impl CaptureCardViewer {
 
                     // 右クリックでコンテキストメニュー
                     if response.secondary_clicked() {
-                        self.show_context_menu = true;
-                        self.context_menu_pos =
-                            ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+                        let pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+                        self.open_context_menu(ctx, pos);
                     }
 
                     self.handle_middle_click_mute(&response);
@@ -1700,9 +1704,8 @@ impl CaptureCardViewer {
 
                     // 右クリックでコンテキストメニュー
                     if response.secondary_clicked() {
-                        self.show_context_menu = true;
-                        self.context_menu_pos =
-                            ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+                        let pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+                        self.open_context_menu(ctx, pos);
                     }
 
                     self.handle_middle_click_mute(&response);
@@ -1809,6 +1812,31 @@ impl CaptureCardViewer {
     /// メニューごと画面内へ押し戻し、幅は画面より広くならないように縮め、
     /// それでも足りない高さは `ScrollArea` でスクロールできるようにする。
     /// 項目を足すときはどれも壊さないこと。
+    /// 右クリックメニューを開く。位置と、平らな一覧にするかサブメニューへ
+    /// 折りたたむかをこの時点で確定させる。
+    ///
+    /// **判定は開いた瞬間の 1 回だけ行い、開いている間は毎フレーム描画に
+    /// 合わせて計算し直さない。** ウィンドウをリサイズしながらメニューを
+    /// 出しっぱなしにできる egui の仕様上、毎フレーム判定すると境界付近で
+    /// 開閉のたびにレイアウトが入れ替わってちらつく。
+    fn open_context_menu(&mut self, ctx: &egui::Context, pos: egui::Pos2) {
+        self.show_context_menu = true;
+        self.context_menu_pos = pos;
+
+        let frame = egui::Frame::popup(&ctx.style());
+        let (_, max_height) =
+            context_menu_size_limits(ctx.screen_rect().size(), frame.inner_margin.sum());
+        // プリセットが 1 つでもあれば、平らな一覧に「プリセット」の行が
+        // 1 行増える（preset_submenu、詳細は estimate_flat_menu_height）
+        let has_presets = self
+            .settings
+            .lock()
+            .map(|settings| !settings.presets.is_empty())
+            .unwrap_or(false);
+        let flat_height = estimate_flat_menu_height(&ctx.style().spacing, has_presets);
+        self.context_menu_layout = context_menu_layout(max_height, flat_height);
+    }
+
     fn show_context_menu(&mut self, ctx: &egui::Context) {
         let mut close_menu = false;
         // メニュー本体と、開いているサブメニューの矩形。外側クリックの判定に使う。
@@ -1832,18 +1860,33 @@ impl CaptureCardViewer {
                     ui.set_min_width(width);
                     ui.set_max_width(width);
 
+                    // 折りたたみ判定は開いた時点で確定済み（open_context_menu）。
+                    // ここでは保険として ScrollArea と constrain_to をどちらの
+                    // レイアウトでも残す。見積もりが外れて平らな一覧が実際には
+                    // 収まらなかった場合の逃げ道になる
                     egui::ScrollArea::vertical()
                         .max_height(max_height)
                         // 横は縮めない。縮むと項目の幅が中身ごとに変わって揃わない
                         .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            self.context_menu_items(
-                                ctx,
-                                ui,
-                                width,
-                                &mut menu_rects,
-                                &mut close_menu,
-                            );
+                        .show(ui, |ui| match self.context_menu_layout {
+                            MenuLayout::Flat => {
+                                self.context_menu_items_flat(
+                                    ctx,
+                                    ui,
+                                    width,
+                                    &mut menu_rects,
+                                    &mut close_menu,
+                                );
+                            }
+                            MenuLayout::Collapsed => {
+                                self.context_menu_items(
+                                    ctx,
+                                    ui,
+                                    width,
+                                    &mut menu_rects,
+                                    &mut close_menu,
+                                );
+                            }
                         });
                 });
                 // 構築後、エリアの完全な矩形をキャプチャ
@@ -1866,6 +1909,165 @@ impl CaptureCardViewer {
 
         if close_menu {
             self.show_context_menu = false;
+        }
+    }
+
+    /// 右クリックメニューの項目を、折りたたまずに平らな一覧として描く。
+    ///
+    /// **項目順は PR #146 より前と同じ。** サブメニューへ分けたところ、
+    /// 隠れて操作性が落ちるという実機確認の指摘を受けたため、ウィンドウの
+    /// 高さが十分なときは使い慣れたこちらの並びへ戻す。動作そのものは
+    /// `context_menu_items` / `view_submenu` / `window_submenu` と同じで、
+    /// 見せ方（階層に分けるかどうか）だけが違う。
+    ///
+    /// **「プリセット」だけは折りたたみの有無に関わらずサブメニューのまま
+    /// 出す。** プリセットは固定の切り替えではなく可変長の一覧なので、平らな
+    /// 一覧に展開すると項目数がプリセットの数だけ増減し、高さの見積もり
+    /// （`estimate_flat_menu_height` は固定の行数を前提にしている）と
+    /// 食い違う。そのため `menu_rects` を受け取る（`preset_submenu` が開く
+    /// サブメニューの矩形を外側クリックの判定に含めるため）。
+    fn context_menu_items_flat(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        width: f32,
+        menu_rects: &mut Vec<egui::Rect>,
+        close_menu: &mut bool,
+    ) {
+        ui.label(format!("音量: {}%", self.volume as i32));
+        let volume_response =
+            ui.add(egui::Slider::new(&mut self.volume, MIN_VOLUME..=MAX_VOLUME).suffix("%"));
+        if volume_response.changed() {
+            self.set_volume_from_ui(self.volume);
+        }
+
+        let mut muted = self.muted;
+        if ui.checkbox(&mut muted, "ミュート").changed() {
+            self.set_muted_from_ui(muted);
+        }
+
+        ui.separator();
+
+        let aspect_response = ui.checkbox(&mut self.maintain_aspect_ratio, "アスペクト比を維持");
+        if aspect_response.changed() {
+            if let Ok(mut settings) = self.settings.lock() {
+                settings.ui.maintain_aspect_ratio = self.maintain_aspect_ratio;
+            }
+            self.mark_settings_dirty();
+        }
+
+        let always_on_top_response = ui.checkbox(&mut self.always_on_top, "最前面表示");
+        if always_on_top_response.changed() {
+            self.set_always_on_top(ctx, self.always_on_top);
+        }
+
+        let fullscreen_response = ui.checkbox(&mut self.is_fullscreen, "フルスクリーン表示");
+        if fullscreen_response.changed() {
+            self.toggle_fullscreen(ctx, self.is_fullscreen);
+        }
+
+        let mut temp_borderless = self.borderless;
+        let borderless_response = ui
+            .add_enabled(
+                !self.is_fullscreen,
+                egui::Checkbox::new(&mut temp_borderless, "タイトルバーを隠す"),
+            )
+            .on_hover_text(
+                "タイトルバーと枠を消します。移動は映像のドラッグ、サイズ変更はウィンドウ端のドラッグ、終了はこのメニューの「終了」か Alt+F4 で行います",
+            )
+            .on_disabled_hover_text("フルスクリーン中は元から装飾がないため切り替えられません");
+        if borderless_response.changed() {
+            self.set_borderless(ctx, temp_borderless);
+        }
+
+        let enable_drag_move = if let Ok(settings) = self.settings.lock() {
+            settings.ui.enable_drag_move
+        } else {
+            true
+        };
+        let mut temp_enable_drag_move = enable_drag_move;
+        let drag_move_response = ui
+            .add_enabled(
+                !self.borderless,
+                egui::Checkbox::new(&mut temp_enable_drag_move, "画面ドラッグ移動"),
+            )
+            .on_disabled_hover_text(
+                "タイトルバーを隠している間は、ウィンドウを動かす唯一の手段なので切れません",
+            );
+        if drag_move_response.changed() {
+            if let Ok(mut settings) = self.settings.lock() {
+                settings.ui.enable_drag_move = temp_enable_drag_move;
+            }
+            self.mark_settings_dirty();
+        }
+
+        let stats_response = ui.checkbox(&mut self.show_stats_overlay, "情報表示");
+        if stats_response.changed() {
+            if let Ok(mut settings) = self.settings.lock() {
+                settings.ui.show_stats_overlay = self.show_stats_overlay;
+            }
+            self.mark_settings_dirty();
+        }
+
+        let auto_reconnect = if let Ok(settings) = self.settings.lock() {
+            settings.video.auto_reconnect
+        } else {
+            true
+        };
+        let mut temp_auto_reconnect = auto_reconnect;
+        let auto_reconnect_response = ui
+            .checkbox(&mut temp_auto_reconnect, "デバイスの自動再接続")
+            .on_hover_text(
+                "映像が途切れたり音声デバイスが消えたときに、自動でデバイスを開き直します",
+            );
+        if auto_reconnect_response.changed() {
+            if let Ok(mut settings) = self.settings.lock() {
+                settings.video.auto_reconnect = temp_auto_reconnect;
+            }
+            info!(
+                "デバイスの自動再接続を{}にした",
+                if temp_auto_reconnect {
+                    "有効"
+                } else {
+                    "無効"
+                }
+            );
+            self.mark_settings_dirty();
+        }
+
+        ui.separator();
+
+        if ui
+            .add_enabled(
+                !self.is_fullscreen,
+                egui::Button::new("ウィンドウサイズをリセット"),
+            )
+            .on_disabled_hover_text("フルスクリーン中は変更できません")
+            .clicked()
+        {
+            self.reset_window_size(ctx);
+            *close_menu = true;
+        }
+        if ui.button("デバイス再接続").clicked() {
+            self.reconnect_devices();
+            *close_menu = true;
+        }
+
+        // プリセットは映像と音声の取り込み方の切替なので、
+        // 「デバイス再接続」のすぐそばに置く（collapsed 側と同じ理由）
+        self.preset_submenu(ui, width, menu_rects, close_menu);
+
+        ui.separator();
+        if ui.button("詳細設定...").clicked() {
+            self.show_settings = true;
+            *close_menu = true;
+        }
+
+        ui.separator();
+        if ui.button("終了").clicked() {
+            info!("右クリックメニューから終了する");
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            *close_menu = true;
         }
     }
 
@@ -2229,6 +2431,75 @@ fn context_menu_size_limits(screen_size: egui::Vec2, frame_margin: egui::Vec2) -
         CONTEXT_MENU_WIDTH.min(available.x).max(0.0),
         available.y.max(0.0),
     )
+}
+
+/// 右クリックメニューの見せ方。
+///
+/// `Flat` は PR #146 より前と同じ、切り替え系も含めた 1 階層の一覧。
+/// `Collapsed` は PR #146 のサブメニュー構成（「表示」「ウィンドウ」）。
+/// 実機確認でサブメニューは操作性が落ちるという指摘を受けたため、
+/// **ウィンドウが十分に高いときは `Flat` を使う。** 収まらないときだけ
+/// `Collapsed` へ落とす。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuLayout {
+    Flat,
+    Collapsed,
+}
+
+/// 平らな一覧（PR #146 以前の構成）の見積もり行数とセパレータ数。
+///
+/// 内訳は `CaptureCardViewer::context_menu_items_flat` の並びと対応させて
+/// あるので、あちらの項目を増減したときはこちらも直すこと。
+///
+/// 行: 音量ラベル / 音量スライダー / ミュート / アスペクト比を維持 /
+/// 最前面表示 / フルスクリーン表示 / タイトルバーを隠す / 画面ドラッグ移動 /
+/// 情報表示 / デバイスの自動再接続 / ウィンドウサイズをリセット /
+/// デバイス再接続 / 詳細設定... / 終了 の 14 行。**プリセットが 1 つでも
+/// あれば「プリセット」の行が 1 つ増える。** プリセットの有無は起動後にいつ
+/// 変わるか分からないため固定の行数には含めず、`estimate_flat_menu_height`
+/// の引数で足す。
+/// セパレータ: ミュートの下 / 自動再接続の下（ウィンドウサイズをリセットの上）/
+/// デバイス再接続の下 / 詳細設定の下 の 4 本。プリセットの行はセパレータを
+/// 増やさない（デバイス再接続の直後に挟まるだけ）。
+const FLAT_MENU_ROW_COUNT: usize = 14;
+const FLAT_MENU_SEPARATOR_COUNT: usize = 4;
+
+/// 平らな一覧の高さを、描画前に見積もる。
+///
+/// 実測はしない。実測しようとすると「一度サブメニュー構成で描いてから
+/// 高さを比べる」といった余分な描画が要る。行の高さは
+/// `interact_size.y + item_spacing.y`（チェックボックスやボタンの
+/// クリック領域＋行間）、セパレータは egui の実装に合わせて
+/// `item_spacing.y * 2.0 + 1.0`（線の上下の余白＋線そのものの太さ）で
+/// 見積もる。多少のずれは境界の判定に影響するだけで、実際に描画した
+/// ときにスクロールへ倒れる分には安全側（`context_menu_layout` 側で
+/// 境界を `Flat` 寄りにしてあるのはこのため）。
+///
+/// `has_presets` はプリセットが 1 つ以上あるかどうか。あれば行数に 1 を
+/// 足す（`preset_submenu` が平らな一覧にも「プリセット」の行を描くため）。
+/// ここを固定 14 行のままにすると、プリセットがある状態でちょうど境界の
+/// 高さのとき、実際には収まらない `Flat` を選んでしまう
+fn estimate_flat_menu_height(spacing: &egui::style::Spacing, has_presets: bool) -> f32 {
+    let row_count = FLAT_MENU_ROW_COUNT + usize::from(has_presets);
+    let row_height = spacing.interact_size.y + spacing.item_spacing.y;
+    let separator_height = spacing.item_spacing.y * 2.0 + 1.0;
+    row_count as f32 * row_height + FLAT_MENU_SEPARATOR_COUNT as f32 * separator_height
+}
+
+/// 右クリックメニューを平らな一覧にするかサブメニューへ折りたたむかを決める。
+///
+/// 平らな一覧の見積もり高さ（`flat_height`）が使える高さ（`available_height`、
+/// `context_menu_size_limits` の高さ側）に収まるなら `Flat`。
+///
+/// **境界（ちょうど収まる）は `Flat` に倒す。** `flat_height` は見積もりで
+/// あり、実測より大きめに出ることはあっても小さめに出ることは想定していない
+/// ため、同点なら操作性の良い平らな一覧を優先してよい。
+fn context_menu_layout(available_height: f32, flat_height: f32) -> MenuLayout {
+    if flat_height <= available_height {
+        MenuLayout::Flat
+    } else {
+        MenuLayout::Collapsed
+    }
 }
 
 /// 統計オーバーレイに出す行を組み立てる。
@@ -4499,6 +4770,82 @@ mod tests {
 
         assert_eq!(width, 0.0);
         assert_eq!(max_height, 0.0);
+    }
+
+    #[test]
+    fn context_menu_layout_fits_within_available_height_is_flat() {
+        assert_eq!(context_menu_layout(500.0, 480.0), MenuLayout::Flat);
+    }
+
+    #[test]
+    fn context_menu_layout_exact_fit_is_flat() {
+        // ちょうど収まる境界は、はみ出す側ではなく平らな一覧を優先する
+        assert_eq!(context_menu_layout(480.0, 480.0), MenuLayout::Flat);
+    }
+
+    #[test]
+    fn context_menu_layout_overflow_by_a_hair_is_collapsed() {
+        assert_eq!(context_menu_layout(480.0, 480.1), MenuLayout::Collapsed);
+    }
+
+    #[test]
+    fn context_menu_layout_zero_available_height_is_collapsed() {
+        // 高さが取れない画面では、平らな一覧は絶対に収まらない
+        assert_eq!(context_menu_layout(0.0, 1.0), MenuLayout::Collapsed);
+    }
+
+    #[test]
+    fn context_menu_layout_huge_available_height_is_flat() {
+        assert_eq!(context_menu_layout(f32::MAX, 480.0), MenuLayout::Flat);
+    }
+
+    #[test]
+    fn estimate_flat_menu_height_with_default_style_is_positive() {
+        let spacing = egui::Style::default().spacing;
+        assert!(estimate_flat_menu_height(&spacing, false) > 0.0);
+    }
+
+    #[test]
+    fn estimate_flat_menu_height_grows_with_row_height() {
+        // 行が高くなるほど見積もりも大きくなること。逆行すると、
+        // フォントサイズを上げたときに折りたたみ判定が正しく働かなくなる
+        let mut spacing = egui::Style::default().spacing;
+        let base = estimate_flat_menu_height(&spacing, false);
+
+        spacing.interact_size.y *= 2.0;
+        let taller = estimate_flat_menu_height(&spacing, false);
+
+        assert!(taller > base);
+    }
+
+    #[test]
+    fn estimate_flat_menu_height_with_presets_adds_one_row() {
+        // プリセットがあると「プリセット」の行が 1 つ増える。ここが
+        // ずれると、プリセットがある状態でだけ折りたたみ判定を誤る
+        let spacing = egui::Style::default().spacing;
+        let without_presets = estimate_flat_menu_height(&spacing, false);
+        let with_presets = estimate_flat_menu_height(&spacing, true);
+
+        let row_height = spacing.interact_size.y + spacing.item_spacing.y;
+        assert!((with_presets - without_presets - row_height).abs() < 1e-3);
+    }
+
+    #[test]
+    fn context_menu_layout_presets_row_tips_the_boundary_to_collapsed() {
+        // プリセットが無ければちょうど収まる高さでも、プリセットの分だけ
+        // 見積もりが増えると収まらなくなり、Collapsed へ倒れる
+        let spacing = egui::Style::default().spacing;
+        let flat_without_presets = estimate_flat_menu_height(&spacing, false);
+        let flat_with_presets = estimate_flat_menu_height(&spacing, true);
+
+        assert_eq!(
+            context_menu_layout(flat_without_presets, flat_without_presets),
+            MenuLayout::Flat
+        );
+        assert_eq!(
+            context_menu_layout(flat_without_presets, flat_with_presets),
+            MenuLayout::Collapsed
+        );
     }
 
     #[test]
