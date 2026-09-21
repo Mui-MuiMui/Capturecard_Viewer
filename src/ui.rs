@@ -340,7 +340,7 @@ impl HotkeyCaptureState {
     /// 一覧の「設定...」から呼ぶ。
     pub fn begin_for(&mut self, action: HotkeyAction) {
         self.editing = Some(action);
-        self.rejection = None;
+        self.clear_rejection();
     }
 
     /// 編集中のアクション。まだ一度も開いていなければ `None`。
@@ -368,7 +368,7 @@ impl HotkeyCaptureState {
     /// `editing` は残す。ダイアログを開き直しても直前の編集対象が分かるように
     /// するためで、実害も無い（次に一覧の「設定...」が押されたときに入れ替わる）。
     pub fn reset(&mut self) {
-        self.rejection = None;
+        self.clear_rejection();
     }
 }
 
@@ -2321,7 +2321,6 @@ pub fn show_hotkey_capture_dialog(
 
     match &judgement {
         HotkeyCaptureJudgement::Accepted(candidate) => {
-            capture.clear_rejection();
             outcome = HotkeyDialogOutcome::Captured(candidate.clone());
             close_dialog = true;
         }
@@ -2334,9 +2333,13 @@ pub fn show_hotkey_capture_dialog(
                 other.label()
             ));
         }
-        HotkeyCaptureJudgement::Waiting => {
-            capture.clear_rejection();
-        }
+        // 待機中でもここでは理由を消さない。呼び出し側（main.rs）が
+        // `HotkeyManager::try_register` の失敗理由をこのフレームより後で
+        // `set_rejection` することがあり、ここで無条件に消すと次のフレームの
+        // 冒頭（このアームの判定）で即座に消えて一度も表示されない。
+        // 理由を消すのは `begin_for`（編集対象の切り替え）と `reset`
+        // （キャンセル・× で閉じる）の役目
+        HotkeyCaptureJudgement::Waiting => {}
     }
 
     egui::Window::new("ホットキー設定")
