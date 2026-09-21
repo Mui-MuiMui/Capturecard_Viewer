@@ -141,7 +141,7 @@ Presets are managed in the **その他 (Other)** tab of the settings window and 
 | 上書き保存 (Overwrite) | Replaces that preset with the video and audio settings you are editing |
 | 削除 (Delete) | Removes it from the list |
 
-- **A preset holds only the video and audio settings from the device settings tab** — device name, format, resolution, FPS, color space, color range, image adjustments (brightness / contrast / saturation), input and output devices, sample rate, channel count and audio passthrough. Screenshot settings, hotkeys and window settings are not included: having the save folder or your hotkeys change underneath you when switching presets would be hard to make sense of.
+- **A preset holds only the video and audio settings from the device settings tab** — device name, format, resolution, FPS, color space, color range, image adjustments (brightness / contrast / saturation), input and output devices, sample rate, channel count, audio buffer length and audio passthrough. Screenshot settings, hotkeys and window settings are not included: having the save folder or your hotkeys change underneath you when switching presets would be hard to make sense of.
 - **Automatic device reconnection is not included either.** Whatever you set from the right-click menu stays as it is.
 - Names must be unique, and a name made only of whitespace is rejected.
 - **Adding, overwriting, deleting and loading all act on the draft**, like every other edit. They reach the running application when you press 適用 or OK, and キャンセル discards all of them.
@@ -227,7 +227,10 @@ The adjustments are folded into the YUY2 -> RGB coefficients, so **the CPU cost 
 
 - Sample rate: 48000 Hz (chosen from the values the devices support)
 - Channels: 2
+- Audio buffer: 50 ms (20-200 ms)
 - Audio passthrough: enabled
+
+**音声バッファ (Audio buffer)** is how much audio is held between the input and the output, and it becomes the audio latency directly. **The smaller it is, the lower the latency, but the more likely you are to hear crackling.** The best value depends on the PC and the devices, so look for the smallest value that stays free of crackling. Changing it and pressing 適用 (Apply) or OK reopens the audio stream only; the video keeps running.
 
 The sample rate and channel options only list values that **both the input and the output device support**. As with video, the capabilities are queried on a worker thread, so switching devices does not freeze the window. A spinner is shown while the query runs; if it fails, the reason and a 再取得 (retry) button appear and the options fall back to a fixed list.
 
