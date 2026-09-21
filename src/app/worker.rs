@@ -154,10 +154,9 @@ pub(super) struct DeviceSnapshot {
     pub(super) active_audio: Option<ActiveAudio>,
     pub(super) video_retry: RetryStatus,
     pub(super) audio_retry: RetryStatus,
-    /// 音声のクロックドリフト補正の現在値。「接続状態」タブへ出す想定だが、
-    /// 表示側（`ui.rs`）はまだ実装していないので読まれていない（Issue #132）。
-    /// 表示を足すまでの間、警告を黙らせる
-    #[allow(dead_code)]
+    /// 音声のクロックドリフト補正の現在値。「接続状態」タブへ出す
+    /// （`app::error_report::connection_status` が `status::format_resample_status`
+    /// で文言に組み立てる）
     pub(super) audio_resample: Option<ResampleStatus>,
 }
 
