@@ -29,6 +29,8 @@ description: 指示役から Issue を渡されて並行開発するサブエー
 3. `.claude/skills/verify/SKILL.md`
 4. `.github/pull_request_template.md`
 
+テストを書く担当なら `.claude/skills/testing-conventions/SKILL.md` も先に読む。テストの置き場所・境界値・異常系の決まりはそちらが持っている。**ドキュメントだけを触る担当では読まなくてよい。**
+
 `docs/design/*.md` は**担当領域に関係するものだけ**読む。どれを読むかは `CLAUDE.md` の「設計の理由はどこにあるか」の表から選ぶ。13 本あるので全部読まない。
 
 Issue の本文は `gh issue view <番号>` で読む。**本文の `file:line` は起票時点のスナップショットなので、着手前に実コードで裏を取る。**
@@ -68,7 +70,7 @@ mv "$APPDATA/capturecard_viewer/config/default-config.toml.agent-bak" "$APPDATA/
 
 書式は `naming-conventions` skill の「コミットメッセージ」。本文に次の 2 行を入れる。
 
-```
+```text
 Refs: #<Issue 番号>
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
@@ -78,14 +80,11 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 
 ## 5. PR を出す
 
-マージ先は `dev`。`gh pr create --base dev` を明示する。手順は `.claude/commands/cv/pr.md` の「初回」。
+**手順は `.claude/commands/cv/pr.md` の「初回」をそのまま踏む。** マージ先が `dev` であること、本文を `.github/pull_request_template.md` の見出しに沿って自分で並べること、`Refs #<番号>` を使うこと、末尾に `🤖 Generated with [Claude Code](https://claude.com/claude-code)` を付けることは、すべてそちらと `naming-conventions` skill にある。ここには再掲しない。
 
-- **本文は `.github/pull_request_template.md` の見出しに沿う。** テンプレートが自動で差し込まれるのは既定ブランチ（`main`）にある版だけで、`--body-file` で渡す経路では差し込まれない。**ファイルを読んで見出しを自分で並べる**
-- 「対応する Issue」は `Refs #<番号>`
-- 末尾に `🤖 Generated with [Claude Code](https://claude.com/claude-code)` を付ける
-- 本文は一時ファイルに書いて `--body-file` で渡す。ヒアドキュメントに `git` の語が含まれると worktree 分離の保護に引っかかることがある
+サブエージェントとして足すのは 1 点だけ。
 
-Issue にも PR の URL をコメントする（`--body-file` で渡す）。**「人間が dev で確認すること」を操作手順と期待結果の形で書く。** マージ後に人がなぞるのはこのコメントで、最終報告ではない。
+**PR 本文と Issue コメントが詳細の置き場所になる。** 最終報告は 20 行に絞るので（9 節）、変更の要点・確認手順・CodeRabbit 対応の経緯はここへ書き切る。特に Issue コメントの「人間が dev で確認すること」は、マージ後に人がなぞる唯一の手順になるため、**操作手順と期待結果の形**で書く。
 
 ## 6. CI と CodeRabbit を確認する
 
@@ -99,14 +98,9 @@ CI が起動しないときは PR を閉じて開き直すと発火する。
 gh pr close <番号> && gh pr reopen <番号>
 ```
 
-CodeRabbit のレビューは PR 作成から 2〜3 分後に届く。
+CodeRabbit のレビューは PR 作成から 2〜3 分後に届く。**読み方と対応の仕方は `.claude/commands/cv/pr.md` の「レビュー対応」に従う**（取得するコマンド、追加のコミットで積むこと、採用しない指摘に理由を返信すること）。
 
-```bash
-gh pr view <番号> --comments
-gh api repos/{owner}/{repo}/pulls/<番号>/comments
-```
-
-妥当な指摘は**追加のコミット**で対応する。採用しない指摘は理由を PR に返信する（黙って無視しない）。判断が分かれるものは直す前に最終報告の「判断を仰ぐ点」へ回す。
+サブエージェントとして足すのは、**判断が分かれる指摘は直さずに最終報告の「判断を仰ぐ点」へ回す**こと。指示役に確認せず方針を決めない。
 
 既知の誤検知。出ても採用しない。
 
@@ -152,7 +146,7 @@ grep -c "mod tests" src/*.rs src/app/*.rs
 
 **20 行以内。厳守。** この 5 項目だけを書く。
 
-```
+```text
 PR: #<番号> <URL>
 判断を仰ぐ点: （無ければ「なし」）
 未確認事項: （実機が要るものなど。無ければ「なし」）
@@ -175,7 +169,7 @@ PR: #<番号> <URL>
 
 指示役がサブエージェントへ渡す依頼文。**共通の手順はこの skill が持つので、書くのはタスク固有の部分だけ。** 10〜20 行に収める。
 
-```
+```text
 あなたは Capturecard_Viewer（Rust / eframe）の <担当領域> 担当です。
 この skill（.claude/skills/subagent-workflow/SKILL.md）に従ってください。
 
