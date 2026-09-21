@@ -385,9 +385,10 @@ pub fn nearest_channels(values: &[u16], desired: u16) -> Option<u16> {
 
 /// パススルーを開くときの要求。
 ///
-/// 引数で渡していたが、対応設定のキャッシュを加えて 6 つになったので構造体へ
-/// まとめた。`input_*` と `output_*` はどちらも同じ型で、順番を取り違えても
-/// コンパイルが通ってしまうため、名前で区別できる形にする意味もある。
+/// 引数で渡していたが、対応設定のキャッシュとバッファ長を加えて 7 つに
+/// なったので構造体へまとめた。`input_*` と `output_*` はどちらも同じ型で、
+/// 順番を取り違えてもコンパイルが通ってしまうため、名前で区別できる形に
+/// する意味もある。
 pub struct PassthroughRequest<'a> {
     pub input_device_name: Option<&'a str>,
     pub output_device_name: Option<&'a str>,
