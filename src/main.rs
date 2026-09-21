@@ -225,11 +225,13 @@ const CONNECT_BACKOFF_BASE: Duration = Duration::from_millis(200);
 /// ときの反応が悪くなる。5 秒で頭打ちにして、挿してから最大 5 秒で繋がるようにする。
 const CONNECT_BACKOFF_MAX: Duration = Duration::from_millis(5000);
 
-/// 音声で、この回数だけ連続して失敗したあとに既定のデバイスを試す。
+/// 音声で、この回数だけ連続して失敗したら「繋がっていない」ことをログに残す。
 ///
-/// 設定に残っているデバイス名が古くて存在しない場合、そのまま待ち続けても
-/// 永久に音が出ない。元の実装と同じ 3 回目に合わせてある。
-const AUDIO_DEFAULT_FALLBACK_AFTER: u32 = 3;
+/// **ここで別のデバイスへ倒したりはしない。** 以前は同じ 3 回目に既定の
+/// デバイスへフォールバックしていた（`decide_audio_fallback` を参照）。
+/// 残したのはログだけで、回数を合わせてあるのは、以前のログと同じ位置に
+/// 「ここで方針が分かれていた」という目印を置くため。
+const AUDIO_RETRY_WARN_AFTER: u32 = 3;
 
 /// フレームが途絶えてから「映像が切れた」と判断するまでの時間。
 ///
@@ -365,6 +367,59 @@ fn decide_audio_reconnect(
         return AudioErrorAction::Wait;
     }
     AudioErrorAction::Reconnect
+}
+
+/// 音声の接続に失敗したあと、その場で何をするか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioFallbackAction {
+    /// 何もしない。`ConnectRetry` のバックオフで次の回を待つ
+    Retry,
+    /// 繋がらないまま再試行を続けることを 1 度だけ記録し、あとは `Retry` と同じ
+    WarnAndRetry,
+}
+
+/// 音声の接続に失敗したときに、その回で何をするかを決める。
+///
+/// **どの回でも接続先は変えない。** 以前は 3 回失敗した時点で入出力とも
+/// Windows の既定デバイスで開き直していたが、これが USB を抜いた直後の
+/// 再接続でも効いていた。設定のデバイスが消えている間は必ず 3 回失敗する
+/// （1.5 秒）一方、USB の再列挙には 10 秒以上かかるため、**フォールバックが
+/// 必ず勝って PC のマイクを入力として掴み、接続成功として確定してしまう**
+/// （#134）。以後は設定のデバイスを試さないので音は戻らず、おまけにマイクの
+/// 音がスピーカーへ流れ続ける。
+///
+/// 起動時も同じ扱いにしてある。設定のデバイスが見つからないときに黙って
+/// 別のデバイスを開くのは、音が出ないことより分かりにくい誤動作のため。
+/// 繋がらないことは「接続状態」タブと通知に出るので、気付く手段はある。
+///
+/// 残っているのは「繋がらないまま再試行を続けている」ことをログへ 1 度だけ
+/// 残す判断だけ。毎回出すとログが埋まり、一度も出さないと調査で気付けない。
+fn decide_audio_fallback(attempt: u32) -> AudioFallbackAction {
+    if attempt == AUDIO_RETRY_WARN_AFTER {
+        return AudioFallbackAction::WarnAndRetry;
+    }
+    AudioFallbackAction::Retry
+}
+
+/// 映像が復帰したときに、音声にも再接続を要求するかを判定する。
+///
+/// 映像と音声は同じ USB 機器なので、映像が戻ったなら音声のデバイスも戻って
+/// いる。音声側のバックオフ（最大 5 秒）を待たせる理由が無いため、そこで
+/// 待ち時間を飛ばす。**保険であって主経路ではない。** 音声の切断は cpal の
+/// エラーコールバックが拾い、`monitor_audio_stream` が再接続を要求する。
+///
+/// **音声が開けていて再試行も走っていないなら何もしない。** 映像だけが
+/// 消える構成（音声は別のマイク）で、無事だったストリームを開き直すと
+/// その都度 UI スレッドが 300ms 止まる。
+fn should_resync_audio_after_video(
+    video_recovered: bool,
+    audio_connected: bool,
+    audio_retry_active: bool,
+) -> bool {
+    if !video_recovered {
+        return false;
+    }
+    !audio_connected || audio_retry_active
 }
 
 /// 映像が出ていないときに画面へ出す文言を決める。
@@ -630,6 +685,10 @@ pub struct CaptureCardViewer {
     // 真偽値ではなく「何をしたか」で持つ。新しいフレームが届いた時点で
     // `Keep` へ戻す
     last_video_link_action: VideoLinkAction,
+    // 途絶を検出して映像を開き直している最中か。
+    // 次に映像が繋がったときだけ音声の再接続も要求するための目印で、
+    // 起動時の接続と区別するために持つ（`should_resync_audio_after_video`）
+    video_reconnect_after_loss: bool,
     // 直近に観測した「映像ストリームを開けているか」。
     // 描画のたびに video_capture のロックを取らずに済ませるため、
     // 毎フレームの監視で拾った値をここに写しておく
@@ -774,6 +833,7 @@ impl Default for CaptureCardViewer {
             last_frame_generation: 0,
             last_new_frame_at: None,
             last_video_link_action: VideoLinkAction::Keep,
+            video_reconnect_after_loss: false,
             video_capturing: false,
             last_audio_error_reconnect: None,
             audio_stream_error_pending: false,
@@ -2552,30 +2612,102 @@ fn main() -> Result<(), eframe::Error> {
     )
 }
 
+/// 日本語フォントの候補。優先度順（先頭ほど優先）。
+/// (ログ・フォント名として使う表示名, フォントファイル名)
+///
+/// Meiryo が入っていない環境（Windows の言語パックを最小構成にした場合など）でも
+/// 日本語が豆腐（□）にならないよう、Windows に同梱されていることが多いフォントを
+/// 順に候補として並べてある。
+const JAPANESE_FONT_CANDIDATES: &[(&str, &str)] = &[
+    ("Meiryo", "meiryo.ttc"),
+    ("Yu Gothic UI (Medium)", "YuGothM.ttc"),
+    ("Yu Gothic UI (Regular)", "YuGothR.ttc"),
+    ("Yu Gothic", "yugothic.ttf"),
+    ("MS Gothic", "msgothic.ttc"),
+    ("BIZ UDGothic", "BIZ-UDGothicR.ttc"),
+];
+
+/// `JAPANESE_FONT_CANDIDATES` を優先度順に、`font_dirs` を引数の順に探し、
+/// 最初に実在したファイルを返す。デバイスや `%AppData%` に触らない純粋関数にするため、
+/// 探索対象のディレクトリ一覧は呼び出し側から渡す。
+fn find_japanese_font(font_dirs: &[PathBuf]) -> Option<(&'static str, PathBuf)> {
+    for (name, filename) in JAPANESE_FONT_CANDIDATES {
+        for dir in font_dirs {
+            let path = dir.join(filename);
+            if path.is_file() {
+                return Some((name, path));
+            }
+        }
+    }
+    None
+}
+
+/// 日本語フォントを探すディレクトリ一覧。システム共通のフォントディレクトリに加えて、
+/// 管理者権限なしでユーザー単位にインストールされたフォント（「自分のみにインストール」）
+/// も見る。パスは `%WINDIR%` / `%LOCALAPPDATA%` から組み立て、`C:\Windows` のように
+/// 決め打ちにしない。通常の Windows 環境ではどちらも設定されているが、
+/// 万一 `%WINDIR%` が取れない場合はシステム共通のフォントディレクトリを諦め、
+/// ユーザー単位のフォントディレクトリだけを見る
+#[cfg(target_os = "windows")]
+fn japanese_font_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    match std::env::var_os("WINDIR") {
+        Some(windir) => dirs.push(PathBuf::from(windir).join("Fonts")),
+        None => warn!(
+            "環境変数 WINDIR が取得できないため、システム共通のフォントディレクトリは探索しません"
+        ),
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(local_app_data).join(r"Microsoft\Windows\Fonts"));
+    }
+    dirs
+}
+
 fn configure_japanese_font(ctx: &egui::Context) {
-    // WindowsフォントディレクトリからMeiryoの読み込みを試行
     #[cfg(target_os = "windows")]
     {
-        let candidate_paths = [
-            "C:/Windows/Fonts/meiryo.ttc",
-            "C:/Windows/Fonts/Meiryo.ttc",
-            "C:/Windows/Fonts/meiryob.ttc",
-        ];
-        for p in candidate_paths.iter() {
-            if let Ok(data) = std::fs::read(p) {
-                let mut fonts = egui::FontDefinitions::default();
-                fonts
-                    .font_data
-                    .insert("meiryo".to_string(), egui::FontData::from_owned(data));
-                // 優先度のためにプロポーショナル・等幅フォントファミリーの先頭に挿入
-                if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                    fam.insert(0, "meiryo".to_string());
+        let font_dirs = japanese_font_search_dirs();
+        match find_japanese_font(&font_dirs) {
+            Some((name, path)) => match std::fs::read(&path) {
+                Ok(data) => {
+                    info!(
+                        "日本語フォントとして {} を使用します ({})",
+                        name,
+                        path.display()
+                    );
+                    let mut fonts = egui::FontDefinitions::default();
+                    fonts
+                        .font_data
+                        .insert("japanese".to_string(), egui::FontData::from_owned(data));
+                    // 優先度のためにプロポーショナル・等幅フォントファミリーの先頭に挿入する。
+                    // egui 既定の絵文字フォント等はそのまま残るため、Meiryo 等に無い記号は
+                    // 引き続きフォールバックで描画される
+                    if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                        fam.insert(0, "japanese".to_string());
+                    }
+                    if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                        fam.insert(0, "japanese".to_string());
+                    }
+                    ctx.set_fonts(fonts);
                 }
-                if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                    fam.insert(0, "meiryo".to_string());
+                Err(e) => {
+                    warn!(
+                        "日本語フォント候補 {} の読み込みに失敗しました: {}",
+                        path.display(),
+                        e
+                    );
                 }
-                ctx.set_fonts(fonts);
-                break;
+            },
+            None => {
+                let tried: Vec<&str> = JAPANESE_FONT_CANDIDATES
+                    .iter()
+                    .map(|(_, filename)| *filename)
+                    .collect();
+                warn!(
+                    "日本語フォント候補が 1 つも見つかりませんでした（探索先: {:?}, 候補: {}）。既定フォントのまま起動します",
+                    font_dirs,
+                    tried.join(", ")
+                );
             }
         }
     }
@@ -2799,6 +2931,9 @@ impl CaptureCardViewer {
         // 確かめる。再試行の間隔は最大 5 秒で頭打ちなので、
         // MediaFoundation への問い合わせもその頻度を超えない
         self.last_video_device = None;
+        // 次に繋がったときは、同じ USB 機器の音声も戻っているとみなして
+        // 音声の再接続も要求する。起動時の接続と区別するためにここで立てる
+        self.video_reconnect_after_loss = true;
         self.video_retry.request_now(target);
         info!("映像デバイスの再接続を要求した");
     }
@@ -2899,6 +3034,11 @@ impl CaptureCardViewer {
                 self.last_video_res = settings.video.resolution;
                 self.last_video_format = settings.video.format.clone();
                 self.last_video_fps = settings.video.fps;
+                // 途絶から復帰したのであれば、音声も同時に戻っているはず。
+                // **旗はここで落とす。** 残すと、以降の接続のたびに音声を
+                // 開き直してしまう
+                let recovered = std::mem::take(&mut self.video_reconnect_after_loss);
+                self.resync_audio_after_video_recovery(settings, recovered);
             }
             Err(e) => {
                 warn!("映像デバイスへの接続に失敗した（{} 回目）: {}", attempt, e);
@@ -2912,11 +3052,43 @@ impl CaptureCardViewer {
         }
     }
 
+    /// 映像が途絶から復帰したときに、音声の再接続も要求する。
+    ///
+    /// 音声の切断は cpal のエラーコールバックが拾うのが主経路で、これはその
+    /// 保険。映像が戻った時点でバックオフの残り（最大 5 秒）を飛ばす。
+    ///
+    /// **ここでもデバイスを開かない。** 要求を立てるだけにして、実際に開くのは
+    /// 次のフレームの `poll_device_connection`。
+    ///
+    /// ロックは video を手放したあとに audio を取る（settings → video → audio）。
+    fn resync_audio_after_video_recovery(&mut self, settings: &AppSettings, recovered: bool) {
+        if !recovered {
+            return;
+        }
+        let audio_connected = match self.audio_capture.lock() {
+            Ok(audio) => audio.active().is_some(),
+            Err(_) => {
+                warn!("映像の復帰にあわせた音声の確認で audio_capture のロックを取得できない");
+                return;
+            }
+        };
+        if !should_resync_audio_after_video(
+            recovered,
+            audio_connected,
+            self.audio_retry.is_active(),
+        ) {
+            debug!("音声は繋がっているので、映像の復帰にあわせた開き直しはしない");
+            return;
+        }
+        self.last_audio_device = None;
+        self.audio_retry.request_now(audio_target(settings));
+        info!("映像が戻ったので、音声デバイスの再接続も要求した");
+    }
+
     /// 音声デバイスへの接続を 1 回だけ試す。
     ///
-    /// 設定のデバイス名で開けない状態が続くと永久に音が出ないため、
-    /// `AUDIO_DEFAULT_FALLBACK_AFTER` 回目の失敗の直後だけ、Windows の
-    /// 既定デバイスで 1 度開き直す。
+    /// **開けなくても、別のデバイスへは倒さない。** 失敗が続いたときの扱いは
+    /// `decide_audio_fallback` を参照。
     fn try_connect_audio(&mut self, settings: &AppSettings, now: Instant) {
         let attempt = self.audio_retry.attempts() + 1;
         info!(
@@ -2988,36 +3160,26 @@ impl CaptureCardViewer {
             }
         };
 
-        // 既定デバイスへのフォールバック。何を試したかをログに残す
-        let fallback_error = if error.is_some() && attempt == AUDIO_DEFAULT_FALLBACK_AFTER {
-            info!(
-                "設定のデバイスで {} 回続けて失敗したので、既定のデバイス（入力・出力とも Windows の既定、レートとチャンネル数もデバイス任せ）で試す",
+        // 失敗が続いていることを 1 度だけ記録する。倒す先が無いので、
+        // ここで開く相手が変わることはない
+        if error.is_some() && decide_audio_fallback(attempt) == AudioFallbackAction::WarnAndRetry {
+            warn!(
+                "音声デバイスに {} 回続けて接続できない。既定のデバイスへは倒さず、戻るまで再試行を続ける",
                 attempt
             );
-            match audio.start_passthrough(&PassthroughRequest::defaults()) {
-                Ok(()) => {
-                    info!("既定のデバイスで音声に接続した");
-                    None
-                }
-                Err(e2) => {
-                    warn!("既定のデバイスでも音声に接続できない: {}", e2);
-                    Some(e2)
-                }
-            }
-        } else {
-            error.clone()
-        };
+        }
 
         drop(audio);
 
-        match fallback_error {
+        match error {
             None => {
                 self.audio_retry.record_success();
                 // 繋がったので直前の失敗は消す
                 self.errors.clear(ErrorSource::Audio);
-                // 既定のデバイスで繋がった場合も、設定に書かれている値を記録する。
-                // ここで実際に開いた値（None）を入れると、設定のデバイスが
-                // 現れても need_audio_restart が立たず繋ぎ直せなくなる
+                // 形を緩めて繋がった場合も、設定に書かれている値を記録する。
+                // ここで実際に開いた値（None）を入れると、設定のレートや
+                // チャンネル数へ戻せるようになっても need_audio_restart が
+                // 立たず、緩めたままになる
                 self.last_audio_device = settings.audio.input_device_name.clone();
                 self.last_audio_output = settings.audio.output_device_name.clone();
                 self.last_audio_rate = settings.audio.sample_rate;
@@ -4830,6 +4992,64 @@ mod tests {
     }
 
     #[test]
+    fn decide_audio_fallback_never_switches_devices() {
+        // #134 の本体。設定のデバイスが消えている間は必ず 3 回失敗するが、
+        // ここで既定のデバイス（＝PC のマイク）へ倒すと、それを接続成功として
+        // 確定してしまい、設定のデバイスが戻っても繋ぎ直さない。
+        // **どの回数でも接続先を変える選択肢が無いこと**を、網羅で確かめる
+        for attempt in [1, 2, 3, 4, 5, 100, u32::MAX] {
+            assert!(
+                matches!(
+                    decide_audio_fallback(attempt),
+                    AudioFallbackAction::Retry | AudioFallbackAction::WarnAndRetry
+                ),
+                "attempt = {}",
+                attempt
+            );
+        }
+    }
+
+    #[test]
+    fn decide_audio_fallback_at_threshold_warns_once() {
+        // 3 回目だけ記録する。毎回出すとログが埋まり、一度も出さないと
+        // 「音が出ない」の調査でこの状態に気付けない
+        assert_eq!(decide_audio_fallback(3), AudioFallbackAction::WarnAndRetry);
+    }
+
+    #[test]
+    fn decide_audio_fallback_before_and_after_threshold_retries() {
+        for attempt in [1, 2, 4, 5, 100] {
+            assert_eq!(
+                decide_audio_fallback(attempt),
+                AudioFallbackAction::Retry,
+                "attempt = {}",
+                attempt
+            );
+        }
+    }
+
+    #[test]
+    fn should_resync_audio_after_video_without_recovery_returns_false() {
+        // 起動時の接続では立てない。毎回音声を開き直すと UI が 300ms 止まる
+        assert!(!should_resync_audio_after_video(false, false, true));
+        assert!(!should_resync_audio_after_video(false, false, false));
+    }
+
+    #[test]
+    fn should_resync_audio_after_video_when_audio_is_down_returns_true() {
+        // 音声が開けていない、または再試行中なら、映像の復帰にあわせて試す
+        assert!(should_resync_audio_after_video(true, false, false));
+        assert!(should_resync_audio_after_video(true, false, true));
+        assert!(should_resync_audio_after_video(true, true, true));
+    }
+
+    #[test]
+    fn should_resync_audio_after_video_when_audio_is_healthy_returns_false() {
+        // 音声が別のデバイス（マイクなど）で無事なら触らない
+        assert!(!should_resync_audio_after_video(true, true, false));
+    }
+
+    #[test]
     fn should_reconnect_after_stream_error_first_time_returns_true() {
         // 一度も開き直していないなら待たせない
         assert!(should_reconnect_after_stream_error(None));
@@ -5850,5 +6070,50 @@ mod tests {
             .remove(0)
             .join()
             .expect("実行中だったスレッドを回収できること");
+    }
+
+    #[test]
+    fn find_japanese_font_prefers_earlier_candidate_when_multiple_exist() {
+        // Meiryo と Yu Gothic が両方入っている環境では、優先度が高い Meiryo を選ぶこと
+        let dir = tempdir().expect("tempdir を作れること");
+        std::fs::write(dir.path().join("meiryo.ttc"), b"dummy").unwrap();
+        std::fs::write(dir.path().join("YuGothR.ttc"), b"dummy").unwrap();
+
+        let found = find_japanese_font(&[dir.path().to_path_buf()]);
+
+        assert_eq!(
+            found,
+            Some(("Meiryo", dir.path().join("meiryo.ttc"))),
+            "候補リストで先に並ぶ Meiryo が選ばれること"
+        );
+    }
+
+    #[test]
+    fn find_japanese_font_returns_none_when_no_candidate_exists() {
+        // 候補が 1 つも無い環境（フォントを削除・最小構成にした等）では落ちずに None を返すこと
+        let dir = tempdir().expect("tempdir を作れること");
+
+        let found = find_japanese_font(&[dir.path().to_path_buf()]);
+
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn find_japanese_font_finds_font_in_user_installed_directory() {
+        // システム共通のフォントディレクトリ（1 つ目）には無く、
+        // ユーザー単位でインストールされたフォントディレクトリ（2 つ目）にだけある場合も見つかること
+        let system_dir = tempdir().expect("tempdir を作れること");
+        let user_dir = tempdir().expect("tempdir を作れること");
+        std::fs::write(user_dir.path().join("BIZ-UDGothicR.ttc"), b"dummy").unwrap();
+
+        let found = find_japanese_font(&[
+            system_dir.path().to_path_buf(),
+            user_dir.path().to_path_buf(),
+        ]);
+
+        assert_eq!(
+            found,
+            Some(("BIZ UDGothic", user_dir.path().join("BIZ-UDGothicR.ttc"))),
+        );
     }
 }
