@@ -231,6 +231,14 @@ JPEG はファイルが小さくなりますが、文字や細い線ににじみ
 **設定画面にあるが未実装の項目**
  - フォーマットで MJPEG や RGB24 を選んでも、内部では常に YUY2 で開かれます。(既知の問題として対応予定)
 
+## 不具合の報告
+
+不具合の報告は [Issues](https://github.com/Mui-MuiMui/Capturecard_Viewer/issues) から受け付けています。報告の前に [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) をご確認ください。既知の不具合と回避策をまとめてあります。
+
+このアプリはお使いのキャプチャーボードとオーディオデバイスに強く依存します。作者が試せる機材は限られているため、**環境情報がないと再現も原因の特定もできません。** Issue のテンプレートを分かる範囲で埋めてください。
+
+現時点で外部のコントリビューターは募集していません。ビルド・検証・ブランチ運用・バージョン番号・`CHANGELOG.md` の扱いといった開発上の決まりと、各ドキュメントの置き場所は [CONTRIBUTING.md](CONTRIBUTING.md) にまとめてあります。
+
 ## コーヒーおごってください
 使い勝手が良ければコーヒーおごってください。  
 <a href='https://ko-fi.com/G2G71JGGSM' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi1.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>

@@ -244,7 +244,7 @@ Bug reports are welcome via [Issues](https://github.com/Mui-MuiMui/Capturecard_V
 
 This application depends heavily on the capture card and audio devices you are using, and the author has access to only a limited set of hardware. Please fill in as much of the issue template as you can; without that information, reproducing the problem is usually not possible.
 
-This project is not currently looking for contributors.
+This project is not currently looking for contributors. The conventions the project follows — building, verifying, branching, versioning and the changelog — are written up in [CONTRIBUTING.md](CONTRIBUTING.md) (in Japanese).
 
 ## Documentation
 
@@ -255,6 +255,7 @@ The documents below are written in Japanese.
 - [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) — dependency status and upgrade plan
 - [docs/MANUAL-TEST.md](docs/MANUAL-TEST.md) — manual test checklist
 - [CHANGELOG.md](CHANGELOG.md) — release history
+- [CONTRIBUTING.md](CONTRIBUTING.md) — where each document lives, and the conventions for building, branching, versioning and the changelog
 
 ## Buy me a coffee
 

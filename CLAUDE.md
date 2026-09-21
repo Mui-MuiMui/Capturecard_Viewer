@@ -455,6 +455,8 @@ PR 本文の雛形は `.github/pull_request_template.md`。**GitHub が自動で
 
 リリースはこの 4 段階の外側にある。手順は `docs/RELEASE.md`、Claude がなぞる場合は `.claude/skills/release/SKILL.md` を使う。
 
+**`CONTRIBUTING.md` は人向けの入口。** 規約の要約と各ドキュメントへの道案内だけを持ち、`CLAUDE.md` や skill と同じ内容を重複させない。
+
 ### ブランチとコミット
 
 `<type>/<説明>` の作業ブランチ → `dev` → `main`。**PR のマージ先は `dev`。** `main` へ入れるのはリリースのときだけ。
