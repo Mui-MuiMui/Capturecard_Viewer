@@ -199,7 +199,9 @@ GitHub が自動で差し込むのは**既定ブランチ（`main`）にある�
 
 ### `Closes` ではなく `Refs` を使う
 
-**PR 本文にもコミットメッセージにも `Closes #n` / `Fixes #n` を書かない。**
+**PR 本文にもコミットメッセージにもクローズ用キーワードを書かない。**
+
+対象は `Closes` / `Fixes` だけではない。GitHub が拾うのは `close` / `closes` / `closed` / `fix` / `fixes` / `fixed` / `resolve` / `resolves` / `resolved` の 9 語で、大文字小文字は区別しない。**Issue 番号の前に置いてよいのは `Refs` だけ**と覚える。
 
 GitHub の自動クローズはどちらも**既定ブランチ（`main`）に入ったとき**に起きるが、`dev` 経由でそこへ至る道筋が違う。
 
