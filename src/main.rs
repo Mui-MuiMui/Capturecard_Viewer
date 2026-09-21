@@ -71,6 +71,20 @@ const DRAG_MOVE_GUARD_MESSAGE: &str = "ウィンドウを動かすため、画�
 /// 掴みやすさと、映像のドラッグ移動を邪魔しないことの兼ね合いで決めている
 const RESIZE_BORDER: f32 = 8.0;
 
+/// 右クリックメニューの幅。項目名が折り返さない程度に取ってある。
+/// サブメニューにも同じ値を使う（egui の既定は 150px で、
+/// 「アスペクト比を維持」のような項目名が折り返してしまう）
+const CONTEXT_MENU_WIDTH: f32 = 240.0;
+
+/// 右クリックメニューの大きさを決めるときに、画面の端へ空けておく余白。
+/// 端にぴったり貼り付くと、収まっているのかはみ出しているのかが見分けにくい
+const CONTEXT_MENU_SCREEN_MARGIN: f32 = 24.0;
+
+/// 外側クリックの判定でサブメニューの矩形に足す余白。
+/// `Ui::min_rect` はポップアップの枠の内側なので、枠の上を押しただけで
+/// メニュー全体が閉じるのを防ぐ
+const CONTEXT_MENU_HIT_MARGIN: f32 = 8.0;
+
 /// 音量を変えたときに OSD を出しておく時間。
 /// ホイールを回している間は回すたびに延びるので、これは「手を止めてから」の長さ
 const VOLUME_OSD_DURATION: Duration = Duration::from_millis(1500);
@@ -205,11 +219,13 @@ const CONNECT_BACKOFF_BASE: Duration = Duration::from_millis(200);
 /// ときの反応が悪くなる。5 秒で頭打ちにして、挿してから最大 5 秒で繋がるようにする。
 const CONNECT_BACKOFF_MAX: Duration = Duration::from_millis(5000);
 
-/// 音声で、この回数だけ連続して失敗したあとに既定のデバイスを試す。
+/// 音声で、この回数だけ連続して失敗したら「繋がっていない」ことをログに残す。
 ///
-/// 設定に残っているデバイス名が古くて存在しない場合、そのまま待ち続けても
-/// 永久に音が出ない。元の実装と同じ 3 回目に合わせてある。
-const AUDIO_DEFAULT_FALLBACK_AFTER: u32 = 3;
+/// **ここで別のデバイスへ倒したりはしない。** 以前は同じ 3 回目に既定の
+/// デバイスへフォールバックしていた（`decide_audio_fallback` を参照）。
+/// 残したのはログだけで、回数を合わせてあるのは、以前のログと同じ位置に
+/// 「ここで方針が分かれていた」という目印を置くため。
+const AUDIO_RETRY_WARN_AFTER: u32 = 3;
 
 /// フレームが途絶えてから「映像が切れた」と判断するまでの時間。
 ///
@@ -345,6 +361,59 @@ fn decide_audio_reconnect(
         return AudioErrorAction::Wait;
     }
     AudioErrorAction::Reconnect
+}
+
+/// 音声の接続に失敗したあと、その場で何をするか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioFallbackAction {
+    /// 何もしない。`ConnectRetry` のバックオフで次の回を待つ
+    Retry,
+    /// 繋がらないまま再試行を続けることを 1 度だけ記録し、あとは `Retry` と同じ
+    WarnAndRetry,
+}
+
+/// 音声の接続に失敗したときに、その回で何をするかを決める。
+///
+/// **どの回でも接続先は変えない。** 以前は 3 回失敗した時点で入出力とも
+/// Windows の既定デバイスで開き直していたが、これが USB を抜いた直後の
+/// 再接続でも効いていた。設定のデバイスが消えている間は必ず 3 回失敗する
+/// （1.5 秒）一方、USB の再列挙には 10 秒以上かかるため、**フォールバックが
+/// 必ず勝って PC のマイクを入力として掴み、接続成功として確定してしまう**
+/// （#134）。以後は設定のデバイスを試さないので音は戻らず、おまけにマイクの
+/// 音がスピーカーへ流れ続ける。
+///
+/// 起動時も同じ扱いにしてある。設定のデバイスが見つからないときに黙って
+/// 別のデバイスを開くのは、音が出ないことより分かりにくい誤動作のため。
+/// 繋がらないことは「接続状態」タブと通知に出るので、気付く手段はある。
+///
+/// 残っているのは「繋がらないまま再試行を続けている」ことをログへ 1 度だけ
+/// 残す判断だけ。毎回出すとログが埋まり、一度も出さないと調査で気付けない。
+fn decide_audio_fallback(attempt: u32) -> AudioFallbackAction {
+    if attempt == AUDIO_RETRY_WARN_AFTER {
+        return AudioFallbackAction::WarnAndRetry;
+    }
+    AudioFallbackAction::Retry
+}
+
+/// 映像が復帰したときに、音声にも再接続を要求するかを判定する。
+///
+/// 映像と音声は同じ USB 機器なので、映像が戻ったなら音声のデバイスも戻って
+/// いる。音声側のバックオフ（最大 5 秒）を待たせる理由が無いため、そこで
+/// 待ち時間を飛ばす。**保険であって主経路ではない。** 音声の切断は cpal の
+/// エラーコールバックが拾い、`monitor_audio_stream` が再接続を要求する。
+///
+/// **音声が開けていて再試行も走っていないなら何もしない。** 映像だけが
+/// 消える構成（音声は別のマイク）で、無事だったストリームを開き直すと
+/// その都度 UI スレッドが 300ms 止まる。
+fn should_resync_audio_after_video(
+    video_recovered: bool,
+    audio_connected: bool,
+    audio_retry_active: bool,
+) -> bool {
+    if !video_recovered {
+        return false;
+    }
+    !audio_connected || audio_retry_active
 }
 
 /// 映像が出ていないときに画面へ出す文言を決める。
@@ -610,6 +679,10 @@ pub struct CaptureCardViewer {
     // 真偽値ではなく「何をしたか」で持つ。新しいフレームが届いた時点で
     // `Keep` へ戻す
     last_video_link_action: VideoLinkAction,
+    // 途絶を検出して映像を開き直している最中か。
+    // 次に映像が繋がったときだけ音声の再接続も要求するための目印で、
+    // 起動時の接続と区別するために持つ（`should_resync_audio_after_video`）
+    video_reconnect_after_loss: bool,
     // 直近に観測した「映像ストリームを開けているか」。
     // 描画のたびに video_capture のロックを取らずに済ませるため、
     // 毎フレームの監視で拾った値をここに写しておく
@@ -745,6 +818,7 @@ impl Default for CaptureCardViewer {
             last_frame_generation: 0,
             last_new_frame_at: None,
             last_video_link_action: VideoLinkAction::Keep,
+            video_reconnect_after_loss: false,
             video_capturing: false,
             last_audio_error_reconnect: None,
             audio_stream_error_pending: false,
@@ -1655,204 +1729,60 @@ impl CaptureCardViewer {
             });
     }
 
+    /// 右クリックメニューを描く。
+    ///
+    /// 中身は `context_menu_items` が描く。ここは置き場所と閉じ方だけを持つ。
+    ///
+    /// **画面に収まらなくなるのを 3 段で防いでいる。** まず `constrain_to` で
+    /// メニューごと画面内へ押し戻し、幅は画面より広くならないように縮め、
+    /// それでも足りない高さは `ScrollArea` でスクロールできるようにする。
+    /// 項目を足すときはどれも壊さないこと。
     fn show_context_menu(&mut self, ctx: &egui::Context) {
         let mut close_menu = false;
-        let mut final_rect: Option<egui::Rect> = None;
+        // メニュー本体と、開いているサブメニューの矩形。外側クリックの判定に使う。
+        // **サブメニューは別の Area に描かれ本体の矩形に含まれない。** ここへ
+        // 足しておかないと、サブメニューを押しただけでメニュー全体が閉じる
+        let mut menu_rects: Vec<egui::Rect> = Vec::new();
+
+        // ポップアップの枠が食う分を引いてから、中身に使える大きさを決める
+        let frame = egui::Frame::popup(&ctx.style());
+        let (width, max_height) =
+            context_menu_size_limits(ctx.screen_rect().size(), frame.inner_margin.sum());
 
         egui::Area::new("context_menu")
             .fixed_pos(self.context_menu_pos)
             .order(egui::Order::Foreground)
+            // 画面の下端や右端の近くで開いたときに、メニューごと画面内へ押し戻す
+            .constrain_to(ctx.screen_rect())
             .show(ctx, |outer_ui| {
                 // 固定幅でポップアップコンテンツをラップ
-                egui::Frame::popup(&ctx.style()).show(outer_ui, |ui| {
-                    // メニューの幅を240pxに固定
-                    ui.set_min_width(240.0);
-                    ui.set_max_width(240.0);
+                frame.show(outer_ui, |ui| {
+                    ui.set_min_width(width);
+                    ui.set_max_width(width);
 
-                    ui.label(format!("音量: {}%", self.volume as i32));
-                    let volume_response = ui.add(
-                        egui::Slider::new(&mut self.volume, MIN_VOLUME..=MAX_VOLUME).suffix("%"),
-                    );
-
-                    // 音量が変更された場合、設定に反映する（書き出しはデバウンス）。
-                    // スライダーが self.volume を書き換えたあとなので、同じ値を
-                    // 渡し直して設定への反映と OSD の表示だけを行わせる
-                    if volume_response.changed() {
-                        self.set_volume_from_ui(self.volume);
-                    }
-
-                    // ミュートはスライダーのすぐ下に置く。音量 0% にする代わりの
-                    // 操作なので、離すと探されない
-                    let mut muted = self.muted;
-                    if ui.checkbox(&mut muted, "ミュート").changed() {
-                        self.set_muted_from_ui(muted);
-                    }
-
-                    ui.separator();
-                    let aspect_response =
-                        ui.checkbox(&mut self.maintain_aspect_ratio, "アスペクト比を維持");
-
-                    // アスペクト比設定が変更された場合、設定に反映する（書き出しはデバウンス）
-                    if aspect_response.changed() {
-                        if let Ok(mut settings) = self.settings.lock() {
-                            settings.ui.maintain_aspect_ratio = self.maintain_aspect_ratio;
-                        }
-                        self.mark_settings_dirty();
-                    }
-
-                    // 最前面表示のチェックボックス
-                    let always_on_top_response = ui.checkbox(&mut self.always_on_top, "最前面表示");
-
-                    // 最前面表示設定が変更された場合。
-                    // チェックボックスが self.always_on_top を書き換えたあとなので、
-                    // 同じ値を渡してウィンドウレベルの適用と保存だけを行わせる
-                    if always_on_top_response.changed() {
-                        self.set_always_on_top(ctx, self.always_on_top);
-                    }
-
-                    // フルスクリーン表示のチェックボックス
-                    let fullscreen_response =
-                        ui.checkbox(&mut self.is_fullscreen, "フルスクリーン表示");
-
-                    // フルスクリーン状態が変更された場合
-                    if fullscreen_response.changed() {
-                        self.toggle_fullscreen(ctx, self.is_fullscreen);
-                    }
-
-                    // タイトルバーを隠すチェックボックス。
-                    // フルスクリーン中は OS が元から装飾を外しているので触らせない。
-                    // ここで切り替えても見た目は変わらず、フルスクリーンを抜けた
-                    // ときに初めて効くので、操作と結果が結びつかない
-                    let mut temp_borderless = self.borderless;
-                    let borderless_response = ui
-                        .add_enabled(
-                            !self.is_fullscreen,
-                            egui::Checkbox::new(&mut temp_borderless, "タイトルバーを隠す"),
-                        )
-                        .on_hover_text(
-                            "タイトルバーと枠を消します。移動は映像のドラッグ、サイズ変更はウィンドウ端のドラッグ、終了はこのメニューの「終了」か Alt+F4 で行います",
-                        )
-                        .on_disabled_hover_text(
-                            "フルスクリーン中は元から装飾がないため切り替えられません",
-                        );
-
-                    if borderless_response.changed() {
-                        self.set_borderless(ctx, temp_borderless);
-                    }
-
-                    // 画面ドラッグ移動のチェックボックス。
-                    // 装飾なしの間は切らせない。切ると動かす手段が残らない
-                    let enable_drag_move = if let Ok(settings) = self.settings.lock() {
-                        settings.ui.enable_drag_move
-                    } else {
-                        true
-                    };
-                    let mut temp_enable_drag_move = enable_drag_move;
-                    let drag_move_response = ui
-                        .add_enabled(
-                            !self.borderless,
-                            egui::Checkbox::new(&mut temp_enable_drag_move, "画面ドラッグ移動"),
-                        )
-                        .on_disabled_hover_text(
-                            "タイトルバーを隠している間は、ウィンドウを動かす唯一の手段なので切れません",
-                        );
-
-                    // 画面ドラッグ移動設定が変更された場合（書き出しはデバウンス）
-                    if drag_move_response.changed() {
-                        if let Ok(mut settings) = self.settings.lock() {
-                            settings.ui.enable_drag_move = temp_enable_drag_move;
-                        }
-                        self.mark_settings_dirty();
-                    }
-
-                    // 情報表示（統計オーバーレイ）のチェックボックス
-                    let stats_response = ui.checkbox(&mut self.show_stats_overlay, "情報表示");
-
-                    // 情報表示の設定が変更された場合（書き出しはデバウンス）
-                    if stats_response.changed() {
-                        if let Ok(mut settings) = self.settings.lock() {
-                            settings.ui.show_stats_overlay = self.show_stats_overlay;
-                        }
-                        self.mark_settings_dirty();
-                    }
-
-                    // デバイスの自動再接続のチェックボックス。
-                    // 設定は VideoSettings に持たせているが、音声ストリームの
-                    // エラーからの復帰にも効く（利用者から見て 1 つの機能なので
-                    // スイッチも 1 つにしてある）
-                    let auto_reconnect = if let Ok(settings) = self.settings.lock() {
-                        settings.video.auto_reconnect
-                    } else {
-                        true
-                    };
-                    let mut temp_auto_reconnect = auto_reconnect;
-                    let auto_reconnect_response = ui
-                        .checkbox(&mut temp_auto_reconnect, "デバイスの自動再接続")
-                        .on_hover_text(
-                            "映像が途切れたり音声デバイスが消えたときに、自動でデバイスを開き直します",
-                        );
-
-                    // 自動再接続の設定が変更された場合（書き出しはデバウンス）
-                    if auto_reconnect_response.changed() {
-                        if let Ok(mut settings) = self.settings.lock() {
-                            settings.video.auto_reconnect = temp_auto_reconnect;
-                        }
-                        info!(
-                            "デバイスの自動再接続を{}にした",
-                            if temp_auto_reconnect {
-                                "有効"
-                            } else {
-                                "無効"
-                            }
-                        );
-                        self.mark_settings_dirty();
-                    }
-
-                    ui.separator();
-                    // ウィンドウサイズのリセット。装飾なしで小さくしすぎて
-                    // 端の帯を掴めなくなったときの復帰手段
-                    if ui
-                        .add_enabled(
-                            !self.is_fullscreen,
-                            egui::Button::new("ウィンドウサイズをリセット"),
-                        )
-                        .on_disabled_hover_text("フルスクリーン中は変更できません")
-                        .clicked()
-                    {
-                        self.reset_window_size(ctx);
-                        close_menu = true;
-                    }
-                    if ui.button("デバイス再接続").clicked() {
-                        self.reconnect_devices();
-                        close_menu = true;
-                    }
-                    ui.separator();
-                    if ui.button("詳細設定...").clicked() {
-                        self.show_settings = true;
-                        close_menu = true;
-                    }
-                    ui.separator();
-                    // 終了。装飾なしでは × が無いので、ここが閉じる手段になる。
-                    // 押すと on_exit が走り、保留中の設定も書き出される
-                    if ui.button("終了").clicked() {
-                        info!("右クリックメニューから終了する");
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        close_menu = true;
-                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(max_height)
+                        // 横は縮めない。縮むと項目の幅が中身ごとに変わって揃わない
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            self.context_menu_items(
+                                ctx,
+                                ui,
+                                width,
+                                &mut menu_rects,
+                                &mut close_menu,
+                            );
+                        });
                 });
                 // 構築後、エリアの完全な矩形をキャプチャ
-                final_rect = Some(outer_ui.min_rect());
+                menu_rects.push(outer_ui.min_rect());
             });
 
         // 外側をクリック、またはEscapeキー押下時のみ閉じる
         ctx.input(|i| {
             if i.pointer.primary_clicked() {
                 if let Some(pos) = i.pointer.latest_pos() {
-                    if let Some(r) = final_rect {
-                        if !r.contains(pos) {
-                            close_menu = true;
-                        }
-                    } else {
+                    if !menu_rects.iter().any(|rect| rect.contains(pos)) {
                         close_menu = true;
                     }
                 }
@@ -1866,6 +1796,272 @@ impl CaptureCardViewer {
             self.show_context_menu = false;
         }
     }
+
+    /// 右クリックメニューの項目を描く。
+    ///
+    /// 項目が増えて縦に伸びると低い解像度で下端が画面外へ出るため、切り替え系は
+    /// 「表示」「ウィンドウ」のサブメニューへ分けてある。**直下に残すのは、映像が
+    /// 出ないときの復帰手段（デバイス再接続）と、装飾を消しているときに他の手段が
+    /// 無い操作（フルスクリーン、終了）。** 探し回らずに押せることを優先する。
+    ///
+    /// サブメニューの中身を足したときは、閉じるボタンに `ui.close_menu()` を
+    /// 忘れないこと。呼ばないと開いた状態が egui 側に残り、次に右クリックした
+    /// ときにサブメニューが開いたまま出る。
+    fn context_menu_items(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        width: f32,
+        menu_rects: &mut Vec<egui::Rect>,
+        close_menu: &mut bool,
+    ) {
+        ui.label(format!("音量: {}%", self.volume as i32));
+        let volume_response =
+            ui.add(egui::Slider::new(&mut self.volume, MIN_VOLUME..=MAX_VOLUME).suffix("%"));
+
+        // 音量が変更された場合、設定に反映する（書き出しはデバウンス）。
+        // スライダーが self.volume を書き換えたあとなので、同じ値を
+        // 渡し直して設定への反映と OSD の表示だけを行わせる
+        if volume_response.changed() {
+            self.set_volume_from_ui(self.volume);
+        }
+
+        // ミュートはスライダーのすぐ下に置く。音量 0% にする代わりの
+        // 操作なので、離すと探されない
+        let mut muted = self.muted;
+        if ui.checkbox(&mut muted, "ミュート").changed() {
+            self.set_muted_from_ui(muted);
+        }
+
+        ui.separator();
+
+        // フルスクリーン表示のチェックボックス。
+        // ダブルクリックとホットキーでも切り替えられるが、装飾を消していると
+        // ここが唯一目に見える切り替え手段になるので直下に残す
+        let fullscreen_response = ui.checkbox(&mut self.is_fullscreen, "フルスクリーン表示");
+
+        // フルスクリーン状態が変更された場合
+        if fullscreen_response.changed() {
+            self.toggle_fullscreen(ctx, self.is_fullscreen);
+        }
+
+        // サブメニューのボタンは既定だと文字の幅しか取らず、上下のチェック
+        // ボックスと縁が揃わない。幅いっぱいに広げて 1 つの並びに見せる
+        ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+            self.view_submenu(ctx, ui, width, menu_rects);
+            self.window_submenu(ctx, ui, width, menu_rects, close_menu);
+        });
+
+        ui.separator();
+        // デバイス再接続。映像が出なくなったときの復帰手段なので、
+        // サブメニューへ入れずに直下へ置く
+        if ui.button("デバイス再接続").clicked() {
+            self.reconnect_devices();
+            *close_menu = true;
+        }
+
+        // デバイスの自動再接続のチェックボックス。
+        // 設定は VideoSettings に持たせているが、音声ストリームの
+        // エラーからの復帰にも効く（利用者から見て 1 つの機能なので
+        // スイッチも 1 つにしてある）。上の「デバイス再接続」と紛らわしい
+        // 項目なので、離さずに隣へ置いてある
+        let auto_reconnect = if let Ok(settings) = self.settings.lock() {
+            settings.video.auto_reconnect
+        } else {
+            true
+        };
+        let mut temp_auto_reconnect = auto_reconnect;
+        let auto_reconnect_response = ui
+            .checkbox(&mut temp_auto_reconnect, "デバイスの自動再接続")
+            .on_hover_text(
+                "映像が途切れたり音声デバイスが消えたときに、自動でデバイスを開き直します",
+            );
+
+        // 自動再接続の設定が変更された場合（書き出しはデバウンス）
+        if auto_reconnect_response.changed() {
+            if let Ok(mut settings) = self.settings.lock() {
+                settings.video.auto_reconnect = temp_auto_reconnect;
+            }
+            info!(
+                "デバイスの自動再接続を{}にした",
+                if temp_auto_reconnect {
+                    "有効"
+                } else {
+                    "無効"
+                }
+            );
+            self.mark_settings_dirty();
+        }
+
+        ui.separator();
+        if ui.button("詳細設定...").clicked() {
+            self.show_settings = true;
+            *close_menu = true;
+        }
+
+        ui.separator();
+        // 終了。装飾なしでは × が無いので、ここが閉じる手段になる。
+        // 押すと on_exit が走り、保留中の設定も書き出される
+        if ui.button("終了").clicked() {
+            info!("右クリックメニューから終了する");
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            *close_menu = true;
+        }
+    }
+
+    /// 右クリックメニューの「表示」サブメニュー。
+    ///
+    /// 映像の見え方に関わる切り替えを集めてある。**どれを押してもメニューは
+    /// 閉じない。** 続けて切り替えることがあるため。
+    fn view_submenu(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        width: f32,
+        menu_rects: &mut Vec<egui::Rect>,
+    ) {
+        ui.menu_button("表示  ⏵", |ui| {
+            // サブメニューの幅は egui の既定が 150px で、項目名が折り返す。
+            // 本体と同じ幅に揃える（狭いウィンドウでは本体ごと縮んでいる）
+            ui.set_max_width(width);
+
+            let aspect_response = ui.checkbox(&mut self.maintain_aspect_ratio, "アスペクト比を維持");
+
+            // アスペクト比設定が変更された場合、設定に反映する（書き出しはデバウンス）
+            if aspect_response.changed() {
+                if let Ok(mut settings) = self.settings.lock() {
+                    settings.ui.maintain_aspect_ratio = self.maintain_aspect_ratio;
+                }
+                self.mark_settings_dirty();
+            }
+
+            // 最前面表示のチェックボックス
+            let always_on_top_response = ui.checkbox(&mut self.always_on_top, "最前面表示");
+
+            // 最前面表示設定が変更された場合。
+            // チェックボックスが self.always_on_top を書き換えたあとなので、
+            // 同じ値を渡してウィンドウレベルの適用と保存だけを行わせる
+            if always_on_top_response.changed() {
+                self.set_always_on_top(ctx, self.always_on_top);
+            }
+
+            // 情報表示（統計オーバーレイ）のチェックボックス
+            let stats_response = ui.checkbox(&mut self.show_stats_overlay, "情報表示");
+
+            // 情報表示の設定が変更された場合（書き出しはデバウンス）
+            if stats_response.changed() {
+                if let Ok(mut settings) = self.settings.lock() {
+                    settings.ui.show_stats_overlay = self.show_stats_overlay;
+                }
+                self.mark_settings_dirty();
+            }
+
+            // タイトルバーを隠すチェックボックス。
+            // フルスクリーン中は OS が元から装飾を外しているので触らせない。
+            // ここで切り替えても見た目は変わらず、フルスクリーンを抜けた
+            // ときに初めて効くので、操作と結果が結びつかない
+            let mut temp_borderless = self.borderless;
+            let borderless_response = ui
+                .add_enabled(
+                    !self.is_fullscreen,
+                    egui::Checkbox::new(&mut temp_borderless, "タイトルバーを隠す"),
+                )
+                .on_hover_text(
+                    "タイトルバーと枠を消します。移動は映像のドラッグ、サイズ変更はウィンドウ端のドラッグ、終了はこのメニューの「終了」か Alt+F4 で行います",
+                )
+                .on_disabled_hover_text(
+                    "フルスクリーン中は元から装飾がないため切り替えられません",
+                );
+
+            if borderless_response.changed() {
+                self.set_borderless(ctx, temp_borderless);
+            }
+
+            menu_rects.push(ui.min_rect().expand(CONTEXT_MENU_HIT_MARGIN));
+        });
+    }
+
+    /// 右クリックメニューの「ウィンドウ」サブメニュー。
+    ///
+    /// ウィンドウの動かし方と大きさに関わる項目を集めてある。
+    /// **「ウィンドウサイズをリセット」は押したらメニューを閉じる。**
+    /// 結果がウィンドウ全体に出るので、メニューが被ったままだと確かめられない。
+    fn window_submenu(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        width: f32,
+        menu_rects: &mut Vec<egui::Rect>,
+        close_menu: &mut bool,
+    ) {
+        ui.menu_button("ウィンドウ  ⏵", |ui| {
+            ui.set_max_width(width);
+
+            // 画面ドラッグ移動のチェックボックス。
+            // 装飾なしの間は切らせない。切ると動かす手段が残らない
+            let enable_drag_move = if let Ok(settings) = self.settings.lock() {
+                settings.ui.enable_drag_move
+            } else {
+                true
+            };
+            let mut temp_enable_drag_move = enable_drag_move;
+            let drag_move_response = ui
+                .add_enabled(
+                    !self.borderless,
+                    egui::Checkbox::new(&mut temp_enable_drag_move, "画面ドラッグ移動"),
+                )
+                .on_disabled_hover_text(
+                    "タイトルバーを隠している間は、ウィンドウを動かす唯一の手段なので切れません",
+                );
+
+            // 画面ドラッグ移動設定が変更された場合（書き出しはデバウンス）
+            if drag_move_response.changed() {
+                if let Ok(mut settings) = self.settings.lock() {
+                    settings.ui.enable_drag_move = temp_enable_drag_move;
+                }
+                self.mark_settings_dirty();
+            }
+
+            // ウィンドウサイズのリセット。装飾なしで小さくしすぎて
+            // 端の帯を掴めなくなったときの復帰手段
+            if ui
+                .add_enabled(
+                    !self.is_fullscreen,
+                    egui::Button::new("ウィンドウサイズをリセット"),
+                )
+                .on_disabled_hover_text("フルスクリーン中は変更できません")
+                .clicked()
+            {
+                self.reset_window_size(ctx);
+                // サブメニュー側も閉じる。閉じないと開いた状態が egui に残り、
+                // 次に右クリックしたときにサブメニューが開いたまま出る
+                ui.close_menu();
+                *close_menu = true;
+            }
+
+            menu_rects.push(ui.min_rect().expand(CONTEXT_MENU_HIT_MARGIN));
+        });
+    }
+}
+
+/// 右クリックメニューの中身に使える幅と、高さの上限を決める。
+///
+/// 引数は egui の画面（＝ウィンドウ）の大きさと、ポップアップの枠が
+/// 左右・上下で食う幅。戻り値は `(幅, 高さの上限)` で、どちらも枠の内側の値。
+///
+/// **`Area::constrain_to` は位置を画面内へ戻すだけで、確定した矩形の幅も
+/// 高さも縮めない。** 画面より大きいメニューはそのままはみ出すので、
+/// 幅はここで縮め、高さは呼び出し側が `ScrollArea` の上限に使う。
+///
+/// 画面が極端に小さい場合は 0 まで落とす。**「これ以下にはしない」という
+/// 下限を置かない。** 置くと、下限を割る画面では必ずはみ出す側へ倒れ、
+/// 画面に収めるという目的と逆になる。
+fn context_menu_size_limits(screen_size: egui::Vec2, frame_margin: egui::Vec2) -> (f32, f32) {
+    let available = screen_size - frame_margin - egui::Vec2::splat(CONTEXT_MENU_SCREEN_MARGIN);
+    (
+        CONTEXT_MENU_WIDTH.min(available.x).max(0.0),
+        available.y.max(0.0),
+    )
 }
 
 /// 統計オーバーレイに出す行を組み立てる。
@@ -2562,6 +2758,9 @@ impl CaptureCardViewer {
         // 確かめる。再試行の間隔は最大 5 秒で頭打ちなので、
         // MediaFoundation への問い合わせもその頻度を超えない
         self.last_video_device = None;
+        // 次に繋がったときは、同じ USB 機器の音声も戻っているとみなして
+        // 音声の再接続も要求する。起動時の接続と区別するためにここで立てる
+        self.video_reconnect_after_loss = true;
         self.video_retry.request_now(target);
         info!("映像デバイスの再接続を要求した");
     }
@@ -2662,6 +2861,11 @@ impl CaptureCardViewer {
                 self.last_video_res = settings.video.resolution;
                 self.last_video_format = settings.video.format.clone();
                 self.last_video_fps = settings.video.fps;
+                // 途絶から復帰したのであれば、音声も同時に戻っているはず。
+                // **旗はここで落とす。** 残すと、以降の接続のたびに音声を
+                // 開き直してしまう
+                let recovered = std::mem::take(&mut self.video_reconnect_after_loss);
+                self.resync_audio_after_video_recovery(settings, recovered);
             }
             Err(e) => {
                 warn!("映像デバイスへの接続に失敗した（{} 回目）: {}", attempt, e);
@@ -2675,11 +2879,43 @@ impl CaptureCardViewer {
         }
     }
 
+    /// 映像が途絶から復帰したときに、音声の再接続も要求する。
+    ///
+    /// 音声の切断は cpal のエラーコールバックが拾うのが主経路で、これはその
+    /// 保険。映像が戻った時点でバックオフの残り（最大 5 秒）を飛ばす。
+    ///
+    /// **ここでもデバイスを開かない。** 要求を立てるだけにして、実際に開くのは
+    /// 次のフレームの `poll_device_connection`。
+    ///
+    /// ロックは video を手放したあとに audio を取る（settings → video → audio）。
+    fn resync_audio_after_video_recovery(&mut self, settings: &AppSettings, recovered: bool) {
+        if !recovered {
+            return;
+        }
+        let audio_connected = match self.audio_capture.lock() {
+            Ok(audio) => audio.active().is_some(),
+            Err(_) => {
+                warn!("映像の復帰にあわせた音声の確認で audio_capture のロックを取得できない");
+                return;
+            }
+        };
+        if !should_resync_audio_after_video(
+            recovered,
+            audio_connected,
+            self.audio_retry.is_active(),
+        ) {
+            debug!("音声は繋がっているので、映像の復帰にあわせた開き直しはしない");
+            return;
+        }
+        self.last_audio_device = None;
+        self.audio_retry.request_now(audio_target(settings));
+        info!("映像が戻ったので、音声デバイスの再接続も要求した");
+    }
+
     /// 音声デバイスへの接続を 1 回だけ試す。
     ///
-    /// 設定のデバイス名で開けない状態が続くと永久に音が出ないため、
-    /// `AUDIO_DEFAULT_FALLBACK_AFTER` 回目の失敗の直後だけ、Windows の
-    /// 既定デバイスで 1 度開き直す。
+    /// **開けなくても、別のデバイスへは倒さない。** 失敗が続いたときの扱いは
+    /// `decide_audio_fallback` を参照。
     fn try_connect_audio(&mut self, settings: &AppSettings, now: Instant) {
         let attempt = self.audio_retry.attempts() + 1;
         info!(
@@ -2751,36 +2987,26 @@ impl CaptureCardViewer {
             }
         };
 
-        // 既定デバイスへのフォールバック。何を試したかをログに残す
-        let fallback_error = if error.is_some() && attempt == AUDIO_DEFAULT_FALLBACK_AFTER {
-            info!(
-                "設定のデバイスで {} 回続けて失敗したので、既定のデバイス（入力・出力とも Windows の既定、レートとチャンネル数もデバイス任せ）で試す",
+        // 失敗が続いていることを 1 度だけ記録する。倒す先が無いので、
+        // ここで開く相手が変わることはない
+        if error.is_some() && decide_audio_fallback(attempt) == AudioFallbackAction::WarnAndRetry {
+            warn!(
+                "音声デバイスに {} 回続けて接続できない。既定のデバイスへは倒さず、戻るまで再試行を続ける",
                 attempt
             );
-            match audio.start_passthrough(&PassthroughRequest::defaults()) {
-                Ok(()) => {
-                    info!("既定のデバイスで音声に接続した");
-                    None
-                }
-                Err(e2) => {
-                    warn!("既定のデバイスでも音声に接続できない: {}", e2);
-                    Some(e2)
-                }
-            }
-        } else {
-            error.clone()
-        };
+        }
 
         drop(audio);
 
-        match fallback_error {
+        match error {
             None => {
                 self.audio_retry.record_success();
                 // 繋がったので直前の失敗は消す
                 self.errors.clear(ErrorSource::Audio);
-                // 既定のデバイスで繋がった場合も、設定に書かれている値を記録する。
-                // ここで実際に開いた値（None）を入れると、設定のデバイスが
-                // 現れても need_audio_restart が立たず繋ぎ直せなくなる
+                // 形を緩めて繋がった場合も、設定に書かれている値を記録する。
+                // ここで実際に開いた値（None）を入れると、設定のレートや
+                // チャンネル数へ戻せるようになっても need_audio_restart が
+                // 立たず、緩めたままになる
                 self.last_audio_device = settings.audio.input_device_name.clone();
                 self.last_audio_output = settings.audio.output_device_name.clone();
                 self.last_audio_rate = settings.audio.sample_rate;
@@ -3894,6 +4120,34 @@ mod tests {
     }
 
     #[test]
+    fn context_menu_size_limits_wide_screen_keeps_the_fixed_width() {
+        // 1280x720 の内側。幅は既定のまま、高さだけ画面から決まる
+        let (width, max_height) =
+            context_menu_size_limits(egui::vec2(1280.0, 720.0), egui::vec2(12.0, 12.0));
+
+        assert_eq!(width, 240.0);
+        assert_eq!(max_height, 684.0);
+    }
+
+    #[test]
+    fn context_menu_size_limits_narrow_screen_shrinks_the_width() {
+        // 幅 200px のウィンドウ。既定の 240px のままだと右側が画面外へ出る
+        let (width, _) = context_menu_size_limits(egui::vec2(200.0, 720.0), egui::vec2(12.0, 12.0));
+
+        assert_eq!(width, 164.0);
+    }
+
+    #[test]
+    fn context_menu_size_limits_tiny_screen_clamps_to_zero() {
+        // 枠と余白だけで画面を使い切る大きさ。負にはしない
+        let (width, max_height) =
+            context_menu_size_limits(egui::vec2(20.0, 30.0), egui::vec2(12.0, 12.0));
+
+        assert_eq!(width, 0.0);
+        assert_eq!(max_height, 0.0);
+    }
+
+    #[test]
     fn volume_overlay_content_rounds_down_like_context_menu() {
         // 右クリックメニューの「音量: N%」と同じ丸め方であること。
         // 食い違うと、スライダーを動かしている間だけ 1% ずれて見える
@@ -4568,6 +4822,64 @@ mod tests {
             decide_audio_reconnect(true, true, Some(Duration::from_secs(5))),
             AudioErrorAction::Reconnect
         );
+    }
+
+    #[test]
+    fn decide_audio_fallback_never_switches_devices() {
+        // #134 の本体。設定のデバイスが消えている間は必ず 3 回失敗するが、
+        // ここで既定のデバイス（＝PC のマイク）へ倒すと、それを接続成功として
+        // 確定してしまい、設定のデバイスが戻っても繋ぎ直さない。
+        // **どの回数でも接続先を変える選択肢が無いこと**を、網羅で確かめる
+        for attempt in [1, 2, 3, 4, 5, 100, u32::MAX] {
+            assert!(
+                matches!(
+                    decide_audio_fallback(attempt),
+                    AudioFallbackAction::Retry | AudioFallbackAction::WarnAndRetry
+                ),
+                "attempt = {}",
+                attempt
+            );
+        }
+    }
+
+    #[test]
+    fn decide_audio_fallback_at_threshold_warns_once() {
+        // 3 回目だけ記録する。毎回出すとログが埋まり、一度も出さないと
+        // 「音が出ない」の調査でこの状態に気付けない
+        assert_eq!(decide_audio_fallback(3), AudioFallbackAction::WarnAndRetry);
+    }
+
+    #[test]
+    fn decide_audio_fallback_before_and_after_threshold_retries() {
+        for attempt in [1, 2, 4, 5, 100] {
+            assert_eq!(
+                decide_audio_fallback(attempt),
+                AudioFallbackAction::Retry,
+                "attempt = {}",
+                attempt
+            );
+        }
+    }
+
+    #[test]
+    fn should_resync_audio_after_video_without_recovery_returns_false() {
+        // 起動時の接続では立てない。毎回音声を開き直すと UI が 300ms 止まる
+        assert!(!should_resync_audio_after_video(false, false, true));
+        assert!(!should_resync_audio_after_video(false, false, false));
+    }
+
+    #[test]
+    fn should_resync_audio_after_video_when_audio_is_down_returns_true() {
+        // 音声が開けていない、または再試行中なら、映像の復帰にあわせて試す
+        assert!(should_resync_audio_after_video(true, false, false));
+        assert!(should_resync_audio_after_video(true, false, true));
+        assert!(should_resync_audio_after_video(true, true, true));
+    }
+
+    #[test]
+    fn should_resync_audio_after_video_when_audio_is_healthy_returns_false() {
+        // 音声が別のデバイス（マイクなど）で無事なら触らない
+        assert!(!should_resync_audio_after_video(true, true, false));
     }
 
     #[test]
