@@ -915,18 +915,15 @@ impl Default for CaptureCardViewer {
                         s.video.device_name = Some(name.clone());
                     }
                 }
-                if s.audio.input_device_name.is_none() {
-                    let ac = AudioCapture::new();
-                    let list = ac.list_input_devices();
-                    debug!("利用できる入力デバイス: {:?}", list);
-                    if let Some(name) = list.first() {
-                        s.audio.input_device_name = Some(name.clone());
-                        info!("入力デバイスの既定を {} にした", name);
-                    }
-                }
+                // 入力デバイスも出力と同じく未設定（None）のままにし、
+                // Windows の既定デバイスへ委ねる。
+                //
+                // **以前は列挙した先頭のデバイスへ自動で書き換えていたが、やめた。**
+                // 直後の s.save() で確定値として保存されるため、次回起動時には
+                // 常に Some(...) になり、poll_default_audio_device の
+                // 「既定のデバイス」追従（track_input）が初回起動以降ずっと
+                // 効かなくなっていた（#135 のレビューで指摘）
                 if s.audio.output_device_name.is_none() {
-                    // 出力デバイスはデフォルト（None）で自動選択させる
-                    s.audio.output_device_name = None;
                     debug!("出力デバイスは既定（自動選択）にする");
                 }
                 // タイトルバーなしで保存されているのに画面ドラッグ移動が切れている
@@ -3133,6 +3130,23 @@ impl CaptureCardViewer {
             "Windows 側の既定音声デバイスが切り替わったので再接続する（入力: {}, 出力: {}）",
             input_switched, output_switched
         );
+
+        // 「既定のデバイス」のキャッシュキーは切り替わっても同じ文字列
+        // （`DEFAULT_DEVICE_KEY`）のままなので、古い物理デバイスの対応設定が
+        // 残ってしまう。取り直さないと、新しい既定デバイスが対応しない
+        // サンプリングレートやチャンネル数のまま開こうとしうる。
+        // 接続に失敗したときの取り直し（`try_connect_audio`）と同じ扱い
+        if input_switched {
+            self.settings_dialog
+                .audio_input_capabilities_mut()
+                .retry(&audio::cache_key(None));
+        }
+        if output_switched {
+            self.settings_dialog
+                .audio_output_capabilities_mut()
+                .retry(&audio::cache_key(None));
+        }
+        self.dispatch_capability_requests();
 
         match self.audio_capture.lock() {
             Ok(mut audio) => audio.stop_capture(),

@@ -105,7 +105,9 @@ eframe は **`update()` の中で要求された再描画しか予約しない�
 
 ### 「既定のデバイス」設定は Windows 側の既定切り替えを追いかける
 
-cpal は WASAPI の `IMMNotificationClient` を公開していないため、開いたあとに Windows 側で既定入出力デバイスが変わっても通知が来ない。`poll_default_audio_device` が `DEFAULT_AUDIO_DEVICE_POLL_INTERVAL`（4 秒）おきに `default_input_device()` / `default_output_device()` の名前を問い合わせ、実際に開いている名前（`audio::ActiveAudio`）と食い違っていれば再接続を要求する（#135）。判定は純粋関数 `default_audio_device_changed`。設定で明示的にデバイスを選んでいる向きは対象にしない（フォールバックの話とは別）。`audio_retry` が既に再試行中のフレームは何もしない。設定ダイアログの開閉に関係なく動く点が `cached_output_devices` の 5 秒キャッシュと違う。
+cpal は WASAPI の `IMMNotificationClient` を公開していないため、開いたあとに Windows 側で既定入出力デバイスが変わっても通知が来ない。`poll_default_audio_device` が `DEFAULT_AUDIO_DEVICE_POLL_INTERVAL`（4 秒）おきに `default_input_device()` / `default_output_device()` の名前を問い合わせ、実際に開いている名前（`audio::ActiveAudio`）と食い違っていれば再接続を要求する（#135）。判定は純粋関数 `default_audio_device_changed`。設定で明示的にデバイスを選んでいる向きは対象にしない（フォールバックの話とは別）。`audio_retry` が既に再試行中のフレームは何もしない。設定ダイアログの開閉に関係なく動く点が `cached_output_devices` の 5 秒キャッシュと違う。切り替わったと判定した向きは、対応設定のキャッシュ（`DEFAULT_DEVICE_KEY` のキーのまま）も `retry` で取り直す。物理デバイスが変わっても文字列としてのキーは同じままなので、取り直さないと古いデバイスの対応設定で開こうとする。
+
+**`CaptureCardViewer::default` は入力デバイスを自動選択しない。** 出力と同じく `None`（既定のデバイス）のままにする。以前は起動時に列挙した先頭のデバイスへ書き換えて `s.save()` していたため、次回起動時には常に具体的なデバイス名になり、入力側の `poll_default_audio_device` の追従が初回起動以降ずっと効かなくなっていた。設定画面のオーディオ入力デバイスの選択肢には出力と違って「デフォルト」が無いため、ユーザーが明示的に切り替えない限り `None` のまま残る。
 
 ### スレッド構成
 
