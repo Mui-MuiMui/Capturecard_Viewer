@@ -1221,7 +1221,7 @@ impl VideoCapture {
 
         // 実際に確定したフォーマットは open_stream の前に読む。
         // ストリーム開始後は nokhwa のフレーム取得スレッドがカメラのロックを
-        // 握り続けるため、待たされて UI スレッドが止まる
+        // 握り続けるため、待たされてデバイスワーカースレッドが止まる
         //
         // fps は載せない。nokhwa のバインディングが MF_MT_FRAME_RATE
         // （上位 32 ビットが分子、下位 32 ビットが分母）を `fps as u32` で
@@ -1308,9 +1308,10 @@ impl VideoCapture {
             device_name.unwrap_or("（未指定。先頭のデバイス）")
         );
 
-        // 失敗をここで warn! にしない。呼び出し側（main.rs の
-        // dispatch_capability_requests）が、デバイス名付きで理由をログへ出し、
-        // 設定ダイアログにも表示する。ここで出すと同じ内容が 2 行並ぶ
+        // 失敗をここで warn! にしない。呼び出し側（`app::worker_connect` の
+        // query_video_capabilities）が、デバイス名付きで理由をログへ出し、
+        // 結果はイベント経由で設定ダイアログにも表示される。ここで出すと
+        // 同じ内容が 2 行並ぶ
         let devices = nokhwa::query(ApiBackend::MediaFoundation)
             .map_err(|e| format!("Failed to query devices: {}", e))?;
 
