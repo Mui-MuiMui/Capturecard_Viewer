@@ -42,10 +42,12 @@ To also remove the settings file, delete the following directory:
   - Toggle automatic device reconnection
   - Reset the window size (back to the default 1280x720)
   - Reconnect device
+  - **プリセット (Presets)** — submenu; appears once you have saved at least one preset
+    - Pick a saved preset to switch the video and audio settings
   - Advanced settings
   - Quit
 
-  **Only when the window is too short to fit the whole menu**, the toggles collapse into two submenus: 表示 (View) — aspect ratio preservation, always-on-top, the stats overlay, the title bar — and ウィンドウ (Window) — window dragging, resetting the window size. When there is enough height, the menu stays flat as listed above, so normally you never have to open a submenu. Whether it collapses is decided the moment the menu opens and does not change while it stays open. The menu is pushed back inside the screen when it would overflow a screen edge, and scrolls when it still does not fit.
+  **Only when the window is too short to fit the whole menu**, the toggles collapse into two submenus: 表示 (View) — aspect ratio preservation, always-on-top, the stats overlay, the title bar — and ウィンドウ (Window) — window dragging, resetting the window size. When there is enough height, the menu stays flat as listed above, so normally you never have to open a submenu. Whether it collapses is decided the moment the menu opens and does not change while it stays open. **プリセット (Presets) always stays a submenu regardless of collapsing**, since it lists a variable number of presets rather than a fixed toggle. The menu is pushed back inside the screen when it would overflow a screen edge, and scrolls when it still does not fit.
 - **Mouse wheel**: Adjust volume (±10%). The current volume appears as a bar at the bottom of the screen and fades out after about 1.5 seconds (the same overlay appears when you change the volume from the context menu slider or the settings dialog)
 
 #### Borderless mode (hiding the title bar)
@@ -70,7 +72,7 @@ You can silence the output without dropping the volume to 0%. The volume value i
 
 ### Hotkeys
 
-The settings window → **screenshot settings** tab → ホットキー (Hotkeys) lets you assign a key to each of the following actions. **They work while other applications have focus.**
+The settings window → **ホットキー (Hotkeys) tab** lets you assign a key to each of the following actions. **They work while other applications have focus.**
 
 | Action | Description | Default |
 |---|---|---|
@@ -82,7 +84,10 @@ The settings window → **screenshot settings** tab → ホットキー (Hotkeys
 | 音量を下げる (Volume down) | Lowers the volume by 10% | unassigned |
 | ミュート切替 (Toggle mute) | Toggles mute on and off | unassigned |
 
-- Press 設定... (Set) on a row to capture a key, or クリア (Clear) to remove the assignment. Changes take effect when you press 適用 (Apply) or OK.
+- Press 設定... (Set) on a row to open the capture dialog. **It accepts a key the instant it opens: press anything other than a modifier key and it captures that combination and closes automatically.** There is no "start capturing" or OK button anymore. Use クリア (Clear) in the list to remove an assignment.
+- Global hotkeys are temporarily suspended while the dialog is open, so **you can capture a key that is already assigned to another action** — including reassigning the same key to the action you're currently editing.
+- If the key you pressed cannot be accepted, the dialog stays open and shows the reason in red: it was only modifier keys, it's already assigned to another action, or it conflicts with another application and could not be registered.
+- Changes take effect when you press 適用 (Apply) or OK.
 - A hotkey does exactly what the mouse does: changing the volume shows the volume bar at the bottom, toggling fullscreen shows the indicator at the top-left.
 - Assigning the same key to more than one action shows a warning. If you apply it anyway, only the action higher in the list stays active.
 - Keys already taken by another application cannot be registered. A notification appears and the reason is also listed below the table. Closing the other application makes the key work again without any action on your part.
@@ -105,8 +110,9 @@ Turning on "情報表示" (Show stats) in the context menu (under 表示 (View) 
 1. Right-click → "詳細設定..." (Advanced settings) to open the settings window.
 2. Select video and audio devices in the **device settings** tab.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
-3. Configure the destination, save location, file format, sound effect, and the per-action hotkeys in the **screenshot settings** tab.
-4. Export, import or reset the settings in the **その他 (Other)** tab.
+3. Configure the destination, save location, file format, and sound effect in the **screenshot settings** tab.
+4. Configure the per-action hotkeys in the **ホットキー (Hotkeys)** tab.
+5. Manage presets, and export, import or reset the settings, in the **その他 (Other)** tab.
 
 Edits in the settings window are kept as a draft and do not affect the running application until you press a button.
 
@@ -122,6 +128,28 @@ Edits in the settings window are kept as a draft and do not affect the running a
 
 > **Note:** The application interface is currently Japanese only.
 
+### Presets
+
+You can name a combination of video and audio settings, save it, and switch between saved combinations from the right-click menu. This helps when you use more than one capture card, or when you move back and forth between "low latency" (720p60) and "image quality" (1080p30) on the same card.
+
+Presets are managed in the **その他 (Other)** tab of the settings window and switched from **プリセット (Presets)** in the right-click menu. While no preset exists, the プリセット entry does not appear in the menu.
+
+| Button | Behavior |
+|---|---|
+| 保存 (Save, with a name typed in) | Adds the video and audio settings you are editing as a new preset |
+| 読み込む (Load) | Puts that preset's contents into the settings you are editing |
+| 上書き保存 (Overwrite) | Replaces that preset with the video and audio settings you are editing |
+| 削除 (Delete) | Removes it from the list |
+
+- **A preset holds only the video and audio settings from the device settings tab** — device name, format, resolution, FPS, color space, color range, image adjustments (brightness / contrast / saturation), input and output devices, sample rate, channel count and audio passthrough. Screenshot settings, hotkeys and window settings are not included: having the save folder or your hotkeys change underneath you when switching presets would be hard to make sense of.
+- **Automatic device reconnection is not included either.** Whatever you set from the right-click menu stays as it is.
+- Names must be unique, and a name made only of whitespace is rejected.
+- **Adding, overwriting, deleting and loading all act on the draft**, like every other edit. They reach the running application when you press 適用 or OK, and キャンセル discards all of them.
+- If you load a preset and then change something by hand, "現在:" in the その他 tab reads "name（変更あり）" ("modified") and the check mark disappears from the right-click menu.
+- Switching from the right-click menu shows "プリセット: name" at the bottom of the screen for about 1.5 seconds. If the contents match what is already running, the device is not reopened and the video does not drop.
+- **設定を初期化... (Reset settings) does not delete your presets.** Reset restores the current settings to their defaults; it is not meant to throw away the presets you have built up. Delete them one by one from the list instead.
+- Exported settings files contain the presets, and importing replaces the preset list with the one from the file.
+
 ### Exporting, importing and resetting settings
 
 These live in the **その他 (Other)** tab of the settings window. Use them when moving to another PC, backing up your settings, or attaching your configuration to a bug report.
@@ -130,13 +158,14 @@ These live in the **その他 (Other)** tab of the settings window. Use them whe
 |---|---|
 | 設定を書き出す... (Export settings) | Saves the current settings as a TOML file. The default file name is `capturecard_viewer-settings-YYYYMMDD.toml` |
 | 設定を読み込む... (Import settings) | Reads an exported file into the settings you are currently editing |
-| 設定を初期化... (Reset settings) | Resets the settings you are editing to their defaults. It covers the same items as import, so the window position and size are left alone. Nothing happens until you press the confirmation button |
+| 設定を初期化... (Reset settings) | Resets the settings you are editing to their defaults. It covers the same items as import, so the window position and size — and your saved presets — are left alone. Nothing happens until you press the confirmation button |
 
 - **Export writes the running settings, not the draft.** Press 適用 first if you want your current edits included.
 - **Import and reset only change the draft.** Like every other edit, they reach the running application when you press 適用 or OK, and キャンセル discards them.
 - **Window position and size are never imported.** A file exported on a machine with a different display layout will not move your window off-screen. Reset leaves the position and size alone as well.
 - Of the items toggled from the right-click menu, always on top, drag to move, stats overlay, mute and borderless mode are not imported. They cannot be changed from the settings window, so importing them would have no effect. Automatic device reconnection *is* imported.
 - If a value cannot be understood, only that item falls back to its default and the rest is imported. If the file is not valid TOML, nothing changes and the reason is shown.
+- **Saved presets are included in the export and are imported as well.** Reset does not remove them.
 
 ### Screenshots
 
@@ -214,7 +243,7 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 
 **Screenshot hotkey**
 
-- F12 cannot currently be used for screenshots. Registration fails due to a conflict with other software on the system. The reason is shown under the hotkey list in the settings window.
+- F12 cannot currently be used for screenshots. Registration fails due to a conflict with other software on the system. When registration fails, the reason is shown right in the hotkey capture dialog; if an already-applied key later conflicts, the reason is also shown under the hotkey list in the settings window.
 
 **Device connection at startup**
 
