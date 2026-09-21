@@ -125,6 +125,8 @@ impl CaptureCardViewer {
 
         if let Ok(mut settings) = self.settings.lock() {
             settings.ui.always_on_top = enabled;
+        } else {
+            warn!("最前面表示の設定の反映で settings のロックを取得できない");
         }
         info!(
             "最前面表示を{}にした",

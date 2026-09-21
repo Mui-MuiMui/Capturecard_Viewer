@@ -7,7 +7,7 @@ use super::CaptureCardViewer;
 use crate::overlay::OverlayContent;
 use crate::settings::{MAX_VOLUME, MIN_VOLUME};
 use eframe::egui;
-use log::info;
+use log::{info, warn};
 use std::time::{Duration, Instant};
 
 /// 音量を変えたときに OSD を出しておく時間。
@@ -100,6 +100,8 @@ impl CaptureCardViewer {
         self.volume = volume;
         if let Ok(mut settings) = self.settings.lock() {
             settings.ui.volume = volume;
+        } else {
+            warn!("音量の設定の反映で settings のロックを取得できない");
         }
         self.mark_settings_dirty();
         self.show_volume_overlay();
@@ -149,9 +151,13 @@ impl CaptureCardViewer {
         self.muted = muted;
         if let Ok(mut settings) = self.settings.lock() {
             settings.ui.muted = muted;
+        } else {
+            warn!("ミュートの設定の反映で settings のロックを取得できない");
         }
         if let Ok(mut audio) = self.audio_capture.lock() {
             audio.set_muted(muted);
+        } else {
+            warn!("ミュートの反映で audio_capture のロックを取得できない");
         }
         self.mark_settings_dirty();
     }

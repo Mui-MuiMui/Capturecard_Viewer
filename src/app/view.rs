@@ -9,7 +9,7 @@ use super::CaptureCardViewer;
 use crate::status::ErrorSource;
 use crate::video::FrameStats;
 use eframe::egui;
-use log::info;
+use log::{info, warn};
 
 /// 映像が出ていないときに画面へ出す文言を決める。
 ///
@@ -123,11 +123,22 @@ impl CaptureCardViewer {
     /// 来ていなくても、最小化していても描き続けていた（Issue #98）。
     pub(super) fn update_video_texture(&mut self, ctx: &egui::Context) -> bool {
         // 新着フレームが無ければ何もしない。既存のテクスチャをそのまま使い回す
-        let new_frame = self
-            .video_capture
-            .lock()
-            .ok()
-            .and_then(|video| video.get_frame_if_newer(self.last_frame_generation));
+        let new_frame = match self.video_capture.lock() {
+            Ok(video) => {
+                self.video_texture_lock_warned = false;
+                video.get_frame_if_newer(self.last_frame_generation)
+            }
+            Err(_) => {
+                // 毎フレーム呼ばれる経路なので、ロックが取れない間ずっと
+                // warn! を出すとログが埋まる。ポイズニングは自然に治らないため、
+                // 最初の 1 回だけ記録すれば調査には足りる
+                if !self.video_texture_lock_warned {
+                    warn!("映像テクスチャの更新で video_capture のロックを取得できない");
+                    self.video_texture_lock_warned = true;
+                }
+                None
+            }
+        };
 
         if let Some((frame, generation)) = new_frame {
             self.last_frame_generation = generation;
@@ -212,6 +223,8 @@ impl CaptureCardViewer {
                             if settings.ui.enable_drag_move {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                             }
+                        } else {
+                            warn!("ウィンドウドラッグの判定で settings のロックを取得できない");
                         }
                     }
 
@@ -244,6 +257,8 @@ impl CaptureCardViewer {
                             if settings.ui.enable_drag_move {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                             }
+                        } else {
+                            warn!("ウィンドウドラッグの判定で settings のロックを取得できない");
                         }
                     }
 
