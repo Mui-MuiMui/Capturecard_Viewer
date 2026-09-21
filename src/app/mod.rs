@@ -211,9 +211,9 @@ pub struct CaptureCardViewer {
 impl Default for CaptureCardViewer {
     fn default() -> Self {
         let (loaded_settings, load_outcome) = AppSettings::load();
-        // 表示状態は apply_settings を待たずに反映する。
-        // apply_settings は起動から 2 秒後が最初なので、待つと
-        // オンで終了したのに起動直後だけ出ていない、という見え方になる
+        // 表示状態はここで読み込んだ値をそのままフィールドの初期値にする。
+        // apply_settings(true) も最初の update() で同じ値を書き戻すが、
+        // 構築時点で確定させておけば以降の初期化順序に依存せずに済む
         let show_stats_overlay = loaded_settings.ui.show_stats_overlay;
         let settings = Arc::new(Mutex::new(loaded_settings));
 
