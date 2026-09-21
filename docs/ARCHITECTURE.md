@@ -345,7 +345,7 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 | レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_connect` / `monitor` / `retry` / `capabilities` / `screenshot` / `settings_dialog` / `settings_store` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
 | UI は状態を持たない | `ui.rs` から `static` / `static mut` は消え、タブ選択・デバイス能力キャッシュ・ホットキー入力の待機状態（編集中のアクションを含む）は `CaptureCardViewer` が持つ `SettingsDialogState` にある。ダイアログの開閉フラグと確定済みのホットキーは `CaptureCardViewer` が直接持つ。ホットキー入力ダイアログはまだ `&mut` で受けた値を直接書き換える | UI 層をイベント返却型にする |
 | イベント駆動 | 2 秒ごとに設定を再適用するポーリング | apply_settings の 2 秒ごとの再登録 |
-| チャネルでの隔離 | コマンドとイベントを mpsc でやり取りする。映像フレームと、コールバックが読む Atomic だけが例外 | 完了 |
+| チャネルでの隔離 | コマンドとイベントを mpsc でやり取りする。チャネルを通さない共有は 3 つ（映像フレーム、コールバックが読む Atomic、観測値の `Arc<RwLock<DeviceSnapshot>>`） | 完了 |
 | UI をブロックしない | デバイスを開く・閉じる・列挙する処理も含めてワーカースレッドへ移した。スクリーンショットのエンコードは撮影ごとのスレッド。`update()` に残るブロッキングは `rfd` のファイルダイアログだけ | 完了 |
 | 要求どおりに開く | MJPEG / RGB24 を選んでも YUYV に差し替わる（差し替えたことは `warn` でログに残る） | MJPEG/RGB24 が YUYV で開かれる不具合 |
 | 新フレームの判別 | 世代番号で新着は判別できるが、無信号・切断の検出には使っていない。接続できていない間の再接続はバックオフで自動化済み | デバイス切断検出と自動再接続 |

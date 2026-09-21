@@ -5,14 +5,15 @@
 //! `DeviceCommand` を送り、`DeviceEvent` を `update()` の中で非ブロックに
 //! 受け取るだけにする。
 //!
-//! **例外は 3 つ。** 映像フレーム（`video::VideoFrames`）、色変換と映像調整
-//! （`video::SharedColorConversion`）、音量・ミュート・パススルー
-//! （`audio::AudioControls`）は、チャネルを通さず共有する。どれもデバイスを
-//! 開く処理を挟まないうえ、フレームはコマンドの列に並べると遅延が増える。
+//! **チャネルを通さない共有が 3 つある。** 映像フレーム（`video::VideoFrames`）、
+//! 色変換と映像調整（`video::SharedColorConversion`）、音量・ミュート・
+//! パススルー（`audio::AudioControls`）。どれもデバイスを開く処理を挟まない
+//! うえ、フレームはコマンドの列に並べると遅延が増える。
 //!
-//! 「いま何に繋がっているか」のような軽い観測値は `DeviceSnapshot` に
-//! 写してあり、UI は `Arc<RwLock<..>>` 越しに読む。イベントを取りこぼしても
-//! 表示が食い違わないよう、状態は必ずこちらを正とする。
+//! これとは別に、「いま何に繋がっているか」のような軽い観測値も
+//! チャネルを通さず `DeviceSnapshot` に写してあり、UI は `Arc<RwLock<..>>`
+//! 越しに読む。イベントを取りこぼしても表示が食い違わないよう、状態は
+//! 必ずこちらを正とする。
 
 use crate::audio::{ActiveAudio, AudioCapabilities, AudioControls, AudioDirection};
 use crate::repaint::RepaintWaker;
