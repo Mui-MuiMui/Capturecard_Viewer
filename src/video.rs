@@ -1328,9 +1328,10 @@ impl VideoCapture {
             CameraFormat::new(Resolution::new(640, 480), FrameFormat::YUYV, 30),
         ));
 
-        // キャプチャ中のデバイスをもう一度開く。取得そのものは `capability-query`
-        // スレッドで走るので UI は止まらないが、ここが伸びると設定ダイアログの
-        // 「対応形式を取得中...」が長く出たままになる
+        // キャプチャ中のデバイスをもう一度開く。取得そのものはデバイス
+        // ワーカースレッドで走るので UI は止まらないが、ここが伸びると設定
+        // ダイアログの「対応形式を取得中...」が長く出たままになり、その間
+        // ワーカーは次のコマンドを処理できない
         let open_start = Instant::now();
         let mut camera = Camera::new(device_info.index().clone(), requested_format)
             .map_err(|e| format!("Failed to create camera for capability query: {}", e))?;

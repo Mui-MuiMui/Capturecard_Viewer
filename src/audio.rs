@@ -98,7 +98,7 @@ pub fn device_name_from_key(key: &str) -> Option<&str> {
 ///
 /// `supported_input_configs()` / `supported_output_configs()` は WASAPI で
 /// 13 レート × 5 形式の `IsFormatSupported`（実測 300ms 前後）になるため、
-/// UI スレッドでは呼ばない。別スレッドで一度取ってこの型で持ち回す。
+/// UI スレッドでは呼ばない。デバイスワーカーが一度取ってこの型で持ち回す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioCapabilities {
     /// デバイスが列挙した対応設定。`select_best_config` へそのまま渡せる
@@ -138,11 +138,12 @@ impl AudioCapabilities {
 /// 指定したデバイスの対応設定を取り、`AudioCapabilities` にまとめる。
 ///
 /// **UI スレッドから直接呼ばないこと。** 列挙は WASAPI への問い合わせを
-/// 繰り返すため実測 300ms 前後かかる。`CaptureCardViewer` が使い捨ての
-/// スレッドへ投げ、結果をチャネルで受け取る。
+/// 繰り返すため実測 300ms 前後かかる。呼ぶのはデバイスワーカースレッド
+/// （`app::worker_connect`）で、結果はチャネルで UI スレッドへ返る。
 ///
-/// `AudioCapture` のホストは使わず、この関数の中で新しく作る。`audio_capture`
-/// のロックを別スレッドから握ると、その間 UI スレッドの再接続が止まるため。
+/// `AudioCapture` のホストは使わず、この関数の中で新しく作る。`AudioCapture`
+/// を持たないスレッドからも呼べるようにしてあり、実際 `query_capabilities`
+/// だけを別スレッドへ切り出すことになっても手を入れずに済む。
 pub fn query_capabilities(
     direction: AudioDirection,
     device_name: Option<&str>,
@@ -181,7 +182,8 @@ pub fn query_capabilities(
 }
 
 /// ホストの一覧から名前でデバイスを探す。`AudioCapture::find_device_by_name` と
-/// 同じことを、`AudioCapture` を持たない別スレッドから行うためのもの。
+/// 同じことを、`AudioCapture` を持たない場所（`query_capabilities`）から
+/// 行うためのもの。
 fn find_device_in_host(
     host: &cpal::Host,
     name: &str,
@@ -393,8 +395,8 @@ pub struct PassthroughRequest<'a> {
     pub sample_rate: Option<u32>,
     /// 設定画面で選んだチャンネル数。`None` ならデバイスの既定に従う
     pub channels: Option<u16>,
-    /// 別スレッドで先に取っておいた入力デバイスの対応設定。
-    /// `None` のときだけ、この場（UI スレッド）で列挙する
+    /// デバイスワーカーが先に取っておいた入力デバイスの対応設定。
+    /// `None` のときだけ、この場で列挙する（そのぶん開くのが 300ms 遅れる）
     pub input_capabilities: Option<&'a AudioCapabilities>,
     /// 同上、出力デバイスの対応設定
     pub output_capabilities: Option<&'a AudioCapabilities>,
@@ -611,7 +613,7 @@ impl AudioCapture {
             .default_output_config()
             .map_err(|e| format!("Failed to get output config: {}", e))?;
 
-        // 対応設定の一覧。**先に別スレッドで取ってあればそれを使う。**
+        // 対応設定の一覧。**先にワーカーが取ってあればそれを使う。**
         // WASAPI の列挙は 300ms 前後かかるため、ここ（UI スレッド）で毎回
         // 走らせるとデバイスの切り替えのたびにウィンドウが固まる
         let input_ranges = resolve_ranges(input_capabilities, AudioDirection::Input, || {
@@ -974,7 +976,7 @@ fn select_aligned_configs(
 
 /// 対応設定の一覧を用意する。
 ///
-/// 別スレッドで取ったキャッシュがあればそれを使い、無いときだけその場で列挙する。
+/// ワーカーが先に取ったものがあればそれを使い、無いときだけその場で列挙する。
 /// 列挙に失敗したら空を返す。空なら `select_best_config` が `None` を返し、
 /// 呼び出し側がデバイスの既定設定へ落ちる（従来の挙動）。
 fn resolve_ranges<E: std::fmt::Display>(
