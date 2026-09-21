@@ -368,6 +368,8 @@ impl Default for CaptureCardViewer {
                         "読めなかった設定ファイルが残っているため、設定の自動保存を止める。設定画面の「適用」か「OK」で保存すると再開する"
                     );
                 }
+            } else {
+                warn!("起動時のデバイス自動選択で settings のロックを取得できない");
             }
         }
 
@@ -376,11 +378,13 @@ impl Default for CaptureCardViewer {
         // 以前はデバイスを切り替えたときしか取得していなかったため、
         // 起動後に設定画面を開いても解像度や FPS の選択肢が出なかった。
         // 接続と並行して走るので、設定画面を開く頃には揃っている
-        let saved_video_device = app
-            .settings
-            .lock()
-            .ok()
-            .and_then(|s| s.video.device_name.clone());
+        let saved_video_device = match app.settings.lock() {
+            Ok(s) => s.video.device_name.clone(),
+            Err(_) => {
+                warn!("保存済みビデオデバイスの能力の先読みで settings のロックを取得できない");
+                None
+            }
+        };
         if let Some(device) = saved_video_device {
             app.settings_dialog.capabilities_mut().request(&device);
         }
@@ -468,6 +472,8 @@ impl eframe::App for CaptureCardViewer {
         if (self.volume - self.last_volume_sent).abs() > 0.5 {
             if let Ok(mut audio) = self.audio_capture.lock() {
                 audio.set_volume(self.volume);
+            } else {
+                warn!("音量の伝播で audio_capture のロックを取得できない");
             }
             self.last_volume_sent = self.volume;
         }
@@ -505,6 +511,8 @@ impl eframe::App for CaptureCardViewer {
                 }
 
                 window_geometry_changed = changed;
+            } else {
+                warn!("ウィンドウの位置・大きさの記録で settings のロックを取得できない");
             }
         }
 
@@ -535,6 +543,8 @@ impl eframe::App for CaptureCardViewer {
             if !self.settings_dialog.has_draft() {
                 if let Ok(settings) = self.settings.lock() {
                     self.settings_dialog.begin_edit(&settings);
+                } else {
+                    warn!("設定ダイアログのドラフト作成で settings のロックを取得できない");
                 }
             }
 
@@ -587,11 +597,13 @@ impl eframe::App for CaptureCardViewer {
             // 同じ基準に揃える）
             let existing_hotkeys = match self.settings_dialog.draft() {
                 Some(draft) => draft.hotkeys.clone(),
-                None => self
-                    .settings
-                    .lock()
-                    .map(|settings| settings.hotkeys.clone())
-                    .unwrap_or_default(),
+                None => match self.settings.lock() {
+                    Ok(settings) => settings.hotkeys.clone(),
+                    Err(_) => {
+                        warn!("ホットキーの重複判定で settings のロックを取得できない");
+                        Default::default()
+                    }
+                },
             };
 
             let outcome = ui::show_hotkey_capture_dialog(
@@ -627,6 +639,8 @@ impl eframe::App for CaptureCardViewer {
                             // ダイアログが閉じたあとの再開（resume）で行う
                             if let Ok(mut settings) = self.settings.lock() {
                                 settings.set_hotkey(action, Some(candidate));
+                            } else {
+                                warn!("ホットキーの確定で settings のロックを取得できない");
                             }
                             self.mark_settings_dirty();
                         }
