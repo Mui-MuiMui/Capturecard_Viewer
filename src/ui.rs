@@ -2,9 +2,8 @@ use crate::audio::{self, AudioCapabilities, AudioDirection, ChoiceSource};
 use crate::hotkey::{HotkeyAction, HotkeyError};
 use crate::settings::{
     resolved_active_preset, validate_preset_name, AppSettings, ColorRange, ColorSpace, Preset,
-    ScreenshotDestination, ScreenshotFormat, DEFAULT_CHANNELS, DEFAULT_SAMPLE_RATE,
-    MAX_AUDIO_BUFFER_MS, MAX_JPEG_QUALITY, MAX_VIDEO_ADJUSTMENT, MIN_AUDIO_BUFFER_MS,
-    MIN_JPEG_QUALITY, MIN_VIDEO_ADJUSTMENT,
+    ScreenshotDestination, ScreenshotFormat, DEFAULT_CHANNELS, DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS,
+    MAX_JPEG_QUALITY, MAX_VIDEO_ADJUSTMENT, MIN_BUFFER_MS, MIN_JPEG_QUALITY, MIN_VIDEO_ADJUSTMENT,
 };
 use crate::status::{ConnectionStatus, ErrorSource, LinkStatus};
 use crate::video::{DeviceCapabilities, VideoMode};
@@ -1786,8 +1785,8 @@ fn show_device_settings_tab(
             ui.label("音声バッファ:");
             ui.add(
                 egui::Slider::new(
-                    &mut settings.audio.audio_buffer_ms,
-                    MIN_AUDIO_BUFFER_MS..=MAX_AUDIO_BUFFER_MS,
+                    &mut settings.audio.buffer_ms,
+                    MIN_BUFFER_MS..=MAX_BUFFER_MS,
                 )
                 .suffix(" ms"),
             );
@@ -2974,7 +2973,7 @@ mod tests {
                 channels: Some(1),
                 passthrough_enabled: false,
                 // 既定値（50ms）と異なる値にして、反映の有無を見分けられるようにする
-                audio_buffer_ms: 120,
+                buffer_ms: 120,
             },
             screenshot: ScreenshotSettings {
                 destination: ScreenshotDestination::Both,

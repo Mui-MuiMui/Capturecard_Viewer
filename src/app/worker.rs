@@ -74,7 +74,7 @@ impl DeviceConfig {
                 settings.audio.output_device_name.clone(),
                 settings.audio.sample_rate,
                 settings.audio.channels,
-                settings.audio.audio_buffer_ms,
+                settings.audio.buffer_ms,
             ),
             auto_reconnect: settings.video.auto_reconnect,
         }

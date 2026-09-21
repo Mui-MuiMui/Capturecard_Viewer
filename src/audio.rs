@@ -402,7 +402,7 @@ pub struct PassthroughRequest<'a> {
     /// 同上、出力デバイスの対応設定
     pub output_capabilities: Option<&'a AudioCapabilities>,
     /// 設定画面で選んだリングバッファの長さ（ミリ秒）。
-    /// `settings::MIN_AUDIO_BUFFER_MS`〜`MAX_AUDIO_BUFFER_MS` の範囲
+    /// `settings::MIN_BUFFER_MS`〜`MAX_BUFFER_MS` の範囲
     pub buffer_ms: u32,
 }
 
@@ -819,7 +819,7 @@ impl AudioCapture {
             output_config.sample_format()
         );
 
-        // リングバッファの長さは設定で選べる（`settings::AudioSettings::audio_buffer_ms`）。
+        // リングバッファの長さは設定で選べる（`settings::AudioSettings::buffer_ms`）。
         // 小さいほど遅延が減るが、出力コールバックが間に合わずアンダーランが
         // 出やすくなる。容量は目標水位の 2 倍にして、入力が先行しても後れても
         // 同じだけ余裕を持たせる

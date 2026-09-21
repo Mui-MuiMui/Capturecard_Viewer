@@ -591,7 +591,7 @@ impl WorkerState {
 mod tests {
     use super::*;
     use crate::audio::AudioControls;
-    use crate::settings::DEFAULT_AUDIO_BUFFER_MS;
+    use crate::settings::DEFAULT_BUFFER_MS;
     use crate::video::VideoFrames;
     use std::sync::mpsc::channel;
     use std::sync::RwLock;
@@ -668,7 +668,7 @@ mod tests {
                 None,
                 None,
                 None,
-                DEFAULT_AUDIO_BUFFER_MS,
+                DEFAULT_BUFFER_MS,
             ),
             auto_reconnect: false,
         }

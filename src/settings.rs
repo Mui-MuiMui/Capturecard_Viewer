@@ -493,9 +493,9 @@ pub struct AudioSettings {
     // あちらは「希望値」で、デバイスの能力に合わせて寄せられる余地があるが、
     // バッファ長はこちらで好きに決められるので寄せ先が無い。
     //
-    // 範囲外の値が書かれていても設定全体を失わせない（deserialize_audio_buffer_ms）
-    #[serde(deserialize_with = "deserialize_audio_buffer_ms")]
-    pub audio_buffer_ms: u32,
+    // 範囲外の値が書かれていても設定全体を失わせない（deserialize_buffer_ms）
+    #[serde(deserialize_with = "deserialize_buffer_ms")]
+    pub buffer_ms: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -626,9 +626,9 @@ pub const DEFAULT_CHANNELS: u16 = 2;
 //
 // 既定の 50ms は設定項目になる前にハードコードされていた長さ。
 // 更新しても既存ユーザーの音の出かたが変わらないようにしてある
-pub const MIN_AUDIO_BUFFER_MS: u32 = 20;
-pub const MAX_AUDIO_BUFFER_MS: u32 = 200;
-pub const DEFAULT_AUDIO_BUFFER_MS: u32 = 50;
+pub const MIN_BUFFER_MS: u32 = 20;
+pub const MAX_BUFFER_MS: u32 = 200;
+pub const DEFAULT_BUFFER_MS: u32 = 50;
 
 // JPEG 品質の下限と上限。image クレートの JpegEncoder が受け付ける範囲に合わせてある
 pub const MIN_JPEG_QUALITY: u8 = 1;
@@ -715,15 +715,12 @@ where
 // 考え方は deserialize_jpeg_quality と同じで、TOML の整数である i64 で
 // 受けてから 20〜200ms へ丸める。u32 のまま読むと、手で書き換えられた
 // 負の値でパースがファイル単位で失敗し、無関係な項目まで既定値へ戻る。
-fn deserialize_audio_buffer_ms<'de, D>(deserializer: D) -> Result<u32, D::Error>
+fn deserialize_buffer_ms<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let raw = i64::deserialize(deserializer)?;
-    let clamped = raw.clamp(
-        i64::from(MIN_AUDIO_BUFFER_MS),
-        i64::from(MAX_AUDIO_BUFFER_MS),
-    );
+    let clamped = raw.clamp(i64::from(MIN_BUFFER_MS), i64::from(MAX_BUFFER_MS));
     if clamped != raw {
         warn!(
             "設定の音声バッファ長 {} ms は範囲外なので {} ms として扱う",
@@ -949,7 +946,7 @@ impl Default for AudioSettings {
             passthrough_enabled: true,
             // 既定は 50ms。この値が設定項目になる前にハードコードされていた
             // 長さと同じで、更新しても音の出かたが変わらない
-            audio_buffer_ms: DEFAULT_AUDIO_BUFFER_MS,
+            buffer_ms: DEFAULT_BUFFER_MS,
         }
     }
 }
@@ -1342,7 +1339,7 @@ output_device_name = "Speakers"
 sample_rate = 44100
 channels = 1
 passthrough_enabled = false
-audio_buffer_ms = 120
+buffer_ms = 120
 
 [screenshot]
 destination = "both"
@@ -2246,16 +2243,16 @@ volume = 80.0
     fn app_settings_missing_audio_buffer_key_uses_the_previous_hardcoded_length() {
         // 音声バッファを設定項目にする前の版が書いた設定ファイル。
         // 既定は当時ハードコードされていた 50ms で、音の出かたが変わらない
-        let config = without_key(FULL_CONFIG, "audio_buffer_ms");
+        let config = without_key(FULL_CONFIG, "buffer_ms");
         assert!(
-            !config.contains("audio_buffer_ms ="),
-            "テスト用の設定から audio_buffer_ms が消えていない"
+            !config.contains("buffer_ms ="),
+            "テスト用の設定から buffer_ms が消えていない"
         );
 
         let settings: AppSettings =
-            toml::from_str(&config).expect("audio_buffer_ms が欠けていても読めなければならない");
+            toml::from_str(&config).expect("buffer_ms が欠けていても読めなければならない");
 
-        assert_eq!(settings.audio.audio_buffer_ms, DEFAULT_AUDIO_BUFFER_MS);
+        assert_eq!(settings.audio.buffer_ms, DEFAULT_BUFFER_MS);
         assert_eq!(settings.audio.sample_rate, Some(44100));
         assert_eq!(settings.ui.volume, 80.0);
     }
@@ -2264,12 +2261,12 @@ volume = 80.0
     fn app_settings_out_of_range_audio_buffer_is_clamped_without_losing_settings() {
         // 手で書き換えて桁を間違えた場合。バッファ長だけが範囲に収まり、
         // 無関係な項目は保持されなければならない
-        let config = FULL_CONFIG.replace("audio_buffer_ms = 120", "audio_buffer_ms = 5000");
+        let config = FULL_CONFIG.replace("buffer_ms = 120", "buffer_ms = 5000");
 
         let settings: AppSettings =
             toml::from_str(&config).expect("範囲外のバッファ長でも読めなければならない");
 
-        assert_eq!(settings.audio.audio_buffer_ms, MAX_AUDIO_BUFFER_MS);
+        assert_eq!(settings.audio.buffer_ms, MAX_BUFFER_MS);
         assert_eq!(settings.audio.channels, Some(1));
         assert_eq!(settings.ui.volume, 80.0);
     }
@@ -2278,12 +2275,12 @@ volume = 80.0
     fn app_settings_negative_audio_buffer_is_clamped_to_minimum() {
         // u32 のまま読むと負の値でファイル単位のパースが落ちる。
         // i64 で受けてから丸めているので、他の項目まで失わない
-        let config = FULL_CONFIG.replace("audio_buffer_ms = 120", "audio_buffer_ms = -1");
+        let config = FULL_CONFIG.replace("buffer_ms = 120", "buffer_ms = -1");
 
         let settings: AppSettings =
             toml::from_str(&config).expect("負のバッファ長でも読めなければならない");
 
-        assert_eq!(settings.audio.audio_buffer_ms, MIN_AUDIO_BUFFER_MS);
+        assert_eq!(settings.audio.buffer_ms, MIN_BUFFER_MS);
         assert_eq!(settings.ui.volume, 80.0);
     }
 
@@ -2293,12 +2290,12 @@ volume = 80.0
         // [audio] へ書き出されなければ、次の起動で 50ms へ戻ってしまう
         let settings: AppSettings =
             toml::from_str(FULL_CONFIG).expect("テスト用の設定を読めること");
-        assert_eq!(settings.audio.audio_buffer_ms, 120);
+        assert_eq!(settings.audio.buffer_ms, 120);
 
         let written = toml::to_string(&settings).expect("設定を書き出せること");
         let restored: AppSettings = toml::from_str(&written).expect("書き出した設定を読めること");
 
-        assert_eq!(restored.audio.audio_buffer_ms, 120);
+        assert_eq!(restored.audio.buffer_ms, 120);
     }
 
     #[test]
