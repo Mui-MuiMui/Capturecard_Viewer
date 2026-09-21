@@ -8,7 +8,6 @@ use super::CaptureCardViewer;
 use crate::overlay::OverlayContent;
 use crate::status::{self, ConnectionStatus, ErrorSource, LinkStatus};
 use chrono::Local;
-use log::warn;
 use std::time::{Duration, Instant};
 
 /// エラーをトーストで見せておく時間。
@@ -61,29 +60,17 @@ impl CaptureCardViewer {
 
     /// 設定ダイアログの「接続状態」タブへ渡す観測値を作る。
     ///
-    /// **ダイアログを開いている間だけ呼ぶ。** ロックは video → audio の順に
-    /// 1 つずつ取り、中では小さな構造体の複製しか行わない
-    /// （`stats()` / `link_state()` と同じ流儀）。
+    /// **デバイスへは問い合わせない。** ワーカーが定期的に更新している
+    /// 観測値（`DeviceSnapshot`）を `update()` の先頭で 1 回読んであり、
+    /// ここはその複製を組み替えるだけ。
     pub(super) fn connection_status(&self) -> ConnectionStatus {
-        let active_video = match self.video_capture.lock() {
-            Ok(video) => video.active(),
-            Err(_) => {
-                warn!("接続状態の表示で video_capture のロックを取得できない");
-                None
-            }
-        };
-        let active_audio = match self.audio_capture.lock() {
-            Ok(audio) => audio.active(),
-            Err(_) => {
-                warn!("接続状態の表示で audio_capture のロックを取得できない");
-                None
-            }
-        };
+        let active_video = self.device_snapshot.active_video.clone();
+        let active_audio = self.device_snapshot.active_audio.clone();
 
         let mut video = LinkStatus {
             connected: active_video.is_some(),
-            reconnecting: self.video_retry.is_active(),
-            attempts: self.video_retry.attempts(),
+            reconnecting: self.device_snapshot.video_retry.active,
+            attempts: self.device_snapshot.video_retry.attempts,
             details: Vec::new(),
             error: self.status_error(ErrorSource::Video),
         };
@@ -100,8 +87,8 @@ impl CaptureCardViewer {
 
         let mut audio = LinkStatus {
             connected: active_audio.is_some(),
-            reconnecting: self.audio_retry.is_active(),
-            attempts: self.audio_retry.attempts(),
+            reconnecting: self.device_snapshot.audio_retry.active,
+            attempts: self.device_snapshot.audio_retry.attempts,
             details: Vec::new(),
             error: self.status_error(ErrorSource::Audio),
         };

@@ -646,6 +646,94 @@ impl FrameBuffer {
     }
 }
 
+/// フレームバッファを共有するハンドル。
+///
+/// **映像フレームだけはワーカースレッドのチャネルを通さない。** デバイスの
+/// 操作は `app::worker_loop` へ移してあるが、フレームをコマンドと同じ列に
+/// 並べると、接続やデバイス列挙の後ろで待たされて遅延が増える。ここだけは
+/// 従来どおり `Arc<Mutex<FrameBuffer>>` をフレームコールバックスレッドと
+/// UI スレッドで直接共有する。
+///
+/// ロックの中で行うのは `Arc` の複製か最大 120 要素の集計だけで、
+/// フレームコールバックの `push_back` をほとんど待たせない。
+#[derive(Clone)]
+pub struct VideoFrames {
+    inner: Arc<Mutex<FrameBuffer>>,
+}
+
+impl Default for VideoFrames {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VideoFrames {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(FrameBuffer::new())),
+        }
+    }
+
+    /// 直近のフレームを新着かどうかに関わらず返す。
+    ///
+    /// スクリーンショットは「いま画面に出ている画」を保存するものなので、
+    /// 新着でなくても最後に届いたフレームを返す必要がある。
+    pub fn latest(&self) -> Option<Arc<VideoFrame>> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|fb| fb.latest_frame().map(|(frame, _)| frame))
+    }
+
+    /// 世代番号が `last_generation` と異なるフレームがある場合だけ、
+    /// フレームと世代番号を返す。
+    ///
+    /// 新着がなければ `None` を返すので、呼び出し側は前回の結果を使い回せる。
+    pub fn newer_than(&self, last_generation: u64) -> Option<(Arc<VideoFrame>, u64)> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|fb| match fb.latest_frame() {
+                Some((frame, generation)) if generation != last_generation => {
+                    Some((frame, generation))
+                }
+                _ => None,
+            })
+    }
+
+    /// 映像パイプラインの観測値を返す。
+    /// ロックを取れなかった場合は既定値（フレーム無し）を返す。
+    pub fn stats(&self) -> FrameStats {
+        self.inner
+            .lock()
+            .ok()
+            .map(|fb| fb.stats())
+            .unwrap_or_default()
+    }
+
+    /// 最後にフレームが届いてからの経過時間。
+    ///
+    /// ロックを取れなかった場合は「まだ 1 枚も届いていない」として返す。
+    /// 途絶時間が取れない状態で切断と判断させないため。
+    pub fn since_last_frame(&self) -> Option<Duration> {
+        self.inner.lock().ok().and_then(|fb| fb.since_last_frame())
+    }
+
+    /// 保持しているフレームと統計を捨てる。キャプチャの停止時に呼ぶ。
+    fn reset(&self) {
+        if let Ok(mut fb) = self.inner.lock() {
+            fb.reset();
+        } else {
+            warn!("フレームバッファのロックを取得できないので統計を消せない");
+        }
+    }
+
+    /// フレームコールバックへ渡す生のハンドル。
+    fn buffer(&self) -> Arc<Mutex<FrameBuffer>> {
+        Arc::clone(&self.inner)
+    }
+}
+
 /// 映像リンクの観測値。切断の判定に使う。
 ///
 /// `FrameStats` と分けてあるのは、こちらが毎フレーム読まれるため。
@@ -698,7 +786,7 @@ impl ActiveVideo {
 /// 明るさ・コントラスト・彩度も同じ扱いで、1 フレームだけ途中の値が
 /// 見えることがあるが、範囲内の値であることに変わりはない。
 #[derive(Debug)]
-struct SharedColorConversion {
+pub struct SharedColorConversion {
     space: AtomicU8,
     range: AtomicU8,
     /// 映像調整。いずれも -100〜100 で、値の意味は `VideoAdjustments` と同じ
@@ -717,8 +805,14 @@ const SPACE_BT709: u8 = 2;
 const RANGE_LIMITED: u8 = 0;
 const RANGE_FULL: u8 = 1;
 
+impl Default for SharedColorConversion {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SharedColorConversion {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             space: AtomicU8::new(SPACE_AUTO),
             range: AtomicU8::new(RANGE_LIMITED),
@@ -726,6 +820,32 @@ impl SharedColorConversion {
             contrast: AtomicI32::new(0),
             saturation: AtomicI32::new(0),
         }
+    }
+
+    /// 色変換に使う色空間とレンジを差し替える。
+    ///
+    /// キャプチャ中でも次のフレームから効く。デバイスを開き直さないのは、
+    /// 開き直しがリトライの待ちを含めて秒単位かかり、色を見比べながら
+    /// 設定を選ぶ操作に耐えないため。**デバイスを触らないので、UI スレッドから
+    /// 直接呼んでよい。**
+    pub fn set_color_conversion(&self, space: ColorSpace, range: ColorRange) {
+        self.store(space, range);
+        info!(
+            "色変換の設定を反映した（色空間: {:?}、レンジ: {:?}）",
+            space, range
+        );
+    }
+
+    /// 明るさ・コントラスト・彩度を差し替える。
+    ///
+    /// 色空間やレンジと同じく、キャプチャ中でも次のフレームから効く。
+    /// 調整は係数表へ畳み込まれるので、変換そのものは重くならない。
+    pub fn set_video_adjustments(&self, adjustments: VideoAdjustments) {
+        self.store_adjustments(adjustments);
+        info!(
+            "映像調整を反映した（明るさ: {}、コントラスト: {}、彩度: {}）",
+            adjustments.brightness, adjustments.contrast, adjustments.saturation
+        );
     }
 
     fn store(&self, space: ColorSpace, range: ColorRange) {
@@ -776,7 +896,7 @@ impl SharedColorConversion {
 
 pub struct VideoCapture {
     camera: Option<CallbackCamera>,
-    frames: Arc<Mutex<FrameBuffer>>,
+    frames: VideoFrames,
     /// いま開いているストリームの内容。閉じているときは `None`
     active: Option<ActiveVideo>,
     // フレームコールバックと共有する色変換の設定。
@@ -788,50 +908,30 @@ pub struct VideoCapture {
 }
 
 impl VideoCapture {
-    pub fn new() -> Self {
+    /// フレームバッファ・色変換・再描画の窓口を受け取って作る。
+    ///
+    /// **どれも UI スレッドが先に作り、複製を持ち続ける。** `VideoCapture`
+    /// 自身はデバイスワーカースレッド（`app::worker_loop`）だけが触るが、
+    /// フレームと色変換は UI スレッドから直に読み書きするため。
+    ///
+    /// 再描画の窓口は**キャプチャを開くより前に渡す必要がある。**
+    /// フレームコールバックは開始時点の複製を持つので、開いたあとに
+    /// 差し替えてもそのストリームには届かない。既定の `RepaintWaker` は
+    /// 何もしないため、渡し忘れても映像は止まらない。ただし `update()` の
+    /// 保険の間隔（`repaint::ACTIVE_FALLBACK_INTERVAL`）でしか更新されず、
+    /// 10fps 程度まで落ちる。
+    pub fn new(
+        frames: VideoFrames,
+        color_conversion: Arc<SharedColorConversion>,
+        repaint_waker: RepaintWaker,
+    ) -> Self {
         Self {
             camera: None,
-            frames: Arc::new(Mutex::new(FrameBuffer::new())),
+            frames,
             active: None,
-            color_conversion: Arc::new(SharedColorConversion::new()),
-            repaint_waker: RepaintWaker::default(),
+            color_conversion,
+            repaint_waker,
         }
-    }
-
-    /// フレームの到着で UI スレッドを起こすための窓口を渡す。
-    ///
-    /// **`start_capture` より前に呼ぶこと。** フレームコールバックは開始時点の
-    /// 複製を持つので、開いたあとに差し替えても、そのストリームには届かない。
-    /// 既定の `RepaintWaker` は何もしないため、渡し忘れても映像は止まらない。
-    /// ただし `update()` の保険の間隔（`repaint::ACTIVE_FALLBACK_INTERVAL`）
-    /// でしか更新されず、10fps 程度まで落ちる。
-    pub fn set_repaint_waker(&mut self, waker: RepaintWaker) {
-        self.repaint_waker = waker;
-    }
-
-    /// 色変換に使う色空間とレンジを差し替える。
-    ///
-    /// キャプチャ中でも次のフレームから効く。デバイスを開き直さないのは、
-    /// 開き直しがリトライの待ちを含めて秒単位かかり、色を見比べながら
-    /// 設定を選ぶ操作に耐えないため。
-    pub fn set_color_conversion(&self, space: ColorSpace, range: ColorRange) {
-        self.color_conversion.store(space, range);
-        info!(
-            "色変換の設定を反映した（色空間: {:?}、レンジ: {:?}）",
-            space, range
-        );
-    }
-
-    /// 明るさ・コントラスト・彩度を差し替える。
-    ///
-    /// 色空間やレンジと同じく、キャプチャ中でも次のフレームから効く。
-    /// 調整は係数表へ畳み込まれるので、変換そのものは重くならない。
-    pub fn set_video_adjustments(&self, adjustments: VideoAdjustments) {
-        self.color_conversion.store_adjustments(adjustments);
-        info!(
-            "映像調整を反映した（明るさ: {}、コントラスト: {}、彩度: {}）",
-            adjustments.brightness, adjustments.contrast, adjustments.saturation
-        );
     }
 
     pub fn list_devices() -> Vec<(String, String)> {
@@ -957,7 +1057,7 @@ impl VideoCapture {
         };
 
         let frame_callback = {
-            let fb = self.frames.clone();
+            let fb = self.frames.buffer();
             let color_conversion = self.color_conversion.clone();
             // フレームを置いたことを UI スレッドへ知らせる窓口。
             // これが無いと、UI 側は保険の間隔でしか新着を見に来ない
@@ -1182,64 +1282,18 @@ impl VideoCapture {
             }
         }
 
-        if let Ok(mut buf) = self.frames.lock() {
-            buf.reset();
-        } else {
-            warn!("フレームバッファのロックを取得できないので統計を消せない");
-        }
-    }
-
-    /// 直近のフレームを新着かどうかに関わらず返す。
-    ///
-    /// スクリーンショットは「いま画面に出ている画」を保存するものなので、
-    /// 新着でなくても最後に届いたフレームを返す必要がある。
-    pub fn get_latest_frame(&self) -> Option<Arc<VideoFrame>> {
-        self.frames
-            .lock()
-            .ok()
-            .and_then(|fb| fb.latest_frame().map(|(frame, _)| frame))
-    }
-
-    /// 映像パイプラインの観測値を返す。
-    ///
-    /// ロックの中では値のコピーと最大 120 要素の集計しか行わない。
-    /// フレームコールバックを待たせないため、ここで重い処理をしない。
-    /// ロックを取れなかった場合は既定値（フレーム無し）を返す。
-    pub fn stats(&self) -> FrameStats {
-        self.frames
-            .lock()
-            .ok()
-            .map(|fb| fb.stats())
-            .unwrap_or_default()
+        self.frames.reset();
     }
 
     /// ストリームが開いているかと、フレームの途絶時間を返す。
     ///
-    /// 切断の監視のために毎フレーム呼ばれる。ロックの中で行うのは
+    /// 切断の監視のためにデバイスワーカーが定期的に呼ぶ。ロックの中で行うのは
     /// `Instant` の減算だけで、フレームコールバックをほとんど待たせない。
-    /// ロックを取れなかった場合は「まだ 1 枚も届いていない」として返す。
-    /// 途絶時間が取れない状態で切断と判断させないため
     pub fn link_state(&self) -> VideoLinkState {
         VideoLinkState {
             capturing: self.camera.is_some(),
-            since_last_frame: self.frames.lock().ok().and_then(|fb| fb.since_last_frame()),
+            since_last_frame: self.frames.since_last_frame(),
         }
-    }
-
-    /// 世代番号が `last_generation` と異なるフレームがある場合だけ、
-    /// フレームと世代番号を返す。
-    ///
-    /// 新着がなければ `None` を返すので、呼び出し側は前回の結果を使い回せる。
-    pub fn get_frame_if_newer(&self, last_generation: u64) -> Option<(Arc<VideoFrame>, u64)> {
-        self.frames
-            .lock()
-            .ok()
-            .and_then(|fb| match fb.latest_frame() {
-                Some((frame, generation)) if generation != last_generation => {
-                    Some((frame, generation))
-                }
-                _ => None,
-            })
     }
 
     // デバイスの能力を取得するメソッド

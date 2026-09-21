@@ -504,8 +504,8 @@ impl SettingsDialogState {
     /// オーディオ入力デバイスの対応設定。
     ///
     /// ビデオ側と同じく、取得要求の取り出しと結果の反映は `CaptureCardViewer`
-    /// が行う。音声の接続も開く直前にここを読むため、ダイアログを開いていない
-    /// 間も触られる。
+    /// が行う。**ここにあるのは設定ダイアログの選択肢のため。** 音声を開く
+    /// ときに使う一覧はデバイスワーカーが別に持っている（`app::worker_loop`）。
     pub fn audio_input_capabilities_mut(&mut self) -> &mut AudioCapabilityCache {
         &mut self.audio_input_capabilities
     }
@@ -513,16 +513,6 @@ impl SettingsDialogState {
     /// オーディオ出力デバイスの対応設定。
     pub fn audio_output_capabilities_mut(&mut self) -> &mut AudioCapabilityCache {
         &mut self.audio_output_capabilities
-    }
-
-    /// オーディオ入力デバイスの対応設定（読み取り）。
-    pub fn audio_input_capabilities(&self) -> &AudioCapabilityCache {
-        &self.audio_input_capabilities
-    }
-
-    /// オーディオ出力デバイスの対応設定（読み取り）。
-    pub fn audio_output_capabilities(&self) -> &AudioCapabilityCache {
-        &self.audio_output_capabilities
     }
 
     /// ドラフトを実行中の設定へ反映する。ドラフトを持っていなければ何もしない。

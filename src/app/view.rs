@@ -4,12 +4,10 @@
 //! ここに並べてある。ウィンドウそのものの操作（装飾・リサイズ・
 //! フルスクリーン切替）は `super::window`、右クリックメニューは `super::menu`。
 
-use super::monitor::VideoLinkAction;
 use super::CaptureCardViewer;
 use crate::status::ErrorSource;
 use crate::video::FrameStats;
 use eframe::egui;
-use log::info;
 
 /// 映像が出ていないときに画面へ出す文言を決める。
 ///
@@ -122,21 +120,13 @@ impl CaptureCardViewer {
     /// 以前はここで無条件に 16ms（60fps）の再描画を予約していたため、映像が
     /// 来ていなくても、最小化していても描き続けていた（Issue #98）。
     pub(super) fn update_video_texture(&mut self, ctx: &egui::Context) -> bool {
-        // 新着フレームが無ければ何もしない。既存のテクスチャをそのまま使い回す
-        let new_frame = self
-            .video_capture
-            .lock()
-            .ok()
-            .and_then(|video| video.get_frame_if_newer(self.last_frame_generation));
+        // 新着フレームが無ければ何もしない。既存のテクスチャをそのまま使い回す。
+        // **フレームだけはワーカーのチャネルを通さない。** コマンドの列に
+        // 並べると、接続や列挙の後ろで待たされて遅延が増える
+        let new_frame = self.frames.newer_than(self.last_frame_generation);
 
         if let Some((frame, generation)) = new_frame {
             self.last_frame_generation = generation;
-
-            // 途絶から戻ってきた。次の途絶をもう一度検出できるように番人を戻す
-            if self.last_video_link_action != VideoLinkAction::Keep {
-                info!("映像フレームが再び届き始めたので表示を再開する");
-                self.last_video_link_action = VideoLinkAction::Keep;
-            }
 
             // 最適化: テクスチャオプションをNearest（補間なし）に設定し、性能向上
             let texture_options = egui::TextureOptions {
@@ -162,8 +152,8 @@ impl CaptureCardViewer {
         // 映像が無いときの文言は描画に入る前に決める。
         // 描画のクロージャの中でロックを取らないため
         let placeholder = video_placeholder_text(
-            self.video_capturing,
-            self.video_retry.is_active(),
+            self.device_snapshot.video_capturing,
+            self.device_snapshot.video_retry.active,
             self.error_detail(ErrorSource::Video).as_deref(),
         );
 
@@ -261,8 +251,8 @@ impl CaptureCardViewer {
     pub(super) fn show_fullscreen_ui(&mut self, ctx: &egui::Context) {
         // ウィンドウ表示と同じ理由で、描画に入る前に文言を決める
         let placeholder = video_placeholder_text(
-            self.video_capturing,
-            self.video_retry.is_active(),
+            self.device_snapshot.video_capturing,
+            self.device_snapshot.video_retry.active,
             self.error_detail(ErrorSource::Video).as_deref(),
         );
         // フルスクリーンUI（装飾なし、ウィンドウ版と同等の機能）
@@ -351,13 +341,7 @@ impl CaptureCardViewer {
     /// 統計の取り出しは 1 フレームにつきこの 1 回だけ。ロックの中では
     /// 値のコピーと最大 120 要素の集計しか起きないため、毎フレーム呼んでよい。
     pub(super) fn show_stats_overlay(&self, ctx: &egui::Context) {
-        let Ok(video) = self.video_capture.lock() else {
-            // ロックを取れないのは他所が長く掴んでいるときだけ。
-            // 表示のために待たず、このフレームは描かない
-            return;
-        };
-        let stats = video.stats();
-        drop(video);
+        let stats = self.frames.stats();
 
         egui::Area::new("stats_overlay")
             .order(egui::Order::Foreground)

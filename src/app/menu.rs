@@ -342,6 +342,10 @@ impl CaptureCardViewer {
                 }
             );
             self.mark_settings_dirty();
+            // **デバイスワーカーへも伝える。** 切断を検出したときに開き直すかの
+            // 判断はワーカー側が持っているので、次の 2 秒ごとの再適用を待つと
+            // その間に起きた切断が切り替え前の設定で扱われる
+            self.apply_settings(false);
         }
 
         ui.separator();
@@ -478,6 +482,8 @@ impl CaptureCardViewer {
                 }
             );
             self.mark_settings_dirty();
+            // 平らな一覧側と同じく、ワーカーへもその場で伝える
+            self.apply_settings(false);
         }
 
         ui.separator();
