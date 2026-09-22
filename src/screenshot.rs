@@ -2,8 +2,69 @@ use crate::video::VideoFrame;
 use log::info;
 use rodio::{Decoder, OutputStream, Sink};
 use std::borrow::Cow;
+use std::fmt;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+
+/// スクリーンショットまわりの処理が失敗した理由。
+///
+/// クリップボードへのコピーと効果音の読み込みを 1 つの enum にまとめてある。
+/// どちらも `ErrorSource::Screenshot` として同じ経路で表示され、呼び出し側は
+/// 出力先の種類で処理を分けないため（`app::screenshot` の
+/// `summarize_screenshot_delivery`）。
+///
+/// **表示用の日本語はこの型の `Display` が持つ。** 定型文
+/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScreenshotError {
+    /// 幅か高さが 0 のフレームを渡された
+    EmptyFrame { width: usize, height: usize },
+    /// 幅 × 高さ × 3 が `usize` に収まらない
+    FrameTooLarge { width: usize, height: usize },
+    /// 幅と高さから決まる長さに対して画素が足りない
+    FrameTooShort {
+        width: usize,
+        height: usize,
+        len: usize,
+    },
+    /// クリップボードを開けない（他のアプリが掴んでいる場合など）
+    ClipboardOpenFailed(String),
+    /// クリップボードを開けたが画像を書き込めない
+    ClipboardWriteFailed(String),
+    /// 効果音ファイルが見つかったのに読めない。既定の効果音へ倒してある
+    SoundFileUnreadable { path: PathBuf, source: String },
+}
+
+impl fmt::Display for ScreenshotError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ScreenshotError::EmptyFrame { width, height } => write!(
+                f,
+                "大きさのない映像フレームはクリップボードへコピーできない: {width}x{height}"
+            ),
+            ScreenshotError::FrameTooLarge { width, height } => {
+                write!(f, "画像として扱えない大きさのフレーム: {width}x{height}")
+            }
+            ScreenshotError::FrameTooShort { width, height, len } => write!(
+                f,
+                "映像フレームの画素が足りない: {width}x{height} に対して {len} バイト"
+            ),
+            ScreenshotError::ClipboardOpenFailed(source) => {
+                write!(f, "クリップボードを開けない: {source}")
+            }
+            ScreenshotError::ClipboardWriteFailed(source) => {
+                write!(f, "クリップボードへ画像を書き込めない: {source}")
+            }
+            ScreenshotError::SoundFileUnreadable { path, source } => write!(
+                f,
+                "効果音ファイル {} を読み込めないため既定の効果音を使う: {source}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ScreenshotError {}
 
 // 既定の効果音。実行ファイルに埋め込む。
 // 既定値が "sound/SS.mp3" というカレントディレクトリ基準の相対パスだったため、
@@ -89,13 +150,13 @@ fn exe_dir() -> Option<PathBuf> {
 ///
 /// 画は圧縮せずそのまま渡す。保存形式と JPEG 品質はファイルへ出すときだけの
 /// 設定で、クリップボードには効かない。
-pub fn copy_frame_to_clipboard(frame: &VideoFrame) -> Result<(), String> {
+pub fn copy_frame_to_clipboard(frame: &VideoFrame) -> Result<(), ScreenshotError> {
     let bytes = rgb_to_rgba(&frame.data, frame.width, frame.height)?;
 
     // Clipboard はスレッドごとに作る。Windows では OpenClipboard が呼んだ
     // スレッドに紐づくため、他スレッドで作ったものを持ち回せない
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|e| format!("クリップボードを開けない: {}", e))?;
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|e| ScreenshotError::ClipboardOpenFailed(e.to_string()))?;
 
     clipboard
         .set_image(arboard::ImageData {
@@ -103,19 +164,16 @@ pub fn copy_frame_to_clipboard(frame: &VideoFrame) -> Result<(), String> {
             height: frame.height,
             bytes: Cow::Owned(bytes),
         })
-        .map_err(|e| format!("クリップボードへ画像を書き込めない: {}", e))
+        .map_err(|e| ScreenshotError::ClipboardWriteFailed(e.to_string()))
 }
 
 /// RGB の画素列を、`arboard` が要求する RGBA へ広げる。
 ///
 /// 不透明として扱うのでアルファは常に 255。キャプチャーした映像に透過は無く、
 /// 0 を入れると貼り付け先によっては全面が透明になる。
-fn rgb_to_rgba(rgb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, String> {
+fn rgb_to_rgba(rgb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, ScreenshotError> {
     if width == 0 || height == 0 {
-        return Err(format!(
-            "大きさのない映像フレームはクリップボードへコピーできない: {}x{}",
-            width, height
-        ));
+        return Err(ScreenshotError::EmptyFrame { width, height });
     }
 
     // 1080p でも 1920*1080*3 で usize には十分収まるが、壊れた値が来たときに
@@ -123,15 +181,14 @@ fn rgb_to_rgba(rgb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, Strin
     let needed = width
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(3))
-        .ok_or_else(|| format!("画像として扱えない大きさのフレーム: {}x{}", width, height))?;
+        .ok_or(ScreenshotError::FrameTooLarge { width, height })?;
 
     if rgb.len() < needed {
-        return Err(format!(
-            "映像フレームの画素が足りない: {}x{} に対して {} バイト",
+        return Err(ScreenshotError::FrameTooShort {
             width,
             height,
-            rgb.len()
-        ));
+            len: rgb.len(),
+        });
     }
 
     let mut rgba = Vec::with_capacity(needed / 3 * 4);
@@ -178,7 +235,7 @@ impl ScreenshotManager {
     // 既定音を使う。そのため呼び出し後は必ず鳴らせる状態になっている。
     // Err を返すのは、解決したファイルが存在したのに読めなかった場合だけ。
     // このときも既定音を入れてあるので、鳴らないという結果にはならない。
-    pub fn set_sound_file(&mut self, sound_path: &Path) -> Result<(), String> {
+    pub fn set_sound_file(&mut self, sound_path: &Path) -> Result<(), ScreenshotError> {
         match resolve_sound_path(sound_path, exe_dir().as_deref(), |path| path.exists()) {
             SoundSource::Embedded => {
                 self.sound_data = Some(EMBEDDED_SOUND.to_vec());
@@ -191,11 +248,10 @@ impl ScreenshotManager {
                 }
                 Err(e) => {
                     self.sound_data = Some(EMBEDDED_SOUND.to_vec());
-                    Err(format!(
-                        "効果音ファイル {} を読み込めないため既定の効果音を使う: {}",
-                        path.display(),
-                        e
-                    ))
+                    Err(ScreenshotError::SoundFileUnreadable {
+                        path,
+                        source: e.to_string(),
+                    })
                 }
             },
         }
@@ -368,7 +424,14 @@ mod tests {
 
         let err = rgb_to_rgba(&rgb, 2, 2).expect_err("エラーになること");
 
-        assert!(err.contains("画素が足りない"), "実際のメッセージ: {}", err);
+        assert_eq!(
+            err,
+            ScreenshotError::FrameTooShort {
+                width: 2,
+                height: 2,
+                len: 11,
+            }
+        );
     }
 
     #[test]
@@ -382,7 +445,74 @@ mod tests {
         // 壊れた値が来ても掛け算が一周して短い長さを通さないこと
         let err = rgb_to_rgba(&[0; 8], usize::MAX, 2).expect_err("エラーになること");
 
-        assert!(err.contains("扱えない大きさ"), "実際のメッセージ: {}", err);
+        assert_eq!(
+            err,
+            ScreenshotError::FrameTooLarge {
+                width: usize::MAX,
+                height: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn screenshot_error_display_keeps_the_numbers_and_the_underlying_reason() {
+        // 文言はそのままトーストに出る。大きさや下位のエラー文が落ちると
+        // 何が起きたのか分からなくなる
+        let too_short = ScreenshotError::FrameTooShort {
+            width: 2,
+            height: 2,
+            len: 11,
+        };
+        assert_eq!(
+            too_short.to_string(),
+            "映像フレームの画素が足りない: 2x2 に対して 11 バイト"
+        );
+
+        let clipboard = ScreenshotError::ClipboardOpenFailed("access denied".to_string());
+        assert_eq!(
+            clipboard.to_string(),
+            "クリップボードを開けない: access denied"
+        );
+
+        let sound = ScreenshotError::SoundFileUnreadable {
+            path: PathBuf::from("C:/sounds/SS.mp3"),
+            source: "permission denied".to_string(),
+        };
+        assert_eq!(
+            sound.to_string(),
+            "効果音ファイル C:/sounds/SS.mp3 を読み込めないため既定の効果音を使う: permission denied"
+        );
+    }
+
+    #[test]
+    fn screenshot_error_display_is_japanese_for_every_variant() {
+        // 英語の文言が混ざると、定型文と繋げたときに日本語と英語が並ぶ
+        let all = [
+            ScreenshotError::EmptyFrame {
+                width: 0,
+                height: 10,
+            },
+            ScreenshotError::FrameTooLarge {
+                width: usize::MAX,
+                height: 2,
+            },
+            ScreenshotError::FrameTooShort {
+                width: 2,
+                height: 2,
+                len: 11,
+            },
+            ScreenshotError::ClipboardOpenFailed("busy".to_string()),
+            ScreenshotError::ClipboardWriteFailed("busy".to_string()),
+            ScreenshotError::SoundFileUnreadable {
+                path: PathBuf::from("C:/sounds/SS.mp3"),
+                source: "missing".to_string(),
+            },
+        ];
+
+        for error in all {
+            let text = error.to_string();
+            assert!(!text.is_ascii(), "日本語が含まれていない: {text}");
+        }
     }
 
     #[test]

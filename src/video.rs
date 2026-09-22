@@ -10,7 +10,56 @@ use std::sync::{Arc, Mutex};
 
 use crate::repaint::RepaintWaker;
 use crate::settings::{ColorRange, ColorSpace, MAX_VIDEO_ADJUSTMENT, MIN_VIDEO_ADJUSTMENT};
+use std::fmt;
 use std::time::{Duration, Instant};
+
+/// 映像デバイスの操作が失敗した理由。
+///
+/// **文字列ではなく種別で返す。** 呼び出し側（`app::worker_connect`）が
+/// 「デバイスが見つからない」と「ストリームを開けない」を区別できるようにする
+/// ため。下位のエラーは `nokhwa` の型をそのまま持ち回すと公開 API に
+/// nokhwa が漏れるので、文字列に落として持たせる。
+///
+/// **表示用の日本語はこの型の `Display` が持つ。** 定型文
+/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoError {
+    /// デバイスの列挙に失敗した
+    DeviceQueryFailed(String),
+    /// 設定に書かれた名前のデバイスが列挙結果に無い
+    DeviceNotFound(String),
+    /// デバイスが 1 台も見つからない（名前が未指定のとき）
+    NoDevices,
+    /// デバイスは見つかったが開けなかった
+    CameraOpenFailed { device: String, source: String },
+    /// デバイスは開けたがストリームを開始できなかった
+    StreamOpenFailed { device: String, source: String },
+}
+
+impl fmt::Display for VideoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VideoError::DeviceQueryFailed(source) => {
+                write!(f, "映像デバイスを列挙できない: {source}")
+            }
+            VideoError::DeviceNotFound(name) => {
+                write!(f, "映像デバイス '{name}' が見つからない")
+            }
+            VideoError::NoDevices => write!(f, "映像デバイスが 1 台も見つからない"),
+            VideoError::CameraOpenFailed { device, source } => {
+                write!(f, "映像デバイス '{device}' を開けない: {source}")
+            }
+            VideoError::StreamOpenFailed { device, source } => {
+                write!(
+                    f,
+                    "映像デバイス '{device}' のストリームを開けない: {source}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for VideoError {}
 
 /// デバイスを開ける映像モード 1 件。解像度とフレームレートの組み合わせ。
 ///
@@ -974,7 +1023,7 @@ impl VideoCapture {
         resolution: Option<(u32, u32)>,
         format: Option<&str>,
         fps: Option<u32>,
-    ) -> Result<(), String> {
+    ) -> Result<(), VideoError> {
         self.stop_capture();
 
         debug!(
@@ -990,7 +1039,7 @@ impl VideoCapture {
 
         let query_start = Instant::now();
         let devices = nokhwa::query(ApiBackend::MediaFoundation)
-            .map_err(|e| format!("Failed to query devices: {}", e))?;
+            .map_err(|e| VideoError::DeviceQueryFailed(e.to_string()))?;
         debug!(
             "映像デバイスを {} 件列挙した（{:.1}ms）: {:?}",
             devices.len(),
@@ -1002,9 +1051,9 @@ impl VideoCapture {
             devices
                 .into_iter()
                 .find(|d| d.human_name() == name)
-                .ok_or_else(|| format!("Device '{}' not found", name))?
+                .ok_or_else(|| VideoError::DeviceNotFound(name.to_string()))?
         } else {
-            devices.into_iter().next().ok_or("No video devices found")?
+            devices.into_iter().next().ok_or(VideoError::NoDevices)?
         };
 
         // 実際に要求したフレームレート。接続状態の表示に使う。
@@ -1216,7 +1265,10 @@ impl VideoCapture {
             requested_format,
             frame_callback,
         )
-        .map_err(|e| format!("Failed to create camera: {}", e))?;
+        .map_err(|e| VideoError::CameraOpenFailed {
+            device: device_info.human_name().to_string(),
+            source: e.to_string(),
+        })?;
         let create_ms = elapsed_ms(create_start);
 
         // 実際に確定したフォーマットは open_stream の前に読む。
@@ -1237,7 +1289,10 @@ impl VideoCapture {
         let open_start = Instant::now();
         camera
             .open_stream()
-            .map_err(|e| format!("Failed to open camera stream: {}", e))?;
+            .map_err(|e| VideoError::StreamOpenFailed {
+                device: device_info.human_name().to_string(),
+                source: e.to_string(),
+            })?;
         let open_ms = elapsed_ms(open_start);
 
         info!(
@@ -1299,7 +1354,7 @@ impl VideoCapture {
     // デバイスの能力を取得するメソッド
     pub fn get_device_capabilities(
         device_name: Option<&str>,
-    ) -> Result<DeviceCapabilities, String> {
+    ) -> Result<DeviceCapabilities, VideoError> {
         use nokhwa::Camera;
 
         let start = Instant::now();
@@ -1313,15 +1368,15 @@ impl VideoCapture {
         // 結果はイベント経由で設定ダイアログにも表示される。ここで出すと
         // 同じ内容が 2 行並ぶ
         let devices = nokhwa::query(ApiBackend::MediaFoundation)
-            .map_err(|e| format!("Failed to query devices: {}", e))?;
+            .map_err(|e| VideoError::DeviceQueryFailed(e.to_string()))?;
 
         let device_info = if let Some(name) = device_name {
             devices
                 .into_iter()
                 .find(|d| d.human_name() == name)
-                .ok_or_else(|| format!("Device '{}' not found", name))?
+                .ok_or_else(|| VideoError::DeviceNotFound(name.to_string()))?
         } else {
-            devices.into_iter().next().ok_or("No video devices found")?
+            devices.into_iter().next().ok_or(VideoError::NoDevices)?
         };
 
         // カメラを一時的に開いて能力を取得
@@ -1334,8 +1389,13 @@ impl VideoCapture {
         // ダイアログの「対応形式を取得中...」が長く出たままになり、その間
         // ワーカーは次のコマンドを処理できない
         let open_start = Instant::now();
-        let mut camera = Camera::new(device_info.index().clone(), requested_format)
-            .map_err(|e| format!("Failed to create camera for capability query: {}", e))?;
+        let mut camera =
+            Camera::new(device_info.index().clone(), requested_format).map_err(|e| {
+                VideoError::CameraOpenFailed {
+                    device: device_info.human_name().to_string(),
+                    source: e.to_string(),
+                }
+            })?;
         debug!(
             "能力取得のためにデバイスを開いた（{:.1}ms）",
             elapsed_ms(open_start)
@@ -2334,5 +2394,58 @@ mod tests {
             "1080p YUY2->RGB {} frames: allocate={:.3} ms/frame, reuse={:.3} ms/frame, adjusted={:.3} ms/frame",
             FRAMES, allocating_ms, reusing_ms, adjusted_ms
         );
+    }
+
+    #[test]
+    fn video_error_display_keeps_the_device_name_and_the_underlying_reason() {
+        // 文言はそのままトーストと「接続状態」タブに出る。デバイス名と
+        // 下位のエラー文が落ちると、どの機器の何が起きたのか分からなくなる
+        let not_found = VideoError::DeviceNotFound("Game Capture HD60".to_string());
+        assert_eq!(
+            not_found.to_string(),
+            "映像デバイス 'Game Capture HD60' が見つからない"
+        );
+
+        let open_failed = VideoError::CameraOpenFailed {
+            device: "Game Capture HD60".to_string(),
+            source: "device in use".to_string(),
+        };
+        assert_eq!(
+            open_failed.to_string(),
+            "映像デバイス 'Game Capture HD60' を開けない: device in use"
+        );
+
+        let stream_failed = VideoError::StreamOpenFailed {
+            device: "Game Capture HD60".to_string(),
+            source: "MF_E_INVALIDMEDIATYPE".to_string(),
+        };
+        assert_eq!(
+            stream_failed.to_string(),
+            "映像デバイス 'Game Capture HD60' のストリームを開けない: MF_E_INVALIDMEDIATYPE"
+        );
+    }
+
+    #[test]
+    fn video_error_display_is_japanese_for_every_variant() {
+        // 英語の文言が混ざると、定型文と繋げたときに日本語と英語が並ぶ。
+        // ASCII だけの文言が残っていないことで確かめる
+        let all = [
+            VideoError::DeviceQueryFailed("backend failure".to_string()),
+            VideoError::DeviceNotFound("Capture".to_string()),
+            VideoError::NoDevices,
+            VideoError::CameraOpenFailed {
+                device: "Capture".to_string(),
+                source: "busy".to_string(),
+            },
+            VideoError::StreamOpenFailed {
+                device: "Capture".to_string(),
+                source: "busy".to_string(),
+            },
+        ];
+
+        for error in all {
+            let text = error.to_string();
+            assert!(!text.is_ascii(), "日本語が含まれていない: {text}");
+        }
     }
 }

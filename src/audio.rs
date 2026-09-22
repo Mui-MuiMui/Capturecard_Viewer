@@ -1,6 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, SampleRate, SupportedStreamConfig, SupportedStreamConfigRange};
 use log::{debug, error, info, trace, warn};
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -62,6 +63,102 @@ impl AudioDirection {
         }
     }
 }
+
+/// 音声デバイスの操作が失敗した理由。
+///
+/// **文字列ではなく種別で返す。** 呼び出し側（`app::worker_connect`）が
+/// 「デバイスが見つからない」と「ストリームを組み立てられない」を区別できる
+/// ようにするため。下位のエラーは cpal の型が段ごとに違う（`DevicesError` /
+/// `DefaultStreamConfigError` / `BuildStreamError` / `PlayStreamError`）ので、
+/// 文字列に落として持たせる。
+///
+/// どのバリアントも入力・出力のどちらで起きたかを持つ。音声は 2 本の
+/// ストリームを開くため、向きが分からないと設定のどちらを直せばよいか
+/// 伝えられない。
+///
+/// **表示用の日本語はこの型の `Display` が持つ。** 定型文
+/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AudioError {
+    /// デバイスの列挙に失敗した
+    DeviceEnumerationFailed {
+        direction: AudioDirection,
+        source: String,
+    },
+    /// 設定に書かれた名前のデバイスが列挙結果に無い
+    DeviceNotFound {
+        direction: AudioDirection,
+        name: String,
+    },
+    /// 名前が未指定なのに、Windows の既定デバイスが無い
+    NoDefaultDevice(AudioDirection),
+    /// デバイスの既定設定（WASAPI のミックスフォーマット）を取得できない
+    DefaultConfigFailed {
+        direction: AudioDirection,
+        source: String,
+    },
+    /// デバイスの対応設定を列挙できない
+    SupportedConfigsFailed {
+        direction: AudioDirection,
+        source: String,
+    },
+    /// 選ばれた設定のサンプルフォーマットを扱えない
+    UnsupportedSampleFormat {
+        direction: AudioDirection,
+        format: SampleFormat,
+    },
+    /// ストリームを組み立てられない
+    StreamBuildFailed {
+        direction: AudioDirection,
+        source: String,
+    },
+    /// 組み立てたストリームを開始できない
+    StreamPlayFailed {
+        direction: AudioDirection,
+        source: String,
+    },
+}
+
+impl fmt::Display for AudioError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AudioError::DeviceEnumerationFailed { direction, source } => {
+                write!(f, "{}デバイスを列挙できない: {source}", direction.label())
+            }
+            AudioError::DeviceNotFound { direction, name } => {
+                write!(f, "{}デバイス '{name}' が見つからない", direction.label())
+            }
+            AudioError::NoDefaultDevice(direction) => {
+                write!(f, "既定の{}デバイスがない", direction.label())
+            }
+            AudioError::DefaultConfigFailed { direction, source } => write!(
+                f,
+                "{}デバイスの既定の設定を取得できない: {source}",
+                direction.label()
+            ),
+            AudioError::SupportedConfigsFailed { direction, source } => write!(
+                f,
+                "{}デバイスの対応設定を列挙できない: {source}",
+                direction.label()
+            ),
+            AudioError::UnsupportedSampleFormat { direction, format } => write!(
+                f,
+                "{}デバイスのサンプルフォーマット {format} に対応していない（対応: f32 / i16 / u16 / i32）",
+                direction.label()
+            ),
+            AudioError::StreamBuildFailed { direction, source } => write!(
+                f,
+                "{}ストリームを組み立てられない: {source}",
+                direction.label()
+            ),
+            AudioError::StreamPlayFailed { direction, source } => {
+                write!(f, "{}ストリームを開始できない: {source}", direction.label())
+            }
+        }
+    }
+}
+
+impl std::error::Error for AudioError {}
 
 /// 出力デバイスが「デフォルト」（設定上は `None`）のときに、能力キャッシュの
 /// キーとして使う名前。
@@ -147,32 +244,35 @@ impl AudioCapabilities {
 pub fn query_capabilities(
     direction: AudioDirection,
     device_name: Option<&str>,
-) -> Result<AudioCapabilities, String> {
+) -> Result<AudioCapabilities, AudioError> {
     let host = cpal::default_host();
 
     let device = match device_name {
         Some(name) => find_device_in_host(&host, name, direction)?,
         None => match direction {
-            AudioDirection::Input => host
-                .default_input_device()
-                .ok_or_else(|| "既定の入力デバイスがありません".to_string())?,
-            AudioDirection::Output => host
-                .default_output_device()
-                .ok_or_else(|| "既定の出力デバイスがありません".to_string())?,
-        },
+            AudioDirection::Input => host.default_input_device(),
+            AudioDirection::Output => host.default_output_device(),
+        }
+        .ok_or(AudioError::NoDefaultDevice(direction))?,
     };
 
     let default_config = match direction {
         AudioDirection::Input => device.default_input_config(),
         AudioDirection::Output => device.default_output_config(),
     }
-    .map_err(|e| format!("既定の設定を取得できません: {e}"))?;
+    .map_err(|e| AudioError::DefaultConfigFailed {
+        direction,
+        source: e.to_string(),
+    })?;
 
     let configs = match direction {
         AudioDirection::Input => device.supported_input_configs().map(|it| it.collect()),
         AudioDirection::Output => device.supported_output_configs().map(|it| it.collect()),
     }
-    .map_err(|e| format!("対応設定を列挙できません: {e}"))?;
+    .map_err(|e| AudioError::SupportedConfigsFailed {
+        direction,
+        source: e.to_string(),
+    })?;
 
     Ok(AudioCapabilities {
         configs,
@@ -188,19 +288,25 @@ fn find_device_in_host(
     host: &cpal::Host,
     name: &str,
     direction: AudioDirection,
-) -> Result<Device, String> {
+) -> Result<Device, AudioError> {
     let devices = match direction {
         AudioDirection::Input => host.input_devices(),
         AudioDirection::Output => host.output_devices(),
     }
-    .map_err(|e| format!("デバイスを列挙できません: {e}"))?;
+    .map_err(|e| AudioError::DeviceEnumerationFailed {
+        direction,
+        source: e.to_string(),
+    })?;
 
     for device in devices {
         if device.name().ok().as_deref() == Some(name) {
             return Ok(device);
         }
     }
-    Err(format!("デバイス '{name}' が見つかりません"))
+    Err(AudioError::DeviceNotFound {
+        direction,
+        name: name.to_string(),
+    })
 }
 
 /// 設定画面に出すサンプリングレートの当たり値。
@@ -745,7 +851,10 @@ impl AudioCapture {
         self.host.default_output_device()?.name().ok()
     }
 
-    pub fn start_passthrough(&mut self, request: &PassthroughRequest<'_>) -> Result<(), String> {
+    pub fn start_passthrough(
+        &mut self,
+        request: &PassthroughRequest<'_>,
+    ) -> Result<(), AudioError> {
         let PassthroughRequest {
             input_device_name,
             output_device_name,
@@ -762,22 +871,22 @@ impl AudioCapture {
         // デバイス取得の簡素化
         let input_device = if let Some(name) = input_device_name {
             debug!("入力デバイスを名前で探す: {}", name);
-            self.find_device_by_name(name, true)?
+            self.find_device_by_name(name, AudioDirection::Input)?
         } else {
             debug!("既定の入力デバイスを使う");
             self.host
                 .default_input_device()
-                .ok_or_else(|| "No default input device".to_string())?
+                .ok_or(AudioError::NoDefaultDevice(AudioDirection::Input))?
         };
 
         let output_device = if let Some(name) = output_device_name {
             debug!("出力デバイスを名前で探す: {}", name);
-            self.find_device_by_name(name, false)?
+            self.find_device_by_name(name, AudioDirection::Output)?
         } else {
             debug!("既定の出力デバイスを使う");
             self.host
                 .default_output_device()
-                .ok_or_else(|| "No default output device".to_string())?
+                .ok_or(AudioError::NoDefaultDevice(AudioDirection::Output))?
         };
 
         // デバイス名をログ出力
@@ -794,13 +903,21 @@ impl AudioCapture {
 
         // デバイスの既定設定。希望値が無いときの基準であり、
         // 対応設定を列挙できなかったときの退避先でもある
-        let input_default = input_device
-            .default_input_config()
-            .map_err(|e| format!("Failed to get input config: {}", e))?;
+        let input_default =
+            input_device
+                .default_input_config()
+                .map_err(|e| AudioError::DefaultConfigFailed {
+                    direction: AudioDirection::Input,
+                    source: e.to_string(),
+                })?;
 
-        let output_default = output_device
-            .default_output_config()
-            .map_err(|e| format!("Failed to get output config: {}", e))?;
+        let output_default =
+            output_device
+                .default_output_config()
+                .map_err(|e| AudioError::DefaultConfigFailed {
+                    direction: AudioDirection::Output,
+                    source: e.to_string(),
+                })?;
 
         // 対応設定の一覧。**先にワーカーが取ってあればそれを使う。**
         // WASAPI の列挙は 300ms 前後かかるため、開くたびにここで走らせると、
@@ -926,9 +1043,17 @@ impl AudioCapture {
                 stream_error.clone(),
                 i32_to_f32,
             ),
-            other => return Err(unsupported_sample_format_error("入力", other)),
+            other => {
+                return Err(AudioError::UnsupportedSampleFormat {
+                    direction: AudioDirection::Input,
+                    format: other,
+                })
+            }
         }
-        .map_err(|e| format!("Failed to build input stream: {}", e))?;
+        .map_err(|e| AudioError::StreamBuildFailed {
+            direction: AudioDirection::Input,
+            source: e.to_string(),
+        })?;
 
         // 出力ストリーム
         let output_signals = OutputSignals {
@@ -1001,19 +1126,33 @@ impl AudioCapture {
                 make_converter().with_telemetry(resample_telemetry.clone()),
                 f32_to_i32,
             ),
-            other => return Err(unsupported_sample_format_error("出力", other)),
+            other => {
+                return Err(AudioError::UnsupportedSampleFormat {
+                    direction: AudioDirection::Output,
+                    format: other,
+                })
+            }
         }
-        .map_err(|e| format!("Failed to build output stream: {}", e))?;
+        .map_err(|e| AudioError::StreamBuildFailed {
+            direction: AudioDirection::Output,
+            source: e.to_string(),
+        })?;
 
         // ストリーム開始
         debug!("音声ストリームを開始する");
         input_stream
             .play()
-            .map_err(|e| format!("Failed to start input stream: {}", e))?;
+            .map_err(|e| AudioError::StreamPlayFailed {
+                direction: AudioDirection::Input,
+                source: e.to_string(),
+            })?;
         std::thread::sleep(std::time::Duration::from_millis(50));
         output_stream
             .play()
-            .map_err(|e| format!("Failed to start output stream: {}", e))?;
+            .map_err(|e| AudioError::StreamPlayFailed {
+                direction: AudioDirection::Output,
+                source: e.to_string(),
+            })?;
 
         self.input_stream = Some(input_stream);
         self.output_stream = Some(output_stream);
@@ -1099,13 +1238,21 @@ impl AudioCapture {
         self.stream_error.swap(false, Ordering::Relaxed)
     }
 
-    fn find_device_by_name(&self, name: &str, input: bool) -> Result<Device, String> {
-        let iter = if input {
-            self.host.input_devices()
-        } else {
-            self.host.output_devices()
+    /// 名前でデバイスを探す。向きを `bool` ではなく `AudioDirection` で受けるのは、
+    /// 見つからなかったときのエラーに入力・出力のどちらかを載せるため。
+    fn find_device_by_name(
+        &self,
+        name: &str,
+        direction: AudioDirection,
+    ) -> Result<Device, AudioError> {
+        let iter = match direction {
+            AudioDirection::Input => self.host.input_devices(),
+            AudioDirection::Output => self.host.output_devices(),
         }
-        .map_err(|e| format!("enumerate devices: {e}"))?;
+        .map_err(|e| AudioError::DeviceEnumerationFailed {
+            direction,
+            source: e.to_string(),
+        })?;
         for d in iter {
             if let Ok(n) = d.name() {
                 if n == name {
@@ -1113,7 +1260,10 @@ impl AudioCapture {
                 }
             }
         }
-        Err(format!("Device '{name}' not found"))
+        Err(AudioError::DeviceNotFound {
+            direction,
+            name: name.to_string(),
+        })
     }
 }
 
@@ -1254,16 +1404,6 @@ fn resolve_ranges<E: std::fmt::Display>(
             Vec::new()
         }
     }
-}
-
-/// 未対応のサンプルフォーマットに当たったときのエラー文言を組み立てる。
-///
-/// ストリーム構築エラーをそのまま上げると「なぜ開けなかったのか」が分からないので、
-/// 何が来て何に対応しているのかを明示する。`direction` は「入力」か「出力」。
-fn unsupported_sample_format_error(direction: &str, format: SampleFormat) -> String {
-    format!(
-        "{direction}デバイスのサンプルフォーマット {format} に対応していません（対応: f32 / i16 / u16 / i32）"
-    )
 }
 
 /// 入力ストリームを組み立てる。
@@ -2187,12 +2327,85 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_sample_format_error_names_the_format() {
+    fn audio_error_unsupported_sample_format_names_the_format() {
         // 「何が未対応だったか」が分からないと原因にたどり着けない
-        let message = unsupported_sample_format_error("入力", SampleFormat::U32);
+        let message = AudioError::UnsupportedSampleFormat {
+            direction: AudioDirection::Input,
+            format: SampleFormat::U32,
+        }
+        .to_string();
 
         assert!(message.contains("入力"), "{message}");
         assert!(message.contains("u32"), "{message}");
+    }
+
+    #[test]
+    fn audio_error_display_names_the_direction_and_the_device() {
+        // 音声は入力と出力の 2 本を開くので、向きが落ちると設定のどちらを
+        // 直せばよいか伝わらない
+        let not_found = AudioError::DeviceNotFound {
+            direction: AudioDirection::Output,
+            name: "スピーカー (Realtek)".to_string(),
+        };
+        assert_eq!(
+            not_found.to_string(),
+            "出力デバイス 'スピーカー (Realtek)' が見つからない"
+        );
+
+        assert_eq!(
+            AudioError::NoDefaultDevice(AudioDirection::Input).to_string(),
+            "既定の入力デバイスがない"
+        );
+
+        let build_failed = AudioError::StreamBuildFailed {
+            direction: AudioDirection::Input,
+            source: "device unavailable".to_string(),
+        };
+        assert_eq!(
+            build_failed.to_string(),
+            "入力ストリームを組み立てられない: device unavailable"
+        );
+    }
+
+    #[test]
+    fn audio_error_display_is_japanese_for_every_variant() {
+        // 英語の文言が混ざると、定型文と繋げたときに日本語と英語が並ぶ
+        let all = [
+            AudioError::DeviceEnumerationFailed {
+                direction: AudioDirection::Input,
+                source: "backend failure".to_string(),
+            },
+            AudioError::DeviceNotFound {
+                direction: AudioDirection::Input,
+                name: "Mic".to_string(),
+            },
+            AudioError::NoDefaultDevice(AudioDirection::Output),
+            AudioError::DefaultConfigFailed {
+                direction: AudioDirection::Output,
+                source: "no config".to_string(),
+            },
+            AudioError::SupportedConfigsFailed {
+                direction: AudioDirection::Input,
+                source: "no config".to_string(),
+            },
+            AudioError::UnsupportedSampleFormat {
+                direction: AudioDirection::Output,
+                format: SampleFormat::U32,
+            },
+            AudioError::StreamBuildFailed {
+                direction: AudioDirection::Input,
+                source: "busy".to_string(),
+            },
+            AudioError::StreamPlayFailed {
+                direction: AudioDirection::Output,
+                source: "busy".to_string(),
+            },
+        ];
+
+        for error in all {
+            let text = error.to_string();
+            assert!(!text.is_ascii(), "日本語が含まれていない: {text}");
+        }
     }
 
     #[test]
