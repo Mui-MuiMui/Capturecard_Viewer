@@ -26,7 +26,7 @@ pub use capture::{ActiveVideo, VideoCapture, VideoLinkState};
 pub use color::{SharedColorConversion, VideoAdjustments};
 pub use frame_buffer::{FrameStats, VideoFrame, VideoFrames};
 
-// この 2 つは `ui` と `app::view` の `#[cfg(test)] mod tests` からしか
+// この 2 つは `ui` と `app::view` のテストモジュールからしか
 // 参照されないため、テストを含まないビルドでは未使用になる。外から見える
 // 経路を分割前と揃えておきたいので、再輸出は残して警告だけを黙らせる
 #[allow(unused_imports)]
