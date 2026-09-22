@@ -60,4 +60,4 @@ cpal は WASAPI の `IMMNotificationClient` を公開していないため、開
 
 - 接続処理を足すときは `apply_config` で開かず、`ConnectRetry::request()` で要求だけ立てる。実際に開くのは `poll_connection()`
 - ユーザーが明示的にやり直しを求める経路（右クリック → デバイス再接続）は `request_now()` を使い、待ち時間を飛ばす
-- 最後の失敗理由は `ConnectRetry` が保持している。画面へ出すのは「エラー通知 UI」の Issue の範囲
+- 最後の失敗理由は `ConnectRetry` が保持している。失敗はトーストと設定ダイアログの「接続状態」タブに出る。仕組みは `docs/design/error-reporting.md` を参照
