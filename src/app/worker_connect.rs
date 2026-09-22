@@ -13,7 +13,6 @@ use super::retry::backoff_delay;
 use super::worker::{DeviceConfig, DeviceEvent};
 use super::worker_loop::WorkerState;
 use crate::audio::{self, AudioDirection};
-use crate::video::VideoCapture;
 use log::{debug, info, warn};
 use std::time::Instant;
 
@@ -36,7 +35,7 @@ impl WorkerState {
         let mut resolved_input = None;
 
         if config.video.0.is_none() {
-            if let Some((name, _)) = VideoCapture::list_devices().into_iter().next() {
+            if let Some((name, _)) = self.video.list_devices().into_iter().next() {
                 config.video.0 = Some(name.clone());
                 resolved_video = Some(name);
             }
@@ -230,7 +229,7 @@ impl WorkerState {
 
     /// デバイス一覧を取り直して UI スレッドへ返す。
     pub(super) fn refresh_device_lists(&mut self) {
-        let video = VideoCapture::list_devices();
+        let video = self.video.list_devices();
         let input = self.audio.list_input_devices();
         let output = self.audio.list_output_devices();
         self.emit(DeviceEvent::DeviceLists {
@@ -245,7 +244,7 @@ impl WorkerState {
         let started = Instant::now();
         // 設定ダイアログの能力キャッシュは理由を画面に出すだけなので、
         // ここで日本語の 1 行へ落として渡す
-        let result = VideoCapture::get_device_capabilities(Some(&device));
+        let result = self.video.capabilities(Some(&device));
         match &result {
             Ok(caps) => info!(
                 "デバイス能力を取得した: {}（{} フォーマット, {} ms）",
@@ -267,7 +266,9 @@ impl WorkerState {
     /// 一覧を要るためで、渡さないとその場で列挙し直すことになる。
     pub(super) fn query_audio_capabilities(&mut self, direction: AudioDirection, key: &str) {
         let started = Instant::now();
-        let result = audio::query_capabilities(direction, audio::device_name_from_key(key));
+        let result = self
+            .audio
+            .capabilities(direction, audio::device_name_from_key(key));
         match &result {
             Ok(caps) => {
                 info!(

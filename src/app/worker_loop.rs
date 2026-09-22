@@ -15,17 +15,22 @@
 //!
 //! 判定そのもの（途絶したか、開き直してよいか）は `super::monitor` の
 //! 純粋関数に切り出してある。ここはデバイスを触る側だけを持つ。
+//!
+//! **デバイスそのものは `super::backend` の trait 越しにしか触らない。**
+//! 実装を選ぶのは `super::worker::DeviceWorker::spawn` だけで、ここから先は
+//! `VideoCapture` / `AudioCapture` という具体型を知らない。おかげでモックを
+//! 差し替えれば、実機も実時間の経過もなしに再試行と切断検出を回せる。
 
 use super::audio_control::volume_change_result;
+use super::backend::{AudioBackend, BackendShared, DeviceBackends, VideoBackend};
 use super::monitor::VideoLinkAction;
 use super::retry::ConnectRetry;
 use super::worker::{
     AudioTarget, DeviceCommand, DeviceConfig, DeviceEvent, DeviceSnapshot, RetryStatus,
     SharedSnapshot, VideoTarget,
 };
-use crate::audio::{AudioCapabilities, AudioCapture, AudioControls, AudioDirection};
+use crate::audio::{AudioCapabilities, AudioControls, AudioDirection};
 use crate::repaint::RepaintWaker;
-use crate::video::{SharedColorConversion, VideoCapture, VideoFrames};
 use log::{debug, info, trace, warn};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -63,18 +68,23 @@ pub(super) fn run(
     commands: Receiver<DeviceCommand>,
     events: Sender<DeviceEvent>,
     snapshot: SharedSnapshot,
-    frames: VideoFrames,
-    color_conversion: Arc<SharedColorConversion>,
-    audio_controls: Arc<AudioControls>,
-    repaint_waker: RepaintWaker,
+    shared: BackendShared,
+    backends: Box<dyn DeviceBackends>,
 ) {
     debug!("デバイスワーカーを開始する");
+    // 音量とミュートはバックエンドへ渡したあともワーカー自身が使う
+    // （最小化中のホットキーの代役）。再描画の窓口も `emit` で使う
+    let audio_controls = Arc::clone(&shared.audio_controls);
+    let repaint_waker = shared.repaint_waker.clone();
+    // **バックエンドを組み立てるのはこのスレッドの中。** `cpal::Stream` は
+    // `!Send` なので、材料だけを送ってここで作る
+    let (video, audio) = backends.create(shared);
     let mut state = WorkerState::new(
+        video,
+        audio,
+        audio_controls,
         events,
         snapshot,
-        frames,
-        color_conversion,
-        audio_controls,
         repaint_waker,
     );
 
@@ -111,8 +121,10 @@ pub(super) fn run(
 /// `super::worker_connect` へ、タイマーで動く監視を `super::worker_timers`
 /// へ分けているため。** `app` の外からは見えない。
 pub(super) struct WorkerState {
-    pub(super) video: VideoCapture,
-    pub(super) audio: AudioCapture,
+    /// 映像デバイスの入口。本番は `VideoCapture`、テストはモック
+    pub(super) video: Box<dyn VideoBackend>,
+    /// 音声デバイスの入口。本番は `AudioCapture`、テストはモック
+    pub(super) audio: Box<dyn AudioBackend>,
     /// 音量・ミュート・パススルーの共有 Atomic。
     ///
     /// 普段は UI スレッドが書き、出力コールバックが読むだけで、ワーカーは
@@ -172,16 +184,16 @@ pub(super) struct WorkerState {
 
 impl WorkerState {
     fn new(
+        video: Box<dyn VideoBackend>,
+        audio: Box<dyn AudioBackend>,
+        audio_controls: Arc<AudioControls>,
         events: Sender<DeviceEvent>,
         snapshot: SharedSnapshot,
-        frames: VideoFrames,
-        color_conversion: Arc<SharedColorConversion>,
-        audio_controls: Arc<AudioControls>,
         repaint_waker: RepaintWaker,
     ) -> Self {
         Self {
-            video: VideoCapture::new(frames, color_conversion, repaint_waker.clone()),
-            audio: AudioCapture::new(Arc::clone(&audio_controls)),
+            video,
+            audio,
             audio_controls,
             events,
             snapshot,
@@ -342,12 +354,88 @@ impl WorkerState {
     }
 }
 
+/// テストの組み立てを 1 か所に置く。**`super::worker_timers` のテストからも使う。**
+///
+/// `WorkerState` の中身はこのファイルが持つので、モックを載せた状態を作る役も
+/// ここに置く。`tick` を駆動するテストは監視の本体と同じ `worker_timers.rs` に
+/// あり、そちらからこれらを呼ぶ。
+#[cfg(test)]
+pub(super) mod testing {
+    use super::super::backend::mock::{MockAudioBackend, MockVideoBackend};
+    use super::*;
+    use crate::settings::DEFAULT_BUFFER_MS;
+    use std::sync::mpsc::channel;
+    use std::sync::RwLock;
+
+    /// モックのバックエンドを載せた `WorkerState` を、スレッドを起こさずに作る。
+    ///
+    /// **実時間を進めずに `tick` を回すためのもの。** 本物のループ
+    /// （`run`）は `Instant::now()` で駆動するが、こちらはテストが渡した
+    /// 時刻をそのまま使えるので、バックオフの待ち時間だけ「進めた」ことに
+    /// できる。
+    pub(in crate::app) fn mock_state(
+        video: &MockVideoBackend,
+        audio: &MockAudioBackend,
+    ) -> (WorkerState, std::sync::mpsc::Receiver<DeviceEvent>) {
+        let (event_tx, event_rx) = channel();
+        let state = WorkerState::new(
+            Box::new(video.clone()),
+            Box::new(audio.clone()),
+            Arc::new(AudioControls::default()),
+            event_tx,
+            Arc::new(RwLock::new(DeviceSnapshot::default())),
+            RepaintWaker::new(),
+        );
+        (state, event_rx)
+    }
+
+    /// 届いているイベントを全て取り出す。
+    pub(in crate::app) fn drain(
+        events: &std::sync::mpsc::Receiver<DeviceEvent>,
+    ) -> Vec<DeviceEvent> {
+        events.try_iter().collect()
+    }
+
+    /// 設定を適用する。`WorkerState::handle` はこのファイルの私有なので、
+    /// 他のファイルのテストからはここを通す。
+    pub(in crate::app) fn apply_config(
+        state: &mut WorkerState,
+        config: DeviceConfig,
+        initial: bool,
+    ) {
+        state.handle(DeviceCommand::ApplyConfig {
+            config: Box::new(config),
+            initial,
+        });
+    }
+
+    /// デバイス名だけを指定した `DeviceConfig` を作る。
+    pub(in crate::app) fn config_for(
+        video_device: Option<&str>,
+        input_device: Option<&str>,
+    ) -> DeviceConfig {
+        DeviceConfig {
+            video: (video_device.map(str::to_string), None, None, None),
+            audio: (
+                input_device.map(str::to_string),
+                None,
+                None,
+                None,
+                DEFAULT_BUFFER_MS,
+            ),
+            auto_reconnect: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::backend::mock::{MockAudioBackend, MockBackends, MockVideoBackend};
+    use super::super::backend::SystemBackends;
+    use super::testing::{config_for, drain, mock_state};
     use super::*;
     use crate::audio::AudioControls;
-    use crate::settings::DEFAULT_BUFFER_MS;
-    use crate::video::VideoFrames;
+    use crate::video::{SharedColorConversion, VideoFrames};
     use std::sync::mpsc::channel;
     use std::sync::RwLock;
 
@@ -393,6 +481,11 @@ mod tests {
     /// `ApplyConfig` を送ってからなので、存在しないデバイス名を渡せば
     /// CI でも失敗経路をなぞれる。
     fn spawn_worker() -> Harness {
+        spawn_worker_with(Box::new(SystemBackends))
+    }
+
+    /// バックエンドを指定してワーカーを起動する。
+    fn spawn_worker_with(backends: Box<dyn DeviceBackends>) -> Harness {
         let (command_tx, command_rx) = channel();
         let (event_tx, event_rx) = channel();
         let snapshot: SharedSnapshot = Arc::new(RwLock::new(DeviceSnapshot::default()));
@@ -404,10 +497,13 @@ mod tests {
                 command_rx,
                 event_tx,
                 thread_snapshot,
-                VideoFrames::new(),
-                Arc::new(SharedColorConversion::new()),
-                thread_controls,
-                RepaintWaker::new(),
+                BackendShared {
+                    frames: VideoFrames::new(),
+                    color_conversion: Arc::new(SharedColorConversion::new()),
+                    audio_controls: thread_controls,
+                    repaint_waker: RepaintWaker::new(),
+                },
+                backends,
             );
         });
         Harness {
@@ -416,21 +512,6 @@ mod tests {
             snapshot,
             audio_controls,
             handle,
-        }
-    }
-
-    /// デバイス名だけを指定した `DeviceConfig` を作る。
-    fn config_for(video_device: Option<&str>, input_device: Option<&str>) -> DeviceConfig {
-        DeviceConfig {
-            video: (video_device.map(str::to_string), None, None, None),
-            audio: (
-                input_device.map(str::to_string),
-                None,
-                None,
-                None,
-                DEFAULT_BUFFER_MS,
-            ),
-            auto_reconnect: false,
         }
     }
 
@@ -562,5 +643,104 @@ mod tests {
             .send(DeviceCommand::ReconnectNow)
             .expect("送信できる");
         worker.shutdown();
+    }
+
+    #[test]
+    fn worker_thread_opens_the_injected_backend() {
+        // バックエンドの差し替えがスレッド越しにも効くこと。
+        // **ここだけは本物のループ（`run`）を回す。** 以降のテストは
+        // `WorkerState` を直接触るので、`DeviceBackends` を経由する道筋は
+        // ここで押さえておく
+        let backends = MockBackends::default();
+        backends.video.with(|state| {
+            state.devices = vec![("モックカメラ".to_string(), "説明".to_string())];
+        });
+        let worker = spawn_worker_with(Box::new(backends.clone()));
+
+        worker
+            .commands
+            .send(DeviceCommand::ApplyConfig {
+                config: Box::new(config_for(Some("モックカメラ"), Some("モック入力"))),
+                initial: false,
+            })
+            .expect("送信できる");
+
+        loop {
+            if matches!(wait_for_event(&worker), DeviceEvent::VideoConnected) {
+                break;
+            }
+        }
+        assert!(
+            backends.video.with(|state| state.capturing),
+            "実機ではなくモックを開いていること"
+        );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn worker_refresh_device_lists_returns_the_backend_lists() {
+        // 列挙結果をモックで差し替えて、そのまま UI へ返ることを見る
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| {
+            state.devices = vec![("モックカメラ".to_string(), "説明".to_string())];
+        });
+        audio.with(|state| {
+            state.input_devices = vec!["モック入力".to_string()];
+            state.output_devices = vec!["モック出力".to_string()];
+        });
+        let (mut state, events) = mock_state(&video, &audio);
+
+        state.handle(DeviceCommand::RefreshDeviceLists);
+
+        match drain(&events).into_iter().next() {
+            Some(DeviceEvent::DeviceLists {
+                video,
+                input,
+                output,
+            }) => {
+                assert_eq!(
+                    video,
+                    vec![("モックカメラ".to_string(), "説明".to_string())]
+                );
+                assert_eq!(input, vec!["モック入力".to_string()]);
+                assert_eq!(output, vec!["モック出力".to_string()]);
+            }
+            other => panic!("デバイス一覧が返らない: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn worker_initial_config_fills_in_the_first_enumerated_devices() {
+        // 起動直後の 1 回だけ、未設定のデバイス名を列挙結果の先頭で埋める。
+        // **出力だけは埋めない**（既定のスピーカーへ任せる）
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| {
+            state.devices = vec![("モックカメラ".to_string(), "説明".to_string())];
+        });
+        audio.with(|state| {
+            state.input_devices = vec!["モック入力".to_string()];
+            state.output_devices = vec!["モック出力".to_string()];
+        });
+        let (mut state, events) = mock_state(&video, &audio);
+
+        state.handle(DeviceCommand::ApplyConfig {
+            config: Box::new(config_for(None, None)),
+            initial: true,
+        });
+
+        match drain(&events).into_iter().next() {
+            Some(DeviceEvent::DefaultDevicesResolved { video, input }) => {
+                assert_eq!(video.as_deref(), Some("モックカメラ"));
+                assert_eq!(input.as_deref(), Some("モック入力"));
+            }
+            other => panic!("埋めた名前が返らない: {:?}", other),
+        }
+        // 往復を待たずに、その場の設定も書き換わっていること
+        let config = state.config.as_ref().expect("設定を覚えていること");
+        assert_eq!(config.video.0.as_deref(), Some("モックカメラ"));
+        assert_eq!(config.audio.0.as_deref(), Some("モック入力"));
+        assert_eq!(config.audio.1, None, "出力は既定のままにすること");
     }
 }

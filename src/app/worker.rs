@@ -15,6 +15,7 @@
 //! 越しに読む。イベントを取りこぼしても表示が食い違わないよう、状態は
 //! 必ずこちらを正とする。
 
+use super::backend::{BackendShared, SystemBackends};
 use crate::audio::{ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, ResampleStatus};
 use crate::repaint::RepaintWaker;
 use crate::settings::AppSettings;
@@ -217,6 +218,10 @@ impl DeviceWorker {
     /// 先に作って複製を渡す。**`VideoCapture` と `AudioCapture` はワーカー
     /// スレッドの中で作る。** `cpal::Stream` は `!Send` で、作ったスレッド以外へ
     /// 持ち出せないため。
+    ///
+    /// デバイスに触る実装を選ぶのはここ 1 か所だけ（`SystemBackends`）。
+    /// ワーカー本体（`super::worker_loop::run`）は `super::backend` の trait
+    /// しか知らないので、テストはモックを渡して同じループを回せる。
     pub(super) fn spawn(
         frames: VideoFrames,
         color_conversion: Arc<SharedColorConversion>,
@@ -228,6 +233,12 @@ impl DeviceWorker {
         let snapshot: SharedSnapshot = Arc::new(RwLock::new(DeviceSnapshot::default()));
 
         let thread_snapshot = Arc::clone(&snapshot);
+        let shared = BackendShared {
+            frames,
+            color_conversion,
+            audio_controls,
+            repaint_waker,
+        };
         let handle = std::thread::Builder::new()
             .name("device-worker".to_string())
             .spawn(move || {
@@ -235,10 +246,8 @@ impl DeviceWorker {
                     command_rx,
                     event_tx,
                     thread_snapshot,
-                    frames,
-                    color_conversion,
-                    audio_controls,
-                    repaint_waker,
+                    shared,
+                    Box::new(SystemBackends),
                 );
             });
 

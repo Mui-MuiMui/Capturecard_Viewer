@@ -5,6 +5,7 @@
 //! `impl CaptureCardViewer` を足す形で、状態そのものは増やさない。
 
 mod audio_control;
+mod backend;
 mod capabilities;
 mod device;
 mod error_report;
