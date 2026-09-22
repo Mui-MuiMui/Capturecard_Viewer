@@ -106,6 +106,9 @@ impl CaptureCardViewer {
             audio.details.extend(status::format_resample_status(
                 self.device_snapshot.audio_resample,
             ));
+            audio.details.push(status::format_underrun_count(
+                self.device_snapshot.audio_underruns,
+            ));
         }
 
         ConnectionStatus { video, audio }

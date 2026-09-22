@@ -258,6 +258,7 @@ impl WorkerState {
                 attempts: self.audio_retry.attempts(),
             },
             audio_resample: self.audio.resample_status(),
+            audio_underruns: self.audio.underrun_count(),
         };
         match self.snapshot.write() {
             Ok(mut slot) => *slot = next,

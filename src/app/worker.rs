@@ -189,6 +189,10 @@ pub(super) struct DeviceSnapshot {
     /// （`app::error_report::connection_status` が `status::format_resample_status`
     /// で文言に組み立てる）
     pub(super) audio_resample: Option<ResampleStatus>,
+    /// 音声のアンダーラン（出力コールバックがリングバッファから取り出せなかった）
+    /// の累計回数。音声を開いていなければ `None`。開き直すと 0 から数え直す。
+    /// 統計 OSD（`app::view`）と「接続状態」タブの両方がこれを読む
+    pub(super) audio_underruns: Option<u32>,
 }
 
 /// ワーカースレッドと、UI スレッドが共有する読み取り専用のスナップショット。
