@@ -266,6 +266,21 @@ pub fn format_resample_status(status: Option<ResampleStatus>) -> Vec<String> {
     ]
 }
 
+/// 音声のアンダーランの回数を 1 行に組み立てる。
+///
+/// **統計 OSD（`app::view`）と「接続状態」タブの両方がこれを呼ぶ。**
+/// 同じ数を別の文言で出すと、どちらを見ているのか分からなくなるため。
+///
+/// `DeviceSnapshot.audio_underruns` をそのまま渡す。音声を開いていない
+/// `None` のときは数を出さずに「-」にする。**0 と書かない。** 開いていて
+/// 一度も途切れていない状態と区別が付かなくなるため。
+pub fn format_underrun_count(count: Option<u32>) -> String {
+    match count {
+        Some(count) => format!("アンダーラン: {} 回", count),
+        None => "アンダーラン: -".to_string(),
+    }
+}
+
 /// 映像か音声、片方の接続状態。設定ダイアログの「接続状態」タブへ渡す。
 ///
 /// **デバイスワーカーが書き出した観測値（`DeviceSnapshot`）から作る。**
@@ -607,6 +622,19 @@ mod tests {
                 "バッファ水位: 不明".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn format_underrun_count_with_a_count_shows_the_number() {
+        assert_eq!(format_underrun_count(Some(0)), "アンダーラン: 0 回");
+        assert_eq!(format_underrun_count(Some(12)), "アンダーラン: 12 回");
+    }
+
+    #[test]
+    fn format_underrun_count_without_audio_shows_a_dash() {
+        // 音声を開いていない間に 0 と出すと、開いていて一度も途切れて
+        // いない状態と読み分けられない
+        assert_eq!(format_underrun_count(None), "アンダーラン: -");
     }
 
     #[test]
