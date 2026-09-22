@@ -81,7 +81,7 @@ pub fn show_settings_dialog(
     view: &SettingsDialogView<'_>,
     devices: &DeviceLists<'_>,
     connection: &ConnectionStatus,
-    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
+    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyAssignmentError>,
 ) -> Vec<SettingsEvent>;
 ```
 
@@ -312,7 +312,9 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 ### エラー型
 
-モジュールごとにエラー型を定義し、呼び出し側が種別で分岐できる状態にする。**ここは `VideoError` / `AudioError` / `ScreenshotError` として実装済み**（それぞれ `src/video.rs` / `src/audio.rs` / `src/screenshot.rs`）。
+モジュールごとにエラー型を定義し、呼び出し側が種別で分岐できる状態にする。**ここは `VideoError` / `AudioError` / `ScreenshotError` / `HotkeyError` / `SettingsError` として実装済み**（それぞれ `src/video.rs` / `src/audio.rs` / `src/screenshot.rs` / `src/hotkey.rs` / `src/settings.rs`）。
+
+`src/logging.rs` だけは `Result<_, String>` のまま残してある。ロガーを初期化する前の失敗なので `report_error` も `log` も使えず、`main.rs` が `let _ = logging::init();` と捨てるだけになる。種別で分岐する読み手がいない。
 
 種別で分けてあると、たとえば「デバイスが見つからない」ならリトライせずユーザーへ通知、「一時的にビジー」ならリトライ、といった判断が書けるようになる。バリアントにはデバイス名・向き・下位のエラー文を持たせ、分岐したあとで文言を組み立て直さずに済むようにする。
 
@@ -369,7 +371,7 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 | 音声設定を効かせる | サンプルレート・チャンネル数は反映され、UI の選択肢も入出力の対応設定から生成している。列挙は別スレッドで行い UI を止めない | 完了 |
 | 入出力差の吸収 | 揃えられる場合は揃え、揃えられない場合は線形補間でリサンプルし、チャンネル数はアップ／ダウンミックスする。クロックドリフトはリングバッファの水位から数秒ごとに補正する（`ResampleTelemetry`）。「接続状態」タブへの表示は未実装（`DeviceSnapshot` には値がある） | 「接続状態」タブへのリサンプル比・バッファ水位の表示はタスク未登録 |
 | バッファ長の調整 | 設定ダイアログのデバイス設定タブでスライダーから調整できる（20〜200ms、既定 50ms） | 完了 |
-| エラー型 | `video` / `audio` / `screenshot` の公開 API は `VideoError` / `AudioError` / `ScreenshotError` を返す。`hotkey` と `settings` は `Result<_, String>` のまま | 映像・音声・スクリーンショットは完了。`hotkey` / `settings` はタスク未登録 |
+| エラー型 | 下位モジュールの公開 API は自分のエラー enum（`VideoError` / `AudioError` / `ScreenshotError` / `HotkeyError` / `SettingsError`）を返す。文言はその型の `Display` が持つ。`logging` だけはロガー初期化前の失敗で読み手がいないため `Result<_, String>` のまま | 完了 |
 | ユーザー通知 | 接続失敗・ホットキー登録失敗・スクリーンショット保存失敗はトースト（`TransientOverlay`）で数秒表示し、同じ発生源の同じ文言は間引く。映像・音声の接続先は設定ダイアログの「接続状態」タブに、ホットキーの登録失敗は理由も添えてホットキー一覧に出す | 完了 |
 | trait による抽象化 | デバイス型を直接利用 | デバイス層を trait で抽象化する |
 
