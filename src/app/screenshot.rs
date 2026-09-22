@@ -288,7 +288,10 @@ impl CaptureCardViewer {
             // ディスクへの書き出しを待たせないため。
             // **片方が失敗しても他方は行う。** クリップボードを他のアプリが
             // 掴んでいてコピーできなくても、ファイルは残したい
-            let clipboard = to_clipboard.then(|| screenshot::copy_frame_to_clipboard(&frame));
+            // `summarize_screenshot_delivery` は理由を 1 本の文へ畳むだけなので、
+            // ここで日本語の 1 行に落として渡す
+            let clipboard = to_clipboard
+                .then(|| screenshot::copy_frame_to_clipboard(&frame).map_err(|e| e.to_string()));
             let file = file_target
                 .map(|(path, encoding)| save_frame(&frame, &path, encoding).map(|()| path));
 
