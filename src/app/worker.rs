@@ -95,6 +95,16 @@ pub(super) enum DeviceCommand {
     },
     /// バックオフを飛ばして映像・音声とも開き直す（右クリックの「デバイス再接続」）
     ReconnectNow,
+    /// 音量を `delta`%（負なら下げる）変える。**最小化中のホットキー専用。**
+    ///
+    /// 普段この 2 つは UI スレッドが `AudioControls` の Atomic を直接
+    /// 書き換える。最小化中は `update()` が呼ばれずその経路が止まるので、
+    /// 常に動いているこのスレッドへ代わりに実行させる（#133）。
+    /// 実行したことは `DeviceEvent::VolumeAdjusted` で UI へ返し、
+    /// 復帰したときに設定と OSD を追従させる
+    AdjustVolume(f32),
+    /// ミュートを切り替える。**最小化中のホットキー専用**（`AdjustVolume` と同じ理由）
+    ToggleMute,
     /// デバイス一覧を取り直す。設定ダイアログの選択肢に使う
     RefreshDeviceLists,
     /// 映像デバイスの対応形式を問い合わせる
@@ -133,6 +143,16 @@ pub(super) enum DeviceEvent {
         input: Vec<String>,
         output: Vec<String>,
     },
+    /// 最小化中のホットキーで音量を `delta`% 変えた。
+    ///
+    /// **UI スレッドは復帰したときに同じ `delta` を自分にも適用する**
+    /// （`adjust_volume`）。絶対値ではなく差分を返すのは、`AudioControls` が
+    /// 持つのは 0.0〜2.0 の倍率で、パーセントへ戻すと端数が動くため。
+    /// 差分なら右クリックメニューやホイールと同じ経路をそのまま通せる
+    VolumeAdjusted(f32),
+    /// 最小化中のホットキーでミュートを切り替えた。UI は復帰したときに
+    /// 自分の状態も切り替える（`toggle_mute`）
+    MuteToggled,
     /// 未設定だったデバイス名を、列挙結果の先頭で埋めた（起動直後の 1 回だけ）。
     /// UI スレッドが設定へ書き戻す
     DefaultDevicesResolved {
@@ -248,6 +268,15 @@ impl DeviceWorker {
         if let Err(e) = self.commands.send(command) {
             warn!("デバイスワーカーへコマンドを送れない: {}", e);
         }
+    }
+
+    /// コマンドの送り口を複製して渡す。
+    ///
+    /// **ホットキーのリスナースレッドへ渡すために用意してある**
+    /// （`app::hotkeys::background_hotkey_runner`）。最小化中は UI スレッドが
+    /// 動かないので、リスナーから直接コマンドを積めるようにする。
+    pub(super) fn command_sender(&self) -> Sender<DeviceCommand> {
+        self.commands.clone()
     }
 
     /// 届いているイベントを 1 つ取り出す。無ければ `None`。

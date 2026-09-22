@@ -64,7 +64,10 @@ fn mute_overlay_content(muted: bool, volume: f32) -> OverlayContent {
 /// 解除しないと「音量を上げたのに鳴らない」状態になって原因が分からない。
 /// 右クリックメニューのスライダーはすぐ下にミュートのチェックが見えているので、
 /// そちらは解除せず、灰色のバーで「効いていない」ことだけを示す。
-fn volume_change_result(current: f32, delta: f32) -> (f32, bool) {
+///
+/// **最小化中のホットキーを代わりに実行するデバイスワーカーもここを通る**
+/// （`super::worker_loop`）。上下限とミュートの扱いを経路で変えないため。
+pub(super) fn volume_change_result(current: f32, delta: f32) -> (f32, bool) {
     ((current + delta).clamp(MIN_VOLUME, MAX_VOLUME), false)
 }
 

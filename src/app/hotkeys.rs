@@ -4,12 +4,46 @@
 //! 登録そのものは `crate::hotkey::HotkeyManager` が持つ。
 
 use super::audio_control::VOLUME_SCROLL_STEP;
+use super::worker::DeviceCommand;
 use super::CaptureCardViewer;
-use crate::hotkey::{HotkeyAction, HotkeyError};
+use crate::hotkey::{BackgroundHotkeyRunner, HotkeyAction, HotkeyError};
 use crate::status::ErrorSource;
 use eframe::egui;
 use log::{debug, trace, warn};
 use std::collections::BTreeMap;
+use std::sync::mpsc::Sender;
+
+/// 最小化中のアクションを、UI スレッドを介さずに実行する窓口を組み立てる。
+///
+/// ホットキーのリスナースレッドから呼ばれる。**やってよいのはデバイス
+/// ワーカーへコマンドを積むところまで。** `CaptureCardViewer` の状態は
+/// UI スレッドのものなので、ここからは触れない。
+///
+/// 音量とミュートをワーカーへ回しているのは、ワーカーがウィンドウの状態に
+/// 関係なく動く唯一のスレッドだから。**結果は `DeviceEvent` で UI へ戻り、
+/// 復帰したフレームで `adjust_volume` / `toggle_mute` を通る**ので、
+/// 設定への反映と OSD は右クリックメニューから操作したときと同じになる。
+///
+/// `HotkeyAction::runs_while_minimized` が偽のものはここへ届かない。
+/// 届いても何もしないので、分類を増やしたときに勝手に実行されることはない。
+pub(super) fn background_hotkey_runner(commands: Sender<DeviceCommand>) -> BackgroundHotkeyRunner {
+    BackgroundHotkeyRunner::new(move |action| {
+        let command = match action {
+            HotkeyAction::ReconnectDevices => DeviceCommand::ReconnectNow,
+            HotkeyAction::VolumeUp => DeviceCommand::AdjustVolume(VOLUME_SCROLL_STEP),
+            HotkeyAction::VolumeDown => DeviceCommand::AdjustVolume(-VOLUME_SCROLL_STEP),
+            HotkeyAction::ToggleMute => DeviceCommand::ToggleMute,
+            HotkeyAction::Screenshot
+            | HotkeyAction::ToggleFullscreen
+            | HotkeyAction::ToggleAlwaysOnTop => return,
+        };
+        if let Err(e) = commands.send(command) {
+            // ワーカーが終わっているときだけ。復帰後に UI 側で実行される
+            // わけでもないので、押下が 1 回落ちる
+            warn!("最小化中のホットキーをデバイスワーカーへ送れない: {}", e);
+        }
+    })
+}
 
 /// 登録できなかったホットキーを、通知 1 件ぶんの文字列にまとめる。
 /// すべて登録できていれば `None`。

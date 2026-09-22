@@ -481,6 +481,21 @@ impl AudioControls {
         trace!("ミュートを設定する: {}", muted);
         self.muted.store(muted, Ordering::Relaxed);
     }
+
+    /// いまの音量をパーセントで返す。
+    ///
+    /// **最小化中のホットキーで増減の基準にするために置いてある**
+    /// （`app::worker_loop::adjust_volume`）。普段は UI スレッドが持つ値が
+    /// 正で、ここを読む必要はない。内部は 0.0〜2.0 の倍率なので、戻す際に
+    /// 端数が動きうる（60% が 60.000004% になる程度）
+    pub fn volume_percent(&self) -> f32 {
+        load_volume(&self.volume) * 100.0
+    }
+
+    /// ミュート中か。`volume_percent` と同じく最小化中のホットキー用。
+    pub fn muted(&self) -> bool {
+        self.muted.load(Ordering::Relaxed)
+    }
 }
 
 /// 目標水位からの相対誤差がこの割合未満なら補正しない（デッドゾーン）。

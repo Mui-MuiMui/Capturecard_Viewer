@@ -75,6 +75,13 @@ impl CaptureCardViewer {
                 self.cached_input_devices = input;
                 self.cached_output_devices = output;
             }
+            DeviceEvent::VolumeAdjusted(delta) => {
+                // 最小化中にワーカーが代わりに実行した分を、UI 側にも同じ
+                // 経路で効かせる。音は既に変わっているので、ここで行うのは
+                // 設定への反映と OSD。**復帰したフレームで初めて届く**
+                self.adjust_volume(delta);
+            }
+            DeviceEvent::MuteToggled => self.toggle_mute(),
             DeviceEvent::DefaultDevicesResolved { video, input } => {
                 self.store_resolved_devices(video, input);
             }

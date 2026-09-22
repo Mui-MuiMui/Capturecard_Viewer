@@ -12,6 +12,7 @@
 //! 判定そのもの（途絶したか、開き直してよいか）は `super::monitor` の
 //! 純粋関数に切り出してある。ここはデバイスを触る側だけを持つ。
 
+use super::audio_control::volume_change_result;
 use super::monitor::{
     decide_audio_reconnect, decide_video_link, default_audio_device_changed,
     should_poll_default_audio_device, AudioErrorAction, VideoLinkAction, VIDEO_SIGNAL_TIMEOUT,
@@ -129,6 +130,12 @@ pub(super) fn run(
 pub(super) struct WorkerState {
     pub(super) video: VideoCapture,
     pub(super) audio: AudioCapture,
+    /// 音量・ミュート・パススルーの共有 Atomic。
+    ///
+    /// 普段は UI スレッドが書き、出力コールバックが読むだけで、ワーカーは
+    /// `AudioCapture` へ渡すためだけに触っていた。**最小化中のホットキーを
+    /// 代わりに実行するために、ここでも複製を持つ**（#133）
+    audio_controls: Arc<AudioControls>,
     pub(super) events: Sender<DeviceEvent>,
     pub(super) snapshot: SharedSnapshot,
     /// イベントを積んだときに UI スレッドを起こす窓口。
@@ -191,7 +198,8 @@ impl WorkerState {
     ) -> Self {
         Self {
             video: VideoCapture::new(frames, color_conversion, repaint_waker.clone()),
-            audio: AudioCapture::new(audio_controls),
+            audio: AudioCapture::new(Arc::clone(&audio_controls)),
+            audio_controls,
             events,
             snapshot,
             repaint_waker,
@@ -267,6 +275,8 @@ impl WorkerState {
             DeviceCommand::QueryAudioCapabilities(direction, key) => {
                 self.query_audio_capabilities(direction, &key);
             }
+            DeviceCommand::AdjustVolume(delta) => self.adjust_volume(delta),
+            DeviceCommand::ToggleMute => self.toggle_mute(),
             // 呼び出し側（`run`）がループを抜けるので、ここへは来ない
             DeviceCommand::Shutdown => {}
         }
@@ -295,6 +305,34 @@ impl WorkerState {
         }
 
         self.config = Some(config);
+    }
+
+    /// 最小化中のホットキーで音量を変える。**UI スレッドの代役。**
+    ///
+    /// 基準にするのは `AudioControls` に入っている値で、UI スレッドが持つ
+    /// `CaptureCardViewer::volume` とは最大 0.5% ずれうる（UI 側は変化が
+    /// その幅を超えたときだけ Atomic へ書く）。ずれは復帰したときの
+    /// `adjust_volume` で UI 側の値へ揃うので、聞こえ方の差にはならない。
+    ///
+    /// 上下限とミュートの扱いは UI と同じ `volume_change_result` に任せる。
+    /// ここで独自に計算すると、経路によって上限や解除の有無が変わる
+    fn adjust_volume(&self, delta: f32) {
+        let (volume, muted) = volume_change_result(self.audio_controls.volume_percent(), delta);
+        self.audio_controls.set_volume(volume);
+        self.audio_controls.set_muted(muted);
+        info!("最小化中のホットキーで音量を {}% にした", volume as i32);
+        self.emit(DeviceEvent::VolumeAdjusted(delta));
+    }
+
+    /// 最小化中のホットキーでミュートを切り替える。**UI スレッドの代役。**
+    fn toggle_mute(&self) {
+        let muted = !self.audio_controls.muted();
+        self.audio_controls.set_muted(muted);
+        info!(
+            "最小化中のホットキーでミュートを{}にした",
+            if muted { "オン" } else { "オフ" }
+        );
+        self.emit(DeviceEvent::MuteToggled);
     }
 
     /// バックオフを飛ばして映像・音声とも開き直す。
@@ -617,6 +655,8 @@ mod tests {
         commands: std::sync::mpsc::Sender<DeviceCommand>,
         events: std::sync::mpsc::Receiver<DeviceEvent>,
         snapshot: SharedSnapshot,
+        /// ワーカーと共有している音量・ミュート。最小化中のホットキーの確認に使う
+        audio_controls: Arc<AudioControls>,
         handle: std::thread::JoinHandle<()>,
     }
 
@@ -641,6 +681,8 @@ mod tests {
         let (event_tx, event_rx) = channel();
         let snapshot: SharedSnapshot = Arc::new(RwLock::new(DeviceSnapshot::default()));
         let thread_snapshot = Arc::clone(&snapshot);
+        let audio_controls = Arc::new(AudioControls::default());
+        let thread_controls = Arc::clone(&audio_controls);
         let handle = std::thread::spawn(move || {
             run(
                 command_rx,
@@ -648,7 +690,7 @@ mod tests {
                 thread_snapshot,
                 VideoFrames::new(),
                 Arc::new(SharedColorConversion::new()),
-                Arc::new(AudioControls::default()),
+                thread_controls,
                 RepaintWaker::new(),
             );
         });
@@ -656,6 +698,7 @@ mod tests {
             commands: command_tx,
             events: event_rx,
             snapshot,
+            audio_controls,
             handle,
         }
     }
@@ -679,6 +722,73 @@ mod tests {
     fn worker_shutdown_command_stops_the_thread() {
         // `on_exit` が待てること。止まらないとアプリが終わらない
         spawn_worker().shutdown();
+    }
+
+    /// イベントが 1 つ届くまで待つ。CI の遅さを見込んで長めに待つ
+    fn wait_for_event(worker: &Harness) -> DeviceEvent {
+        worker
+            .events
+            .recv_timeout(Duration::from_secs(5))
+            .expect("イベントが届くこと")
+    }
+
+    #[test]
+    fn worker_adjust_volume_changes_the_shared_value_and_reports_the_delta() {
+        // 最小化中のホットキーの経路。デバイスを開いていなくても効くこと
+        let worker = spawn_worker();
+        worker.audio_controls.set_volume(100.0);
+
+        worker
+            .commands
+            .send(DeviceCommand::AdjustVolume(10.0))
+            .expect("コマンドを送れる");
+
+        match wait_for_event(&worker) {
+            DeviceEvent::VolumeAdjusted(delta) => assert_eq!(delta, 10.0),
+            other => panic!("音量の変更が返らない: {:?}", other),
+        }
+        // 出力コールバックが読む値が既に変わっていること（聞こえ方が先に変わる）
+        assert!(
+            (worker.audio_controls.volume_percent() - 110.0).abs() < 0.01,
+            "音量が変わっていない: {}",
+            worker.audio_controls.volume_percent()
+        );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn worker_adjust_volume_releases_mute() {
+        // UI 側の `adjust_volume` と同じ扱い。解除しないと
+        // 「上げたのに鳴らない」状態になる
+        let worker = spawn_worker();
+        worker.audio_controls.set_muted(true);
+
+        worker
+            .commands
+            .send(DeviceCommand::AdjustVolume(-10.0))
+            .expect("コマンドを送れる");
+        wait_for_event(&worker);
+
+        assert!(!worker.audio_controls.muted());
+        worker.shutdown();
+    }
+
+    #[test]
+    fn worker_toggle_mute_flips_the_shared_value() {
+        let worker = spawn_worker();
+        assert!(!worker.audio_controls.muted());
+
+        worker
+            .commands
+            .send(DeviceCommand::ToggleMute)
+            .expect("コマンドを送れる");
+
+        match wait_for_event(&worker) {
+            DeviceEvent::MuteToggled => {}
+            other => panic!("ミュートの切替が返らない: {:?}", other),
+        }
+        assert!(worker.audio_controls.muted());
+        worker.shutdown();
     }
 
     #[test]
