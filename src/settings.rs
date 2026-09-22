@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 pub enum SettingsError {
     /// 読み込もうとした場所にファイルが無い
     FileNotFound(PathBuf),
+    /// 読み込もうとした場所はあるが、ファイルではない（ディレクトリなど）
+    NotAFile(PathBuf),
     /// TOML として書き出せない（書き込み権限が無い、ディスクが一杯など）
     ExportFailed { path: PathBuf, source: String },
     /// ファイルは読めたが TOML として解釈できない
@@ -31,6 +33,9 @@ impl fmt::Display for SettingsError {
         match self {
             SettingsError::FileNotFound(path) => {
                 write!(f, "{} が見つからない", path.display())
+            }
+            SettingsError::NotAFile(path) => {
+                write!(f, "{} はファイルではない", path.display())
             }
             SettingsError::ExportFailed { path, source } => {
                 write!(f, "{} へ書き出せない: {source}", path.display())
@@ -1346,10 +1351,26 @@ pub fn export_to(path: &Path, settings: &AppSettings) -> Result<(), SettingsErro
 // **`confy::load_path` はファイルが無いと既定値で新しく作る。** 読み込みの
 // つもりで呼んだ結果、選んだ場所に既定値のファイルが増えるのは意図と違うので、
 // 先に存在を確かめてから渡す。
+//
+// 確かめ方に `Path::is_file()` を使わないのは、**実在するのにメタデータを
+// 取れない場合も `false` を返す**ため。権限の無いファイルを選んだときに
+// 「見つからない」と出すと、置き場所を疑って直しようがなくなる。
 pub fn import_from(path: &Path) -> Result<AppSettings, SettingsError> {
-    if !path.is_file() {
-        return Err(SettingsError::FileNotFound(path.to_path_buf()));
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        // ディレクトリやデバイスファイル。confy へ渡しても読めない
+        Ok(_) => return Err(SettingsError::NotAFile(path.to_path_buf())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SettingsError::FileNotFound(path.to_path_buf()))
+        }
+        Err(e) => {
+            return Err(SettingsError::ImportFailed {
+                path: path.to_path_buf(),
+                source: e.to_string(),
+            })
+        }
     }
+
     confy::load_path(path).map_err(|e| SettingsError::ImportFailed {
         path: path.to_path_buf(),
         source: e.to_string(),
@@ -2785,11 +2806,27 @@ volume = 80.0
     }
 
     #[test]
+    fn import_from_a_directory_is_not_reported_as_missing() {
+        // 実在するのに「見つからない」と出すと、置き場所を疑って直しようがない。
+        // is_file() だけで判定していたころはここが FileNotFound になっていた
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("not-a-file");
+        fs::create_dir(&path).expect("ディレクトリを作れること");
+
+        let err = import_from(&path).expect_err("エラーになること");
+
+        assert_eq!(err, SettingsError::NotAFile(path));
+    }
+
+    #[test]
     fn settings_error_display_keeps_the_path_and_the_underlying_reason() {
         // 文言はそのままトーストに出る。場所と下位のエラー文が落ちると
         // どのファイルで何が起きたのか分からなくなる
         let missing = SettingsError::FileNotFound(PathBuf::from("C:/tmp/settings.toml"));
         assert_eq!(missing.to_string(), "C:/tmp/settings.toml が見つからない");
+
+        let not_a_file = SettingsError::NotAFile(PathBuf::from("C:/tmp/settings"));
+        assert_eq!(not_a_file.to_string(), "C:/tmp/settings はファイルではない");
 
         let export = SettingsError::ExportFailed {
             path: PathBuf::from("C:/tmp/settings.toml"),
@@ -2815,6 +2852,7 @@ volume = 80.0
         // 英語の文言が混ざると、定型文と繋げたときに日本語と英語が並ぶ
         let all = [
             SettingsError::FileNotFound(PathBuf::from("C:/tmp/settings.toml")),
+            SettingsError::NotAFile(PathBuf::from("C:/tmp/settings")),
             SettingsError::ExportFailed {
                 path: PathBuf::from("C:/tmp/settings.toml"),
                 source: "denied".to_string(),
