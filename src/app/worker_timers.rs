@@ -56,7 +56,7 @@ impl WorkerState {
     /// は変換が要る場合しか作らないので、まだ音声を開いていない場合も含めて
     /// ここで早期に諦める。
     fn adjust_resample_correction(&mut self, now: Instant) {
-        let Some(telemetry) = self.audio.resample_telemetry().cloned() else {
+        let Some(telemetry) = self.audio.resample_telemetry() else {
             return;
         };
 

@@ -15,17 +15,22 @@
 //!
 //! 判定そのもの（途絶したか、開き直してよいか）は `super::monitor` の
 //! 純粋関数に切り出してある。ここはデバイスを触る側だけを持つ。
+//!
+//! **デバイスそのものは `super::backend` の trait 越しにしか触らない。**
+//! 実装を選ぶのは `super::worker::DeviceWorker::spawn` だけで、ここから先は
+//! `VideoCapture` / `AudioCapture` という具体型を知らない。おかげでモックを
+//! 差し替えれば、実機も実時間の経過もなしに再試行と切断検出を回せる。
 
 use super::audio_control::volume_change_result;
+use super::backend::{AudioBackend, BackendShared, DeviceBackends, VideoBackend};
 use super::monitor::VideoLinkAction;
 use super::retry::ConnectRetry;
 use super::worker::{
     AudioTarget, DeviceCommand, DeviceConfig, DeviceEvent, DeviceSnapshot, RetryStatus,
     SharedSnapshot, VideoTarget,
 };
-use crate::audio::{AudioCapabilities, AudioCapture, AudioControls, AudioDirection};
+use crate::audio::{AudioCapabilities, AudioControls, AudioDirection};
 use crate::repaint::RepaintWaker;
-use crate::video::{SharedColorConversion, VideoCapture, VideoFrames};
 use log::{debug, info, trace, warn};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -63,18 +68,23 @@ pub(super) fn run(
     commands: Receiver<DeviceCommand>,
     events: Sender<DeviceEvent>,
     snapshot: SharedSnapshot,
-    frames: VideoFrames,
-    color_conversion: Arc<SharedColorConversion>,
-    audio_controls: Arc<AudioControls>,
-    repaint_waker: RepaintWaker,
+    shared: BackendShared,
+    backends: Box<dyn DeviceBackends>,
 ) {
     debug!("デバイスワーカーを開始する");
+    // 音量とミュートはバックエンドへ渡したあともワーカー自身が使う
+    // （最小化中のホットキーの代役）。再描画の窓口も `emit` で使う
+    let audio_controls = Arc::clone(&shared.audio_controls);
+    let repaint_waker = shared.repaint_waker.clone();
+    // **バックエンドを組み立てるのはこのスレッドの中。** `cpal::Stream` は
+    // `!Send` なので、材料だけを送ってここで作る
+    let (video, audio) = backends.create(shared);
     let mut state = WorkerState::new(
+        video,
+        audio,
+        audio_controls,
         events,
         snapshot,
-        frames,
-        color_conversion,
-        audio_controls,
         repaint_waker,
     );
 
@@ -111,8 +121,10 @@ pub(super) fn run(
 /// `super::worker_connect` へ、タイマーで動く監視を `super::worker_timers`
 /// へ分けているため。** `app` の外からは見えない。
 pub(super) struct WorkerState {
-    pub(super) video: VideoCapture,
-    pub(super) audio: AudioCapture,
+    /// 映像デバイスの入口。本番は `VideoCapture`、テストはモック
+    pub(super) video: Box<dyn VideoBackend>,
+    /// 音声デバイスの入口。本番は `AudioCapture`、テストはモック
+    pub(super) audio: Box<dyn AudioBackend>,
     /// 音量・ミュート・パススルーの共有 Atomic。
     ///
     /// 普段は UI スレッドが書き、出力コールバックが読むだけで、ワーカーは
@@ -172,16 +184,16 @@ pub(super) struct WorkerState {
 
 impl WorkerState {
     fn new(
+        video: Box<dyn VideoBackend>,
+        audio: Box<dyn AudioBackend>,
+        audio_controls: Arc<AudioControls>,
         events: Sender<DeviceEvent>,
         snapshot: SharedSnapshot,
-        frames: VideoFrames,
-        color_conversion: Arc<SharedColorConversion>,
-        audio_controls: Arc<AudioControls>,
         repaint_waker: RepaintWaker,
     ) -> Self {
         Self {
-            video: VideoCapture::new(frames, color_conversion, repaint_waker.clone()),
-            audio: AudioCapture::new(Arc::clone(&audio_controls)),
+            video,
+            audio,
             audio_controls,
             events,
             snapshot,
@@ -344,10 +356,11 @@ impl WorkerState {
 
 #[cfg(test)]
 mod tests {
+    use super::super::backend::SystemBackends;
     use super::*;
     use crate::audio::AudioControls;
     use crate::settings::DEFAULT_BUFFER_MS;
-    use crate::video::VideoFrames;
+    use crate::video::{SharedColorConversion, VideoFrames};
     use std::sync::mpsc::channel;
     use std::sync::RwLock;
 
@@ -393,6 +406,11 @@ mod tests {
     /// `ApplyConfig` を送ってからなので、存在しないデバイス名を渡せば
     /// CI でも失敗経路をなぞれる。
     fn spawn_worker() -> Harness {
+        spawn_worker_with(Box::new(SystemBackends))
+    }
+
+    /// バックエンドを指定してワーカーを起動する。
+    fn spawn_worker_with(backends: Box<dyn DeviceBackends>) -> Harness {
         let (command_tx, command_rx) = channel();
         let (event_tx, event_rx) = channel();
         let snapshot: SharedSnapshot = Arc::new(RwLock::new(DeviceSnapshot::default()));
@@ -404,10 +422,13 @@ mod tests {
                 command_rx,
                 event_tx,
                 thread_snapshot,
-                VideoFrames::new(),
-                Arc::new(SharedColorConversion::new()),
-                thread_controls,
-                RepaintWaker::new(),
+                BackendShared {
+                    frames: VideoFrames::new(),
+                    color_conversion: Arc::new(SharedColorConversion::new()),
+                    audio_controls: thread_controls,
+                    repaint_waker: RepaintWaker::new(),
+                },
+                backends,
             );
         });
         Harness {
