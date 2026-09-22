@@ -387,7 +387,7 @@ impl CaptureCardViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::video::IntervalStats;
+    use crate::video::frame_buffer::IntervalStats;
     use egui::Vec2;
 
     #[test]

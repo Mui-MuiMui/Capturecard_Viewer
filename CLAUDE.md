@@ -79,7 +79,7 @@ cargo build --release
 
 **例外はデバイスワーカーの 5 つ**（`worker.rs` / `worker_loop.rs` / `worker_timers.rs` / `worker_connect.rs` / `backend.rs`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_timers.rs` と `worker_connect.rs` がそこへ `impl` を足す。`backend.rs` はアプリの状態（`CaptureCardViewer` / `WorkerState` に属するもの）を持たず、デバイスの入口の trait とその実装だけを持つ。テスト用のモックだけは自分の中に観測用の値を抱える。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
 
-`src/video/` の子モジュールは**役割で分けてあるだけで、状態はそれぞれのファイルが定義する型が持つ。** 他のファイルから呼ぶ項目にだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。**外から使う経路（`crate::video::...`）は `video/mod.rs` の `pub use` に集める。** 呼び出し側の `#[cfg(test)] mod tests` からしか参照されない項目（`FormatCapability` / `IntervalStats`）は、テストを含まないビルドでは未使用になるので、再輸出に `#[allow(unused_imports)]` を付けて経路だけ残してある。
+`src/video/` の子モジュールは**役割で分けてあるだけで、状態はそれぞれのファイルが定義する型が持つ。** 他のファイルから呼ぶ項目にだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。**外から使う経路（`crate::video::...`）は `video/mod.rs` の `pub use` に集める。** ただし**呼び出し側のテストからしか参照されない項目は再輸出しない。** テストを含まないビルドで誰も使わない `pub use` が残り、`unused_imports` の警告になるため。そういう項目（`FormatCapability` / `IntervalStats`）は置いてある子モジュールを `pub(crate) mod` にして、`crate::video::capabilities::FormatCapability` のように子モジュールの経路で参照する。`src/ui/` と同じ考え方。
 
 `src/ui/` の子モジュールは**どれも状態を持たず、書き換えるのもドラフトだけ。** 起きたことは `SettingsEvent` / `HotkeyDialogEvent` の列で返す。ダイアログの状態は `state.rs` の `SettingsDialogState` 1 つに集めてある。**外から使う経路（`crate::ui::...`）は `ui/mod.rs` の `pub use` に集める。** `ui` の中だけで使う項目は再輸出せず、子モジュールの経路で参照する（`mod ui;` 自体が私有なので、誰も使わない再輸出は `unused_imports` の警告になる）。
 

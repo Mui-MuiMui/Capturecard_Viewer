@@ -275,7 +275,8 @@ fn show_audio_capability_state(
 mod tests {
     use super::*;
 
-    use crate::video::{DeviceCapabilities, FormatCapability, VideoMode};
+    use crate::video::capabilities::FormatCapability;
+    use crate::video::{DeviceCapabilities, VideoMode};
 
     /// 取得できたことにする能力。中身そのものは検証の対象ではないので最小限
     fn sample_capabilities() -> DeviceCapabilities {

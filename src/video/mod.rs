@@ -15,24 +15,22 @@
 //! ここに置いてあるのは、どのファイルからも使う `VideoError` と
 //! ログの書式を揃えるための `elapsed_ms` だけ。
 
-mod capabilities;
+// `FormatCapability`（`capabilities`）と `IntervalStats`（`frame_buffer`）は
+// 呼び出し側のテストからしか参照されない。再輸出すると、テストを含まない
+// ビルドで誰も使わない `pub use` が残って `unused_imports` の警告になるので、
+// この 2 つのモジュールだけ `pub(crate)` にして子モジュールの経路
+// （`crate::video::capabilities::FormatCapability`）で参照してもらう。
+// `src/ui/` と同じ考え方
+pub(crate) mod capabilities;
 mod capture;
 mod color;
 mod convert;
-mod frame_buffer;
+pub(crate) mod frame_buffer;
 
 pub use capabilities::{DeviceCapabilities, VideoMode};
 pub use capture::{ActiveVideo, VideoCapture, VideoLinkState};
 pub use color::{SharedColorConversion, VideoAdjustments};
 pub use frame_buffer::{FrameStats, VideoFrame, VideoFrames};
-
-// この 2 つは `ui` と `app::view` のテストモジュールからしか
-// 参照されないため、テストを含まないビルドでは未使用になる。外から見える
-// 経路を分割前と揃えておきたいので、再輸出は残して警告だけを黙らせる
-#[allow(unused_imports)]
-pub use capabilities::FormatCapability;
-#[allow(unused_imports)]
-pub use frame_buffer::IntervalStats;
 
 use std::fmt;
 use std::time::Instant;

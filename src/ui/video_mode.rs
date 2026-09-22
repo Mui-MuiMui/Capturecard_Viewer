@@ -94,7 +94,8 @@ fn video_mode_rank(
 mod tests {
     use super::*;
 
-    use crate::video::{DeviceCapabilities, FormatCapability, VideoMode};
+    use crate::video::capabilities::FormatCapability;
+    use crate::video::{DeviceCapabilities, VideoMode};
 
     #[test]
     fn select_default_video_mode_without_previous_takes_largest_resolution_and_fps() {
