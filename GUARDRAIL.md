@@ -39,7 +39,7 @@
 - `active_preset` は `AppSettings` の先頭、`Preset::name` は `video` / `audio` より前に置く（理由: `docs/design/presets.md`）
 - プリセットに `screenshot` / `hotkeys` / `ui` を入れない。適用する項目と比較する項目を必ず揃える（理由: `docs/design/presets.md`）
 - `commit_draft` の末尾の `refresh_active_preset()` を外さない（理由: `docs/design/presets.md`）
-- `ui.rs` に `static` を追加しない。新しい状態は `SettingsDialogState` へ足し、描画側へは `SettingsDialogView` の読み取り専用の借用で渡す（理由: `docs/design/settings-dialog.md`）
+- `src/ui/` に `static` を追加しない。新しい状態は `SettingsDialogState` へ足し、描画側へは `SettingsDialogView` の読み取り専用の借用で渡す（理由: `docs/design/settings-dialog.md`）
 - 描画関数へ共有設定の `Arc<Mutex<AppSettings>>` を渡さない。描画が書き換えてよいのはドラフトだけ（理由: `docs/design/settings-dialog.md`）
 - `SettingsEvent` は受け取った順に処理する。`SettingsEvent::Dialog` は必ず列の最後（理由: `docs/design/settings-dialog.md`）
 - `rfd` のファイルダイアログを描画の中から開かない。`settings` のロックを握ったまま出さない（理由: `docs/design/settings-dialog.md`）
