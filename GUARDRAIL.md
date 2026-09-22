@@ -10,6 +10,7 @@
 - 時間で動くデバイス処理を `update()` から駆動しない（理由: `docs/design/device-worker.md`）
 - `update()` の中でデバイスを開く・閉じる・列挙する・能力を問い合わせる処理を書かない（理由: `docs/design/device-worker.md`、`docs/ARCHITECTURE.md`）
 - `AudioCapture` はワーカースレッドの中で作る（理由: `docs/design/device-worker.md`）
+- ワーカー（`worker_loop` / `worker_connect` / `worker_timers`）から `VideoCapture` / `AudioCapture` を名指しで呼ばない。`app::backend` の trait を通す。コールバックの経路には trait を挟まない（理由: `docs/design/device-worker.md`）
 - デバイスに触る使い捨てのスレッドを新しく作らない（理由: `docs/design/threads.md`）
 - 新しく `Arc<Mutex<..>>` を足す前に「ワーカーへのコマンドで済まないか」を考える。要る場合もロックを握ったまま重い処理（デバイスの開き直し、画像のエンコード、ファイル I/O）をしない（理由: `docs/design/threads.md`）
 - cpal のコールバックスレッドから再接続を始めない。エラーの旗はストリームを開き直すたびに新しい `Arc` へ差し替える（理由: `docs/design/threads.md`）

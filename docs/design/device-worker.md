@@ -49,3 +49,35 @@ flowchart LR
 eframe は最小化されたウィンドウの再描画要求を捨てるため、最小化中は `update()` が呼ばれない。`update()` から駆動していた頃は、その間これらがすべて止まっていた（#133）。**時間で動くデバイス処理を `update()` から呼ぶ形へ戻さないこと。**
 
 ホットキーのアクション実行も、**画面が要らないもの（デバイス再接続・音量・ミュート）はリスナースレッドからこのワーカーへコマンドとして流す**（`DeviceCommand::ReconnectNow` / `AdjustVolume` / `ToggleMute`）。ワーカーがウィンドウの状態に関係なく動く唯一のスレッドだからで、UI スレッドの代役をここに置いている。実行したことは `DeviceEvent` で返し、復帰した最初のフレームで UI 側の設定と OSD を追従させる。画面が要るもの（フルスクリーン切替、最前面表示、スクリーンショット）は復帰まで持ち越す。詳しくは `docs/design/hotkeys.md` の「最小化中の扱い」。
+
+## デバイスに触る入口は trait 1 枚で仕切る
+
+**ワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。** `worker_loop` / `worker_connect` / `worker_timers` はどれも `Box<dyn ..>` を持つだけで、`VideoCapture` / `AudioCapture` という具体型を知らない。実装を選ぶのは `DeviceWorker::spawn` の 1 か所（`SystemBackends`）で、そこが `BackendShared`（フレーム・色変換・音量・再描画の窓口）と一緒にワーカースレッドへ送り、**組み立てはあちら側で行う**（`cpal::Stream` が `!Send` なので、作る場所は使うスレッドでなければならない）。
+
+```mermaid
+flowchart LR
+    spawn["DeviceWorker::spawn<br/>（UI スレッド）"]
+    loop["worker_loop / worker_connect<br/>worker_timers"]
+    trait["VideoBackend / AudioBackend"]
+    real["VideoCapture / AudioCapture"]
+    mock["モック（テスト専用）"]
+
+    spawn -->|Box&lt;dyn DeviceBackends&gt;| loop
+    loop --> trait
+    trait --> real
+    trait -.-> mock
+```
+
+**境界はワーカーがデバイスへ触る場所に置く。** 開く・閉じる・列挙する・能力を問い合わせる・観測値を読む、の 5 つだけで、`worker_connect` と `worker_timers` が呼ぶ操作がそのまま trait のメソッドに並ぶ。ここより上（コマンドの解釈、再試行の期限、途絶の判定）はもともと `WorkerState` と `monitor` / `retry` の側にあり、デバイスを知らない。ここより下（`video.rs` / `audio.rs` の中身）には手を入れていない。
+
+**開いた結果を別のハンドル型では返さない。** ストリームを持つのは実装自身で、`stop_capture` / `link_state` / `active` がその持ち物に対する窓口になる。`VideoCapture` は `CallbackCamera` を抱えたまま開き直しと途絶の観測を行っているので、「開いた分」だけを切り出すには `video.rs` の中身を動かすことになる。trait を被せる目的はそこではない。
+
+**フレームコールバックと cpal のコールバックの経路には挟まない。** 映像フレームは `VideoFrames`、音量とミュートは `AudioControls` の共有ハンドル越しに今までどおり流れる。あの 2 つのコールバックはロックもアロケーションもしない決まりで（`docs/design/video-pipeline.md` / `docs/design/audio.md`）、動的ディスパッチを足す場所ではない。trait 化したのは開閉と問い合わせだけなので、1 回の接続につき数回しか通らない。
+
+### これで実機なしに何が試せるか
+
+テスト用のモックは `app::backend` の `mock`（`#[cfg(test)]`）にある。持たせたのは「指定回数失敗してから成功する」「列挙結果を差し替える」「フレームが止まったことにする」の 3 つだけで、映像や音声の中身は作らない。
+
+モックを載せた `WorkerState` は、スレッドを起こさずに `tick(now)` を呼べる。**渡す時刻はテストが決めてよい**ので、バックオフ（200ms → 400ms → …）もフレームの途絶（3 秒）も実時間を待たずに跨げる。`ConnectRetry` と `monitor` がもともと `Instant` / `Duration` を引数で受け取る形だったため、時刻の注入のために足した仕組みは無い。
+
+**カラーバーや正弦波を吐くフェイクデバイスはここには無い。** それはこの trait の実装の 1 つとして #142 で足す。色変換の期待値の検証や、デバイス切替 UI・自動復帰・スクリーンショットの通し確認はそちらの話で、ここにあるモックは「ワーカーの分岐を通す」ためだけのもの。
