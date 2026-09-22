@@ -63,7 +63,7 @@
 - `println!` / `eprintln!` を新たに足さない（例外は `#[cfg(test)]` の中）（理由: `docs/design/logging.md`）
 - `catch_unwind` を使わない（理由: `docs/design/logging.md`）
 - 失敗はログだけで終わらせず `report_error(ErrorSource::_, 理由)` を呼ぶ。接続に成功したら `errors.clear(..)` を呼ぶ（理由: `docs/design/error-reporting.md`）
-- `video.rs` / `audio/` / `screenshot.rs` / `hotkey.rs` / `settings.rs` の公開 API は `String` ではなく自分のエラー enum を返す（理由: `docs/design/error-reporting.md`）
+- `video/` / `audio/` / `screenshot.rs` / `hotkey.rs` / `settings.rs` の公開 API は `String` ではなく自分のエラー enum を返す（理由: `docs/design/error-reporting.md`）
 - エラー enum の日本語の文言はその型の `Display` に書く。`status.rs` に発生源ごとの `match` を足さない（理由: `docs/design/error-reporting.md`）
 - カレントディレクトリ基準でファイルを解決する処理を新たに足さない（理由: `docs/design/assets.md`）
 - `src/app/` の子モジュールにフィールドや `static` を持たせない（理由: `CLAUDE.md` の「モジュール構成」）

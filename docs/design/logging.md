@@ -31,7 +31,7 @@
 
 **アプリ本体に `println!` / `eprintln!` は 1 つも残っていない。** 足し直すと CI で落ちる。`Cargo.toml` の `[lints.clippy]` で `print_stdout` / `print_stderr` を `warn` にしてあり、CI は `-D warnings` で clippy を回すため。
 
-**例外はテストコードの中。** テストバイナリの標準出力は `cargo test -- --nocapture` で読めるため、`println!` を使ってよい（`src/video.rs` の計測用テストがその例）。`src/main.rs` 冒頭の `#![cfg_attr(test, allow(clippy::print_stdout))]` がこれを許している。**クレートルートに置いてあるのは、テストを持つモジュール側に `#[allow]` を散らかさないため。**
+**例外はテストコードの中。** テストバイナリの標準出力は `cargo test -- --nocapture` で読めるため、`println!` を使ってよい（`src/video/convert.rs` の計測用テストがその例）。`src/main.rs` 冒頭の `#![cfg_attr(test, allow(clippy::print_stdout))]` がこれを許している。**クレートルートに置いてあるのは、テストを持つモジュール側に `#[allow]` を散らかさないため。**
 
 **デバイス起因の不具合を調べるときは `.claude/skills/device-debug/SKILL.md` の手順に従う。** ログの読み方、正常時の所要時間の目安、症状ごとの確認順をまとめてある。
 

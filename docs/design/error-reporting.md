@@ -12,7 +12,7 @@
 - 新しい失敗は `TransientOverlay`（音量 OSD と同じヘルパー）に 4 秒出す。**同じ発生源で同じ文言が続く間は 60 秒間引く。** 接続の再試行は最大 5 秒間隔で無限に続くため、間引かないと出っぱなしになる
 - 同じフレームで複数の発生源が失敗したら**後勝ち**。`TransientOverlay` は 1 件しか持たない。優先度は付けていない。消えたほうもログと「接続状態」タブに残り、次の再試行でまた記録されるため
 - 接続に成功したら `errors.clear(..)` を呼ぶ。**呼ばないと繋がったあとも古い失敗が画面に残る**
-- **下位モジュールは自分のエラー enum を返す。** `video.rs` は `VideoError`、`audio/` は `AudioError`、`screenshot.rs` は `ScreenshotError`、`hotkey.rs` は `HotkeyError`、`settings.rs` は `SettingsError`。文字列で返していたころは「デバイスが見つからない」と「ストリームを開けない」を呼び出し側が区別できなかった。バリアントにはデバイス名・向き・下位のエラー文を持たせる
+- **下位モジュールは自分のエラー enum を返す。** `video/` は `VideoError`、`audio/` は `AudioError`、`screenshot.rs` は `ScreenshotError`、`hotkey.rs` は `HotkeyError`、`settings.rs` は `SettingsError`。文字列で返していたころは「デバイスが見つからない」と「ストリームを開けない」を呼び出し側が区別できなかった。バリアントにはデバイス名・向き・下位のエラー文を持たせる
 - **日本語の文言はそのエラー型の `Display` が持つ。** 文言を `status.rs` へ集めると、バリアントを増やすたびに離れた場所の `match` を足すことになり、実際に英語の文言（"Failed to build input stream: ..."）が残っていた。中身のすぐ隣に置く
 - **`status.rs` が持つのは定型文（`ErrorSource::headline`）との連結と表示用の組み立てだけ。** 発生源ごとの文言をここで `match` しない
 - **UI へ渡す `DeviceEvent` は `String` のまま。** ワーカー（`app::worker_connect`）が `to_string()` で落として送る。いまの再試行（`ConnectRetry`）は失敗の理由で戦略を変えないため、種別を載せても読む側が無い。理由で分岐したくなったらここを enum へ広げる
@@ -27,4 +27,4 @@
 
 値は `CaptureCardViewer::connection_status()` が作って `status::ConnectionStatus` で渡す。**描画中にデバイスへ問い合わせない。** ワーカーが定期的に書き出している `DeviceSnapshot`（`video::ActiveVideo` / `audio::ActiveAudio` を含む）を `update()` の先頭で 1 回読んであり、ここはその複製を組み替えるだけ。
 
-出すのは設定に書かれた値ではなく**デバイスが確定させた値**。設定画面では対応していない組み合わせも選べるため、要求した値と食い違う。例外はフレームレートで、nokhwa のバインディングが実際の値を取れないため要求した値を「要求フレームレート」として出している（`video.rs` の `start_capture` のコメント）。
+出すのは設定に書かれた値ではなく**デバイスが確定させた値**。設定画面では対応していない組み合わせも選べるため、要求した値と食い違う。例外はフレームレートで、nokhwa のバインディングが実際の値を取れないため要求した値を「要求フレームレート」として出している（`video/capture.rs` の `start_capture` のコメント）。
