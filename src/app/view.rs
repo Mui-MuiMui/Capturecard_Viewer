@@ -5,7 +5,7 @@
 //! フルスクリーン切替）は `super::window`、右クリックメニューは `super::menu`。
 
 use super::CaptureCardViewer;
-use crate::status::ErrorSource;
+use crate::status::{self, ErrorSource};
 use crate::video::FrameStats;
 use eframe::egui;
 use log::warn;
@@ -44,7 +44,11 @@ fn video_placeholder_text(capturing: bool, reconnecting: bool, detail: Option<&s
 /// 値が取れていない項目は数値を出さずに「-」や「なし」にする。
 /// フレームが 1 枚も来ていない状態で平均を出そうとすると NaN や
 /// 無限大になり、それがそのまま画面に出てしまうため。
-fn format_stats_lines(stats: &FrameStats) -> Vec<String> {
+///
+/// `audio_underruns` は `DeviceSnapshot.audio_underruns`。音声のアンダーランは
+/// 映像の統計ではないが、**バッファ長を詰めたときに音が途切れていないかを、
+/// 設定画面を開かずに見られるようにする**ためにここへ並べてある。
+fn format_stats_lines(stats: &FrameStats, audio_underruns: Option<u32>) -> Vec<String> {
     let mut lines = Vec::new();
 
     match stats.intervals {
@@ -80,6 +84,9 @@ fn format_stats_lines(stats: &FrameStats) -> Vec<String> {
     if let Some(elapsed_ms) = stats.since_last_frame_ms {
         lines.push(format!("最終フレーム {:.0}ms 前", elapsed_ms));
     }
+
+    // 文言は「接続状態」タブと共通（`status::format_underrun_count`）
+    lines.push(status::format_underrun_count(audio_underruns));
 
     lines
 }
@@ -351,6 +358,8 @@ impl CaptureCardViewer {
     /// 値のコピーと最大 120 要素の集計しか起きないため、毎フレーム呼んでよい。
     pub(super) fn show_stats_overlay(&self, ctx: &egui::Context) {
         let stats = self.frames.stats();
+        // ワーカーが書き出した観測値の複製。ここでデバイスへは問い合わせない
+        let audio_underruns = self.device_snapshot.audio_underruns;
 
         egui::Area::new("stats_overlay")
             .order(egui::Order::Foreground)
@@ -363,7 +372,7 @@ impl CaptureCardViewer {
                     .rounding(4.0)
                     .inner_margin(egui::Margin::same(6.0))
                     .show(ui, |ui| {
-                        for line in format_stats_lines(&stats) {
+                        for line in format_stats_lines(&stats, audio_underruns) {
                             ui.label(
                                 egui::RichText::new(line)
                                     .monospace()
@@ -385,7 +394,7 @@ mod tests {
     fn format_stats_lines_without_frames_shows_no_numbers() {
         // デバイスに接続できていない状態。0 除算の結果や NaN を
         // そのまま画面へ出さないことを確かめる
-        let lines = format_stats_lines(&FrameStats::default());
+        let lines = format_stats_lines(&FrameStats::default(), None);
         let joined = lines.join(
             "
 ",
@@ -413,6 +422,9 @@ mod tests {
             "フレームが無いのに経過時間が出ている: {}",
             joined
         );
+        // 音声を開いていないときに 0 と出すと、開いていて一度も
+        // 途切れていない状態と区別が付かない
+        assert!(joined.contains("アンダーラン: -"), "{}", joined);
     }
 
     #[test]
@@ -435,7 +447,7 @@ mod tests {
             since_last_frame_ms: Some(12.4),
         };
 
-        let lines = format_stats_lines(&stats);
+        let lines = format_stats_lines(&stats, Some(3));
         let joined = lines.join(
             "
 ",
@@ -449,6 +461,7 @@ mod tests {
         assert!(joined.contains("高速 1200 / 汎用 3"), "{}", joined);
         assert!(joined.contains("1920x1080 YUY2"), "{}", joined);
         assert!(joined.contains("最終フレーム 12ms 前"), "{}", joined);
+        assert!(joined.contains("アンダーラン: 3 回"), "{}", joined);
     }
 
     #[test]

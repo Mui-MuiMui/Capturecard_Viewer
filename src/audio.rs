@@ -594,6 +594,33 @@ pub struct ResampleStatus {
     pub target_level: usize,
 }
 
+/// 出力ストリームがデバイスワーカーへ知らせる値。
+///
+/// どちらも出力コールバックが書き、デバイスワーカーが読む。別々の引数にすると
+/// `build_output_stream_with` の引数が増えすぎるので 1 つにまとめてある。
+/// **ストリームを開き直すたびに中身ごと作り直す**（`AudioCapture` の
+/// `stream_error` / `underruns` の説明を参照）。
+#[derive(Clone)]
+struct OutputSignals {
+    /// 稼働中のストリームでエラーが起きたことを表す旗
+    error: Arc<AtomicBool>,
+    /// アンダーランの累計回数
+    underruns: Arc<AtomicU32>,
+}
+
+/// 出力コールバックがアンダーラン（リングバッファから取り出せなかった）を
+/// 1 回数える。
+///
+/// **出力コールバックから呼ぶので、ロックもアロケーションもしない**
+/// （`docs/design/audio.md`）。`u32::MAX` で頭打ちにするのは、回り切って 0 へ
+/// 戻ると「直った」と読めてしまうため。数え始めからの累計で、減ることはない。
+fn count_underrun(counter: &AtomicU32) {
+    // `checked_add` が `None` を返す（頭打ち）と更新せずに終わる
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        current.checked_add(1)
+    });
+}
+
 pub struct AudioCapture {
     host: cpal::Host,
     input_stream: Option<cpal::Stream>,
@@ -620,6 +647,14 @@ pub struct AudioCapture {
     //
     // 読むのはデバイスワーカースレッド（`app::worker_loop`）だけ
     stream_error: Arc<AtomicBool>,
+    /// 出力コールバックがリングバッファから取り出せなかった回数（コールバック
+    /// 1 回につき最大 1 回）。**バッファ長（`buffer_ms`）を詰めすぎていないかを
+    /// 耳ではなく数で判断するために置いてある。**
+    ///
+    /// `stream_error` と同じく、ストリームを開き直すたびに新しい `Arc` へ
+    /// 差し替えて 0 から数え直す。使い回すと、閉じたストリームが最後に数えた分が
+    /// 開き直した直後の値として残ってしまう
+    underruns: Arc<AtomicU32>,
 }
 
 /// 共有している音量へ書き込む。
@@ -662,6 +697,7 @@ impl AudioCapture {
             controls,
             resample_telemetry: None,
             stream_error: Arc::new(AtomicBool::new(false)),
+            underruns: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -841,6 +877,8 @@ impl AudioCapture {
 
         // このストリーム専用のエラー旗。開き直すたびに作り直す
         let stream_error = Arc::new(AtomicBool::new(false));
+        // アンダーランの数え手も同じく作り直す（開き直したら 0 から）
+        let underruns = Arc::new(AtomicU32::new(0));
 
         // 入力ストリーム。デバイスのサンプル型ごとに正規化の仕方が違うので明示的に分ける
         let input_stream_config = input_config.config();
@@ -878,6 +916,10 @@ impl AudioCapture {
         .map_err(|e| format!("Failed to build input stream: {}", e))?;
 
         // 出力ストリーム
+        let output_signals = OutputSignals {
+            error: stream_error.clone(),
+            underruns: underruns.clone(),
+        };
         let controls = Arc::clone(&self.controls);
         let output_stream_config = output_config.config();
 
@@ -913,7 +955,7 @@ impl AudioCapture {
                 &output_stream_config,
                 consumer.clone(),
                 controls,
-                stream_error.clone(),
+                output_signals.clone(),
                 make_converter().with_telemetry(resample_telemetry.clone()),
                 |sample| sample,
             ),
@@ -922,7 +964,7 @@ impl AudioCapture {
                 &output_stream_config,
                 consumer.clone(),
                 controls,
-                stream_error.clone(),
+                output_signals.clone(),
                 make_converter().with_telemetry(resample_telemetry.clone()),
                 f32_to_i16,
             ),
@@ -931,7 +973,7 @@ impl AudioCapture {
                 &output_stream_config,
                 consumer.clone(),
                 controls,
-                stream_error.clone(),
+                output_signals.clone(),
                 make_converter().with_telemetry(resample_telemetry.clone()),
                 f32_to_u16,
             ),
@@ -940,7 +982,7 @@ impl AudioCapture {
                 &output_stream_config,
                 consumer.clone(),
                 controls,
-                stream_error.clone(),
+                output_signals.clone(),
                 make_converter().with_telemetry(resample_telemetry.clone()),
                 f32_to_i32,
             ),
@@ -964,6 +1006,8 @@ impl AudioCapture {
         self.stream_error = stream_error;
         // デバイスワーカーが `tick` の中で読み書きする対象も差し替える
         self.resample_telemetry = resample_telemetry;
+        // 数え手も、いま開いたストリームのものへ差し替える
+        self.underruns = underruns;
         // 接続状態の表示用に、実際に開いた内容を控える
         self.active = Some(ActiveAudio {
             input_device: input_device_name,
@@ -1004,6 +1048,16 @@ impl AudioCapture {
             })
     }
 
+    /// 統計 OSD と「接続状態」タブへ出す、アンダーランの累計回数。
+    ///
+    /// 音声を開いていなければ `None`。閉じている間の 0 を「開いていて一度も
+    /// 落ちていない」と読み違えさせないため、開いているときだけ数を返す。
+    pub fn underrun_count(&self) -> Option<u32> {
+        self.active
+            .as_ref()
+            .map(|_| self.underruns.load(Ordering::Relaxed))
+    }
+
     pub fn stop_capture(&mut self) {
         self.active = None;
         self.resample_telemetry = None;
@@ -1016,6 +1070,8 @@ impl AudioCapture {
         // 閉じたストリームのエラーコールバックが後から立てる旗を読まないよう、
         // 監視対象を新しいものへ差し替える
         self.stream_error = Arc::new(AtomicBool::new(false));
+        // 同じ理由で、数え手も新しいものへ差し替える
+        self.underruns = Arc::new(AtomicU32::new(0));
     }
 
     /// 稼働中のストリームでエラーが起きていたかを返し、旗を下ろす。
@@ -1231,18 +1287,25 @@ where
 ///
 /// `to_sample` はリングバッファの f32 をデバイスのサンプル型へ戻す。
 /// `converter` は入出力でレートやチャンネル数が違う場合の変換を持つ。
+/// `signals` はエラーの旗とアンダーランの回数（`OutputSignals`）。
 fn build_output_stream_with<T>(
     device: &Device,
     config: &cpal::StreamConfig,
     consumer: Arc<Mutex<AudioConsumer>>,
     controls: Arc<AudioControls>,
-    stream_error: Arc<AtomicBool>,
+    signals: OutputSignals,
     mut converter: PassthroughConverter,
     to_sample: impl Fn(f32) -> T + Send + 'static,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
     T: cpal::SizedSample,
 {
+    // データのコールバックとエラーのコールバックが別々に持つので、
+    // まとめて受け取ったものをここで分ける
+    let OutputSignals {
+        error: stream_error,
+        underruns,
+    } = signals;
     device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
@@ -1255,16 +1318,25 @@ where
                 // クロックドリフト補正の水位。この呼び出し分を消費する前の値を書く
                 converter.record_water_level(cons.len());
                 let mut pop = || cons.pop();
-                render_output_samples(
+                let starved = render_output_samples(
                     data,
                     volume,
                     audible,
                     || converter.next_sample(&mut pop),
                     &to_sample,
                 );
+                if starved {
+                    // 1 回のコールバックで何サンプル足りなくても 1 回として数える。
+                    // 足りなかったサンプル数はバッファの大きさで意味が変わり、
+                    // 「何回途切れたか」ほど直感的に読めないため
+                    count_underrun(&underruns);
+                }
             } else {
                 // 無音を表す値は型ごとに違う（u16 は 0 ではなく 32768）ので変換関数に通す
                 data.fill(to_sample(0.0));
+                // ロックを取れなかったときも無音を書く。聞こえ方は取り出せなかった
+                // ときと同じなので、同じく 1 回数える
+                count_underrun(&underruns);
             }
         },
         move |e| {
@@ -1564,20 +1636,31 @@ fn output_is_audible(passthrough_enabled: bool, muted: bool) -> bool {
 ///
 /// `next_sample` はリングバッファから 1 サンプル取り出す。取り出せなければ `None`。
 /// `to_sample` は音量を掛けた f32 を出力ストリームのサンプル型へ変換する。
+///
+/// **1 サンプルでも取り出せなかったら `true` を返す**（アンダーラン）。
+/// 数を増やすのは呼び出し側（出力コールバック）の仕事で、ここは判定だけを持つ。
 fn render_output_samples<T>(
     data: &mut [T],
     volume: f32,
     audible: bool,
     mut next_sample: impl FnMut() -> Option<f32>,
     to_sample: impl Fn(f32) -> T,
-) {
+) -> bool {
     // 無音を書くときもリングバッファは同じ数だけ消費する。
     // 消費を止めるとバッファが溢れ、再度鳴らしたときに古い音から再生されてしまう。
+    let mut starved = false;
     for slot in data.iter_mut() {
-        let sample = next_sample().unwrap_or(0.0);
+        let sample = match next_sample() {
+            Some(sample) => sample,
+            None => {
+                starved = true;
+                0.0
+            }
+        };
         let value = if audible { sample * volume } else { 0.0 };
         *slot = to_sample(value);
     }
+    starved
 }
 
 impl Drop for AudioCapture {
@@ -1693,6 +1776,59 @@ mod tests {
         render_output_samples(&mut data, 1.0, true, || source.pop(), |value| value);
 
         assert_eq!(data, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn render_output_samples_reports_starvation_when_the_source_runs_out() {
+        // 途中で尽きた場合。出力コールバックはこれを見てアンダーランを数える
+        let mut source = SampleSource::new(&[1.0]);
+        let mut data = [9.0f32; 3];
+
+        let starved = render_output_samples(&mut data, 1.0, true, || source.pop(), |value| value);
+
+        assert!(starved);
+    }
+
+    #[test]
+    fn render_output_samples_reports_no_starvation_when_the_source_has_enough() {
+        let mut source = SampleSource::new(&[1.0, 0.5, -0.25]);
+        let mut data = [9.0f32; 3];
+
+        let starved = render_output_samples(&mut data, 1.0, true, || source.pop(), |value| value);
+
+        assert!(!starved);
+    }
+
+    #[test]
+    fn render_output_samples_reports_starvation_even_when_inaudible() {
+        // ミュート中・パススルー無効でもリングバッファは同じだけ消費する。
+        // 数え方を変えると、ミュートを解除した瞬間だけ数が跳ねることになる
+        let mut source = SampleSource::new(&[]);
+        let mut data = [9.0f32; 2];
+
+        let starved = render_output_samples(&mut data, 1.0, false, || source.pop(), |value| value);
+
+        assert!(starved);
+    }
+
+    #[test]
+    fn count_underrun_increments_by_one() {
+        let counter = AtomicU32::new(0);
+
+        count_underrun(&counter);
+        count_underrun(&counter);
+
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn count_underrun_saturates_at_the_maximum() {
+        // 回り切って 0 へ戻ると「直った」と読めてしまうので頭打ちにする
+        let counter = AtomicU32::new(u32::MAX);
+
+        count_underrun(&counter);
+
+        assert_eq!(counter.load(Ordering::Relaxed), u32::MAX);
     }
 
     #[test]
