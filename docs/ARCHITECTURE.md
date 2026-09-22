@@ -60,7 +60,7 @@ flowchart TD
 | `platform` | Windows 固有処理（フォント、アイコン、モニタ情報） | 汎用ロジック |
 | `logging` | ログの初期化と出力先 | — |
 
-`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_connect.rs` で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
+`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_connect.rs` / `worker_timers.rs`（再試行・切断監視・既定デバイスの追従などタイマー駆動の監視）で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
 
 ## 状態管理
 
@@ -359,7 +359,7 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 | 目指す姿 | 現状 | 対応するタスク |
 |---|---|---|
-| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_connect` / `monitor` / `retry` / `capabilities` / `screenshot` / `settings_dialog` / `settings_store` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
+| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_connect` / `worker_timers` / `monitor` / `retry` / `capabilities` / `screenshot` / `settings_dialog` / `settings_store` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
 | イベント駆動 | 2 秒ごとに設定を再適用するポーリング | apply_settings の 2 秒ごとの再登録 |
 | チャネルでの隔離 | UI と `device` ワーカーの間はコマンドとイベントを mpsc でやり取りする。**この境界で**チャネルを通さず共有するのは 3 つ（映像フレーム、コールバックが読む Atomic、観測値の `Arc<RwLock<DeviceSnapshot>>`）。`settings` や `screenshot_manager` のようにデバイスを跨がない共有はこの話の外 | 完了 |
 | UI をブロックしない | デバイスを開く・閉じる・列挙する処理も含めてワーカースレッドへ移した。スクリーンショットのエンコードは撮影ごとのスレッド。`update()` に残るブロッキングは `rfd` のファイルダイアログだけ | 完了 |
