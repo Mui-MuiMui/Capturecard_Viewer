@@ -3,7 +3,51 @@ use chrono::Datelike;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
+
+/// 設定ファイルの書き出し・読み込みが失敗した理由。
+///
+/// 対象は「設定を書き出す」「設定を読み込む」の 2 つだけ。`%AppData%` 側の
+/// 読み書き（`AppSettings::load` / `save`）は成否を `bool` で扱い、理由は
+/// ログにしか出していないのでここを通らない。
+///
+/// **表示用の日本語はこの型の `Display` が持つ。** 定型文
+/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事
+/// （`docs/design/error-reporting.md`）。文言に「設定ファイル」を付けないのは、
+/// 定型文が既に「設定ファイルを読み書きできません」で始まるため。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsError {
+    /// 読み込もうとした場所にファイルが無い
+    FileNotFound(PathBuf),
+    /// 読み込もうとした場所はあるが、ファイルではない（ディレクトリなど）
+    NotAFile(PathBuf),
+    /// TOML として書き出せない（書き込み権限が無い、ディスクが一杯など）
+    ExportFailed { path: PathBuf, source: String },
+    /// ファイルは読めたが TOML として解釈できない
+    ImportFailed { path: PathBuf, source: String },
+}
+
+impl fmt::Display for SettingsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SettingsError::FileNotFound(path) => {
+                write!(f, "{} が見つからない", path.display())
+            }
+            SettingsError::NotAFile(path) => {
+                write!(f, "{} はファイルではない", path.display())
+            }
+            SettingsError::ExportFailed { path, source } => {
+                write!(f, "{} へ書き出せない: {source}", path.display())
+            }
+            SettingsError::ImportFailed { path, source } => {
+                write!(f, "{} を読み込めない: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for SettingsError {}
 
 // confy が設定ファイルの置き場所を決めるのに使う名前。
 // ここがずれると既存の設定ファイルを見失うため、1 箇所にまとめてある。
@@ -1292,8 +1336,11 @@ pub fn export_file_name(date: &impl Datelike) -> String {
 // **confy の `store_path` をそのまま使う。** 書式を `%AppData%` の設定ファイルと
 // 揃えたいためで、ここだけ別の toml 実装で書くと、confy が書式を変えたときに
 // 書き出したファイルを読み戻せない組み合わせが生まれる。
-pub fn export_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
-    confy::store_path(path, settings).map_err(|e| e.to_string())
+pub fn export_to(path: &Path, settings: &AppSettings) -> Result<(), SettingsError> {
+    confy::store_path(path, settings).map_err(|e| SettingsError::ExportFailed {
+        path: path.to_path_buf(),
+        source: e.to_string(),
+    })
 }
 
 // 書き出した設定ファイルを読む。
@@ -1304,11 +1351,30 @@ pub fn export_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
 // **`confy::load_path` はファイルが無いと既定値で新しく作る。** 読み込みの
 // つもりで呼んだ結果、選んだ場所に既定値のファイルが増えるのは意図と違うので、
 // 先に存在を確かめてから渡す。
-pub fn import_from(path: &Path) -> Result<AppSettings, String> {
-    if !path.is_file() {
-        return Err(format!("{} が見つからない", path.display()));
+//
+// 確かめ方に `Path::is_file()` を使わないのは、**実在するのにメタデータを
+// 取れない場合も `false` を返す**ため。権限の無いファイルを選んだときに
+// 「見つからない」と出すと、置き場所を疑って直しようがなくなる。
+pub fn import_from(path: &Path) -> Result<AppSettings, SettingsError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        // ディレクトリやデバイスファイル。confy へ渡しても読めない
+        Ok(_) => return Err(SettingsError::NotAFile(path.to_path_buf())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SettingsError::FileNotFound(path.to_path_buf()))
+        }
+        Err(e) => {
+            return Err(SettingsError::ImportFailed {
+                path: path.to_path_buf(),
+                source: e.to_string(),
+            })
+        }
     }
-    confy::load_path(path).map_err(|e| e.to_string())
+
+    confy::load_path(path).map_err(|e| SettingsError::ImportFailed {
+        path: path.to_path_buf(),
+        source: e.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -2717,7 +2783,9 @@ volume = 80.0
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("missing.toml");
 
-        assert!(import_from(&path).is_err());
+        let err = import_from(&path).expect_err("エラーになること");
+
+        assert_eq!(err, SettingsError::FileNotFound(path.clone()));
         assert!(!path.exists());
     }
 
@@ -2727,7 +2795,78 @@ volume = 80.0
         let path = dir.path().join("broken.toml");
         fs::write(&path, "これは TOML ではない [[[").expect("書けること");
 
-        assert!(import_from(&path).is_err());
+        let err = import_from(&path).expect_err("エラーになること");
+
+        // ファイルはあるので「見つからない」ではなく解釈の失敗として返ること。
+        // 区別が付かないと、ユーザーは置き場所を疑って直しようがなくなる
+        assert!(
+            matches!(err, SettingsError::ImportFailed { .. }),
+            "解釈の失敗として返ること: {err:?}"
+        );
+    }
+
+    #[test]
+    fn import_from_a_directory_is_not_reported_as_missing() {
+        // 実在するのに「見つからない」と出すと、置き場所を疑って直しようがない。
+        // is_file() だけで判定していたころはここが FileNotFound になっていた
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("not-a-file");
+        fs::create_dir(&path).expect("ディレクトリを作れること");
+
+        let err = import_from(&path).expect_err("エラーになること");
+
+        assert_eq!(err, SettingsError::NotAFile(path));
+    }
+
+    #[test]
+    fn settings_error_display_keeps_the_path_and_the_underlying_reason() {
+        // 文言はそのままトーストに出る。場所と下位のエラー文が落ちると
+        // どのファイルで何が起きたのか分からなくなる
+        let missing = SettingsError::FileNotFound(PathBuf::from("C:/tmp/settings.toml"));
+        assert_eq!(missing.to_string(), "C:/tmp/settings.toml が見つからない");
+
+        let not_a_file = SettingsError::NotAFile(PathBuf::from("C:/tmp/settings"));
+        assert_eq!(not_a_file.to_string(), "C:/tmp/settings はファイルではない");
+
+        let export = SettingsError::ExportFailed {
+            path: PathBuf::from("C:/tmp/settings.toml"),
+            source: "permission denied".to_string(),
+        };
+        assert_eq!(
+            export.to_string(),
+            "C:/tmp/settings.toml へ書き出せない: permission denied"
+        );
+
+        let import = SettingsError::ImportFailed {
+            path: PathBuf::from("C:/tmp/settings.toml"),
+            source: "expected a table".to_string(),
+        };
+        assert_eq!(
+            import.to_string(),
+            "C:/tmp/settings.toml を読み込めない: expected a table"
+        );
+    }
+
+    #[test]
+    fn settings_error_display_is_japanese_for_every_variant() {
+        // 英語の文言が混ざると、定型文と繋げたときに日本語と英語が並ぶ
+        let all = [
+            SettingsError::FileNotFound(PathBuf::from("C:/tmp/settings.toml")),
+            SettingsError::NotAFile(PathBuf::from("C:/tmp/settings")),
+            SettingsError::ExportFailed {
+                path: PathBuf::from("C:/tmp/settings.toml"),
+                source: "denied".to_string(),
+            },
+            SettingsError::ImportFailed {
+                path: PathBuf::from("C:/tmp/settings.toml"),
+                source: "broken".to_string(),
+            },
+        ];
+
+        for error in all {
+            let text = error.to_string();
+            assert!(!text.is_ascii(), "日本語が含まれていない: {text}");
+        }
     }
 
     #[test]

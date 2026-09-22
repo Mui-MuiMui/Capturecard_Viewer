@@ -255,8 +255,9 @@ impl CaptureCardViewer {
                     .set_management_message(format!("{} へ書き出しました", path.display()), false);
             }
             Err(e) => {
-                error!("設定を {} へ書き出せない: {}", path.display(), e);
-                self.report_settings_error(e);
+                // 書き出し先は SettingsError が持っているので、ここでは足さない
+                error!("{e}");
+                self.report_settings_error(e.to_string());
             }
         }
     }
@@ -281,8 +282,9 @@ impl CaptureCardViewer {
         let imported = match settings::import_from(&path) {
             Ok(imported) => imported,
             Err(e) => {
-                error!("設定ファイル {} を読み込めない: {}", path.display(), e);
-                self.report_settings_error(e);
+                // 読み込み元は SettingsError が持っているので、ここでは足さない
+                error!("{e}");
+                self.report_settings_error(e.to_string());
                 return;
             }
         };
