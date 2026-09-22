@@ -100,7 +100,9 @@ impl WorkerState {
             Err(e) => {
                 warn!("映像デバイスへの接続に失敗した（{} 回目）: {}", attempt, e);
                 self.video_retry.record_failure(now);
-                self.emit(DeviceEvent::VideoFailed(e));
+                // UI へは日本語の 1 行に落として渡す。`DeviceEvent` に種別を
+                // 載せても、いまの再試行は理由で戦略を変えないため
+                self.emit(DeviceEvent::VideoFailed(e.to_string()));
                 debug!(
                     "映像デバイスへの再試行は {} ms 後",
                     backoff_delay(self.video_retry.attempts()).as_millis()
@@ -240,6 +242,8 @@ impl WorkerState {
     /// 映像デバイスの対応形式を問い合わせる。
     pub(super) fn query_video_capabilities(&mut self, device: String) {
         let started = Instant::now();
+        // 設定ダイアログの能力キャッシュは理由を画面に出すだけなので、
+        // ここで日本語の 1 行へ落として渡す
         let result = VideoCapture::get_device_capabilities(Some(&device));
         match &result {
             Ok(caps) => info!(
@@ -250,7 +254,10 @@ impl WorkerState {
             ),
             Err(e) => warn!("デバイス能力を取得できない: {}: {}", device, e),
         }
-        self.emit(DeviceEvent::VideoCapabilities(device, Box::new(result)));
+        self.emit(DeviceEvent::VideoCapabilities(
+            device,
+            Box::new(result.map_err(|e| e.to_string())),
+        ));
     }
 
     /// 音声デバイスの対応設定を問い合わせる。
