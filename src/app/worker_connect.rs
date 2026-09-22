@@ -201,7 +201,8 @@ impl WorkerState {
                     );
                 }
                 self.audio_retry.record_failure(now);
-                self.emit(DeviceEvent::AudioFailed(e));
+                // 映像と同じく、UI へは日本語の 1 行に落として渡す
+                self.emit(DeviceEvent::AudioFailed(e.to_string()));
                 // **取得済みの対応設定を捨てて取り直す。** デバイスが挿し直された
                 // 場合、古い一覧でしか開けない設定を選び続けて失敗が繰り返される
                 self.audio_capabilities
@@ -289,7 +290,8 @@ impl WorkerState {
         self.emit(DeviceEvent::AudioCapabilities(
             direction,
             key.to_string(),
-            Box::new(result),
+            // 能力キャッシュは理由を画面に出すだけなので、日本語の 1 行へ落とす
+            Box::new(result.map_err(|e| e.to_string())),
         ));
     }
 }
