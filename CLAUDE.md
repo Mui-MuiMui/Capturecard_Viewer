@@ -53,13 +53,26 @@ cargo build --release
 | `src/screenshot.rs` | rodio による効果音の読み込みと再生 |
 | `src/settings.rs` | `AppSettings` とその serde 定義、confy による読み書き、保存パスの決定、旧形式からの移行 |
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |
-| `src/ui.rs` | 設定ダイアログとホットキー設定ダイアログの描画。**状態を持たず、書き換えるのもドラフトだけ。** 起きたことは `SettingsEvent` / `HotkeyDialogEvent` の列で返す |
+| `src/ui/mod.rs` | 設定ダイアログの入口 `show_settings_dialog` と、タブをまたいで使うイベント型・注意書きのヘルパー（`warning_label` / `notice_label` / `status_badge`）。外から使う経路（`crate::ui::...`）の `pub use` もここ |
+| `src/ui/state.rs` | `SettingsDialogState`。ドラフトの保持、操作の受け止め、`SettingsDialogView` の切り出し |
+| `src/ui/draft.rs` | `commit_draft` / `draft_from_imported` / `draft_from_defaults`。設定を組み替えるだけで描画を含まない |
+| `src/ui/preset.rs` | プリセットの保存・読み込み・削除と「（変更あり）」の判定。描画を含まない |
+| `src/ui/capability.rs` | `CapabilityCache`（デバイス能力の取得状態）と、そこから作る選択肢まわりの表示 |
+| `src/ui/video_mode.rs` | デバイスを切り替えたときに選び直すビデオの既定値（`select_default_video_mode`） |
+| `src/ui/device_tab.rs` | 「デバイス設定」タブの描画 |
+| `src/ui/screenshot_tab.rs` | 「スクリーンショット設定」タブの描画 |
+| `src/ui/hotkeys_tab.rs` | 「ホットキー」タブの描画と、割り当ての重複判定 |
+| `src/ui/hotkey_capture.rs` | ホットキー入力ダイアログ。キー入力の組み立てと確定の判定 |
+| `src/ui/other_tab.rs` | 「その他」タブの描画（プリセット、書き出し / 読み込み / 初期化） |
+| `src/ui/status_tab.rs` | 「接続状態」タブの描画 |
 | `src/status.rs` | 失敗の記録（`ErrorCenter`）とトーストの間引き判定、設定ダイアログへ渡す接続状態（`ConnectionStatus`）、日本語の定型文 |
 | `src/repaint.rs` | 次の再描画までの間隔の判定（`next_repaint_delay`）と、UI スレッド以外から再描画を促す窓口（`RepaintWaker`） |
 
 `src/app/` の子モジュールは**基本どれも `impl CaptureCardViewer` を足す形**で、状態そのものは `app/mod.rs` の構造体 1 つに集めてある。**子モジュール側にフィールドや `static` を持たせないこと。** 他の子モジュールから呼ぶメソッドにだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
 **例外はデバイスワーカーの 3 つ**（`worker.rs` / `worker_loop.rs` / `worker_connect.rs`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_connect.rs` がそこへ `impl` を足す。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
+
+`src/ui/` の子モジュールは**どれも状態を持たず、書き換えるのもドラフトだけ。** 起きたことは `SettingsEvent` / `HotkeyDialogEvent` の列で返す。ダイアログの状態は `state.rs` の `SettingsDialogState` 1 つに集めてある。**外から使う経路（`crate::ui::...`）は `ui/mod.rs` の `pub use` に集める。** `ui` の中だけで使う項目は再輸出せず、子モジュールの経路で参照する（`mod ui;` 自体が私有なので、誰も使わない再輸出は `unused_imports` の警告になる）。
 
 ## 設計の理由はどこにあるか
 
