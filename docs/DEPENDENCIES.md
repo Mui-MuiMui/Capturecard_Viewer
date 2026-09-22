@@ -118,7 +118,7 @@ flowchart TD
 
 `ringbuf` → `cpal` → `rodio` の順。
 
-- `ringbuf` 0.3 → 0.5 は `Producer` / `Consumer` の型と分割の API が変わっている。`src/audio.rs` の中心部分に触れる
+- `ringbuf` 0.3 → 0.5 は `Producer` / `Consumer` の型と分割の API が変わっている。`src/audio/stream.rs` の中心部分に触れる
 - `cpal` 0.15 → 0.18 はストリーム構築とサンプル型の扱いに影響しうる
 - `rodio` 0.17 → 0.22 は `OutputStream` と `Sink` の API。効果音再生のみに影響
 

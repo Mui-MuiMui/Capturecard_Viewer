@@ -68,7 +68,7 @@ flowchart LR
     trait -.-> mock
 ```
 
-**境界はワーカーがデバイスへ触る場所に置く。** 開く・閉じる・列挙する・能力を問い合わせる・観測値を読む、の 5 つだけで、`worker_connect` と `worker_timers` が呼ぶ操作がそのまま trait のメソッドに並ぶ。ここより上（コマンドの解釈、再試行の期限、途絶の判定）はもともと `WorkerState` と `monitor` / `retry` の側にあり、デバイスを知らない。ここより下（`src/video/` / `audio.rs` の中身）には手を入れていない。
+**境界はワーカーがデバイスへ触る場所に置く。** 開く・閉じる・列挙する・能力を問い合わせる・観測値を読む、の 5 つだけで、`worker_connect` と `worker_timers` が呼ぶ操作がそのまま trait のメソッドに並ぶ。ここより上（コマンドの解釈、再試行の期限、途絶の判定）はもともと `WorkerState` と `monitor` / `retry` の側にあり、デバイスを知らない。ここより下（`src/video/` / `src/audio/` の中身）には手を入れていない。
 
 **開いた結果を別のハンドル型では返さない。** ストリームを持つのは実装自身で、`stop_capture` / `link_state` / `active` がその持ち物に対する窓口になる。`VideoCapture` は `CallbackCamera` を抱えたまま開き直しと途絶の観測を行っているので、「開いた分」だけを切り出すには `src/video/capture.rs` の中身を動かすことになる。trait を被せる目的はそこではない。
 
