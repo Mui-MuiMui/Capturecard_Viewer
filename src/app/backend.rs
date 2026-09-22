@@ -239,3 +239,234 @@ impl AudioBackend for AudioCapture {
         AudioCapture::take_stream_error(self)
     }
 }
+
+/// テスト用のモック。**実機なしでワーカーの再試行と切断検出を回すためだけのもの。**
+///
+/// 映像や音声の中身は作らない（カラーバーや正弦波を吐くフェイクは #142）。
+/// ここにあるのは「指定回数失敗してから成功する」「列挙結果を差し替える」
+/// 「フレームが止まったことにする」の 3 つだけ。
+///
+/// 状態は `Arc<Mutex<..>>` で外に出してある。バックエンドはワーカーへ
+/// 渡してしまうと手元に残らないので、テスト側は共有した中身を覗く。
+#[cfg(test)]
+pub(super) mod mock {
+    use super::*;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// 映像モックの中身。テストが直接読み書きする。
+    #[derive(Debug, Default)]
+    pub(in crate::app) struct MockVideoState {
+        /// 成功させるまでに失敗させる回数。0 なら最初から成功する
+        pub(in crate::app) failures_before_success: u32,
+        /// `start_capture` を呼ばれた回数
+        pub(in crate::app) start_calls: u32,
+        /// `stop_capture` を呼ばれた回数
+        pub(in crate::app) stop_calls: u32,
+        /// `list_devices` が返す一覧
+        pub(in crate::app) devices: Vec<(String, String)>,
+        /// ストリームを開けている状態か。`start_capture` の成否で動く
+        pub(in crate::app) capturing: bool,
+        /// `link_state` が返す途絶時間。`None` は「まだ 1 枚も届いていない」。
+        /// **ここへ `VIDEO_SIGNAL_TIMEOUT` より長い値を入れると切断になる**
+        pub(in crate::app) since_last_frame: Option<Duration>,
+        /// 最後に開こうとしたデバイス名
+        pub(in crate::app) last_device_name: Option<String>,
+    }
+
+    /// 映像バックエンドのモック。複製しても同じ中身を指す。
+    #[derive(Debug, Clone, Default)]
+    pub(in crate::app) struct MockVideoBackend {
+        state: Arc<Mutex<MockVideoState>>,
+    }
+
+    impl MockVideoBackend {
+        /// 中身を書き換える / 読む。ロックが壊れていたらテストごと落とす
+        pub(in crate::app) fn with<R>(&self, f: impl FnOnce(&mut MockVideoState) -> R) -> R {
+            f(&mut self.state.lock().expect("モックの状態を触れる"))
+        }
+    }
+
+    impl VideoBackend for MockVideoBackend {
+        fn list_devices(&self) -> Vec<(String, String)> {
+            self.with(|state| state.devices.clone())
+        }
+
+        fn capabilities(
+            &self,
+            _device_name: Option<&str>,
+        ) -> Result<DeviceCapabilities, VideoError> {
+            Ok(Vec::new())
+        }
+
+        fn start_capture(
+            &mut self,
+            device_name: Option<&str>,
+            _resolution: Option<(u32, u32)>,
+            _format: Option<&str>,
+            _fps: Option<u32>,
+        ) -> Result<(), VideoError> {
+            self.with(|state| {
+                state.start_calls += 1;
+                state.last_device_name = device_name.map(str::to_string);
+                if state.failures_before_success > 0 {
+                    state.failures_before_success -= 1;
+                    state.capturing = false;
+                    return Err(VideoError::DeviceNotFound(
+                        device_name.unwrap_or("（未指定）").to_string(),
+                    ));
+                }
+                state.capturing = true;
+                // 開き直したら途絶の記録も消える（実装と同じ）
+                state.since_last_frame = None;
+                Ok(())
+            })
+        }
+
+        fn stop_capture(&mut self) {
+            self.with(|state| {
+                state.stop_calls += 1;
+                state.capturing = false;
+                state.since_last_frame = None;
+            });
+        }
+
+        fn link_state(&self) -> VideoLinkState {
+            self.with(|state| VideoLinkState {
+                capturing: state.capturing,
+                since_last_frame: state.since_last_frame,
+            })
+        }
+
+        fn active(&self) -> Option<ActiveVideo> {
+            self.with(|state| {
+                state.capturing.then(|| ActiveVideo {
+                    device_name: state.last_device_name.clone().unwrap_or_default(),
+                    resolution: None,
+                    format: None,
+                    requested_fps: 0,
+                })
+            })
+        }
+    }
+
+    /// 音声モックの中身。
+    #[derive(Debug, Default)]
+    pub(in crate::app) struct MockAudioState {
+        pub(in crate::app) failures_before_success: u32,
+        pub(in crate::app) start_calls: u32,
+        pub(in crate::app) stop_calls: u32,
+        pub(in crate::app) input_devices: Vec<String>,
+        pub(in crate::app) output_devices: Vec<String>,
+        /// パススルーを開けている状態か
+        pub(in crate::app) running: bool,
+        /// 立てておくと `take_stream_error` が 1 回だけ真を返す
+        pub(in crate::app) stream_error: bool,
+    }
+
+    /// 音声バックエンドのモック。
+    #[derive(Debug, Clone, Default)]
+    pub(in crate::app) struct MockAudioBackend {
+        state: Arc<Mutex<MockAudioState>>,
+    }
+
+    impl MockAudioBackend {
+        pub(in crate::app) fn with<R>(&self, f: impl FnOnce(&mut MockAudioState) -> R) -> R {
+            f(&mut self.state.lock().expect("モックの状態を触れる"))
+        }
+    }
+
+    impl AudioBackend for MockAudioBackend {
+        fn list_input_devices(&self) -> Vec<String> {
+            self.with(|state| state.input_devices.clone())
+        }
+
+        fn list_output_devices(&self) -> Vec<String> {
+            self.with(|state| state.output_devices.clone())
+        }
+
+        fn default_input_device_name(&self) -> Option<String> {
+            None
+        }
+
+        fn default_output_device_name(&self) -> Option<String> {
+            None
+        }
+
+        fn capabilities(
+            &self,
+            direction: AudioDirection,
+            _device_name: Option<&str>,
+        ) -> Result<AudioCapabilities, AudioError> {
+            Err(AudioError::NoDefaultDevice(direction))
+        }
+
+        fn start_passthrough(
+            &mut self,
+            _request: &PassthroughRequest<'_>,
+        ) -> Result<(), AudioError> {
+            self.with(|state| {
+                state.start_calls += 1;
+                if state.failures_before_success > 0 {
+                    state.failures_before_success -= 1;
+                    state.running = false;
+                    return Err(AudioError::NoDefaultDevice(AudioDirection::Input));
+                }
+                state.running = true;
+                Ok(())
+            })
+        }
+
+        fn stop_capture(&mut self) {
+            self.with(|state| {
+                state.stop_calls += 1;
+                state.running = false;
+            });
+        }
+
+        fn active(&self) -> Option<ActiveAudio> {
+            self.with(|state| {
+                state.running.then(|| ActiveAudio {
+                    input_device: "モック入力".to_string(),
+                    output_device: "モック出力".to_string(),
+                    input_sample_rate: 48_000,
+                    output_sample_rate: 48_000,
+                    input_channels: 2,
+                    output_channels: 2,
+                })
+            })
+        }
+
+        fn resample_status(&self) -> Option<ResampleStatus> {
+            None
+        }
+
+        fn resample_telemetry(&self) -> Option<Arc<ResampleTelemetry>> {
+            None
+        }
+
+        fn underrun_count(&self) -> Option<u32> {
+            None
+        }
+
+        fn take_stream_error(&self) -> bool {
+            self.with(|state| std::mem::take(&mut state.stream_error))
+        }
+    }
+
+    /// モックを組み立てる役。`DeviceBackends` として `worker_loop::run` へ渡す。
+    #[derive(Debug, Clone, Default)]
+    pub(in crate::app) struct MockBackends {
+        pub(in crate::app) video: MockVideoBackend,
+        pub(in crate::app) audio: MockAudioBackend,
+    }
+
+    impl DeviceBackends for MockBackends {
+        fn create(
+            self: Box<Self>,
+            _shared: BackendShared,
+        ) -> (Box<dyn VideoBackend>, Box<dyn AudioBackend>) {
+            (Box::new(self.video.clone()), Box::new(self.audio.clone()))
+        }
+    }
+}
