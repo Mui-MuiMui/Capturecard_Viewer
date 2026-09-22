@@ -50,7 +50,14 @@ cargo build --release
 | `src/app/audio_control.rs` | 音量とミュートの操作、その OSD |
 | `src/app/error_report.rs` | 失敗の記録と、トースト・「接続状態」タブへの出し方 |
 | `src/video.rs` | nokhwa `CallbackCamera` によるキャプチャ、YUY2→RGB 変換、`FrameBuffer`（`Arc` によるフレーム共有と世代番号）、デバイス能力の取得 |
-| `src/audio.rs` | cpal による入力→リングバッファ→出力のパススルー、音量制御 |
+| `src/audio/mod.rs` | 音声モジュールの入口。`ActiveAudio` / `AudioDirection` / `AudioError` と能力キャッシュのキー（`cache_key` / `device_name_from_key`）、外から使う経路（`crate::audio::...`）の `pub use` |
+| `src/audio/capabilities.rs` | デバイスの対応設定の取得（`query_capabilities`）と、設定画面に出す選択肢の組み立て（`selectable_*` / `ChoiceSource`） |
+| `src/audio/stream_config.rs` | 対応設定の中から実際に開く設定を選ぶ（`select_best_config` / `select_aligned_configs`）。扱えるサンプル型の一覧もここ |
+| `src/audio/capture.rs` | `AudioCapture`。パススルーの開始と停止、観測値（実際に開いた内容・アンダーラン・リサンプル）の取り出し |
+| `src/audio/stream.rs` | cpal のストリームの組み立てと入出力のコールバック、リングバッファの型、アンダーランの数え方 |
+| `src/audio/convert.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32）と、レート・チャンネル数が違う場合の変換（`PassthroughConverter`） |
+| `src/audio/resample.rs` | クロックドリフト補正の共有状態（`ResampleTelemetry`）と補正係数の決め方（`decide_resample_correction`） |
+| `src/audio/controls.rs` | `AudioControls`。音量・パススルー・ミュートの共有状態 |
 | `src/hotkey.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）、global-hotkey によるアクション別の登録とリスナースレッド、押下の検出とデバウンス、ホットキー文字列のパース |
 | `src/screenshot.rs` | rodio による効果音の読み込みと再生 |
 | `src/settings.rs` | `AppSettings` とその serde 定義、confy による読み書き、保存パスの決定、旧形式からの移行 |
@@ -75,6 +82,8 @@ cargo build --release
 **例外はデバイスワーカーの 5 つ**（`worker.rs` / `worker_loop.rs` / `worker_timers.rs` / `worker_connect.rs` / `backend.rs`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_timers.rs` と `worker_connect.rs` がそこへ `impl` を足す。`backend.rs` はアプリの状態（`CaptureCardViewer` / `WorkerState` に属するもの）を持たず、デバイスの入口の trait とその実装だけを持つ。テスト用のモックだけは自分の中に観測用の値を抱える。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
 
 `src/ui/` の子モジュールは**どれも状態を持たず、書き換えるのもドラフトだけ。** 起きたことは `SettingsEvent` / `HotkeyDialogEvent` の列で返す。ダイアログの状態は `state.rs` の `SettingsDialogState` 1 つに集めてある。**外から使う経路（`crate::ui::...`）は `ui/mod.rs` の `pub use` に集める。** `ui` の中だけで使う項目は再輸出せず、子モジュールの経路で参照する（`mod ui;` 自体が私有なので、誰も使わない再輸出は `unused_imports` の警告になる）。
+
+`src/audio/` の子モジュールで**状態を持つのは `capture.rs` の `AudioCapture` と、スレッドをまたいで共有する `AudioControls` / `ResampleTelemetry` だけ。** 残りは純粋関数か、cpal のストリームを組み立てて返すだけにする。**外から使う経路（`crate::audio::...`）は `audio/mod.rs` の `pub use` に集める**（`ui/mod.rs` と同じ理由で、誰も使わない再輸出は警告になる）。子モジュール同士で使うものには `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
 ## 設計の理由はどこにあるか
 
@@ -102,7 +111,7 @@ cargo build --release
 
 - コードコメント、UI 文字列、コミットメッセージは日本語
 - 既存の命名（snake_case、モジュール構成）に合わせる
-- コメントは Issue #73 で一巡整理済み（ワーカースレッド化と競合するため後回しにしていた `src/app/device.rs` / `monitor.rs` / `retry.rs` / `capabilities.rs`、`src/video.rs`、`src/audio.rs` も含む）。とはいえ実装とコメントが食い違っている箇所が今後また出うるので、コメントを鵜呑みにせず実コードを確認すること
+- コメントは Issue #73 で一巡整理済み（ワーカースレッド化と競合するため後回しにしていた `src/app/device.rs` / `monitor.rs` / `retry.rs` / `capabilities.rs`、`src/video.rs`、`src/audio/` も含む）。とはいえ実装とコメントが食い違っている箇所が今後また出うるので、コメントを鵜呑みにせず実コードを確認すること
 
 ブランチ名・コミットメッセージ・PR の書き方は `.claude/skills/naming-conventions/SKILL.md` にまとめてある。ブランチを切る前、コミットする前、PR を作る前に参照すること。
 
