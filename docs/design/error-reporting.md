@@ -12,12 +12,12 @@
 - 新しい失敗は `TransientOverlay`（音量 OSD と同じヘルパー）に 4 秒出す。**同じ発生源で同じ文言が続く間は 60 秒間引く。** 接続の再試行は最大 5 秒間隔で無限に続くため、間引かないと出っぱなしになる
 - 同じフレームで複数の発生源が失敗したら**後勝ち**。`TransientOverlay` は 1 件しか持たない。優先度は付けていない。消えたほうもログと「接続状態」タブに残り、次の再試行でまた記録されるため
 - 接続に成功したら `errors.clear(..)` を呼ぶ。**呼ばないと繋がったあとも古い失敗が画面に残る**
-- **下位モジュールは自分のエラー enum を返す。** `video.rs` は `VideoError`、`audio.rs` は `AudioError`、`screenshot.rs` は `ScreenshotError`。文字列で返していたころは「デバイスが見つからない」と「ストリームを開けない」を呼び出し側が区別できなかった。バリアントにはデバイス名・向き・下位のエラー文を持たせる
+- **下位モジュールは自分のエラー enum を返す。** `video.rs` は `VideoError`、`audio.rs` は `AudioError`、`screenshot.rs` は `ScreenshotError`、`hotkey.rs` は `HotkeyError`、`settings.rs` は `SettingsError`。文字列で返していたころは「デバイスが見つからない」と「ストリームを開けない」を呼び出し側が区別できなかった。バリアントにはデバイス名・向き・下位のエラー文を持たせる
 - **日本語の文言はそのエラー型の `Display` が持つ。** 文言を `status.rs` へ集めると、バリアントを増やすたびに離れた場所の `match` を足すことになり、実際に英語の文言（"Failed to build input stream: ..."）が残っていた。中身のすぐ隣に置く
 - **`status.rs` が持つのは定型文（`ErrorSource::headline`）との連結と表示用の組み立てだけ。** 発生源ごとの文言をここで `match` しない
 - **UI へ渡す `DeviceEvent` は `String` のまま。** ワーカー（`app::worker_connect`）が `to_string()` で落として送る。いまの再試行（`ConnectRetry`）は失敗の理由で戦略を変えないため、種別を載せても読む側が無い。理由で分岐したくなったらここを enum へ広げる
-- **`hotkey.rs` と `settings.rs` は `Result<_, String>` のまま。** #100 の対象は映像・音声・スクリーンショットの 3 つに絞ってある
-- **ホットキーの登録失敗はまだ繋いでいない。** `ErrorSource::Hotkey` と `report_error` は用意してあるので、登録処理側から呼べば出る。呼び始めたら `ErrorSource::Hotkey` の `expect(dead_code)` を外すこと
+- **ホットキーの「登録できなかった理由」は 2 段になっている。** `HotkeyError` が理由そのもので、それを「どのキーを登録しようとしたか」と一緒に包んだのが `HotkeyAssignmentError`。設定画面の一覧（`ui::hotkeys_tab`）は同じアクションでもキーが変われば別の失敗として出すため、キー文字列を捨てられない
+- **`logging.rs` は `Result<_, String>` のまま。** ロガーを初期化する前の失敗なので `report_error` も `log` も使えず、`main.rs` が受けて捨てるだけになる。種別で分岐する読み手がいない
 
 映像のプレースホルダー（`video_placeholder_text`）に添える理由は、**ストリームを開けていないときだけ**出す。開けていて信号だけが来ていない状態に接続エラーを出すと、入力機器ではなく USB を疑わせる。
 
