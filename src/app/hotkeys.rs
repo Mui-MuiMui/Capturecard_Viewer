@@ -6,7 +6,7 @@
 use super::audio_control::VOLUME_SCROLL_STEP;
 use super::worker::DeviceCommand;
 use super::CaptureCardViewer;
-use crate::hotkey::{BackgroundHotkeyRunner, HotkeyAction, HotkeyError};
+use crate::hotkey::{BackgroundHotkeyRunner, HotkeyAction, HotkeyAssignmentError};
 use crate::status::ErrorSource;
 use eframe::egui;
 use log::{debug, trace, warn};
@@ -51,14 +51,14 @@ pub(super) fn background_hotkey_runner(commands: Sender<DeviceCommand>) -> Backg
 /// 定型文（「ホットキーを登録できません」）は `status::format_message` が
 /// 前に付けるので、ここでは付けない。どのアクションのどのキーが駄目だったかを
 /// 並べるところまでを受け持つ。
-fn hotkey_error_summary(errors: &BTreeMap<HotkeyAction, HotkeyError>) -> Option<String> {
+fn hotkey_error_summary(errors: &BTreeMap<HotkeyAction, HotkeyAssignmentError>) -> Option<String> {
     if errors.is_empty() {
         return None;
     }
 
     let detail = errors
         .iter()
-        .map(|(action, error)| format!("{}（{}）: {}", action.label(), error.hotkey, error.message))
+        .map(|(action, error)| format!("{}（{}）: {}", action.label(), error.hotkey, error.reason))
         .collect::<Vec<_>>()
         .join(" / ");
     Some(detail)
@@ -148,6 +148,7 @@ impl CaptureCardViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hotkey::HotkeyError;
 
     #[test]
     fn hotkey_error_summary_without_errors_is_none() {
@@ -160,15 +161,15 @@ mod tests {
     fn hotkey_error_summary_one_error_names_the_action_and_key() {
         let errors = BTreeMap::from([(
             HotkeyAction::Screenshot,
-            HotkeyError {
+            HotkeyAssignmentError {
                 hotkey: "F12".to_string(),
-                message: "他のアプリと競合しています".to_string(),
+                reason: HotkeyError::UnsupportedKey("F13".to_string()),
             },
         )]);
 
         assert_eq!(
             hotkey_error_summary(&errors),
-            Some("スクリーンショット（F12）: 他のアプリと競合しています".to_string())
+            Some("スクリーンショット（F12）: 未対応のキー: F13".to_string())
         );
     }
 
@@ -179,23 +180,26 @@ mod tests {
         let errors = BTreeMap::from([
             (
                 HotkeyAction::VolumeUp,
-                HotkeyError {
+                HotkeyAssignmentError {
                     hotkey: "F8".to_string(),
-                    message: "理由 B".to_string(),
+                    reason: HotkeyError::MissingKey,
                 },
             ),
             (
                 HotkeyAction::Screenshot,
-                HotkeyError {
+                HotkeyAssignmentError {
                     hotkey: "F5".to_string(),
-                    message: "理由 A".to_string(),
+                    reason: HotkeyError::MultipleKeys,
                 },
             ),
         ]);
 
         assert_eq!(
             hotkey_error_summary(&errors),
-            Some("スクリーンショット（F5）: 理由 A / 音量を上げる（F8）: 理由 B".to_string())
+            Some(
+                "スクリーンショット（F5）: 通常キーを 2 つ以上は指定できません / 音量を上げる（F8）: 通常キーが指定されていません"
+                    .to_string()
+            )
         );
     }
 
@@ -205,9 +209,9 @@ mod tests {
         // 「ホットキーを登録できません: ホットキーを登録できません: ...」になる
         let errors = BTreeMap::from([(
             HotkeyAction::Screenshot,
-            HotkeyError {
+            HotkeyAssignmentError {
                 hotkey: "F5".to_string(),
-                message: "理由".to_string(),
+                reason: HotkeyError::RegisterFailed("HotKey already registered".to_string()),
             },
         )]);
 

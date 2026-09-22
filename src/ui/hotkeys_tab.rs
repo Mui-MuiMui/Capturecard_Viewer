@@ -3,7 +3,7 @@
 //! アクションごとの割り当ての一覧と、重複の判定を置いてある。
 //! 入力ダイアログ本体は `hotkey_capture`（`docs/design/hotkeys.md`）。
 
-use crate::hotkey::{HotkeyAction, HotkeyError};
+use crate::hotkey::{HotkeyAction, HotkeyAssignmentError};
 use crate::settings::AppSettings;
 use crate::status::ErrorSource;
 use eframe::egui;
@@ -21,7 +21,7 @@ use super::{notice_frame, warning_label, NoticeKind, SettingsEvent};
 pub(super) fn show_hotkey_settings_tab(
     ui: &mut egui::Ui,
     settings: &mut AppSettings,
-    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
+    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyAssignmentError>,
     events: &mut Vec<SettingsEvent>,
 ) {
     ui.heading("ホットキー設定");
@@ -37,7 +37,7 @@ pub(super) fn show_hotkey_settings_tab(
 fn show_hotkey_assignments(
     ui: &mut egui::Ui,
     settings: &mut AppSettings,
-    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
+    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyAssignmentError>,
     events: &mut Vec<SettingsEvent>,
 ) {
     ui.group(|ui| {
@@ -139,7 +139,7 @@ fn show_hotkey_assignments(
                         "{}（{}）— {}",
                         action.label(),
                         error.hotkey,
-                        error.message
+                        error.reason
                     ));
                 }
             });

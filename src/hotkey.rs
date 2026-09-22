@@ -6,6 +6,7 @@ use global_hotkey::{
 use log::{debug, error, info, trace, warn};
 use serde::{Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -151,16 +152,74 @@ impl Serialize for HotkeyAction {
     }
 }
 
+/// ホットキーを解釈できなかった、または登録できなかった理由。
+///
+/// 解釈（`parse_hotkey`）と登録（`HotkeyManager::register` / `try_register`）を
+/// 1 つの enum にまとめてある。どちらも `ErrorSource::Hotkey` として同じ経路で
+/// 表示され、呼び出し側は「どの段で失敗したか」で処理を分けないため。
+///
+/// **表示用の日本語はこの型の `Display` が持つ。** 定型文
+/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事
+/// （`docs/design/error-reporting.md`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HotkeyError {
+    /// `"Ctrl+A+B"` のように通常キーを 2 つ以上含む
+    MultipleKeys,
+    /// `"Ctrl+Shift"` のように修飾キーだけで通常キーが無い
+    MissingKey,
+    /// 対応表に無いキー名。`key` は指定されたままの文字列
+    UnsupportedKey(String),
+    /// 同じキーが既に別のアクションへ割り当てられている
+    DuplicateAssignment { other: HotkeyAction },
+    /// global-hotkey のマネージャーを作れない
+    ManagerUnavailable(String),
+    /// 作ったはずのマネージャーが見つからない。通常は起きない
+    ManagerMissing,
+    /// OS への登録に失敗した（他のアプリが同じキーを使っている場合など）
+    RegisterFailed(String),
+    /// 試し登録したホットキーを解除できない
+    UnregisterFailed(String),
+}
+
+impl fmt::Display for HotkeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HotkeyError::MultipleKeys => write!(f, "通常キーを 2 つ以上は指定できません"),
+            HotkeyError::MissingKey => write!(f, "通常キーが指定されていません"),
+            HotkeyError::UnsupportedKey(key) => write!(f, "未対応のキー: {key}"),
+            HotkeyError::DuplicateAssignment { other } => {
+                write!(f, "同じキーが「{}」に割り当てられています", other.label())
+            }
+            // 下の ManagerMissing と同じ文言。ユーザーから見ればどちらも
+            // 「仕組みを用意できていない」で、区別しても打つ手が変わらない
+            HotkeyError::ManagerUnavailable(source) => {
+                write!(f, "ホットキーの仕組みを初期化できません: {source}")
+            }
+            HotkeyError::ManagerMissing => write!(f, "ホットキーの仕組みを初期化できません"),
+            HotkeyError::RegisterFailed(source) => write!(
+                f,
+                "登録できません（他のアプリと競合している可能性があります）: {source}"
+            ),
+            HotkeyError::UnregisterFailed(source) => write!(
+                f,
+                "試し登録したホットキーを解除できません。もう一度お試しください: {source}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HotkeyError {}
+
 /// アクションに割り当てたキーを登録できなかった理由。
 ///
 /// `hotkey` を一緒に持つのは、同じアクションでもキーが変われば別の失敗として
 /// 扱うため。設定画面へそのまま出す。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HotkeyError {
+pub struct HotkeyAssignmentError {
     /// 登録しようとしたホットキー文字列
     pub hotkey: String,
     /// 画面に出す理由
-    pub message: String,
+    pub reason: HotkeyError,
 }
 
 /// 最小化中のアクションを、UI スレッドを介さずに実行するための窓口。
@@ -283,7 +342,7 @@ pub struct HotkeyManager {
     /// 登録に成功しているアクション → (ホットキー文字列, 登録した HotKey)
     registered: BTreeMap<HotkeyAction, (String, HotKey)>,
     /// 登録できなかったアクション → 理由
-    errors: BTreeMap<HotkeyAction, HotkeyError>,
+    errors: BTreeMap<HotkeyAction, HotkeyAssignmentError>,
     state: Arc<Mutex<ListenerState>>,
     /// リスナースレッドへの終了要求
     listener_shutdown: Arc<AtomicBool>,
@@ -304,7 +363,7 @@ pub struct HotkeyManager {
 ///
 /// 修飾キーだけの指定（`"Ctrl+Shift"` など）と、通常キーを 2 つ以上含む指定
 /// （`"Ctrl+A+B"` など）は登録できないため、エラーにする。
-fn parse_hotkey(hotkey_str: &str) -> Result<HotKey, String> {
+fn parse_hotkey(hotkey_str: &str) -> Result<HotKey, HotkeyError> {
     let parts: Vec<&str> = hotkey_str.split('+').collect();
     let mut modifiers = Modifiers::empty();
     let mut key_code = None;
@@ -321,19 +380,19 @@ fn parse_hotkey(hotkey_str: &str) -> Result<HotKey, String> {
                 // "Ctrl+A+B" が "Ctrl+B" として登録され、設定した覚えのない
                 // キーが効いてしまうため、2 つ目を見つけた時点で弾く
                 if key_code.is_some() {
-                    return Err("通常キーを 2 つ以上は指定できません".to_string());
+                    return Err(HotkeyError::MultipleKeys);
                 }
                 key_code = Some(parse_key_code(key)?);
             }
         }
     }
 
-    let code = key_code.ok_or_else(|| "通常キーが指定されていません".to_string())?;
+    let code = key_code.ok_or(HotkeyError::MissingKey)?;
     Ok(HotKey::new(Some(modifiers), code))
 }
 
 /// 単一のキー名を `Code` に変換する。大文字小文字と前後の空白は無視する。
-fn parse_key_code(key: &str) -> Result<Code, String> {
+fn parse_key_code(key: &str) -> Result<Code, HotkeyError> {
     let normalized = key.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "f1" => Ok(Code::F1),
@@ -387,7 +446,7 @@ fn parse_key_code(key: &str) -> Result<Code, String> {
         "space" => Ok(Code::Space),
         "enter" => Ok(Code::Enter),
         "escape" => Ok(Code::Escape),
-        _ => Err(format!("未対応のキー: {}", key)),
+        _ => Err(HotkeyError::UnsupportedKey(key.to_string())),
     }
 }
 
@@ -679,7 +738,7 @@ impl HotkeyManager {
     ///
     /// 直っていない間は毎回の `apply` で試し直しているので、ここに残っている
     /// のは「いまも登録できていないもの」だけ。
-    pub fn errors(&self) -> &BTreeMap<HotkeyAction, HotkeyError> {
+    pub fn errors(&self) -> &BTreeMap<HotkeyAction, HotkeyAssignmentError> {
         &self.errors
     }
 
@@ -725,22 +784,14 @@ impl HotkeyManager {
     ///
     /// 登録に成功したら直ちに解除する。ここでの登録は `registered` へ記録しない。
     /// 実際に使い続けるための登録は、この呼び出しのあとに行う `resume` が行う。
-    pub fn try_register(&mut self, hotkey_str: &str) -> Result<(), String> {
+    pub fn try_register(&mut self, hotkey_str: &str) -> Result<(), HotkeyError> {
         let hotkey = parse_hotkey(hotkey_str)?;
 
-        if self.manager.is_none() {
-            debug!("ホットキーマネージャーを作成する");
-            match GlobalHotKeyManager::new() {
-                Ok(manager) => self.manager = Some(manager),
-                Err(e) => {
-                    return Err(format!("ホットキーの仕組みを初期化できません: {}", e));
-                }
-            }
-        }
+        self.create_manager_if_needed()?;
 
         let Some(manager) = &self.manager else {
             // 直前に作っているので通常は来ない
-            return Err("ホットキーの仕組みを初期化できません".to_string());
+            return Err(HotkeyError::ManagerMissing);
         };
 
         match manager.register(hotkey) {
@@ -750,13 +801,29 @@ impl HotkeyManager {
                 // ここを成功扱いにすると、呼び出し側が候補を受理してダイアログを
                 // 閉じ、resume でも同じキーを登録しようとして「二重登録」で
                 // 失敗する。**解除できるまで候補を受理させない。**
-                Err(e) => Err(format!(
-                    "試し登録したホットキーを解除できません。もう一度お試しください: {e}"
-                )),
+                Err(e) => Err(HotkeyError::UnregisterFailed(e.to_string())),
             },
-            Err(e) => Err(format!(
-                "登録できません（他のアプリと競合している可能性があります）: {e}"
-            )),
+            Err(e) => Err(HotkeyError::RegisterFailed(e.to_string())),
+        }
+    }
+
+    /// まだ作っていなければ global-hotkey のマネージャーを作る。
+    ///
+    /// **作ったものを返さず `self.manager` へ置くだけにしてある。** 参照を
+    /// 返すと `&mut self` の借用が呼び出し側の分岐の間ずっと生き、失敗を
+    /// `record_error` で記録する経路（`register`）が借用検査に通らない。
+    fn create_manager_if_needed(&mut self) -> Result<(), HotkeyError> {
+        if self.manager.is_some() {
+            return Ok(());
+        }
+
+        debug!("ホットキーマネージャーを作成する");
+        match GlobalHotKeyManager::new() {
+            Ok(manager) => {
+                self.manager = Some(manager);
+                Ok(())
+            }
+            Err(e) => Err(HotkeyError::ManagerUnavailable(e.to_string())),
         }
     }
 
@@ -778,24 +845,14 @@ impl HotkeyManager {
             self.record_error(
                 action,
                 hotkey_str,
-                format!("同じキーが「{}」に割り当てられています", other.label()),
+                HotkeyError::DuplicateAssignment { other },
             );
             return;
         }
 
-        if self.manager.is_none() {
-            debug!("ホットキーマネージャーを作成する");
-            match GlobalHotKeyManager::new() {
-                Ok(manager) => self.manager = Some(manager),
-                Err(e) => {
-                    self.record_error(
-                        action,
-                        hotkey_str,
-                        format!("ホットキーの仕組みを初期化できません: {}", e),
-                    );
-                    return;
-                }
-            }
+        if let Err(e) = self.create_manager_if_needed() {
+            self.record_error(action, hotkey_str, e);
+            return;
         }
 
         let Some(manager) = &self.manager else {
@@ -817,7 +874,7 @@ impl HotkeyManager {
             self.record_error(
                 action,
                 hotkey_str,
-                format!("登録できません（他のアプリと競合している可能性があります）: {e}"),
+                HotkeyError::RegisterFailed(e.to_string()),
             );
             return;
         }
@@ -882,17 +939,17 @@ impl HotkeyManager {
     ///
     /// 登録に失敗したアクションは 2 秒ごとの再適用で試し直すため、毎回
     /// ログへ書くと同じ行が延々と積もる。
-    fn record_error(&mut self, action: HotkeyAction, hotkey: &str, message: String) {
-        let error = HotkeyError {
+    fn record_error(&mut self, action: HotkeyAction, hotkey: &str, reason: HotkeyError) {
+        let error = HotkeyAssignmentError {
             hotkey: hotkey.to_string(),
-            message,
+            reason,
         };
         if self.errors.get(&action) != Some(&error) {
             error!(
                 "{} に {} を割り当てられない: {}",
                 action.label(),
                 error.hotkey,
-                error.message
+                error.reason
             );
         }
         self.errors.insert(action, error);
@@ -977,28 +1034,40 @@ mod tests {
     #[test]
     fn parse_hotkey_modifier_only_returns_error() {
         // 修飾キーだけでは登録できないため、パース時点で弾く
-        assert!(parse_hotkey("Ctrl").is_err());
-        assert!(parse_hotkey("Ctrl+Shift").is_err());
-        assert!(parse_hotkey("Ctrl+Shift+Alt").is_err());
+        assert_eq!(parse_hotkey("Ctrl"), Err(HotkeyError::MissingKey));
+        assert_eq!(parse_hotkey("Ctrl+Shift"), Err(HotkeyError::MissingKey));
+        assert_eq!(parse_hotkey("Ctrl+Shift+Alt"), Err(HotkeyError::MissingKey));
     }
 
     #[test]
     fn parse_hotkey_empty_returns_error() {
-        assert!(parse_hotkey("").is_err());
+        // 空文字列は「未対応のキー」ではなく「通常キーが無い」として扱う。
+        // "" が split で 1 要素の空文字列になり、修飾キーにも当たらない
+        assert_eq!(
+            parse_hotkey(""),
+            Err(HotkeyError::UnsupportedKey(String::new()))
+        );
     }
 
     #[test]
     fn parse_hotkey_unknown_key_returns_error() {
-        assert!(parse_hotkey("Ctrl+Nonexistent").is_err());
-        assert!(parse_hotkey("F13").is_err());
+        // 種別が分かれていれば、設定画面に「未対応のキー: f13」と出せる
+        assert_eq!(
+            parse_hotkey("Ctrl+Nonexistent"),
+            Err(HotkeyError::UnsupportedKey("nonexistent".to_string()))
+        );
+        assert_eq!(
+            parse_hotkey("F13"),
+            Err(HotkeyError::UnsupportedKey("f13".to_string()))
+        );
     }
 
     #[test]
     fn parse_hotkey_multiple_key_codes_returns_error() {
         // 黙って最後のキーで上書きせず、エラーにする
-        assert!(parse_hotkey("Ctrl+A+B").is_err());
-        assert!(parse_hotkey("A+B").is_err());
-        assert!(parse_hotkey("F5+F6").is_err());
+        assert_eq!(parse_hotkey("Ctrl+A+B"), Err(HotkeyError::MultipleKeys));
+        assert_eq!(parse_hotkey("A+B"), Err(HotkeyError::MultipleKeys));
+        assert_eq!(parse_hotkey("F5+F6"), Err(HotkeyError::MultipleKeys));
     }
 
     #[test]
@@ -1097,6 +1166,51 @@ mod tests {
         assert!(parse_key_code("f13").is_err());
         assert!(parse_key_code("").is_err());
         assert!(parse_key_code("ctrl").is_err());
+    }
+
+    // ---- エラーの文言 ----
+
+    #[test]
+    fn hotkey_error_display_keeps_the_key_and_the_underlying_reason() {
+        // 文言はそのままトーストと設定画面の一覧に出る。キー名や下位の
+        // エラー文が落ちると、何を直せばよいのか分からなくなる
+        assert_eq!(
+            HotkeyError::UnsupportedKey("f13".to_string()).to_string(),
+            "未対応のキー: f13"
+        );
+        assert_eq!(
+            HotkeyError::DuplicateAssignment {
+                other: HotkeyAction::ToggleFullscreen,
+            }
+            .to_string(),
+            "同じキーが「フルスクリーン切替」に割り当てられています"
+        );
+        assert_eq!(
+            HotkeyError::RegisterFailed("HotKey already registered".to_string()).to_string(),
+            "登録できません（他のアプリと競合している可能性があります）: HotKey already registered"
+        );
+    }
+
+    #[test]
+    fn hotkey_error_display_is_japanese_for_every_variant() {
+        // 英語の文言が混ざると、定型文と繋げたときに日本語と英語が並ぶ
+        let all = [
+            HotkeyError::MultipleKeys,
+            HotkeyError::MissingKey,
+            HotkeyError::UnsupportedKey("f13".to_string()),
+            HotkeyError::DuplicateAssignment {
+                other: HotkeyAction::Screenshot,
+            },
+            HotkeyError::ManagerUnavailable("failed".to_string()),
+            HotkeyError::ManagerMissing,
+            HotkeyError::RegisterFailed("in use".to_string()),
+            HotkeyError::UnregisterFailed("in use".to_string()),
+        ];
+
+        for error in all {
+            let text = error.to_string();
+            assert!(!text.is_ascii(), "日本語が含まれていない: {text}");
+        }
     }
 
     // ---- リスナースレッドのイベント照合とデバウンス ----

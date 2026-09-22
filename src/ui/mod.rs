@@ -54,7 +54,7 @@ use self::screenshot_tab::show_screenshot_settings_tab;
 use self::status_tab::show_status_tab;
 
 use crate::audio::AudioDirection;
-use crate::hotkey::{HotkeyAction, HotkeyError};
+use crate::hotkey::{HotkeyAction, HotkeyAssignmentError};
 use crate::settings::AppSettings;
 use crate::status::ConnectionStatus;
 use eframe::egui;
@@ -314,7 +314,7 @@ pub fn show_settings_dialog(
     view: &SettingsDialogView<'_>,
     devices: &DeviceLists<'_>,
     connection: &ConnectionStatus,
-    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
+    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyAssignmentError>,
 ) -> Vec<SettingsEvent> {
     let mut events: Vec<SettingsEvent> = Vec::new();
     let mut button = SettingsDialogAction::None;

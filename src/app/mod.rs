@@ -621,7 +621,7 @@ impl eframe::App for CaptureCardViewer {
                         self.show_hotkey_dialog = true;
                         self.settings_dialog
                             .hotkey_capture_mut()
-                            .set_rejection(reason);
+                            .set_rejection(reason.to_string());
                     }
                 }
             }
