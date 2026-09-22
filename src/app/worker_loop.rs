@@ -354,14 +354,87 @@ impl WorkerState {
     }
 }
 
+/// テストの組み立てを 1 か所に置く。**`super::worker_timers` のテストからも使う。**
+///
+/// `WorkerState` の中身はこのファイルが持つので、モックを載せた状態を作る役も
+/// ここに置く。`tick` を駆動するテストは監視の本体と同じ `worker_timers.rs` に
+/// あり、そちらからこれらを呼ぶ。
+#[cfg(test)]
+pub(super) mod testing {
+    use super::super::backend::mock::{MockAudioBackend, MockVideoBackend};
+    use super::*;
+    use crate::settings::DEFAULT_BUFFER_MS;
+    use std::sync::mpsc::channel;
+    use std::sync::RwLock;
+
+    /// モックのバックエンドを載せた `WorkerState` を、スレッドを起こさずに作る。
+    ///
+    /// **実時間を進めずに `tick` を回すためのもの。** 本物のループ
+    /// （`run`）は `Instant::now()` で駆動するが、こちらはテストが渡した
+    /// 時刻をそのまま使えるので、バックオフの待ち時間だけ「進めた」ことに
+    /// できる。
+    pub(in crate::app) fn mock_state(
+        video: &MockVideoBackend,
+        audio: &MockAudioBackend,
+    ) -> (WorkerState, std::sync::mpsc::Receiver<DeviceEvent>) {
+        let (event_tx, event_rx) = channel();
+        let state = WorkerState::new(
+            Box::new(video.clone()),
+            Box::new(audio.clone()),
+            Arc::new(AudioControls::default()),
+            event_tx,
+            Arc::new(RwLock::new(DeviceSnapshot::default())),
+            RepaintWaker::new(),
+        );
+        (state, event_rx)
+    }
+
+    /// 届いているイベントを全て取り出す。
+    pub(in crate::app) fn drain(
+        events: &std::sync::mpsc::Receiver<DeviceEvent>,
+    ) -> Vec<DeviceEvent> {
+        events.try_iter().collect()
+    }
+
+    /// 設定を適用する。`WorkerState::handle` はこのファイルの私有なので、
+    /// 他のファイルのテストからはここを通す。
+    pub(in crate::app) fn apply_config(
+        state: &mut WorkerState,
+        config: DeviceConfig,
+        initial: bool,
+    ) {
+        state.handle(DeviceCommand::ApplyConfig {
+            config: Box::new(config),
+            initial,
+        });
+    }
+
+    /// デバイス名だけを指定した `DeviceConfig` を作る。
+    pub(in crate::app) fn config_for(
+        video_device: Option<&str>,
+        input_device: Option<&str>,
+    ) -> DeviceConfig {
+        DeviceConfig {
+            video: (video_device.map(str::to_string), None, None, None),
+            audio: (
+                input_device.map(str::to_string),
+                None,
+                None,
+                None,
+                DEFAULT_BUFFER_MS,
+            ),
+            auto_reconnect: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::backend::mock::{MockAudioBackend, MockBackends, MockVideoBackend};
     use super::super::backend::SystemBackends;
-    use super::super::monitor::VIDEO_SIGNAL_TIMEOUT;
+    use super::testing::{config_for, drain, mock_state};
     use super::*;
     use crate::audio::AudioControls;
-    use crate::settings::DEFAULT_BUFFER_MS;
     use crate::video::{SharedColorConversion, VideoFrames};
     use std::sync::mpsc::channel;
     use std::sync::RwLock;
@@ -439,48 +512,6 @@ mod tests {
             snapshot,
             audio_controls,
             handle,
-        }
-    }
-
-    /// モックのバックエンドを載せた `WorkerState` を、スレッドを起こさずに作る。
-    ///
-    /// **実時間を進めずに `tick` を回すためのもの。** 本物のループ
-    /// （`run`）は `Instant::now()` で駆動するが、こちらはテストが渡した
-    /// 時刻をそのまま使えるので、バックオフの待ち時間だけ「進めた」ことに
-    /// できる。
-    fn mock_state(
-        video: &MockVideoBackend,
-        audio: &MockAudioBackend,
-    ) -> (WorkerState, std::sync::mpsc::Receiver<DeviceEvent>) {
-        let (event_tx, event_rx) = channel();
-        let state = WorkerState::new(
-            Box::new(video.clone()),
-            Box::new(audio.clone()),
-            Arc::new(AudioControls::default()),
-            event_tx,
-            Arc::new(RwLock::new(DeviceSnapshot::default())),
-            RepaintWaker::new(),
-        );
-        (state, event_rx)
-    }
-
-    /// 届いているイベントを全て取り出す。
-    fn drain(events: &std::sync::mpsc::Receiver<DeviceEvent>) -> Vec<DeviceEvent> {
-        events.try_iter().collect()
-    }
-
-    /// デバイス名だけを指定した `DeviceConfig` を作る。
-    fn config_for(video_device: Option<&str>, input_device: Option<&str>) -> DeviceConfig {
-        DeviceConfig {
-            video: (video_device.map(str::to_string), None, None, None),
-            audio: (
-                input_device.map(str::to_string),
-                None,
-                None,
-                None,
-                DEFAULT_BUFFER_MS,
-            ),
-            auto_reconnect: false,
         }
     }
 
@@ -644,185 +675,6 @@ mod tests {
             "実機ではなくモックを開いていること"
         );
         worker.shutdown();
-    }
-
-    // ここから下はモックのバックエンドを使う。スレッドを起こさず、`tick` へ
-    // 渡す時刻を自分で進めるので、実時間の経過もデバイスも要らない。
-
-    #[test]
-    fn worker_retries_video_until_the_backend_succeeds() {
-        // 2 回失敗してから繋がる。バックオフ（200ms → 400ms）を跨ぐように
-        // 時刻を進め、その都度 1 回だけ試していることを見る
-        let video = MockVideoBackend::default();
-        let audio = MockAudioBackend::default();
-        video.with(|state| state.failures_before_success = 2);
-        let (mut state, events) = mock_state(&video, &audio);
-
-        state.handle(DeviceCommand::ApplyConfig {
-            config: Box::new(config_for(Some("モックカメラ"), Some("モック入力"))),
-            initial: false,
-        });
-
-        let base = Instant::now();
-        state.tick(base);
-        // まだ 200ms 経っていないので、ここでは試さない
-        state.tick(base + Duration::from_millis(100));
-        assert_eq!(
-            video.with(|state| state.start_calls),
-            1,
-            "バックオフの途中で試し直さないこと"
-        );
-
-        state.tick(base + Duration::from_millis(250));
-        state.tick(base + Duration::from_millis(700));
-
-        assert_eq!(
-            video.with(|state| state.start_calls),
-            3,
-            "失敗した回数のぶんだけ試して繋がること"
-        );
-        assert!(
-            !state.video_retry.is_active(),
-            "繋がったら追いかけるのをやめること"
-        );
-
-        let events = drain(&events);
-        let failures = events
-            .iter()
-            .filter(|event| matches!(event, DeviceEvent::VideoFailed(_)))
-            .count();
-        assert_eq!(failures, 2, "失敗のたびに理由を返すこと");
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, DeviceEvent::VideoConnected)),
-            "最後は接続を知らせること"
-        );
-    }
-
-    #[test]
-    fn worker_video_signal_loss_stops_the_stream_and_requests_a_reconnect() {
-        // 開けているのにフレームだけが止まった場合。表示を落として開き直す
-        let video = MockVideoBackend::default();
-        let audio = MockAudioBackend::default();
-        let (mut state, events) = mock_state(&video, &audio);
-
-        let mut config = config_for(Some("モックカメラ"), Some("モック入力"));
-        config.auto_reconnect = true;
-        state.handle(DeviceCommand::ApplyConfig {
-            config: Box::new(config),
-            initial: false,
-        });
-
-        let base = Instant::now();
-        state.tick(base);
-        assert!(video.with(|state| state.capturing), "まず繋がること");
-        drain(&events);
-
-        // フレームが途絶えたことにする。`VIDEO_SIGNAL_TIMEOUT` 未満では動かない
-        video.with(|state| {
-            state.since_last_frame = Some(VIDEO_SIGNAL_TIMEOUT - Duration::from_millis(1));
-        });
-        state.tick(base + Duration::from_millis(100));
-        assert!(
-            drain(&events).is_empty(),
-            "閾値に届くまでは切断として扱わないこと"
-        );
-        assert_eq!(video.with(|state| state.stop_calls), 0);
-
-        video.with(|state| {
-            state.since_last_frame = Some(VIDEO_SIGNAL_TIMEOUT + Duration::from_millis(1));
-        });
-        state.tick(base + Duration::from_millis(200));
-
-        assert!(
-            drain(&events)
-                .iter()
-                .any(|event| matches!(event, DeviceEvent::VideoSignalLost)),
-            "表示中のテクスチャを捨てるよう UI へ知らせること"
-        );
-        assert_eq!(
-            video.with(|state| state.stop_calls),
-            1,
-            "「信号だけ無い」と区別できるようストリームを閉じること"
-        );
-        assert!(state.video_retry.is_active(), "開き直しを要求すること");
-        assert!(
-            state.video_reconnect_after_loss,
-            "次に繋がったとき音声も開き直す目印を立てること"
-        );
-    }
-
-    #[test]
-    fn worker_video_signal_loss_without_auto_reconnect_keeps_the_stream() {
-        // 自動再接続を切っているときは、表示を落とすだけで開き直さない
-        let video = MockVideoBackend::default();
-        let audio = MockAudioBackend::default();
-        let (mut state, events) = mock_state(&video, &audio);
-
-        // `config_for` の既定が auto_reconnect: false
-        state.handle(DeviceCommand::ApplyConfig {
-            config: Box::new(config_for(Some("モックカメラ"), Some("モック入力"))),
-            initial: false,
-        });
-
-        let base = Instant::now();
-        state.tick(base);
-        drain(&events);
-
-        video.with(|state| {
-            state.since_last_frame = Some(VIDEO_SIGNAL_TIMEOUT + Duration::from_millis(1));
-        });
-        state.tick(base + Duration::from_millis(100));
-
-        assert!(
-            drain(&events)
-                .iter()
-                .any(|event| matches!(event, DeviceEvent::VideoSignalLost)),
-            "表示は落とすこと"
-        );
-        assert_eq!(
-            video.with(|state| state.stop_calls),
-            0,
-            "開き直さないのだからストリームは閉じないこと"
-        );
-        assert!(!state.video_retry.is_active(), "再試行を要求しないこと");
-    }
-
-    #[test]
-    fn worker_audio_stream_error_reopens_the_passthrough() {
-        // cpal のエラーコールバックが旗を立てた場合。ワーカーが回収して開き直す
-        let video = MockVideoBackend::default();
-        let audio = MockAudioBackend::default();
-        let (mut state, events) = mock_state(&video, &audio);
-
-        // 映像は未設定にして、音声だけを動かす
-        let mut config = config_for(None, Some("モック入力"));
-        config.auto_reconnect = true;
-        state.handle(DeviceCommand::ApplyConfig {
-            config: Box::new(config),
-            initial: false,
-        });
-
-        let base = Instant::now();
-        state.tick(base);
-        assert_eq!(audio.with(|state| state.start_calls), 1, "まず繋がること");
-        drain(&events);
-
-        audio.with(|state| state.stream_error = true);
-        state.tick(base + Duration::from_millis(100));
-        assert_eq!(
-            audio.with(|state| state.stop_calls),
-            1,
-            "エラーを拾ったらストリームを閉じること"
-        );
-
-        state.tick(base + Duration::from_millis(200));
-        assert_eq!(
-            audio.with(|state| state.start_calls),
-            2,
-            "閉じたあと開き直すこと"
-        );
     }
 
     #[test]
