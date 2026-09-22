@@ -259,6 +259,14 @@ impl Default for CaptureCardViewer {
             screenshot_save_threads: Vec::new(),
         };
 
+        // 最小化中のホットキーは UI スレッドを通せないので、リスナーから
+        // 直接デバイスワーカーへコマンドを積ませる（#133）。
+        // **ワーカーを起動したあとでしか渡せない**ので、ここで渡す
+        app.hotkey_manager
+            .set_background_runner(hotkeys::background_hotkey_runner(
+                app.device.command_sender(),
+            ));
+
         // **未設定のデバイス名はここで埋めない。** 列挙は映像で 1〜3ms、
         // 音声で 300ms 前後かかり、ウィンドウが出る前にその分だけ待たせる
         // ことになる。ワーカーが最初の `ApplyConfig` で列挙して決め、
@@ -649,6 +657,11 @@ impl eframe::App for CaptureCardViewer {
         // 間隔を広げている間だけ、別スレッドからの通知で起こしてもらう
         self.repaint_waker
             .set_enabled(should_wake_on_event(condition));
+
+        // 最小化しているかをホットキーのリスナーへ伝える。最小化すると
+        // ここが呼ばれなくなるので、**最後に書いた値がそのまま残る**のが狙い。
+        // リスナーは真の間だけ、画面の要らないアクションをワーカーへ回す（#133）
+        self.hotkey_manager.set_minimized(minimized);
         ctx.request_repaint_after(next_repaint_delay(condition));
     }
 

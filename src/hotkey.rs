@@ -5,7 +5,7 @@ use global_hotkey::{
 };
 use log::{debug, error, info, trace, warn};
 use serde::{Serialize, Serializer};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -90,6 +90,51 @@ impl HotkeyAction {
             HotkeyAction::ToggleMute => "ミュート切替",
         }
     }
+
+    /// 最小化している間も、その場で実行してよいか。
+    ///
+    /// **分かれ目は「画面が要るか」。** 音量・ミュート・再接続は出力
+    /// コールバックやデバイスワーカーに届けば効くので、最小化中でも
+    /// 意味がある。フルスクリーンや最前面表示、スクリーンショットは
+    /// 見えていないウィンドウに対して行っても意味がないうえ、UI スレッド
+    /// でしか触れない状態を書き換えるため、復帰するまで保留する（#133）。
+    ///
+    /// 真を返すものの実行経路は `app::hotkeys::background_hotkey_runner`。
+    pub fn runs_while_minimized(self) -> bool {
+        match self {
+            HotkeyAction::ReconnectDevices
+            | HotkeyAction::VolumeUp
+            | HotkeyAction::VolumeDown
+            | HotkeyAction::ToggleMute => true,
+            HotkeyAction::Screenshot
+            | HotkeyAction::ToggleFullscreen
+            | HotkeyAction::ToggleAlwaysOnTop => false,
+        }
+    }
+}
+
+/// 保留していた押下を、復帰したときに何回実行するかへ畳む。
+///
+/// 最小化している間 `update()` は呼ばれないので、押下は復帰するまで溜まる。
+/// 溜まった数をそのまま実行すると、フルスクリーンを 2 回押して戻したはずが
+/// 復帰後にフルスクリーンになる、といった食い違いが出る。
+///
+/// **`match` に `_` を置かないこと。** アクションを増やしたときに、
+/// 溜まった押下をどう畳むかをここで必ず決めさせるため。
+fn folded_repeats(action: HotkeyAction, presses: u32) -> u32 {
+    match action {
+        // トグルは偶数回なら元の状態へ戻る。押した回数ぶん切り替えても
+        // 結果は同じなので、奇数回のときだけ 1 回実行する
+        HotkeyAction::ToggleFullscreen
+        | HotkeyAction::ToggleAlwaysOnTop
+        | HotkeyAction::ToggleMute => presses % 2,
+        // 復帰してから撮るので、何回押されていても同じ 1 枚にしかならない
+        HotkeyAction::Screenshot => presses.min(1),
+        // 開き直しは何回要求しても結果が同じ
+        HotkeyAction::ReconnectDevices => presses.min(1),
+        // 増減は押した回数ぶん効かせる。畳むと「10 段上げたのに 1 段」になる
+        HotkeyAction::VolumeUp | HotkeyAction::VolumeDown => presses,
+    }
 }
 
 // 設定では BTreeMap<HotkeyAction, String> のキーとして使う。TOML のキーは
@@ -118,6 +163,48 @@ pub struct HotkeyError {
     pub message: String,
 }
 
+/// 最小化中のアクションを、UI スレッドを介さずに実行するための窓口。
+///
+/// 中身の組み立ては `app` 側（`app::hotkeys::background_hotkey_runner`）が
+/// 持つ。ここでは「押されたアクションを渡す先」としてだけ扱い、
+/// `DeviceCommand` のような `app` の型をこのモジュールへ持ち込まない。
+///
+/// **リスナースレッドから呼ばれる。** 渡す処理はデバイスワーカーへ
+/// コマンドを送るだけにして、その場でブロックしないこと。
+///
+/// 既定は「何もしない」。渡さなければ、最小化中のアクションも復帰まで
+/// 保留される（#133 を直す前と同じ振る舞い）。
+#[derive(Clone, Default)]
+pub struct BackgroundHotkeyRunner {
+    run: Option<Arc<dyn Fn(HotkeyAction) + Send + Sync>>,
+}
+
+impl BackgroundHotkeyRunner {
+    pub fn new(run: impl Fn(HotkeyAction) + Send + Sync + 'static) -> Self {
+        Self {
+            run: Some(Arc::new(run)),
+        }
+    }
+
+    /// アクションを実行させる。窓口が渡されていなければ何もしない。
+    fn run(&self, action: HotkeyAction) {
+        if let Some(run) = &self.run {
+            run(action);
+        }
+    }
+}
+
+/// 押下をどこで実行するか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PressRouting {
+    /// UI スレッドが `take_pressed` で取りに来るまで保留する
+    Deferred,
+    /// 最小化中なので、UI スレッドを介さずその場で実行する
+    Background,
+    /// デバウンス期間内なので捨てる
+    Debounced,
+}
+
 /// リスナースレッドと共有する状態。
 ///
 /// **登録中の ID と押下の記録を 1 つのロックにまとめてある。** 別々に持つと、
@@ -131,11 +218,26 @@ struct ListenerState {
     /// 作るハッシュなので 0 も正規の値になりうる。番兵の数値で未登録を表すと、
     /// たまたまその値になったホットキーだけが効かなくなる。
     registered: HashMap<u32, HotkeyAction>,
-    /// リスナーが検出した押下。UI スレッドが毎フレーム取り出して空にする。
+    /// リスナーが検出した押下の回数。UI スレッドが毎フレーム取り出して空にする。
     ///
-    /// 集合にしてあるので、1 フレームの間に同じアクションが複数回届いても
-    /// 1 回として扱う。
-    pressed: HashSet<HotkeyAction>,
+    /// **集合ではなく回数で持つ。** 最小化している間は `update()` が呼ばれず
+    /// 押下が溜まるため、何回押されたかが分からないと復帰したときに
+    /// 畳めない（`folded_repeats`）。`BTreeMap` にしてあるので、取り出す
+    /// 順序はアクションの宣言順で安定する。
+    pressed: BTreeMap<HotkeyAction, u32>,
+    /// アクションごとの、最後に押下として受け付けた時刻。デバウンスの基準。
+    ///
+    /// **UI スレッド側ではなくここで見る。** 最小化中は実行が UI スレッドを
+    /// 通らないため、実行の時点で計ると押しっぱなしのキーリピートを
+    /// 捨てられない。
+    last_press: HashMap<HotkeyAction, Instant>,
+    /// ウィンドウが最小化されているか。UI スレッドが毎フレーム書き込む。
+    ///
+    /// 最小化中は `update()` が呼ばれないので、ここが真のまま止まる。
+    /// それが狙いで、リスナーは真の間だけ `background` へ回す。
+    minimized: bool,
+    /// 最小化中のアクションの実行先。
+    background: BackgroundHotkeyRunner,
     /// 押下を記録したあとに UI スレッドを起こす窓口。
     ///
     /// **押下は `update()` が `take_pressed` で取りに来るまで実行されない。**
@@ -145,6 +247,30 @@ struct ListenerState {
     /// 既定の `RepaintWaker` は何もしないので、渡さなくても動作は変わらない
     /// （反応が遅くなるだけ）。
     waker: RepaintWaker,
+}
+
+impl ListenerState {
+    /// 受け付けた押下を記録し、どこで実行するかを返す。
+    ///
+    /// デバウンスの判定もここで行う。抑止した場合に `last_press` を
+    /// 更新しないのは、押しっぱなしのキーリピートで抑止が延々と続き、
+    /// いつまでも実行できない状態にしないため（`decide_trigger`）。
+    fn record_press(&mut self, action: HotkeyAction, now: Instant) -> PressRouting {
+        let since_last = self
+            .last_press
+            .get(&action)
+            .map(|last| now.duration_since(*last));
+        if decide_trigger(since_last, HOTKEY_DEBOUNCE) == TriggerDecision::Debounced {
+            return PressRouting::Debounced;
+        }
+        self.last_press.insert(action, now);
+
+        if self.minimized && action.runs_while_minimized() {
+            return PressRouting::Background;
+        }
+        *self.pressed.entry(action).or_insert(0) += 1;
+        PressRouting::Deferred
+    }
 }
 
 /// グローバルホットキーの登録と押下の検出。
@@ -159,9 +285,6 @@ pub struct HotkeyManager {
     /// 登録できなかったアクション → 理由
     errors: BTreeMap<HotkeyAction, HotkeyError>,
     state: Arc<Mutex<ListenerState>>,
-    /// アクションごとの最終実行時刻。デバウンスの基準。
-    /// UI スレッドからしか触らないので共有しない
-    last_trigger: HashMap<HotkeyAction, Instant>,
     /// リスナースレッドへの終了要求
     listener_shutdown: Arc<AtomicBool>,
     /// リスナースレッドのハンドル。`Drop` で join するために持つ
@@ -340,19 +463,28 @@ fn spawn_listener(state: Arc<Mutex<ListenerState>>, shutdown: Arc<AtomicBool>) -
                     // クリアしたはずのキーで 1 回だけ実行されることがある。
                     // ログはロックを手放してから出す（trace ではファイルへの
                     // 書き出しが入るため、その間ロックを握らない）
-                    // 押下を記録したときに UI スレッドを起こすための複製。
-                    // **起こすのはロックを手放してから。** 握ったまま呼ぶと、
-                    // egui 側の待ちの間この共有状態も止まる
+                    // 押下を記録したときに UI スレッドを起こすための複製と、
+                    // 最小化中にその場で実行するための複製。
+                    // **どちらもロックを手放してから呼ぶ。** 握ったまま呼ぶと、
+                    // 相手を待つ間この共有状態も止まる
                     let mut wake = None;
+                    let mut background = None;
                     let outcome = match state.lock() {
                         Ok(mut state) => {
                             let action =
                                 accepted_action(&state.registered, event.id(), event.state());
-                            if let Some(action) = action {
-                                state.pressed.insert(action);
-                                wake = Some(state.waker.clone());
-                            }
-                            Some(action)
+                            let routing = action.map(|action| {
+                                let routing = state.record_press(action, Instant::now());
+                                match routing {
+                                    PressRouting::Deferred => wake = Some(state.waker.clone()),
+                                    PressRouting::Background => {
+                                        background = Some((state.background.clone(), action))
+                                    }
+                                    PressRouting::Debounced => {}
+                                }
+                                (action, routing)
+                            });
+                            Some(routing)
                         }
                         Err(_) => {
                             // release ビルドは panic = "abort" なので毒されない
@@ -364,11 +496,25 @@ fn spawn_listener(state: Arc<Mutex<ListenerState>>, shutdown: Arc<AtomicBool>) -
                     if let Some(waker) = wake {
                         waker.wake();
                     }
+                    if let Some((runner, action)) = background {
+                        // 最小化中なので UI スレッドは動いていない。
+                        // 復帰を待たずにここから実行させる（#133）
+                        debug!("最小化中の {} をワーカーへ回す", action.label());
+                        runner.run(action);
+                    }
 
                     match outcome {
-                        Some(Some(action)) => {
+                        Some(Some((action, PressRouting::Deferred))) => {
                             trace!("{} の押下を記録した", action.label())
                         }
+                        Some(Some((action, PressRouting::Background))) => {
+                            trace!("{} を最小化中のまま実行した", action.label())
+                        }
+                        Some(Some((action, PressRouting::Debounced))) => trace!(
+                            "デバウンスにより {} の押下を捨てた（{}ms 以内）",
+                            action.label(),
+                            HOTKEY_DEBOUNCE.as_millis()
+                        ),
                         Some(None) => trace!("対象外のイベントなので無視する"),
                         None => {}
                     }
@@ -410,7 +556,6 @@ impl HotkeyManager {
             registered: BTreeMap::new(),
             errors: BTreeMap::new(),
             state,
-            last_trigger: HashMap::new(),
             listener_shutdown,
             listener: Some(listener),
             paused: false,
@@ -426,6 +571,29 @@ impl HotkeyManager {
             Ok(mut state) => state.waker = waker,
             // 起こせないだけで押下の検出は続く。反応が最大 250ms 遅れる
             Err(_) => warn!("ホットキーの共有状態のロックを取得できないので再描画の窓口を渡せない"),
+        }
+    }
+
+    /// 最小化中のアクションを UI スレッドを介さずに実行する窓口を渡す。
+    ///
+    /// 渡さなければ、最小化中のアクションも他と同じように復帰まで保留される。
+    pub fn set_background_runner(&mut self, runner: BackgroundHotkeyRunner) {
+        match self.state.lock() {
+            Ok(mut state) => state.background = runner,
+            Err(_) => warn!("ホットキーの共有状態のロックを取得できないので実行の窓口を渡せない"),
+        }
+    }
+
+    /// ウィンドウが最小化されているかを伝える。**毎フレーム呼ぶ。**
+    ///
+    /// 最小化すると `update()` が呼ばれなくなるので、最後に書き込んだ値が
+    /// そのまま残る。リスナーはその値を見て、画面の要らないアクションだけを
+    /// `BackgroundHotkeyRunner` へ回す（#133）。
+    pub fn set_minimized(&mut self, minimized: bool) {
+        match self.state.lock() {
+            Ok(mut state) => state.minimized = minimized,
+            // 最小化中のアクションが復帰まで保留されるだけで、検出は続く
+            Err(_) => warn!("ホットキーの共有状態のロックを取得できないので最小化を伝えられない"),
         }
     }
 
@@ -468,13 +636,18 @@ impl HotkeyManager {
         }
     }
 
-    /// 押されたアクションを取り出す。デバウンス期間内の再入力は落とす。
+    /// 保留している押下を取り出す。
     ///
     /// 毎フレーム UI スレッドから呼ばれる。返す順序はアクションの宣言順で、
     /// 同じフレームに複数届いても並び順は変わらない。
+    ///
+    /// **デバウンスはリスナー側で済んでいる**（`ListenerState::record_press`）。
+    /// ここで行うのは、最小化している間に溜まった押下を何回ぶん実行するかの
+    /// 判断だけで、判断そのものは `folded_repeats` が持つ。最小化していない
+    /// 間はアクションごとに高々 1 回しか溜まらないので、畳んでも結果は変わらない。
     pub fn take_pressed(&mut self) -> Vec<HotkeyAction> {
-        let mut pressed: Vec<HotkeyAction> = match self.state.lock() {
-            Ok(mut state) => state.pressed.drain().collect(),
+        let pressed: BTreeMap<HotkeyAction, u32> = match self.state.lock() {
+            Ok(mut state) => std::mem::take(&mut state.pressed),
             Err(_) => {
                 // ここが失敗するのはロックが毒されたときだけで、毎フレーム呼ばれる。
                 // release ビルドは panic = "abort" なので毒されること自体が起きない
@@ -482,34 +655,21 @@ impl HotkeyManager {
                 return Vec::new();
             }
         };
-        if pressed.is_empty() {
-            return Vec::new();
-        }
 
-        // HashSet の反復順は不定なので、同じフレームで複数のアクションが
-        // 押されたときの実行順を宣言順に固定する
-        pressed.sort();
-
-        let now = Instant::now();
         let mut fired = Vec::new();
-        for action in pressed {
-            let since_last = self
-                .last_trigger
-                .get(&action)
-                .map(|last| now.duration_since(*last));
-            match decide_trigger(since_last, HOTKEY_DEBOUNCE) {
-                TriggerDecision::Fire => {
-                    self.last_trigger.insert(action, now);
-                    debug!("{} をホットキーから実行する", action.label());
-                    fired.push(action);
-                }
-                TriggerDecision::Debounced => {
-                    debug!(
-                        "デバウンスにより {} を抑止した（{}ms 以内）",
-                        action.label(),
-                        HOTKEY_DEBOUNCE.as_millis()
-                    );
-                }
+        for (action, presses) in pressed {
+            let repeats = folded_repeats(action, presses);
+            if repeats < presses {
+                debug!(
+                    "{} の押下 {} 回を {} 回へ畳んだ",
+                    action.label(),
+                    presses,
+                    repeats
+                );
+            }
+            for _ in 0..repeats {
+                debug!("{} をホットキーから実行する", action.label());
+                fired.push(action);
             }
         }
         fired
@@ -1143,7 +1303,7 @@ mod tests {
             state
                 .registered
                 .insert(hotkey.id(), HotkeyAction::Screenshot);
-            state.pressed.insert(HotkeyAction::Screenshot);
+            state.pressed.insert(HotkeyAction::Screenshot, 1);
         }
 
         manager.unregister(HotkeyAction::Screenshot);
@@ -1163,15 +1323,15 @@ mod tests {
             .insert(HotkeyAction::Screenshot, ("F5".to_string(), hotkey));
         {
             let mut state = manager.state.lock().expect("ロックが毒されていないこと");
-            state.pressed.insert(HotkeyAction::Screenshot);
-            state.pressed.insert(HotkeyAction::VolumeUp);
+            state.pressed.insert(HotkeyAction::Screenshot, 1);
+            state.pressed.insert(HotkeyAction::VolumeUp, 1);
         }
 
         manager.unregister(HotkeyAction::Screenshot);
 
         let state = manager.state.lock().expect("ロックが毒されていないこと");
         assert_eq!(
-            state.pressed.iter().copied().collect::<Vec<_>>(),
+            state.pressed.keys().copied().collect::<Vec<_>>(),
             vec![HotkeyAction::VolumeUp]
         );
     }
@@ -1181,9 +1341,9 @@ mod tests {
         let mut manager = HotkeyManager::new();
         {
             let mut state = manager.state.lock().expect("ロックが毒されていないこと");
-            state.pressed.insert(HotkeyAction::VolumeDown);
-            state.pressed.insert(HotkeyAction::Screenshot);
-            state.pressed.insert(HotkeyAction::ReconnectDevices);
+            state.pressed.insert(HotkeyAction::VolumeDown, 1);
+            state.pressed.insert(HotkeyAction::Screenshot, 1);
+            state.pressed.insert(HotkeyAction::ReconnectDevices, 1);
         }
 
         let fired = manager.take_pressed();
@@ -1206,32 +1366,27 @@ mod tests {
             .lock()
             .expect("ロックが毒されていないこと")
             .pressed
-            .insert(HotkeyAction::Screenshot);
+            .insert(HotkeyAction::Screenshot, 1);
 
         assert_eq!(manager.take_pressed(), vec![HotkeyAction::Screenshot]);
         assert!(manager.take_pressed().is_empty());
     }
 
     #[test]
-    fn take_pressed_within_debounce_suppresses_the_second_press() {
-        // キーリピートで連続して届いた場合。1 回目だけ通す
+    fn take_pressed_folds_repeated_presses() {
+        // 最小化している間に溜まった押下。トグルは偶数回なら実行しない
         let mut manager = HotkeyManager::new();
-        manager
-            .state
-            .lock()
-            .expect("ロックが毒されていないこと")
-            .pressed
-            .insert(HotkeyAction::Screenshot);
-        assert_eq!(manager.take_pressed(), vec![HotkeyAction::Screenshot]);
+        {
+            let mut state = manager.state.lock().expect("ロックが毒されていないこと");
+            state.pressed.insert(HotkeyAction::ToggleFullscreen, 2);
+            state.pressed.insert(HotkeyAction::ToggleAlwaysOnTop, 3);
+            state.pressed.insert(HotkeyAction::Screenshot, 4);
+        }
 
-        manager
-            .state
-            .lock()
-            .expect("ロックが毒されていないこと")
-            .pressed
-            .insert(HotkeyAction::Screenshot);
-
-        assert!(manager.take_pressed().is_empty());
+        assert_eq!(
+            manager.take_pressed(),
+            vec![HotkeyAction::Screenshot, HotkeyAction::ToggleAlwaysOnTop,]
+        );
     }
 
     // ---- 一時停止と再開 ----
@@ -1328,25 +1483,148 @@ mod tests {
         assert!(manager.manager.is_none());
     }
 
+    // ---- 押下の記録（デバウンスと最小化中の振り分け） ----
+
     #[test]
-    fn take_pressed_debounce_is_per_action() {
+    fn record_press_within_debounce_is_dropped() {
+        // キーリピートで連続して届いた場合。1 回目だけ数える
+        let mut state = ListenerState::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            state.record_press(HotkeyAction::Screenshot, now),
+            PressRouting::Deferred
+        );
+        assert_eq!(
+            state.record_press(HotkeyAction::Screenshot, now + HOTKEY_DEBOUNCE),
+            PressRouting::Debounced
+        );
+
+        assert_eq!(state.pressed.get(&HotkeyAction::Screenshot), Some(&1));
+    }
+
+    #[test]
+    fn record_press_after_debounce_counts_again() {
+        // 最小化中は取り出す側が居ないので、回数が積み上がる
+        let mut state = ListenerState::default();
+        let now = Instant::now();
+
+        state.record_press(HotkeyAction::ToggleFullscreen, now);
+        state.record_press(
+            HotkeyAction::ToggleFullscreen,
+            now + HOTKEY_DEBOUNCE + Duration::from_millis(1),
+        );
+
+        assert_eq!(state.pressed.get(&HotkeyAction::ToggleFullscreen), Some(&2));
+    }
+
+    #[test]
+    fn record_press_debounce_is_per_action() {
         // スクリーンショットを撮った直後でも、別のアクションは抑止されない
-        let mut manager = HotkeyManager::new();
-        manager
-            .state
-            .lock()
-            .expect("ロックが毒されていないこと")
-            .pressed
-            .insert(HotkeyAction::Screenshot);
-        assert_eq!(manager.take_pressed(), vec![HotkeyAction::Screenshot]);
+        let mut state = ListenerState::default();
+        let now = Instant::now();
 
-        manager
-            .state
-            .lock()
-            .expect("ロックが毒されていないこと")
-            .pressed
-            .insert(HotkeyAction::VolumeUp);
+        state.record_press(HotkeyAction::Screenshot, now);
 
-        assert_eq!(manager.take_pressed(), vec![HotkeyAction::VolumeUp]);
+        assert_eq!(
+            state.record_press(HotkeyAction::VolumeUp, now),
+            PressRouting::Deferred
+        );
+    }
+
+    #[test]
+    fn record_press_while_minimized_runs_ui_free_actions_in_background() {
+        // 最小化中の音量・ミュート・再接続は復帰を待たずに実行する（#133）。
+        // 保留にも残さない（残すと復帰したときに二重で効く）
+        let mut state = ListenerState {
+            minimized: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            state.record_press(HotkeyAction::ToggleMute, Instant::now()),
+            PressRouting::Background
+        );
+        assert!(state.pressed.is_empty(), "保留にも残っている");
+    }
+
+    #[test]
+    fn record_press_while_minimized_defers_actions_that_need_the_window() {
+        // 画面が要るものは最小化中に実行しても意味がないので溜める
+        let mut state = ListenerState {
+            minimized: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            state.record_press(HotkeyAction::ToggleFullscreen, Instant::now()),
+            PressRouting::Deferred
+        );
+        assert_eq!(state.pressed.get(&HotkeyAction::ToggleFullscreen), Some(&1));
+    }
+
+    #[test]
+    fn record_press_when_not_minimized_defers_even_ui_free_actions() {
+        // 最小化していなければ UI スレッドが実行する。ワーカーへ回すと
+        // 右クリックメニューと経路が変わってしまう
+        let mut state = ListenerState::default();
+
+        assert_eq!(
+            state.record_press(HotkeyAction::ToggleMute, Instant::now()),
+            PressRouting::Deferred
+        );
+    }
+
+    // ---- 溜まった押下の畳み方 ----
+
+    #[test]
+    fn folded_repeats_toggles_cancel_out_in_pairs() {
+        // 最小化中に 2 回押して戻したなら、復帰しても切り替えない
+        assert_eq!(folded_repeats(HotkeyAction::ToggleFullscreen, 2), 0);
+        assert_eq!(folded_repeats(HotkeyAction::ToggleFullscreen, 3), 1);
+        assert_eq!(folded_repeats(HotkeyAction::ToggleAlwaysOnTop, 4), 0);
+        assert_eq!(folded_repeats(HotkeyAction::ToggleMute, 1), 1);
+    }
+
+    #[test]
+    fn folded_repeats_screenshot_is_taken_once() {
+        // 復帰してから撮るので、何回押されていても同じ 1 枚にしかならない
+        assert_eq!(folded_repeats(HotkeyAction::Screenshot, 5), 1);
+        assert_eq!(folded_repeats(HotkeyAction::Screenshot, 0), 0);
+    }
+
+    #[test]
+    fn folded_repeats_volume_keeps_every_press() {
+        // 増減は押した回数ぶん効かせる（最小化中はワーカーが実行するので、
+        // ここへ来るのは通常のフレームで溜まった分だけ）
+        assert_eq!(folded_repeats(HotkeyAction::VolumeUp, 3), 3);
+        assert_eq!(folded_repeats(HotkeyAction::VolumeDown, 1), 1);
+    }
+
+    // ---- 最小化中の実行の窓口 ----
+
+    #[test]
+    fn background_runner_passes_the_action_through() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let runner = BackgroundHotkeyRunner::new(move |action| {
+            recorded
+                .lock()
+                .expect("ロックが毒されていないこと")
+                .push(action);
+        });
+
+        runner.run(HotkeyAction::VolumeUp);
+
+        assert_eq!(
+            *seen.lock().expect("ロックが毒されていないこと"),
+            vec![HotkeyAction::VolumeUp]
+        );
+    }
+
+    #[test]
+    fn background_runner_default_does_nothing() {
+        // 窓口を渡し忘れても落ちない。最小化中のアクションが効かなくなるだけ
+        BackgroundHotkeyRunner::default().run(HotkeyAction::ToggleMute);
     }
 }
