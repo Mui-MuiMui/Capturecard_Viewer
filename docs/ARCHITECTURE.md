@@ -312,7 +312,7 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 ### エラー型
 
-モジュールごとにエラー型を定義し、呼び出し側が種別で分岐できる状態にする。**ここは `VideoError` / `AudioError` / `ScreenshotError` / `HotkeyError` / `SettingsError` として実装済み**（それぞれ `src/video.rs` / `src/audio.rs` / `src/screenshot.rs` / `src/hotkey.rs` / `src/settings.rs`）。
+モジュールごとにエラー型を定義し、呼び出し側が種別で分岐できる状態にする。**ここは `VideoError` / `AudioError` / `ScreenshotError` / `HotkeyError` / `SettingsError` として実装済み**（それぞれ `src/video/` / `src/audio.rs` / `src/screenshot.rs` / `src/hotkey.rs` / `src/settings.rs`）。
 
 `src/logging.rs` だけは `Result<_, String>` のまま残してある。ロガーを初期化する前の失敗なので `report_error` も `log` も使えず、`main.rs` が `let _ = logging::init();` と捨てるだけになる。種別で分岐する読み手がいない。
 

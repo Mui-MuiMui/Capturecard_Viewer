@@ -139,7 +139,7 @@ flowchart TD
 
 ### 映像が出ない
 
-`映像デバイスへの接続に失敗した（N 回目）: <理由>` の `<理由>` で分岐する。文字列は `src/video.rs` の `start_capture` が組み立てている。
+`映像デバイスへの接続に失敗した（N 回目）: <理由>` の `<理由>` で分岐する。文字列は `src/video/capture.rs` の `start_capture` が組み立てている。
 
 | 理由 | 起きていること | 次に見る |
 |---|---|---|
@@ -176,7 +176,7 @@ flowchart TD
 
 **`映像ストリームを開いた` の「実際の設定」に fps は載っていない。** `nokhwa-bindings-windows 0.4.6` の `format_refreshed` が `MF_MT_FRAME_RATE`（上位 32 ビットが分子、下位 32 ビットが分母）を `fps as u32` で読んでおり、整数フレームレートでは分母の 1 しか取れない。解像度とピクセルフォーマットは正しいので、その 2 つだけを載せている。**おおよそのフレームレートを知りたい場合は `trace` の `フレームが届いた` の行数を数える**（実測では 5.5 秒で 293 行 ≒ 53 枚/秒）。**これは処理できた枚数であって、デバイスが出した枚数ではない。** 捨てた枚数は数えていないので、入力の fps そのものを測る用途には使えない。
 
-**毎フレーム出るログを `info` 以上で足さないこと。** 1 行ごとにフラッシュしているため、1080p60 では毎秒 60 回のディスク書き込みになる。初回だけ出す判定は `video.rs` の `FirstTimeOnly` にまとめてある。
+**毎フレーム出るログを `info` 以上で足さないこと。** 1 行ごとにフラッシュしているため、1080p60 では毎秒 60 回のディスク書き込みになる。初回だけ出す判定は `video/capture.rs` の `FirstTimeOnly` にまとめてある。
 
 ### 音が出ない
 
@@ -195,7 +195,7 @@ flowchart TD
 `VideoCapture::get_device_capabilities` はデバイスワーカースレッドで走り、結果はチャネルで UI スレッドへ返る（`src/app/capabilities.rs` の `dispatch_capability_requests` → `src/app/worker_connect.rs` の `query_video_capabilities` → `src/app/device.rs` の `drain_device_events`）。
 
 - 成否は呼び出し側が残す。成功なら `info` の `デバイス能力を取得した: <デバイス名>（N フォーマット, N ms）`、失敗なら `warn` の `デバイス能力を取得できない: <デバイス名>: <理由>`。**失敗は設定ダイアログにも「⚠ 対応形式を取得できませんでした」として出る**ので、ユーザーの報告と突き合わせられる
-- フォーマットごとの件数は `video.rs` が `debug` の `デバイス能力の内訳（<デバイス名>、N ms）: YUY2: n 件、…` に残す。`Camera::new` の所要時間は `能力取得のためにデバイスを開いた（N ms）`
+- フォーマットごとの件数は `video/capabilities.rs` が `debug` の `デバイス能力の内訳（<デバイス名>、N ms）: YUY2: n 件、…` に残す。`Camera::new` の所要時間は `能力取得のためにデバイスを開いた（N ms）`
 - `get_device_capabilities` は `Camera::new` で**キャプチャ中のデバイスをもう一度開く**。ワーカースレッドなので UI は止まらないが、ここが伸びると「対応形式を取得中...」が長く出たままになり、その間ワーカーは次のコマンドを処理できない
 - 全フォーマットで `compatible_list_by_resolution` が失敗したときは、コード内にベタ書きされた既定の解像度リストが返る。**画面に出ている選択肢がデバイスの実際の能力とは限らない。** この差し替えは `warn` の `… の対応する組み合わせを取得できないので既定値を使う` で分かる
 
@@ -243,7 +243,7 @@ flowchart TD
 cargo test --locked -- --ignored
 ```
 
-**現時点で `#[ignore]` が付いているのは `src/video.rs` の `yuy2_to_rgb_naive_1080p_conversion_time` だけで、これは計測用でデバイスを使わない。** デバイスを開くテストはまだ 1 つもないので、このコマンドでデバイス起因の不具合は捕まらない。
+**現時点で `#[ignore]` が付いているのは `src/video/convert.rs` の `yuy2_to_rgb_naive_1080p_conversion_time` だけで、これは計測用でデバイスを使わない。** デバイスを開くテストはまだ 1 つもないので、このコマンドでデバイス起因の不具合は捕まらない。
 
 デバイスを開くテストを足すときの書き方は `.claude/skills/testing-conventions/SKILL.md` の「結合テスト（実機必須）」に従う。
 

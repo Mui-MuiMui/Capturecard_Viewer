@@ -49,7 +49,12 @@ cargo build --release
 | `src/app/hotkeys.rs` | ホットキーの適用と、押されたときのアクションの実行 |
 | `src/app/audio_control.rs` | 音量とミュートの操作、その OSD |
 | `src/app/error_report.rs` | 失敗の記録と、トースト・「接続状態」タブへの出し方 |
-| `src/video.rs` | nokhwa `CallbackCamera` によるキャプチャ、YUY2→RGB 変換、`FrameBuffer`（`Arc` によるフレーム共有と世代番号）、デバイス能力の取得 |
+| `src/video/mod.rs` | `VideoError` とログ用の `elapsed_ms`。外から使う経路（`crate::video::...`）の `pub use` もここ |
+| `src/video/capture.rs` | nokhwa `CallbackCamera` によるキャプチャ。開く・閉じる・列挙する、フレームコールバック、途絶の観測（`VideoLinkState`） |
+| `src/video/capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の取得 |
+| `src/video/color.rs` | YCbCr→RGB の係数表とその選び方、映像調整の畳み込み、設定の共有（`SharedColorConversion`） |
+| `src/video/convert.rs` | YUY2→RGB24 の画素変換 |
+| `src/video/frame_buffer.rs` | `FrameBuffer`（`Arc` によるフレーム共有と世代番号）と観測値（`FrameStats`） |
 | `src/audio.rs` | cpal による入力→リングバッファ→出力のパススルー、音量制御 |
 | `src/hotkey.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）、global-hotkey によるアクション別の登録とリスナースレッド、押下の検出とデバウンス、ホットキー文字列のパース |
 | `src/screenshot.rs` | rodio による効果音の読み込みと再生 |
@@ -73,6 +78,8 @@ cargo build --release
 `src/app/` の子モジュールは**基本どれも `impl CaptureCardViewer` を足す形**で、状態そのものは `app/mod.rs` の構造体 1 つに集めてある。**子モジュール側にフィールドや `static` を持たせないこと。** 他の子モジュールから呼ぶメソッドにだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
 **例外はデバイスワーカーの 5 つ**（`worker.rs` / `worker_loop.rs` / `worker_timers.rs` / `worker_connect.rs` / `backend.rs`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_timers.rs` と `worker_connect.rs` がそこへ `impl` を足す。`backend.rs` はアプリの状態（`CaptureCardViewer` / `WorkerState` に属するもの）を持たず、デバイスの入口の trait とその実装だけを持つ。テスト用のモックだけは自分の中に観測用の値を抱える。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
+
+`src/video/` の子モジュールは**役割で分けてあるだけで、状態はそれぞれのファイルが定義する型が持つ。** 他のファイルから呼ぶ項目にだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。**外から使う経路（`crate::video::...`）は `video/mod.rs` の `pub use` に集める。** 呼び出し側の `#[cfg(test)] mod tests` からしか参照されない項目（`FormatCapability` / `IntervalStats`）は、テストを含まないビルドでは未使用になるので、再輸出に `#[allow(unused_imports)]` を付けて経路だけ残してある。
 
 `src/ui/` の子モジュールは**どれも状態を持たず、書き換えるのもドラフトだけ。** 起きたことは `SettingsEvent` / `HotkeyDialogEvent` の列で返す。ダイアログの状態は `state.rs` の `SettingsDialogState` 1 つに集めてある。**外から使う経路（`crate::ui::...`）は `ui/mod.rs` の `pub use` に集める。** `ui` の中だけで使う項目は再輸出せず、子モジュールの経路で参照する（`mod ui;` 自体が私有なので、誰も使わない再輸出は `unused_imports` の警告になる）。
 
@@ -102,7 +109,7 @@ cargo build --release
 
 - コードコメント、UI 文字列、コミットメッセージは日本語
 - 既存の命名（snake_case、モジュール構成）に合わせる
-- コメントは Issue #73 で一巡整理済み（ワーカースレッド化と競合するため後回しにしていた `src/app/device.rs` / `monitor.rs` / `retry.rs` / `capabilities.rs`、`src/video.rs`、`src/audio.rs` も含む）。とはいえ実装とコメントが食い違っている箇所が今後また出うるので、コメントを鵜呑みにせず実コードを確認すること
+- コメントは Issue #73 で一巡整理済み（ワーカースレッド化と競合するため後回しにしていた `src/app/device.rs` / `monitor.rs` / `retry.rs` / `capabilities.rs`、`src/video/`、`src/audio.rs` も含む）。とはいえ実装とコメントが食い違っている箇所が今後また出うるので、コメントを鵜呑みにせず実コードを確認すること
 
 ブランチ名・コミットメッセージ・PR の書き方は `.claude/skills/naming-conventions/SKILL.md` にまとめてある。ブランチを切る前、コミットする前、PR を作る前に参照すること。
 
