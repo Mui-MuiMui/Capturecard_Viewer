@@ -36,7 +36,8 @@ cargo build --release
 | `src/app/window.rs` | 最前面表示、タイトルバーの有無、装飾なしのときの端のドラッグによるリサイズ、大きさのリセット、フルスクリーンの切り替え |
 | `src/app/device.rs` | `apply_settings`（設定をワーカーへ渡す）と、ワーカーから届いたイベントの取り込み |
 | `src/app/worker.rs` | デバイスワーカーとやり取りする型（コマンド / イベント / `DeviceConfig` / `DeviceSnapshot`）と、UI 側の窓口 `DeviceWorker` |
-| `src/app/worker_loop.rs` | デバイスワーカースレッドの本体。コマンドの受け口、再試行と監視のタイマー、観測値の書き出し |
+| `src/app/worker_loop.rs` | デバイスワーカースレッドの本体。`WorkerState` の定義、コマンドの受け口、待ち時間の決定、観測値の書き出し |
+| `src/app/worker_timers.rs` | ワーカーがタイマーで回す監視。再試行の期限、フレームの途絶、音声ストリームのエラー、既定デバイスの切り替え、クロックドリフト補正 |
 | `src/app/worker_connect.rs` | ワーカーが行うデバイス操作。開く・閉じる・列挙する・能力を問い合わせる |
 | `src/app/monitor.rs` | 切断や既定デバイスの切り替えの**判定**（純粋関数）。ワーカーが使う |
 | `src/app/retry.rs` | `ConnectRetry` とバックオフ。「いつ試してよいか」だけを持つ。ワーカーが持つ |
@@ -70,7 +71,7 @@ cargo build --release
 
 `src/app/` の子モジュールは**基本どれも `impl CaptureCardViewer` を足す形**で、状態そのものは `app/mod.rs` の構造体 1 つに集めてある。**子モジュール側にフィールドや `static` を持たせないこと。** 他の子モジュールから呼ぶメソッドにだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
-**例外はデバイスワーカーの 3 つ**（`worker.rs` / `worker_loop.rs` / `worker_connect.rs`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_connect.rs` がそこへ `impl` を足す。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
+**例外はデバイスワーカーの 4 つ**（`worker.rs` / `worker_loop.rs` / `worker_timers.rs` / `worker_connect.rs`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_timers.rs` と `worker_connect.rs` がそこへ `impl` を足す。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
 
 `src/ui/` の子モジュールは**どれも状態を持たず、書き換えるのもドラフトだけ。** 起きたことは `SettingsEvent` / `HotkeyDialogEvent` の列で返す。ダイアログの状態は `state.rs` の `SettingsDialogState` 1 つに集めてある。**外から使う経路（`crate::ui::...`）は `ui/mod.rs` の `pub use` に集める。** `ui` の中だけで使う項目は再輸出せず、子モジュールの経路で参照する（`mod ui;` 自体が私有なので、誰も使わない再輸出は `unused_imports` の警告になる）。
 

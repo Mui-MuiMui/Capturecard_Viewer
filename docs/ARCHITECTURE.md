@@ -60,7 +60,7 @@ flowchart TD
 | `platform` | Windows 固有処理（フォント、アイコン、モニタ情報） | 汎用ロジック |
 | `logging` | ログの初期化と出力先 | — |
 
-`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_connect.rs` で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
+`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_connect.rs` / `worker_timers.rs`（再試行・切断監視・既定デバイスの追従などタイマー駆動の監視）で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
 
 ## 状態管理
 
@@ -359,18 +359,18 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 | 目指す姿 | 現状 | 対応するタスク |
 |---|---|---|
-| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_connect` / `monitor` / `retry` / `capabilities` / `screenshot` / `settings_dialog` / `settings_store` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
+| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_connect` / `worker_timers` / `monitor` / `retry` / `capabilities` / `screenshot` / `settings_dialog` / `settings_store` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
 | イベント駆動 | 2 秒ごとに設定を再適用するポーリング | apply_settings の 2 秒ごとの再登録 |
 | チャネルでの隔離 | UI と `device` ワーカーの間はコマンドとイベントを mpsc でやり取りする。**この境界で**チャネルを通さず共有するのは 3 つ（映像フレーム、コールバックが読む Atomic、観測値の `Arc<RwLock<DeviceSnapshot>>`）。`settings` や `screenshot_manager` のようにデバイスを跨がない共有はこの話の外 | 完了 |
 | UI をブロックしない | デバイスを開く・閉じる・列挙する処理も含めてワーカースレッドへ移した。スクリーンショットのエンコードは撮影ごとのスレッド。`update()` に残るブロッキングは `rfd` のファイルダイアログだけ | 完了 |
 | 要求どおりに開く | MJPEG / RGB24 を選んでも YUYV に差し替わる（差し替えたことは `warn` でログに残る） | MJPEG/RGB24 が YUYV で開かれる不具合 |
-| 新フレームの判別 | 世代番号で新着は判別できるが、無信号・切断の検出には使っていない。接続できていない間の再接続はバックオフで自動化済み | デバイス切断検出と自動再接続 |
-| 統計の公開 | 映像側は `VideoFrames::stats()` で読み出せ、右クリックの「情報表示」で OSD に出る。初回フレームの解像度・経路・変換時間はログにも出る。音声のアンダーラン回数はまだ収集していない | 映像側は完了。音声側はタスク未登録 |
+| 新フレームの判別 | 一定時間フレームが来ないことを検出して「映像信号がありません」を出す。`video.auto_reconnect`（既定 有効、右クリックメニューで切替）が有効なら、対象デバイスが戻ってきたときバックオフで自動再接続する。最小化中や無信号の間は再描画の頻度も落とす | 完了 |
+| 統計の公開 | 映像側は `VideoFrames::stats()` で読み出せ、右クリックの「情報表示」で OSD に出る。初回フレームの解像度・経路・変換時間はログにも出る。音声のアンダーラン回数も `DeviceSnapshot.audio_underruns` として収集し、OSD と「接続状態」タブの両方に出す | 完了 |
 | 音声設定を効かせる | サンプルレート・チャンネル数は反映され、UI の選択肢も入出力の対応設定から生成している。列挙は別スレッドで行い UI を止めない | 完了 |
 | 入出力差の吸収 | 揃えられる場合は揃え、揃えられない場合は線形補間でリサンプルし、チャンネル数はアップ／ダウンミックスする。クロックドリフトはリングバッファの水位から数秒ごとに補正する（`ResampleTelemetry`）。「接続状態」タブへの表示は未実装（`DeviceSnapshot` には値がある） | 「接続状態」タブへのリサンプル比・バッファ水位の表示はタスク未登録 |
-| バッファ長の調整 | 50ms 固定 | 音声バッファの調整 UI |
+| バッファ長の調整 | 設定ダイアログのデバイス設定タブでスライダーから調整できる（20〜200ms、既定 50ms） | 完了 |
 | エラー型 | `video` / `audio` / `screenshot` の公開 API は `VideoError` / `AudioError` / `ScreenshotError` を返す。`hotkey` と `settings` は `Result<_, String>` のまま | 映像・音声・スクリーンショットは完了。`hotkey` / `settings` はタスク未登録 |
-| ユーザー通知 | 接続失敗が画面に出ない | エラー通知 UI |
+| ユーザー通知 | 接続失敗・ホットキー登録失敗・スクリーンショット保存失敗はトースト（`TransientOverlay`）で数秒表示し、同じ発生源の同じ文言は間引く。映像・音声の接続先は設定ダイアログの「接続状態」タブに、ホットキーの登録失敗は理由も添えてホットキー一覧に出す | 完了 |
 | trait による抽象化 | デバイス型を直接利用 | デバイス層を trait で抽象化する |
 
 バックログはこちら。

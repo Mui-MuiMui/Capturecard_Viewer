@@ -20,6 +20,7 @@ mod window;
 mod worker;
 mod worker_connect;
 mod worker_loop;
+mod worker_timers;
 
 use self::menu::MenuLayout;
 use self::screenshot::ScreenshotResult;
