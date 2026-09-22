@@ -53,6 +53,7 @@
 - `HotkeyManager::apply` を直接呼ばない。呼ぶのは `apply_hotkey_assignments` だけ（理由: `docs/design/hotkeys.md`）
 - `HotkeyAction::as_str()` の文字列は、一度出した名前を変えない（理由: `docs/design/hotkeys.md`）
 - ホットキーのアクションは右クリックメニューと同じメソッドを呼ぶ。独自に書かない（理由: `docs/design/hotkeys.md`）
+- ホットキーのリスナースレッドから `CaptureCardViewer` の状態を触らない。最小化中に実行するのは `HotkeyAction::runs_while_minimized()` が真のものだけで、経路はワーカーへの `DeviceCommand`（理由: `docs/design/hotkeys.md`）
 - `ui.enable_drag_move` が切れている状態で装飾（`ui.borderless`）を外させない（理由: `docs/design/window.md`）
 - 生成後に `ViewportCommand::Decorations` で装飾を外さない。起動時は `ViewportBuilder::with_decorations` で決める（理由: `docs/design/window.md`）
 
