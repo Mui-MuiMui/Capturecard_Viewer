@@ -200,7 +200,7 @@ impl WorkerState {
             .unwrap_or(true);
 
         if self.audio.take_stream_error() {
-            // エラーの内容自体は audio.rs が error! で残している
+            // エラーの内容自体は audio::stream が error! で残している
             warn!("音声ストリームのエラーを検出したので切断として扱う");
             // **旗は読んだ時点で下りている。** ここへ移しておかないと、
             // 自動再接続が無効な間や下限に達していない間のエラーが消え、
