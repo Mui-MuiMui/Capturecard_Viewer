@@ -281,6 +281,12 @@ struct ListenerState {
     focused: bool,
     /// 「フォーカスがあるときだけ反応する」がオンか。設定の反映のたびに書く。
     only_when_focused: bool,
+    /// 動いていたリスナーが止まった理由。止まっていなければ `None`。
+    ///
+    /// リスナーはキー入力を待てなくなると終わる（フックも外れる）。ここに
+    /// 書いておき、UI スレッドの `apply` が拾って失敗として画面に出す。
+    /// 書かないと、効かなくなったのに登録済みのまま何も表示されない。
+    listener_failure: Option<KeyboardHookError>,
     /// 最小化中のアクションの実行先。
     background: BackgroundHotkeyRunner,
     /// 押下を記録したあとに UI スレッドを起こす窓口。
@@ -306,6 +312,7 @@ impl Default for ListenerState {
             focused: true,
             // 既定はオフ。#133 のとおり、他のアプリの操作中や最小化中も効かせる
             only_when_focused: false,
+            listener_failure: None,
             background: BackgroundHotkeyRunner::default(),
             waker: RepaintWaker::default(),
         }
@@ -595,10 +602,20 @@ fn spawn_listener(
             if !pumped {
                 // 待てないまま回り続けると CPU を使い切るので抜ける。
                 // 以降ホットキーは効かなくなるが、他のアプリの入力は妨げない
+                let source = std::io::Error::last_os_error().to_string();
                 error!(
                     "ホットキーのリスナーがキー入力を待てないので終了する: {}",
-                    std::io::Error::last_os_error()
+                    source
                 );
+                // UI スレッドの apply が拾い、HookUnavailable として画面に出す
+                match state.lock() {
+                    Ok(mut state) => {
+                        state.listener_failure = Some(KeyboardHookError::WaitFailed(source))
+                    }
+                    Err(_) => {
+                        warn!("ホットキーの共有状態のロックを取得できないので停止を伝えられない")
+                    }
+                }
                 break;
             }
         }
@@ -721,6 +738,11 @@ impl HotkeyManager {
         if self.paused {
             return;
         }
+
+        // リスナーが途中で止まっていたら、フックを使えないのと同じ扱いにする。
+        // 登録済みのものを外しておけば、下の登録で理由付きの失敗として記録され、
+        // トーストと設定画面に出る
+        self.take_listener_failure();
 
         // 解除するのは、割り当てが消えたアクションとキーが変わったアクション
         let stale: Vec<HotkeyAction> = self
@@ -907,6 +929,35 @@ impl HotkeyManager {
         }
 
         info!("{} の {} の割り当てを解除した", action.label(), hotkey_str);
+    }
+
+    /// リスナーが途中で止まっていたら、理由を `hook_error` へ移し、
+    /// 登録済みのものを外す。止まっていなければ何もしない。
+    ///
+    /// 外したものは続く登録で `HookUnavailable` として記録し直される。
+    /// 一度移したら `hook_error` が埋まるので、以降は毎回の登録がそこで失敗する。
+    fn take_listener_failure(&mut self) {
+        if self.hook_error.is_some() {
+            return;
+        }
+        let failure = match self.state.lock() {
+            Ok(mut state) => state.listener_failure.take(),
+            Err(_) => {
+                warn!(
+                    "ホットキーの共有状態のロックを取得できないのでリスナーの停止を確かめられない"
+                );
+                None
+            }
+        };
+        let Some(failure) = failure else {
+            return;
+        };
+
+        self.hook_error = Some(failure);
+        let actions: Vec<HotkeyAction> = self.registered.keys().copied().collect();
+        for action in actions {
+            self.unregister(action);
+        }
     }
 
     /// その組み合わせを既に使っているアクション。
@@ -1652,6 +1703,40 @@ mod tests {
             Some(&HotkeyError::HookUnavailable(
                 KeyboardHookError::Unsupported
             ))
+        );
+    }
+
+    #[test]
+    fn apply_after_listener_failure_reports_every_assignment() {
+        // 動いていたリスナーが止まったら、登録済みのものも含めて失敗として
+        // 記録し直す。記録しないと、効かないのに何も表示されない
+        let mut manager = HotkeyManager::new();
+        manager.hook_error = None;
+        let desired = assignments(&[(HotkeyAction::Screenshot, "F5")]);
+        manager.apply(&desired);
+        assert!(manager.registered.contains_key(&HotkeyAction::Screenshot));
+
+        let failure = KeyboardHookError::WaitFailed("failed".to_string());
+        manager
+            .state
+            .lock()
+            .expect("ロックが毒されていないこと")
+            .listener_failure = Some(failure.clone());
+        manager.apply(&desired);
+
+        assert!(manager.registered.is_empty());
+        assert!(manager
+            .state
+            .lock()
+            .expect("ロックが毒されていないこと")
+            .registered
+            .is_empty());
+        assert_eq!(
+            manager
+                .errors
+                .get(&HotkeyAction::Screenshot)
+                .map(|error| &error.reason),
+            Some(&HotkeyError::HookUnavailable(failure))
         );
     }
 

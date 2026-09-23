@@ -82,6 +82,8 @@ pub(crate) enum KeyboardHookError {
     InstallFailed(String),
     /// リスナースレッドが起動の結果を返さないまま終わった
     ListenerStopped,
+    /// 動いていたリスナーがキー入力を待てなくなって終わった。OS のエラー文を持つ
+    WaitFailed(String),
 }
 
 impl fmt::Display for KeyboardHookError {
@@ -94,6 +96,10 @@ impl fmt::Display for KeyboardHookError {
             KeyboardHookError::ListenerStopped => {
                 write!(f, "ホットキーのリスナースレッドが起動しませんでした")
             }
+            KeyboardHookError::WaitFailed(source) => write!(
+                f,
+                "キー入力を待てなくなったのでホットキーを止めました。アプリを再起動してください: {source}"
+            ),
         }
     }
 }
@@ -423,6 +429,7 @@ mod tests {
             KeyboardHookError::Unsupported,
             KeyboardHookError::InstallFailed("failed".to_string()),
             KeyboardHookError::ListenerStopped,
+            KeyboardHookError::WaitFailed("failed".to_string()),
         ] {
             let text = error.to_string();
             assert!(!text.is_ascii(), "日本語が含まれていない: {text}");
