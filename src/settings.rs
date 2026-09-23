@@ -689,6 +689,14 @@ pub const DEFAULT_BUFFER_MS: u32 = 50;
 pub const MIN_JPEG_QUALITY: u8 = 1;
 pub const MAX_JPEG_QUALITY: u8 = 100;
 
+// 効果音の既定値。実行ファイルに埋め込んだ既定音（内蔵の SS.mp3）を指す。
+//
+// ファイルとしては配布していないので、exe の隣を探しても見つからず、
+// screenshot::resolve_sound_path が埋め込みの既定音へ倒すことで鳴る。
+// 設定画面の「既定に戻す」もこの値を書き、「既定（内蔵）」の表示もこの値との
+// 一致で判定する（docs/design/assets.md）
+pub const DEFAULT_SOUND_FILE: &str = "sound/SS.mp3";
+
 // 映像調整（明るさ・コントラスト・彩度）の下限と上限。0 が無調整。
 //
 // 3 つで範囲を揃えてあるのは、スライダーの中央が常に「無調整」になり、
@@ -1026,7 +1034,7 @@ impl Default for ScreenshotSettings {
             // 解決は screenshot::resolve_sound_path が exe の置き場所を基準に行い、
             // 見つからなければ埋め込みの既定音へ倒す。
             // None は「効果音を鳴らさない」の意味なので、既定値には使えない
-            sound_file: Some(PathBuf::from("sound/SS.mp3")),
+            sound_file: Some(PathBuf::from(DEFAULT_SOUND_FILE)),
             sound_volume: 100.0,
             // 既定は「旧版の項目が無い」。既定のホットキーは
             // default_hotkeys() が持つ
