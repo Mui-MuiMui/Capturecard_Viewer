@@ -15,6 +15,7 @@
 - 新しく `Arc<Mutex<..>>` を足す前に「ワーカーへのコマンドで済まないか」を考える。要る場合もロックを握ったまま重い処理（デバイスの開き直し、画像のエンコード、ファイル I/O）をしない（理由: `docs/design/threads.md`）
 - cpal のコールバックスレッドから再接続を始めない。エラーの旗はストリームを開き直すたびに新しい `Arc` へ差し替える（理由: `docs/design/threads.md`）
 - ホットキーのリスナースレッドはアプリ全体で 1 本にする。`ListenerState` を別々のロックに分けない（理由: `docs/design/threads.md`）
+- キーボードフックのコールバックでロックもアロケーションもしない。受け取ったキーは必ず `CallNextHookEx` で次へ渡す（理由: `docs/design/hotkeys.md`）
 - スクリーンショットの保存スレッドの `JoinHandle` を捨てない。`on_exit` で join する（理由: `docs/design/threads.md`）
 - クリップボードへのコピーを UI スレッドへ移さない。`arboard::Clipboard` は使うスレッドごとに作る（理由: `docs/design/threads.md`）
 - 保存スレッドから直接 `error!` を出さない（理由: `docs/design/threads.md`）

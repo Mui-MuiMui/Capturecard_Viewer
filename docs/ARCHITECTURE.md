@@ -25,7 +25,7 @@ flowchart TD
     app["app<br/>AppState / eframe::App / イベント処理"]
     ui["ui<br/>描画のみ"]
     settings["settings<br/>永続化"]
-    hotkey["hotkey<br/>グローバルホットキー"]
+    hotkey["hotkey<br/>ホットキー"]
     device["device<br/>ワーカー層"]
     video["video"]
     audio["audio"]
@@ -56,7 +56,7 @@ flowchart TD
 | `device` | デバイス操作をワーカースレッドへ隔離し、チャネルで橋渡しする | UI の知識 |
 | `video` / `audio` | デバイス固有の処理 | アプリ状態の知識 |
 | `settings` | 設定の型と永続化 | 実行時状態 |
-| `hotkey` | 割り当てられる操作の定義、グローバルホットキーの登録と押下の検出 | 操作そのものの実行（`app` が行う） |
+| `hotkey` | 割り当てられる操作の定義、ホットキーの登録と押下の検出（押下は `keyboard_hook` の低レベルキーボードフックでキーを奪わずに観測する） | 操作そのものの実行（`app` が行う） |
 | `platform` | Windows 固有処理（フォント、アイコン、モニタ情報） | 汎用ロジック |
 | `logging` | ログの初期化と出力先 | — |
 

@@ -54,7 +54,6 @@
 | `nokhwa` | 0.10 | 0.10.11 | パッチのみ | 映像キャプチャ |
 | `cpal` | 0.15 | 0.18.2 | マイナー 3 | 音声入出力 |
 | `confy` | 0.6 | 2.0.0 | メジャー | 設定の永続化 |
-| `global-hotkey` | 0.4 | 0.8.0 | マイナー 4 | グローバルホットキー |
 | `image` | 0.24 | 0.25.10 | マイナー 1 | スクリーンショットの保存 |
 | `rodio` | 0.17 | 0.22.2 | マイナー 5 | 効果音の再生 |
 | `dirs` | 5.0 | 7.0.0 | メジャー 2 | デスクトップ等のパス取得 |
@@ -166,9 +165,14 @@ flowchart TD
 
 `winapi` 0.3 は長く更新が止まっており、Microsoft 公式の `windows-sys` / `windows` クレートへ移行するのが現在の主流。
 
-`winapi` は `src/platform.rs` の `monitor_work_areas` で使っている。ウィンドウ位置の復元時に、保存された位置が画面内かを判定するためモニタの作業領域を列挙する用途（`EnumDisplayMonitors` / `GetMonitorInfoW`）。feature は `minwindef` / `winuser` / `windef` の 3 つ。
+`winapi` は 2 か所で使っている。
 
-使用箇所がこの 1 関数だけなので、`windows-sys` へ移す場合の影響は小さい。移行するなら、この関数の中だけを書き換えれば済む。
+- `src/platform.rs` の `monitor_work_areas`。ウィンドウ位置の復元時に、保存された位置が画面内かを判定するためモニタの作業領域を列挙する用途（`EnumDisplayMonitors` / `GetMonitorInfoW`）
+- `src/keyboard_hook.rs` の `imp` モジュール。ホットキーの押下を低レベルキーボードフックで観測する用途（`SetWindowsHookExW` / `CallNextHookEx` / `MsgWaitForMultipleObjects` / `PeekMessageW` / `PostThreadMessageW` / `GetAsyncKeyState` など）。global-hotkey を外したときに、既に直接の依存だったこのクレートへ寄せた（#202）
+
+feature は `minwindef` / `winuser` / `windef` / `libloaderapi` / `processthreadsapi` / `winbase` の 6 つ。
+
+使用箇所はどちらも Windows 専用の小さな関数群に閉じているので、`windows-sys` へ移す場合の影響は小さい。移行するなら、この 2 か所の中だけを書き換えれば済む。
 
 ## 調査の再実行
 
