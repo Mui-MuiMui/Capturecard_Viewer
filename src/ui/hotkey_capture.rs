@@ -190,8 +190,9 @@ enum HotkeyCaptureJudgement {
 /// - 候補が組み立てられても、`action` 以外のアクションに同じキーが
 ///   割り当て済みなら `Duplicate`。**`action` 自身への再割当て（変更なし、
 ///   または同じキーの入力し直し）は許す**
-/// - それ以外は `Accepted`。ただし実際に OS へ登録できるかはここでは分からない。
-///   呼び出し側が `HotkeyManager::try_register` で試すこと
+/// - それ以外は `Accepted`。ただし押下を観測する仕組み（キーボードフック）が
+///   使えているかはここでは分からない。呼び出し側が
+///   `HotkeyManager::try_register` で確かめること
 fn judge_hotkey_capture(
     modifiers: &egui::Modifiers,
     keys_down: &[egui::Key],
@@ -225,7 +226,7 @@ fn judge_hotkey_capture(
 /// が `Accepted` を返した時点で自動的に確定する（「キャプチャ開始」「OK」は無い）。
 ///
 /// 受け取った側は**まず `Close` を反映してから `Captured` を処理すること。**
-/// `Captured` は `HotkeyManager::try_register` で実際に登録できるか試し、
+/// `Captured` は `HotkeyManager::try_register` で登録できるか確かめ、
 /// 失敗したら開き直して理由を `HotkeyCaptureState::set_rejection` で伝える。
 /// 順序が逆だと、開き直したはずのダイアログを `Close` が閉じてしまう。
 #[derive(Debug, Clone, PartialEq, Eq)]

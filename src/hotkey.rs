@@ -1,29 +1,27 @@
+use crate::keyboard_hook::{KeyChord, KeyboardHook, KeyboardHookError, Modifiers};
 use crate::repaint::RepaintWaker;
-use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-};
 use log::{debug, error, info, trace, warn};
 use serde::{Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// リスナースレッドがホットキーのイベントを待つ時間。
+/// リスナースレッドがキー入力を待つ時間。
 ///
 /// タイムアウトするたびに終了要求を確認するため、終了を要求してから
 /// スレッドが実際に止まるまで最大でこの時間かかる。待つのはウィンドウを
-/// 閉じたあとなので、画面上は見えない。
-const LISTENER_RECV_TIMEOUT: Duration = Duration::from_millis(200);
+/// 閉じたあとなので、画面上は見えない。キー入力があればタイムアウトを
+/// 待たずに起きるので、押下の反応はこの長さに左右されない。
+const LISTENER_WAIT_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// 同じアクションの連続実行を無視する時間。
 /// キーリピートで何枚も撮れてしまうのを防ぐ。
 const HOTKEY_DEBOUNCE: Duration = Duration::from_millis(200);
 
-/// グローバルホットキーで実行できるアクション。
+/// ホットキーで実行できるアクション。
 ///
 /// **順序が設定ファイルのキーの並び順と、設定画面の一覧の並び順になる。**
 /// `BTreeMap` のキーとして使うため `Ord` を導出しており、その順序は
@@ -171,14 +169,8 @@ pub enum HotkeyError {
     UnsupportedKey(String),
     /// 同じキーが既に別のアクションへ割り当てられている
     DuplicateAssignment { other: HotkeyAction },
-    /// global-hotkey のマネージャーを作れない
-    ManagerUnavailable(String),
-    /// 作ったはずのマネージャーが見つからない。通常は起きない
-    ManagerMissing,
-    /// OS への登録に失敗した（他のアプリが同じキーを使っている場合など）
-    RegisterFailed(String),
-    /// 試し登録したホットキーを解除できない
-    UnregisterFailed(String),
+    /// 押下を観測するキーボードフックを使えない
+    HookUnavailable(KeyboardHookError),
 }
 
 impl fmt::Display for HotkeyError {
@@ -190,20 +182,9 @@ impl fmt::Display for HotkeyError {
             HotkeyError::DuplicateAssignment { other } => {
                 write!(f, "同じキーが「{}」に割り当てられています", other.label())
             }
-            // 下の ManagerMissing と同じ文言。ユーザーから見ればどちらも
-            // 「仕組みを用意できていない」で、区別しても打つ手が変わらない
-            HotkeyError::ManagerUnavailable(source) => {
+            HotkeyError::HookUnavailable(source) => {
                 write!(f, "ホットキーの仕組みを初期化できません: {source}")
             }
-            HotkeyError::ManagerMissing => write!(f, "ホットキーの仕組みを初期化できません"),
-            HotkeyError::RegisterFailed(source) => write!(
-                f,
-                "登録できません（他のアプリと競合している可能性があります）: {source}"
-            ),
-            HotkeyError::UnregisterFailed(source) => write!(
-                f,
-                "試し登録したホットキーを解除できません。もう一度お試しください: {source}"
-            ),
         }
     }
 }
@@ -262,21 +243,18 @@ enum PressRouting {
     Background,
     /// デバウンス期間内なので捨てる
     Debounced,
+    /// 「フォーカスがあるときだけ反応する」がオンで、フォーカスが無いので捨てる
+    Unfocused,
 }
 
 /// リスナースレッドと共有する状態。
 ///
-/// **登録中の ID と押下の記録を 1 つのロックにまとめてある。** 別々に持つと、
-/// リスナーが ID を照合してから押下を記録するまでの隙に解除処理が終わり、
+/// **登録中の組み合わせと押下の記録を 1 つのロックにまとめてある。** 別々に持つと、
+/// リスナーが組み合わせを照合してから押下を記録するまでの隙に解除処理が終わり、
 /// 解除したはずのキーで 1 回だけ実行されることがある。
-#[derive(Default)]
 struct ListenerState {
-    /// 登録中のホットキー ID → アクション。
-    ///
-    /// 未登録を空のマップで表す。global-hotkey の ID は修飾キーとキー名から
-    /// 作るハッシュなので 0 も正規の値になりうる。番兵の数値で未登録を表すと、
-    /// たまたまその値になったホットキーだけが効かなくなる。
-    registered: HashMap<u32, HotkeyAction>,
+    /// 登録中のキーの組み合わせ → アクション。未登録は空のマップで表す。
+    registered: HashMap<KeyChord, HotkeyAction>,
     /// リスナーが検出した押下の回数。UI スレッドが毎フレーム取り出して空にする。
     ///
     /// **集合ではなく回数で持つ。** 最小化している間は `update()` が呼ばれず
@@ -295,6 +273,14 @@ struct ListenerState {
     /// 最小化中は `update()` が呼ばれないので、ここが真のまま止まる。
     /// それが狙いで、リスナーは真の間だけ `background` へ回す。
     minimized: bool,
+    /// ウィンドウにキーボードフォーカスがあるか。UI スレッドが毎フレーム書き込む。
+    ///
+    /// **フックの中で `GetForegroundWindow` を呼んで調べない。** フックの
+    /// コールバックでは判定以外のことをしない決まり（`crate::keyboard_hook`）
+    /// なので、`minimized` と同じく UI スレッドが知っている値を書いておく。
+    focused: bool,
+    /// 「フォーカスがあるときだけ反応する」がオンか。設定の反映のたびに書く。
+    only_when_focused: bool,
     /// 最小化中のアクションの実行先。
     background: BackgroundHotkeyRunner,
     /// 押下を記録したあとに UI スレッドを起こす窓口。
@@ -308,13 +294,38 @@ struct ListenerState {
     waker: RepaintWaker,
 }
 
+impl Default for ListenerState {
+    fn default() -> Self {
+        Self {
+            registered: HashMap::new(),
+            pressed: BTreeMap::new(),
+            last_press: HashMap::new(),
+            minimized: false,
+            // 最初の update() が書くまでの間は「フォーカスあり」に倒す。
+            // 起動直後はたいてい自分が前面にいる
+            focused: true,
+            // 既定はオフ。#133 のとおり、他のアプリの操作中や最小化中も効かせる
+            only_when_focused: false,
+            background: BackgroundHotkeyRunner::default(),
+            waker: RepaintWaker::default(),
+        }
+    }
+}
+
 impl ListenerState {
     /// 受け付けた押下を記録し、どこで実行するかを返す。
     ///
     /// デバウンスの判定もここで行う。抑止した場合に `last_press` を
     /// 更新しないのは、押しっぱなしのキーリピートで抑止が延々と続き、
     /// いつまでも実行できない状態にしないため（`decide_trigger`）。
+    ///
+    /// 「フォーカスがあるときだけ反応する」がオンで前面にいないときは、
+    /// デバウンスの基準も更新せずに捨てる。最小化中は前面にいないものとして扱う。
     fn record_press(&mut self, action: HotkeyAction, now: Instant) -> PressRouting {
+        if self.only_when_focused && (!self.focused || self.minimized) {
+            return PressRouting::Unfocused;
+        }
+
         let since_last = self
             .last_press
             .get(&action)
@@ -332,15 +343,23 @@ impl ListenerState {
     }
 }
 
-/// グローバルホットキーの登録と押下の検出。
+/// ホットキーの登録と押下の検出。
+///
+/// **押下は低レベルキーボードフックで観測し、キーを奪わない**
+/// （`crate::keyboard_hook`、#202）。ここでの「登録」は OS へ登録することでは
+/// なく、リスナーが照合に使う表へ載せることを指す。
 ///
 /// **UI スレッドだけが触るので `Mutex` で包まない。** リスナースレッドと
 /// 共有するのは内部の `Arc<Mutex<ListenerState>>` だけで、そこには
-/// 登録中の ID と押下の記録しか入っていない。
+/// 登録中の組み合わせと押下の記録しか入っていない。
 pub struct HotkeyManager {
-    manager: Option<GlobalHotKeyManager>,
-    /// 登録に成功しているアクション → (ホットキー文字列, 登録した HotKey)
-    registered: BTreeMap<HotkeyAction, (String, HotKey)>,
+    /// フックを使えないときの理由。使えていれば `None`。
+    ///
+    /// リスナーの起動時に 1 度だけ決まる。使えないときは、割り当てのたびに
+    /// この理由で失敗として記録し、設定画面とトーストに出す。
+    hook_error: Option<KeyboardHookError>,
+    /// 登録に成功しているアクション → (ホットキー文字列, キーの組み合わせ)
+    registered: BTreeMap<HotkeyAction, (String, KeyChord)>,
     /// 登録できなかったアクション → 理由
     errors: BTreeMap<HotkeyAction, HotkeyAssignmentError>,
     state: Arc<Mutex<ListenerState>>,
@@ -359,11 +378,11 @@ pub struct HotkeyManager {
 // ホットキー文字列の解析。`HotkeyManager` の状態に依存しないためフリー関数に
 // してある（ユニットテストから直接呼べるようにするため）。
 
-/// `"F5"` や `"Ctrl+Shift+A"` のような文字列を `HotKey` に変換する。
+/// `"F5"` や `"Ctrl+Shift+A"` のような文字列を `KeyChord` に変換する。
 ///
 /// 修飾キーだけの指定（`"Ctrl+Shift"` など）と、通常キーを 2 つ以上含む指定
 /// （`"Ctrl+A+B"` など）は登録できないため、エラーにする。
-fn parse_hotkey(hotkey_str: &str) -> Result<HotKey, HotkeyError> {
+fn parse_hotkey(hotkey_str: &str) -> Result<KeyChord, HotkeyError> {
     let parts: Vec<&str> = hotkey_str.split('+').collect();
     let mut modifiers = Modifiers::empty();
     let mut key_code = None;
@@ -376,7 +395,7 @@ fn parse_hotkey(hotkey_str: &str) -> Result<HotKey, HotkeyError> {
             "shift" => modifiers |= Modifiers::SHIFT,
             "win" | "windows" | "super" => modifiers |= Modifiers::SUPER,
             key => {
-                // HotKey が持てる通常キーは 1 つだけ。黙って上書きすると
+                // 組み合わせが持てる通常キーは 1 つだけ。黙って上書きすると
                 // "Ctrl+A+B" が "Ctrl+B" として登録され、設定した覚えのない
                 // キーが効いてしまうため、2 つ目を見つけた時点で弾く
                 if key_code.is_some() {
@@ -387,87 +406,66 @@ fn parse_hotkey(hotkey_str: &str) -> Result<HotKey, HotkeyError> {
         }
     }
 
-    let code = key_code.ok_or(HotkeyError::MissingKey)?;
-    Ok(HotKey::new(Some(modifiers), code))
+    let vk = key_code.ok_or(HotkeyError::MissingKey)?;
+    Ok(KeyChord { modifiers, vk })
 }
 
-/// 単一のキー名を `Code` に変換する。大文字小文字と前後の空白は無視する。
-fn parse_key_code(key: &str) -> Result<Code, HotkeyError> {
+// Win32 の仮想キーコード。英字と数字は ASCII の大文字・数字と同じ値。
+const VK_RETURN: u32 = 0x0D;
+const VK_ESCAPE: u32 = 0x1B;
+const VK_SPACE: u32 = 0x20;
+const VK_F1: u32 = 0x70;
+
+/// 単一のキー名を仮想キーコードに変換する。大文字小文字と前後の空白は無視する。
+///
+/// 受け付けるキー名は global-hotkey を使っていたころと同じ
+/// （F1〜F12、A〜Z、0〜9、Space、Enter、Escape）。
+fn parse_key_code(key: &str) -> Result<u32, HotkeyError> {
     let normalized = key.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "f1" => Ok(Code::F1),
-        "f2" => Ok(Code::F2),
-        "f3" => Ok(Code::F3),
-        "f4" => Ok(Code::F4),
-        "f5" => Ok(Code::F5),
-        "f6" => Ok(Code::F6),
-        "f7" => Ok(Code::F7),
-        "f8" => Ok(Code::F8),
-        "f9" => Ok(Code::F9),
-        "f10" => Ok(Code::F10),
-        "f11" => Ok(Code::F11),
-        "f12" => Ok(Code::F12),
-        "a" => Ok(Code::KeyA),
-        "b" => Ok(Code::KeyB),
-        "c" => Ok(Code::KeyC),
-        "d" => Ok(Code::KeyD),
-        "e" => Ok(Code::KeyE),
-        "f" => Ok(Code::KeyF),
-        "g" => Ok(Code::KeyG),
-        "h" => Ok(Code::KeyH),
-        "i" => Ok(Code::KeyI),
-        "j" => Ok(Code::KeyJ),
-        "k" => Ok(Code::KeyK),
-        "l" => Ok(Code::KeyL),
-        "m" => Ok(Code::KeyM),
-        "n" => Ok(Code::KeyN),
-        "o" => Ok(Code::KeyO),
-        "p" => Ok(Code::KeyP),
-        "q" => Ok(Code::KeyQ),
-        "r" => Ok(Code::KeyR),
-        "s" => Ok(Code::KeyS),
-        "t" => Ok(Code::KeyT),
-        "u" => Ok(Code::KeyU),
-        "v" => Ok(Code::KeyV),
-        "w" => Ok(Code::KeyW),
-        "x" => Ok(Code::KeyX),
-        "y" => Ok(Code::KeyY),
-        "z" => Ok(Code::KeyZ),
-        "0" => Ok(Code::Digit0),
-        "1" => Ok(Code::Digit1),
-        "2" => Ok(Code::Digit2),
-        "3" => Ok(Code::Digit3),
-        "4" => Ok(Code::Digit4),
-        "5" => Ok(Code::Digit5),
-        "6" => Ok(Code::Digit6),
-        "7" => Ok(Code::Digit7),
-        "8" => Ok(Code::Digit8),
-        "9" => Ok(Code::Digit9),
-        "space" => Ok(Code::Space),
-        "enter" => Ok(Code::Enter),
-        "escape" => Ok(Code::Escape),
+        "f1" => Ok(VK_F1),
+        "f2" => Ok(VK_F1 + 1),
+        "f3" => Ok(VK_F1 + 2),
+        "f4" => Ok(VK_F1 + 3),
+        "f5" => Ok(VK_F1 + 4),
+        "f6" => Ok(VK_F1 + 5),
+        "f7" => Ok(VK_F1 + 6),
+        "f8" => Ok(VK_F1 + 7),
+        "f9" => Ok(VK_F1 + 8),
+        "f10" => Ok(VK_F1 + 9),
+        "f11" => Ok(VK_F1 + 10),
+        "f12" => Ok(VK_F1 + 11),
+        "space" => Ok(VK_SPACE),
+        "enter" => Ok(VK_RETURN),
+        "escape" => Ok(VK_ESCAPE),
+        // 英字 1 文字と数字 1 文字。仮想キーコードは大文字と数字の ASCII と同じ
+        single if single.len() == 1 && is_letter_or_digit(single.as_bytes()[0]) => {
+            Ok(u32::from(single.as_bytes()[0].to_ascii_uppercase()))
+        }
         _ => Err(HotkeyError::UnsupportedKey(key.to_string())),
     }
 }
 
-/// 受け取ったイベントを、どのアクションの押下として扱うか。
+/// 1 文字のキー名として受け付ける文字か（小文字化したあとの英字と数字）。
+fn is_letter_or_digit(c: u8) -> bool {
+    c.is_ascii_lowercase() || c.is_ascii_digit()
+}
+
+/// 観測した押下を、どのアクションの押下として扱うか。
 ///
 /// リスナースレッドはアプリ全体で 1 本だけ動いており、まだ何も登録していない
-/// 間もイベントチャネルを待っている。判定に必要なものを引数で受け取る
+/// 間も全てのキー入力を観測している。判定に必要なものを引数で受け取る
 /// 純粋関数にしてあるのは、実機のキー入力なしでテストするため。
 ///
-/// - 登録していない ID なら無視する。ホットキーを切り替えた直後は、解除した
-///   古いキーのイベントがチャネルに残っていることがある
-/// - 解放（`Released`）は無視する。押下だけを 1 回として数える
+/// - 登録していない組み合わせなら無視する。他のアプリへ打っている文字も
+///   全てここを通る
+/// - 修飾キーは完全一致で比べる（`F5` の割り当ては `Ctrl+F5` では反応しない）。
+///   解放とキーリピートはフックの側で落としてある
 fn accepted_action(
-    registered: &HashMap<u32, HotkeyAction>,
-    event_id: u32,
-    state: HotKeyState,
+    registered: &HashMap<KeyChord, HotkeyAction>,
+    chord: KeyChord,
 ) -> Option<HotkeyAction> {
-    if state != HotKeyState::Pressed {
-        return None;
-    }
-    registered.get(&event_id).copied()
+    registered.get(&chord).copied()
 }
 
 /// 押下を受け取ったときの判断。
@@ -492,126 +490,157 @@ fn decide_trigger(since_last_trigger: Option<Duration>, debounce: Duration) -> T
     }
 }
 
-/// ホットキーのイベントを待つスレッドを 1 本起動する。
+/// 観測した押下 1 回ぶんを処理する。リスナースレッドから呼ばれる。
 ///
-/// `GlobalHotKeyEvent::receiver()` が返すのはプロセスに 1 つしかないチャネルなので、
-/// リスナーもアプリ全体で 1 本だけにする。`recv_timeout` でブロックして待ち、
-/// タイムアウトしたときにだけ終了要求を確認する。
-fn spawn_listener(state: Arc<Mutex<ListenerState>>, shutdown: Arc<AtomicBool>) -> JoinHandle<()> {
-    std::thread::spawn(move || {
-        debug!("ホットキーのリスナースレッドを開始した");
-        let channel = GlobalHotKeyEvent::receiver();
-
-        loop {
-            if shutdown.load(Ordering::Acquire) {
-                break;
+/// **この間は次のキー入力のフックが待たされる**（他のアプリの入力も
+/// 待たされる）。ロックは照合と記録のあいだだけ握り、UI スレッドを起こす
+/// ことと最小化中の実行はロックを手放してから行う。
+fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord) {
+    // **照合と押下の記録を同じロックの中で行う。**
+    // ロックを手放してから記録すると、その隙に解除処理が
+    // 「組み合わせを消す → 押下を落とす」を終えてしまい、
+    // クリアしたはずのキーで 1 回だけ実行されることがある。
+    // ログはロックを手放してから出す（trace ではファイルへの
+    // 書き出しが入るため、その間ロックを握らない）
+    //
+    // 押下を記録したときに UI スレッドを起こすための複製と、
+    // 最小化中にその場で実行するための複製。
+    // **どちらもロックを手放してから呼ぶ。** 握ったまま呼ぶと、
+    // 相手を待つ間この共有状態も止まる
+    let mut wake = None;
+    let mut background = None;
+    let outcome = match state.lock() {
+        Ok(mut state) => accepted_action(&state.registered, chord).map(|action| {
+            let routing = state.record_press(action, Instant::now());
+            match routing {
+                PressRouting::Deferred => wake = Some(state.waker.clone()),
+                PressRouting::Background => background = Some((state.background.clone(), action)),
+                PressRouting::Debounced | PressRouting::Unfocused => {}
             }
+            (action, routing)
+        }),
+        Err(_) => {
+            // release ビルドは panic = "abort" なので毒されない
+            warn!("ホットキーの共有状態のロックを取得できないので押下を捨てる");
+            None
+        }
+    };
 
-            match channel.recv_timeout(LISTENER_RECV_TIMEOUT) {
-                Ok(event) => {
-                    // 押下・解放のたびに流れるので trace に落とす
-                    trace!(
-                        "ホットキーのイベントを受信した: ID={}、State={:?}",
-                        event.id(),
-                        event.state()
-                    );
+    if let Some(waker) = wake {
+        waker.wake();
+    }
+    if let Some((runner, action)) = background {
+        // 最小化中なので UI スレッドは動いていない。
+        // 復帰を待たずにここから実行させる（#133）
+        debug!("最小化中の {} をワーカーへ回す", action.label());
+        runner.run(action);
+    }
 
-                    // **ID の照合と押下の記録を同じロックの中で行う。**
-                    // ロックを手放してから記録すると、その隙に解除処理が
-                    // 「ID を消す → 押下を落とす」を終えてしまい、
-                    // クリアしたはずのキーで 1 回だけ実行されることがある。
-                    // ログはロックを手放してから出す（trace ではファイルへの
-                    // 書き出しが入るため、その間ロックを握らない）
-                    // 押下を記録したときに UI スレッドを起こすための複製と、
-                    // 最小化中にその場で実行するための複製。
-                    // **どちらもロックを手放してから呼ぶ。** 握ったまま呼ぶと、
-                    // 相手を待つ間この共有状態も止まる
-                    let mut wake = None;
-                    let mut background = None;
-                    let outcome = match state.lock() {
-                        Ok(mut state) => {
-                            let action =
-                                accepted_action(&state.registered, event.id(), event.state());
-                            let routing = action.map(|action| {
-                                let routing = state.record_press(action, Instant::now());
-                                match routing {
-                                    PressRouting::Deferred => wake = Some(state.waker.clone()),
-                                    PressRouting::Background => {
-                                        background = Some((state.background.clone(), action))
-                                    }
-                                    PressRouting::Debounced => {}
-                                }
-                                (action, routing)
-                            });
-                            Some(routing)
-                        }
-                        Err(_) => {
-                            // release ビルドは panic = "abort" なので毒されない
-                            warn!("ホットキーの共有状態のロックを取得できないのでイベントを捨てる");
-                            None
-                        }
-                    };
+    // 割り当てていないキー（他のアプリへ打っている文字）は何も出さない。
+    // 全てのキー入力がここを通るので、trace でも積もりすぎる
+    match outcome {
+        Some((action, PressRouting::Deferred)) => {
+            trace!("{} の押下を記録した", action.label())
+        }
+        Some((action, PressRouting::Background)) => {
+            trace!("{} を最小化中のまま実行した", action.label())
+        }
+        Some((action, PressRouting::Debounced)) => trace!(
+            "デバウンスにより {} の押下を捨てた（{}ms 以内）",
+            action.label(),
+            HOTKEY_DEBOUNCE.as_millis()
+        ),
+        Some((action, PressRouting::Unfocused)) => {
+            trace!("フォーカスが無いので {} の押下を捨てた", action.label())
+        }
+        None => {}
+    }
+}
 
-                    if let Some(waker) = wake {
-                        waker.wake();
-                    }
-                    if let Some((runner, action)) = background {
-                        // 最小化中なので UI スレッドは動いていない。
-                        // 復帰を待たずにここから実行させる（#133）
-                        debug!("最小化中の {} をワーカーへ回す", action.label());
-                        runner.run(action);
-                    }
+/// キー入力を観測するスレッドを 1 本起動する。
+///
+/// 低レベルキーボードフックはこのスレッドに登録し、このスレッドの
+/// メッセージループの中で呼ばれる。**リスナーはアプリ全体で 1 本だけにする。**
+/// 何本も作ると 1 回のキー入力が全てのフックを順に通り、他のアプリの入力を
+/// そのぶん遅らせる。
+///
+/// フックを登録できたかどうかを待ってから返す。登録できなかったときは
+/// スレッドはすぐに終わり、理由を返す。
+fn spawn_listener(
+    state: Arc<Mutex<ListenerState>>,
+    shutdown: Arc<AtomicBool>,
+) -> (JoinHandle<()>, Result<(), KeyboardHookError>) {
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let handle = std::thread::spawn(move || {
+        debug!("ホットキーのリスナースレッドを開始した");
 
-                    match outcome {
-                        Some(Some((action, PressRouting::Deferred))) => {
-                            trace!("{} の押下を記録した", action.label())
-                        }
-                        Some(Some((action, PressRouting::Background))) => {
-                            trace!("{} を最小化中のまま実行した", action.label())
-                        }
-                        Some(Some((action, PressRouting::Debounced))) => trace!(
-                            "デバウンスにより {} の押下を捨てた（{}ms 以内）",
-                            action.label(),
-                            HOTKEY_DEBOUNCE.as_millis()
-                        ),
-                        Some(None) => trace!("対象外のイベントなので無視する"),
-                        None => {}
-                    }
-                }
-                Err(e) if e.is_disconnected() => {
-                    // 送信側は global-hotkey の static なので通常は起きない。
-                    // 切断された状態で recv_timeout を呼ぶと待たずに返り続けるため、
-                    // 全力で回り続けないようここで抜ける
-                    warn!("ホットキーのイベントチャネルが切断されたのでリスナーを終了する");
-                    break;
-                }
-                Err(_) => {
-                    // タイムアウト。ループの先頭で終了要求を確認する
-                }
+        let hook = match KeyboardHook::install() {
+            Ok(hook) => {
+                // 受け手（spawn_listener）は結果を受け取るまで待っているので、
+                // 送れないことはない
+                let _ = ready_tx.send(Ok(()));
+                hook
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+                debug!("キーボードフックを登録できないのでリスナースレッドを終える");
+                return;
+            }
+        };
+
+        while !shutdown.load(Ordering::Acquire) {
+            let pumped = hook.pump(LISTENER_WAIT_TIMEOUT, |chord| {
+                handle_key_down(&state, chord)
+            });
+            if !pumped {
+                // 待てないまま回り続けると CPU を使い切るので抜ける。
+                // 以降ホットキーは効かなくなるが、他のアプリの入力は妨げない
+                error!(
+                    "ホットキーのリスナーがキー入力を待てないので終了する: {}",
+                    std::io::Error::last_os_error()
+                );
+                break;
             }
         }
 
+        // ここでフックを外す
+        drop(hook);
         debug!("ホットキーのリスナースレッドを終了した");
-    })
+    });
+
+    // スレッドが結果を送る前に終わった場合（起動直後のパニック）だけ受け取れない
+    let ready = ready_rx
+        .recv()
+        .unwrap_or(Err(KeyboardHookError::ListenerStopped));
+    (handle, ready)
 }
 
 impl HotkeyManager {
     /// ホットキーのリスナースレッドを起動して `HotkeyManager` を作る。
     ///
-    /// この時点ではまだ何も登録していないので、リスナーは受け取ったイベントを
+    /// この時点ではまだ何も登録していないので、リスナーは観測した押下を
     /// すべて捨てる。登録は `apply` が行う。
     /// スレッドを止めるのは `Drop` だけなので、**アプリ全体で 1 つだけ作ること。**
+    ///
+    /// キーボードフックを登録できたかを待ってから返す（数 ms）。
     pub fn new() -> Self {
         let state = Arc::new(Mutex::new(ListenerState::default()));
         let listener_shutdown = Arc::new(AtomicBool::new(false));
 
         // リスナーはここで 1 本だけ起動し、登録のたびには作り直さない。
-        // イベントチャネルはプロセスに 1 つしかないので、複数のスレッドで
-        // 待つとどちらがイベントを取るか決まらない
-        let listener = spawn_listener(Arc::clone(&state), Arc::clone(&listener_shutdown));
+        // フックはリスナースレッドに紐づくので、作り直すとフックも
+        // 付け直しになり、その間のキー入力を取りこぼす
+        let (listener, ready) = spawn_listener(Arc::clone(&state), Arc::clone(&listener_shutdown));
+        let hook_error = match ready {
+            Ok(()) => None,
+            Err(e) => {
+                error!("ホットキーのキーボードフックを登録できない: {}", e);
+                Some(e)
+            }
+        };
 
         Self {
-            manager: None,
+            hook_error,
             registered: BTreeMap::new(),
             errors: BTreeMap::new(),
             state,
@@ -643,16 +672,38 @@ impl HotkeyManager {
         }
     }
 
-    /// ウィンドウが最小化されているかを伝える。**毎フレーム呼ぶ。**
+    /// ウィンドウが最小化されているか、キーボードフォーカスがあるかを伝える。
+    /// **毎フレーム呼ぶ。**
     ///
     /// 最小化すると `update()` が呼ばれなくなるので、最後に書き込んだ値が
     /// そのまま残る。リスナーはその値を見て、画面の要らないアクションだけを
-    /// `BackgroundHotkeyRunner` へ回す（#133）。
-    pub fn set_minimized(&mut self, minimized: bool) {
+    /// `BackgroundHotkeyRunner` へ回す（#133）。フォーカスは「フォーカスが
+    /// あるときだけ反応する」がオンのときの判定に使う（#202）。
+    pub fn set_window_state(&mut self, minimized: bool, focused: bool) {
         match self.state.lock() {
-            Ok(mut state) => state.minimized = minimized,
+            Ok(mut state) => {
+                state.minimized = minimized;
+                state.focused = focused;
+            }
             // 最小化中のアクションが復帰まで保留されるだけで、検出は続く
-            Err(_) => warn!("ホットキーの共有状態のロックを取得できないので最小化を伝えられない"),
+            Err(_) => {
+                warn!(
+                    "ホットキーの共有状態のロックを取得できないのでウィンドウの状態を伝えられない"
+                )
+            }
+        }
+    }
+
+    /// 「フォーカスがあるときだけ反応する」を切り替える。
+    ///
+    /// 設定の反映（`apply_settings`）のたびに呼ばれる。値を書くだけなので
+    /// 何度呼んでもよい。
+    pub fn set_only_when_focused(&mut self, only_when_focused: bool) {
+        match self.state.lock() {
+            Ok(mut state) => state.only_when_focused = only_when_focused,
+            Err(_) => warn!(
+                "ホットキーの共有状態のロックを取得できないのでフォーカスの扱いを切り替えられない"
+            ),
         }
     }
 
@@ -662,8 +713,8 @@ impl HotkeyManager {
     /// 登録し直すとその瞬間のキー入力を取りこぼす。
     ///
     /// 登録できなかったアクションは `registered` に入らないので、次に呼ばれた
-    /// ときに再試行する。他のアプリがキーを離せば、操作しなくても効くようになる。
-    /// ログは理由が変わったときだけ出す（同じ失敗が 2 秒ごとに積もらないように）。
+    /// ときに再試行する。ログは理由が変わったときだけ出す（同じ失敗が
+    /// 2 秒ごとに積もらないように）。
     pub fn apply(&mut self, desired: &BTreeMap<HotkeyAction, String>) {
         // 一時停止中は何もしない。ホットキー入力ダイアログを開いている間に
         // 2 秒ごとの再適用が割り込むと、解除したはずのキーが登録し直されてしまう
@@ -744,8 +795,10 @@ impl HotkeyManager {
 
     /// 登録中のホットキーをすべて一時解除する。ホットキー入力ダイアログを開くときに使う。
     ///
-    /// **押しても効かなくなるのはグローバルホットキーだけ。** リスナースレッドは
-    /// 止めない（止めると再開が重くなるうえ、アプリ全体で 1 本という前提が崩れる）。
+    /// 解除しないと、割り当て済みのキーを押して付け直そうとしたときに、
+    /// そのアクションまで実行されてしまう。**リスナースレッドとフックは
+    /// 止めない**（止めると再開が重くなるうえ、アプリ全体で 1 本という前提が
+    /// 崩れる）。照合に使う表を空にするだけ。
     ///
     /// 既に一時停止中なら何もしない。二重に呼んでも安全にしておくことで、
     /// 呼び出し側でダイアログの開閉検出が多少ずれても壊れない。
@@ -759,7 +812,7 @@ impl HotkeyManager {
         for action in actions {
             self.unregister(action);
         }
-        info!("ホットキー入力ダイアログのためグローバルホットキーを一時解除した");
+        info!("ホットキー入力ダイアログのためホットキーを一時解除した");
     }
 
     /// 一時停止を終え、`desired` の内容で登録し直す。
@@ -771,59 +824,24 @@ impl HotkeyManager {
             return;
         }
         self.paused = false;
-        info!("グローバルホットキーの一時解除を終える");
+        info!("ホットキーの一時解除を終える");
         self.apply(desired);
     }
 
-    /// 候補のホットキーを実際に登録できるか試す。
+    /// 候補のホットキーを登録できるか確かめる。
     ///
-    /// ホットキー入力ダイアログでキーが確定したときに使う。**`pause` で
-    /// 自分自身の登録をすべて解除したあとに呼ぶことを想定している。** そうして
-    /// おけば、ここでの試し登録が自分の他のアクションと衝突することはなく、
-    /// 純粋に「他のアプリと競合していないか」だけを確かめられる。
+    /// ホットキー入力ダイアログでキーが確定したときに使う。見るのは
+    /// 「解釈できるか」と「キーボードフックを使えているか」の 2 つだけで、
+    /// ここでは何も登録しない。実際に使い続けるための登録は、この呼び出しの
+    /// あとに行う `resume` が行う。
     ///
-    /// 登録に成功したら直ちに解除する。ここでの登録は `registered` へ記録しない。
-    /// 実際に使い続けるための登録は、この呼び出しのあとに行う `resume` が行う。
-    pub fn try_register(&mut self, hotkey_str: &str) -> Result<(), HotkeyError> {
-        let hotkey = parse_hotkey(hotkey_str)?;
-
-        self.create_manager_if_needed()?;
-
-        let Some(manager) = &self.manager else {
-            // 直前に作っているので通常は来ない
-            return Err(HotkeyError::ManagerMissing);
-        };
-
-        match manager.register(hotkey) {
-            Ok(()) => match manager.unregister(hotkey) {
-                Ok(()) => Ok(()),
-                // 解除に失敗すると、OS 側にはまだこの試し登録が残ったままになる。
-                // ここを成功扱いにすると、呼び出し側が候補を受理してダイアログを
-                // 閉じ、resume でも同じキーを登録しようとして「二重登録」で
-                // 失敗する。**解除できるまで候補を受理させない。**
-                Err(e) => Err(HotkeyError::UnregisterFailed(e.to_string())),
-            },
-            Err(e) => Err(HotkeyError::RegisterFailed(e.to_string())),
-        }
-    }
-
-    /// まだ作っていなければ global-hotkey のマネージャーを作る。
-    ///
-    /// **作ったものを返さず `self.manager` へ置くだけにしてある。** 参照を
-    /// 返すと `&mut self` の借用が呼び出し側の分岐の間ずっと生き、失敗を
-    /// `record_error` で記録する経路（`register`）が借用検査に通らない。
-    fn create_manager_if_needed(&mut self) -> Result<(), HotkeyError> {
-        if self.manager.is_some() {
-            return Ok(());
-        }
-
-        debug!("ホットキーマネージャーを作成する");
-        match GlobalHotKeyManager::new() {
-            Ok(manager) => {
-                self.manager = Some(manager);
-                Ok(())
-            }
-            Err(e) => Err(HotkeyError::ManagerUnavailable(e.to_string())),
+    /// **他のアプリとの競合は起きない。** キーを奪わずに観測するだけなので、
+    /// 他のアプリが同じキーを使っていても両方が反応する（#202）。
+    pub fn try_register(&self, hotkey_str: &str) -> Result<(), HotkeyError> {
+        parse_hotkey(hotkey_str)?;
+        match &self.hook_error {
+            Some(e) => Err(HotkeyError::HookUnavailable(e.clone())),
+            None => Ok(()),
         }
     }
 
@@ -837,11 +855,11 @@ impl HotkeyManager {
             }
         };
 
-        // 同じキーを 2 つのアクションへ割り当てると、どちらのイベントなのか
-        // ID から区別できない。設定画面でも警告するが、設定ファイルを手で
+        // 同じキーを 2 つのアクションへ割り当てると、どちらの押下なのか
+        // 区別できない。設定画面でも警告するが、設定ファイルを手で
         // 書き換えられる前提でここでも弾く。先に登録したほう（宣言順で先の
         // アクション）を残す
-        if let Some(other) = self.action_for_id(hotkey.id()) {
+        if let Some(other) = self.action_for_chord(hotkey) {
             self.record_error(
                 action,
                 hotkey_str,
@@ -850,39 +868,18 @@ impl HotkeyManager {
             return;
         }
 
-        if let Err(e) = self.create_manager_if_needed() {
-            self.record_error(action, hotkey_str, e);
+        // フックが無ければ押下を観測できない。表に載せても効かないので、
+        // 理由を残して設定画面とトーストに出す
+        if let Some(e) = &self.hook_error {
+            let reason = HotkeyError::HookUnavailable(e.clone());
+            self.record_error(action, hotkey_str, reason);
             return;
         }
 
-        let Some(manager) = &self.manager else {
-            // 直前に作っているので通常は来ない
-            return;
-        };
-
-        // F11/F12 は他のアプリと取り合いになりやすい。登録自体は成功しても
-        // 効かないことがあるので、不具合報告から切り分けられるよう残す
-        let lowered = hotkey_str.to_lowercase();
-        if lowered == "f11" || lowered == "f12" {
-            info!(
-                "{} をグローバルホットキーとして登録する。他のアプリが使っていないか確認すること",
-                hotkey_str
-            );
-        }
-
-        if let Err(e) = manager.register(hotkey) {
-            self.record_error(
-                action,
-                hotkey_str,
-                HotkeyError::RegisterFailed(e.to_string()),
-            );
-            return;
-        }
-
-        // リスナーが照合に使う ID を足す
+        // リスナーが照合に使う組み合わせを足す
         match self.state.lock() {
             Ok(mut state) => {
-                state.registered.insert(hotkey.id(), action);
+                state.registered.insert(hotkey, action);
             }
             Err(_) => warn!("ホットキーの共有状態のロックを取得できない"),
         }
@@ -890,12 +887,7 @@ impl HotkeyManager {
         self.registered
             .insert(action, (hotkey_str.to_string(), hotkey));
         self.errors.remove(&action);
-        info!(
-            "{} に {} を割り当てた（ID: {}）",
-            action.label(),
-            hotkey_str,
-            hotkey.id()
-        );
+        info!("{} に {} を割り当てた", action.label(), hotkey_str);
     }
 
     /// 1 つのアクションの登録を解除する。登録していなければ何もしない。
@@ -904,34 +896,24 @@ impl HotkeyManager {
             return;
         };
 
-        // 先に共有している ID を消す。解除が終わるまでの間に届いたイベントを
-        // 押下として扱わないため。**同じロックの中で保留中の押下も落とす。**
+        // 照合に使う組み合わせを消す。**同じロックの中で保留中の押下も落とす。**
         // 別々のロックで行うと、クリアした直後のフレームで 1 回だけ実行される
         match self.state.lock() {
             Ok(mut state) => {
-                state.registered.remove(&hotkey.id());
+                state.registered.remove(&hotkey);
                 state.pressed.remove(&action);
             }
             Err(_) => warn!("ホットキーの共有状態のロックを取得できない"),
         }
 
-        info!("{} の {} の割り当てを解除する", action.label(), hotkey_str);
-
-        let Some(manager) = &self.manager else {
-            return;
-        };
-        if let Err(e) = manager.unregister(hotkey) {
-            // 解除できなくても新しいホットキーの登録は続けられるので、
-            // 失敗しても止めない。原因が追えるようログには残す
-            warn!("古いホットキーを登録解除できない: {}", e);
-        }
+        info!("{} の {} の割り当てを解除した", action.label(), hotkey_str);
     }
 
-    /// その ID を既に使っているアクション。
-    fn action_for_id(&self, id: u32) -> Option<HotkeyAction> {
+    /// その組み合わせを既に使っているアクション。
+    fn action_for_chord(&self, chord: KeyChord) -> Option<HotkeyAction> {
         self.registered
             .iter()
-            .find(|(_, (_, hotkey))| hotkey.id() == id)
+            .find(|(_, (_, hotkey))| *hotkey == chord)
             .map(|(action, _)| *action)
     }
 
@@ -975,9 +957,10 @@ impl Drop for HotkeyManager {
             return;
         };
 
-        // 終了要求は recv_timeout のタイムアウトで拾うため、待ち時間は
-        // 最大で LISTENER_RECV_TIMEOUT。ウィンドウを閉じたあとの待ちなので
-        // 画面上は見えない。切り離すとプロセスが終わるまでスレッドが残る
+        // 終了要求は待ちのタイムアウトで拾うため、待ち時間は
+        // 最大で LISTENER_WAIT_TIMEOUT。ウィンドウを閉じたあとの待ちなので
+        // 画面上は見えない。切り離すとプロセスが終わるまでスレッドが残り、
+        // フックも外れない
         if handle.join().is_err() {
             // release ビルドは panic = "abort" なのでここには来ない
             warn!("ホットキーのリスナースレッドがパニックした");
@@ -1025,10 +1008,27 @@ mod tests {
 
     // ---- ホットキー文字列の解析 ----
 
-    // HotKey の `mods` / `key` は pub(crate) で外から読めないため、期待する組み合わせで
-    // 作った HotKey と比較する。id は修飾キーとキーコードから決まるので等価判定で足りる。
-    fn assert_hotkey(actual: &HotKey, expected_mods: Modifiers, expected_code: Code) {
-        assert_eq!(*actual, HotKey::new(Some(expected_mods), expected_code));
+    // テストで使う仮想キーコード。英字と数字は ASCII の大文字・数字と同じ値
+    const VK_A: u32 = 0x41;
+    const VK_M: u32 = 0x4D;
+    const VK_S: u32 = 0x53;
+    const VK_Z: u32 = 0x5A;
+    const VK_0: u32 = 0x30;
+    const VK_5: u32 = 0x35;
+    const VK_9: u32 = 0x39;
+    const VK_F5: u32 = 0x74;
+    const VK_F9: u32 = 0x78;
+    const VK_F10: u32 = 0x79;
+    const VK_F12: u32 = 0x7B;
+
+    fn assert_hotkey(actual: &KeyChord, expected_mods: Modifiers, expected_vk: u32) {
+        assert_eq!(
+            *actual,
+            KeyChord {
+                modifiers: expected_mods,
+                vk: expected_vk,
+            }
+        );
     }
 
     #[test]
@@ -1073,92 +1073,92 @@ mod tests {
     #[test]
     fn parse_hotkey_single_key_has_no_modifiers() {
         let hotkey = parse_hotkey("F5").expect("F5 は解析できる");
-        assert_hotkey(&hotkey, Modifiers::empty(), Code::F5);
+        assert_hotkey(&hotkey, Modifiers::empty(), VK_F5);
     }
 
     #[test]
     fn parse_hotkey_with_one_modifier_sets_that_modifier() {
         let hotkey = parse_hotkey("Ctrl+S").expect("Ctrl+S は解析できる");
-        assert_hotkey(&hotkey, Modifiers::CONTROL, Code::KeyS);
+        assert_hotkey(&hotkey, Modifiers::CONTROL, VK_S);
     }
 
     #[test]
     fn parse_hotkey_with_two_modifiers_sets_both() {
         let hotkey = parse_hotkey("Ctrl+Shift+A").expect("Ctrl+Shift+A は解析できる");
-        assert_hotkey(&hotkey, Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyA);
+        assert_hotkey(&hotkey, Modifiers::CONTROL | Modifiers::SHIFT, VK_A);
     }
 
     #[test]
     fn parse_hotkey_accepts_modifier_aliases() {
         let control = parse_hotkey("Control+A").expect("Control は Ctrl の別名");
-        assert_hotkey(&control, Modifiers::CONTROL, Code::KeyA);
+        assert_hotkey(&control, Modifiers::CONTROL, VK_A);
 
         let win = parse_hotkey("Win+A").expect("Win は Super の別名");
-        assert_hotkey(&win, Modifiers::SUPER, Code::KeyA);
+        assert_hotkey(&win, Modifiers::SUPER, VK_A);
 
         let windows = parse_hotkey("Windows+A").expect("Windows は Super の別名");
-        assert_hotkey(&windows, Modifiers::SUPER, Code::KeyA);
+        assert_hotkey(&windows, Modifiers::SUPER, VK_A);
 
         let superkey = parse_hotkey("Super+A").expect("Super はそのまま使える");
-        assert_hotkey(&superkey, Modifiers::SUPER, Code::KeyA);
+        assert_hotkey(&superkey, Modifiers::SUPER, VK_A);
     }
 
     #[test]
     fn parse_hotkey_is_case_insensitive() {
         let upper = parse_hotkey("CTRL+SHIFT+A").expect("大文字でも解析できる");
-        assert_hotkey(&upper, Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyA);
+        assert_hotkey(&upper, Modifiers::CONTROL | Modifiers::SHIFT, VK_A);
 
         let lower = parse_hotkey("ctrl+shift+a").expect("小文字でも解析できる");
-        assert_hotkey(&lower, Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyA);
+        assert_hotkey(&lower, Modifiers::CONTROL | Modifiers::SHIFT, VK_A);
     }
 
     #[test]
     fn parse_hotkey_ignores_spaces_around_parts() {
         let hotkey = parse_hotkey(" Ctrl + S ").expect("前後の空白は無視する");
-        assert_hotkey(&hotkey, Modifiers::CONTROL, Code::KeyS);
+        assert_hotkey(&hotkey, Modifiers::CONTROL, VK_S);
     }
 
     #[test]
     fn parse_key_code_letters_are_mapped() {
-        assert_eq!(parse_key_code("a"), Ok(Code::KeyA));
-        assert_eq!(parse_key_code("m"), Ok(Code::KeyM));
-        assert_eq!(parse_key_code("z"), Ok(Code::KeyZ));
+        assert_eq!(parse_key_code("a"), Ok(VK_A));
+        assert_eq!(parse_key_code("m"), Ok(VK_M));
+        assert_eq!(parse_key_code("z"), Ok(VK_Z));
     }
 
     #[test]
     fn parse_key_code_function_keys_are_mapped() {
-        assert_eq!(parse_key_code("f1"), Ok(Code::F1));
-        assert_eq!(parse_key_code("f9"), Ok(Code::F9));
-        assert_eq!(parse_key_code("f10"), Ok(Code::F10));
-        assert_eq!(parse_key_code("f12"), Ok(Code::F12));
+        assert_eq!(parse_key_code("f1"), Ok(VK_F1));
+        assert_eq!(parse_key_code("f9"), Ok(VK_F9));
+        assert_eq!(parse_key_code("f10"), Ok(VK_F10));
+        assert_eq!(parse_key_code("f12"), Ok(VK_F12));
     }
 
     #[test]
     fn parse_key_code_digits_are_mapped() {
-        assert_eq!(parse_key_code("0"), Ok(Code::Digit0));
-        assert_eq!(parse_key_code("5"), Ok(Code::Digit5));
-        assert_eq!(parse_key_code("9"), Ok(Code::Digit9));
+        assert_eq!(parse_key_code("0"), Ok(VK_0));
+        assert_eq!(parse_key_code("5"), Ok(VK_5));
+        assert_eq!(parse_key_code("9"), Ok(VK_9));
     }
 
     #[test]
     fn parse_hotkey_digit_with_modifiers_is_accepted() {
         let hotkey = parse_hotkey("Ctrl+Shift+9").expect("Ctrl+Shift+9 は解析できる");
-        assert_hotkey(&hotkey, Modifiers::CONTROL | Modifiers::SHIFT, Code::Digit9);
+        assert_hotkey(&hotkey, Modifiers::CONTROL | Modifiers::SHIFT, VK_9);
     }
 
     #[test]
     fn parse_key_code_named_keys_are_mapped() {
-        assert_eq!(parse_key_code("space"), Ok(Code::Space));
-        assert_eq!(parse_key_code("enter"), Ok(Code::Enter));
-        assert_eq!(parse_key_code("escape"), Ok(Code::Escape));
+        assert_eq!(parse_key_code("space"), Ok(VK_SPACE));
+        assert_eq!(parse_key_code("enter"), Ok(VK_RETURN));
+        assert_eq!(parse_key_code("escape"), Ok(VK_ESCAPE));
     }
 
     #[test]
     fn parse_key_code_uppercase_is_accepted() {
         // parse_hotkey は小文字化してから渡すが、直接呼ばれても同じ結果になること
-        assert_eq!(parse_key_code("A"), Ok(Code::KeyA));
-        assert_eq!(parse_key_code("F5"), Ok(Code::F5));
-        assert_eq!(parse_key_code("Space"), Ok(Code::Space));
+        assert_eq!(parse_key_code("A"), Ok(VK_A));
+        assert_eq!(parse_key_code("F5"), Ok(VK_F5));
+        assert_eq!(parse_key_code("Space"), Ok(VK_SPACE));
     }
 
     #[test]
@@ -1166,6 +1166,12 @@ mod tests {
         assert!(parse_key_code("f13").is_err());
         assert!(parse_key_code("").is_err());
         assert!(parse_key_code("ctrl").is_err());
+        // 1 文字でも英字と数字以外は受け付けない（global-hotkey のころと同じ）
+        assert!(parse_key_code("-").is_err());
+        assert!(parse_key_code("あ").is_err());
+        // F キーは表にある 12 個だけ。数値として読んで範囲を広げない
+        assert!(parse_key_code("f0").is_err());
+        assert!(parse_key_code("f01").is_err());
     }
 
     // ---- エラーの文言 ----
@@ -1186,8 +1192,11 @@ mod tests {
             "同じキーが「フルスクリーン切替」に割り当てられています"
         );
         assert_eq!(
-            HotkeyError::RegisterFailed("HotKey already registered".to_string()).to_string(),
-            "登録できません（他のアプリと競合している可能性があります）: HotKey already registered"
+            HotkeyError::HookUnavailable(KeyboardHookError::InstallFailed(
+                "access denied".to_string()
+            ))
+            .to_string(),
+            "ホットキーの仕組みを初期化できません: キーボードフックを登録できません: access denied"
         );
     }
 
@@ -1201,10 +1210,7 @@ mod tests {
             HotkeyError::DuplicateAssignment {
                 other: HotkeyAction::Screenshot,
             },
-            HotkeyError::ManagerUnavailable("failed".to_string()),
-            HotkeyError::ManagerMissing,
-            HotkeyError::RegisterFailed("in use".to_string()),
-            HotkeyError::UnregisterFailed("in use".to_string()),
+            HotkeyError::HookUnavailable(KeyboardHookError::Unsupported),
         ];
 
         for error in all {
@@ -1213,69 +1219,71 @@ mod tests {
         }
     }
 
-    // ---- リスナースレッドのイベント照合とデバウンス ----
+    // ---- リスナースレッドの押下の照合とデバウンス ----
 
-    // ID は modifiers とキー名のハッシュなので、テストでは適当な値で足りる
-    const SCREENSHOT_ID: u32 = 1234;
-    const FULLSCREEN_ID: u32 = 5678;
+    const F5: KeyChord = KeyChord {
+        modifiers: Modifiers::empty(),
+        vk: VK_F5,
+    };
+    const CTRL_F11: KeyChord = KeyChord {
+        modifiers: Modifiers::CONTROL,
+        vk: VK_F1 + 10,
+    };
 
-    fn registered_ids() -> HashMap<u32, HotkeyAction> {
+    fn registered_chords() -> HashMap<KeyChord, HotkeyAction> {
         HashMap::from([
-            (SCREENSHOT_ID, HotkeyAction::Screenshot),
-            (FULLSCREEN_ID, HotkeyAction::ToggleFullscreen),
+            (F5, HotkeyAction::Screenshot),
+            (CTRL_F11, HotkeyAction::ToggleFullscreen),
         ])
     }
 
     #[test]
-    fn accepted_action_matching_id_returns_that_action() {
+    fn accepted_action_matching_chord_returns_that_action() {
         assert_eq!(
-            accepted_action(&registered_ids(), SCREENSHOT_ID, HotKeyState::Pressed),
+            accepted_action(&registered_chords(), F5),
             Some(HotkeyAction::Screenshot)
         );
         assert_eq!(
-            accepted_action(&registered_ids(), FULLSCREEN_ID, HotKeyState::Pressed),
+            accepted_action(&registered_chords(), CTRL_F11),
             Some(HotkeyAction::ToggleFullscreen)
         );
     }
 
     #[test]
-    fn accepted_action_released_returns_none() {
-        // 押下と解放で 2 回流れる。解放で撮ると 1 回の操作で 2 枚になる
-        assert_eq!(
-            accepted_action(&registered_ids(), SCREENSHOT_ID, HotKeyState::Released),
-            None
-        );
+    fn accepted_action_extra_modifier_returns_none() {
+        // F5 の割り当ては Ctrl+F5 では反応しない（RegisterHotKey と同じ）。
+        // 他のアプリの Ctrl+F5（再読み込みなど）で撮られると困る
+        let ctrl_f5 = KeyChord {
+            modifiers: Modifiers::CONTROL,
+            vk: VK_F5,
+        };
+        assert_eq!(accepted_action(&registered_chords(), ctrl_f5), None);
     }
 
     #[test]
-    fn accepted_action_other_id_returns_none() {
-        // ホットキーを切り替えた直後、解除済みのキーのイベントが残っていることがある
-        assert_eq!(
-            accepted_action(&registered_ids(), SCREENSHOT_ID + 1, HotKeyState::Pressed),
-            None
-        );
+    fn accepted_action_missing_modifier_returns_none() {
+        // Ctrl+F11 の割り当ては F11 単独では反応しない
+        let f11 = KeyChord {
+            modifiers: Modifiers::empty(),
+            vk: VK_F1 + 10,
+        };
+        assert_eq!(accepted_action(&registered_chords(), f11), None);
+    }
+
+    #[test]
+    fn accepted_action_unassigned_key_returns_none() {
+        // 他のアプリへ打っている文字も全てリスナーを通る
+        let a = KeyChord {
+            modifiers: Modifiers::empty(),
+            vk: VK_A,
+        };
+        assert_eq!(accepted_action(&registered_chords(), a), None);
     }
 
     #[test]
     fn accepted_action_without_registration_returns_none() {
         // リスナーは登録前から動いている。何も登録していない間は反応しない
-        let empty = HashMap::new();
-        assert_eq!(
-            accepted_action(&empty, SCREENSHOT_ID, HotKeyState::Pressed),
-            None
-        );
-        assert_eq!(accepted_action(&empty, 0, HotKeyState::Pressed), None);
-    }
-
-    #[test]
-    fn accepted_action_id_zero_is_a_valid_registration() {
-        // ID はハッシュなので 0 も正規の値。未登録を 0 で表していると
-        // そのホットキーだけが効かなくなる
-        let registered = HashMap::from([(0, HotkeyAction::VolumeUp)]);
-        assert_eq!(
-            accepted_action(&registered, 0, HotKeyState::Pressed),
-            Some(HotkeyAction::VolumeUp)
-        );
+        assert_eq!(accepted_action(&HashMap::new(), F5), None);
     }
 
     #[test]
@@ -1312,12 +1320,13 @@ mod tests {
 
     #[test]
     fn spawn_listener_stops_after_shutdown_request() {
-        // 終了要求を recv_timeout のタイムアウトで拾えること。拾えないと
+        // 終了要求を待ちのタイムアウトで拾えること。拾えないと
         // join が返らず、アプリが終了できなくなる
         let state = Arc::new(Mutex::new(ListenerState::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let handle = spawn_listener(Arc::clone(&state), Arc::clone(&shutdown));
+        // フックを登録できない環境でも、スレッドが終わることは確かめられる
+        let (handle, _ready) = spawn_listener(Arc::clone(&state), Arc::clone(&shutdown));
 
         shutdown.store(true, Ordering::Release);
         let started = Instant::now();
@@ -1326,11 +1335,11 @@ mod tests {
         // 待ち時間はタイムアウト 1 回ぶんが上限。CI の遅さを見込んで
         // 4 倍を上限にしている
         assert!(
-            started.elapsed() < LISTENER_RECV_TIMEOUT * 4,
+            started.elapsed() < LISTENER_WAIT_TIMEOUT * 4,
             "終了までに {:?} かかった",
             started.elapsed()
         );
-        // イベントを受け取っていないので押下は記録されない
+        // 何も登録していないので押下は記録されない
         assert!(state
             .lock()
             .expect("ロックが毒されていないこと")
@@ -1340,9 +1349,9 @@ mod tests {
 
     // ---- 登録の差分処理 ----
     //
-    // GlobalHotKeyManager は実際に Windows へ登録するため、CI では
+    // HotkeyManager::new は実際にキーボードフックを登録するため、CI では
     // 成功しないことがある。ここで確かめるのは「解除と押下の扱い」だけにし、
-    // 登録そのものの成否には依存しないテストにしてある。
+    // フックの登録の成否には依存しないテストにしてある。
 
     fn assignments(pairs: &[(HotkeyAction, &str)]) -> BTreeMap<HotkeyAction, String> {
         pairs
@@ -1414,9 +1423,7 @@ mod tests {
             .insert(HotkeyAction::Screenshot, ("F5".to_string(), hotkey));
         {
             let mut state = manager.state.lock().expect("ロックが毒されていないこと");
-            state
-                .registered
-                .insert(hotkey.id(), HotkeyAction::Screenshot);
+            state.registered.insert(hotkey, HotkeyAction::Screenshot);
             state.pressed.insert(HotkeyAction::Screenshot, 1);
         }
 
@@ -1424,7 +1431,10 @@ mod tests {
 
         let state = manager.state.lock().expect("ロックが毒されていないこと");
         assert!(state.pressed.is_empty(), "保留中の押下が残っている");
-        assert!(state.registered.is_empty(), "登録中の ID が残っている");
+        assert!(
+            state.registered.is_empty(),
+            "登録中の組み合わせが残っている"
+        );
     }
 
     #[test]
@@ -1518,7 +1528,7 @@ mod tests {
             .lock()
             .expect("ロックが毒されていないこと")
             .registered
-            .insert(hotkey.id(), HotkeyAction::Screenshot);
+            .insert(hotkey, HotkeyAction::Screenshot);
 
         manager.pause();
 
@@ -1586,15 +1596,110 @@ mod tests {
     // ---- 試し登録 ----
 
     #[test]
-    fn try_register_unparsable_hotkey_returns_error_without_creating_manager() {
+    fn try_register_unparsable_hotkey_returns_the_parse_error() {
+        // 解釈できない理由をそのまま返す。フックの有無より先に見る
+        let manager = HotkeyManager::new();
+
+        assert_eq!(
+            manager.try_register("Ctrl+Shift"),
+            Err(HotkeyError::MissingKey)
+        );
+    }
+
+    #[test]
+    fn try_register_does_not_register_anything() {
+        // 確かめるだけで、照合の表には載せない。載せるのは resume の apply
+        let manager = HotkeyManager::new();
+
+        let _ = manager.try_register("F5");
+
+        assert!(manager.registered.is_empty());
+        assert!(manager
+            .state
+            .lock()
+            .expect("ロックが毒されていないこと")
+            .registered
+            .is_empty());
+    }
+
+    #[test]
+    fn try_register_without_hook_reports_why() {
+        // フックを使えない環境では、どのキーを選んでも効かない。
+        // ダイアログを閉じさせず、理由を出させる
         let mut manager = HotkeyManager::new();
+        manager.hook_error = Some(KeyboardHookError::Unsupported);
 
-        let result = manager.try_register("Ctrl+Shift");
+        assert_eq!(
+            manager.try_register("F5"),
+            Err(HotkeyError::HookUnavailable(KeyboardHookError::Unsupported))
+        );
+    }
 
-        assert!(result.is_err());
-        // GlobalHotKeyManager は実際に Windows へ触るため、解析の時点で
-        // 弾ける入力では作らないことを確かめる
-        assert!(manager.manager.is_none());
+    #[test]
+    fn apply_without_hook_records_the_reason() {
+        // 表に載せても押下を観測できないので、失敗として設定画面へ出す
+        let mut manager = HotkeyManager::new();
+        manager.hook_error = Some(KeyboardHookError::Unsupported);
+
+        manager.apply(&assignments(&[(HotkeyAction::Screenshot, "F5")]));
+
+        assert!(!manager.registered.contains_key(&HotkeyAction::Screenshot));
+        assert_eq!(
+            manager
+                .errors
+                .get(&HotkeyAction::Screenshot)
+                .map(|error| &error.reason),
+            Some(&HotkeyError::HookUnavailable(
+                KeyboardHookError::Unsupported
+            ))
+        );
+    }
+
+    #[test]
+    fn apply_with_hook_registers_the_chord_for_the_listener() {
+        // フックが使えていれば、リスナーが照合する表に組み合わせが載る
+        let mut manager = HotkeyManager::new();
+        manager.hook_error = None;
+
+        manager.apply(&assignments(&[(HotkeyAction::Screenshot, "Ctrl+S")]));
+
+        let chord = KeyChord {
+            modifiers: Modifiers::CONTROL,
+            vk: VK_S,
+        };
+        assert_eq!(
+            manager
+                .state
+                .lock()
+                .expect("ロックが毒されていないこと")
+                .registered
+                .get(&chord),
+            Some(&HotkeyAction::Screenshot)
+        );
+        assert!(manager.errors.is_empty());
+    }
+
+    #[test]
+    fn apply_duplicate_chord_keeps_the_first_action() {
+        // 同じ組み合わせを 2 つのアクションへ割り当てたら、宣言順で先のほうを残す
+        let mut manager = HotkeyManager::new();
+        manager.hook_error = None;
+
+        manager.apply(&assignments(&[
+            (HotkeyAction::Screenshot, "F5"),
+            (HotkeyAction::VolumeUp, "f5"),
+        ]));
+
+        assert!(manager.registered.contains_key(&HotkeyAction::Screenshot));
+        assert_eq!(
+            manager
+                .errors
+                .get(&HotkeyAction::VolumeUp)
+                .map(|error| &error.reason),
+            Some(&HotkeyError::DuplicateAssignment {
+                other: HotkeyAction::Screenshot
+            })
+        );
     }
 
     // ---- 押下の記録（デバウンスと最小化中の振り分け） ----
@@ -1687,6 +1792,104 @@ mod tests {
             state.record_press(HotkeyAction::ToggleMute, Instant::now()),
             PressRouting::Deferred
         );
+    }
+
+    // ---- フォーカスがあるときだけ反応する ----
+
+    #[test]
+    fn listener_state_default_reacts_without_focus() {
+        // 既定はオフ。他のアプリを操作している間も効く（#133 の挙動を保つ）
+        let mut state = ListenerState {
+            focused: false,
+            ..Default::default()
+        };
+
+        assert!(!state.only_when_focused);
+        assert_eq!(
+            state.record_press(HotkeyAction::Screenshot, Instant::now()),
+            PressRouting::Deferred
+        );
+    }
+
+    #[test]
+    fn record_press_only_when_focused_drops_presses_without_focus() {
+        // 他のアプリにフォーカスがある間は反応しない。保留にも残さない
+        // （残すと、戻ってきたときに実行される）
+        let mut state = ListenerState {
+            only_when_focused: true,
+            focused: false,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            state.record_press(HotkeyAction::Screenshot, Instant::now()),
+            PressRouting::Unfocused
+        );
+        assert!(state.pressed.is_empty(), "保留に残っている");
+    }
+
+    #[test]
+    fn record_press_only_when_focused_accepts_presses_with_focus() {
+        let mut state = ListenerState {
+            only_when_focused: true,
+            focused: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            state.record_press(HotkeyAction::Screenshot, Instant::now()),
+            PressRouting::Deferred
+        );
+    }
+
+    #[test]
+    fn record_press_only_when_focused_treats_minimized_as_unfocused() {
+        // 最小化中は前面にいない。フォーカスの旗が古いまま真でも、
+        // 音量などをワーカーへ回さない
+        let mut state = ListenerState {
+            only_when_focused: true,
+            focused: true,
+            minimized: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            state.record_press(HotkeyAction::VolumeUp, Instant::now()),
+            PressRouting::Unfocused
+        );
+    }
+
+    #[test]
+    fn record_press_unfocused_does_not_start_the_debounce() {
+        // 捨てた押下でデバウンスの基準を更新すると、フォーカスを戻した
+        // 直後の押下まで捨てられる
+        let mut state = ListenerState {
+            only_when_focused: true,
+            focused: false,
+            ..Default::default()
+        };
+        let now = Instant::now();
+        state.record_press(HotkeyAction::Screenshot, now);
+
+        state.focused = true;
+
+        assert_eq!(
+            state.record_press(HotkeyAction::Screenshot, now),
+            PressRouting::Deferred
+        );
+    }
+
+    #[test]
+    fn set_window_state_and_only_when_focused_reach_the_listener() {
+        let mut manager = HotkeyManager::new();
+
+        manager.set_window_state(true, false);
+        manager.set_only_when_focused(true);
+
+        let state = manager.state.lock().expect("ロックが毒されていないこと");
+        assert!(state.minimized);
+        assert!(!state.focused);
+        assert!(state.only_when_focused);
     }
 
     // ---- 溜まった押下の畳み方 ----

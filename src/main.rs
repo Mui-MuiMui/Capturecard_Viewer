@@ -11,6 +11,7 @@ use eframe::egui;
 mod app;
 mod audio;
 mod hotkey;
+mod keyboard_hook;
 mod logging;
 mod overlay;
 mod platform;

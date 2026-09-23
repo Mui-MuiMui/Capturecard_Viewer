@@ -443,8 +443,8 @@ mod tests {
     use super::*;
     use crate::hotkey::HotkeyAction;
     use crate::settings::{
-        AppSettings, AudioSettings, ColorRange, ColorSpace, Preset, ScreenshotDestination,
-        ScreenshotFormat, ScreenshotSettings, UiSettings, VideoSettings,
+        AppSettings, AudioSettings, ColorRange, ColorSpace, HotkeySettings, Preset,
+        ScreenshotDestination, ScreenshotFormat, ScreenshotSettings, UiSettings, VideoSettings,
     };
 
     use std::collections::{BTreeMap, BTreeSet};
@@ -510,6 +510,10 @@ mod tests {
                 (HotkeyAction::Screenshot, "Ctrl+S".to_string()),
                 (HotkeyAction::ToggleFullscreen, "F11".to_string()),
             ]),
+            // 既定値（false）と異なる値にして、反映の有無を見分けられるようにする
+            hotkey_settings: HotkeySettings {
+                only_when_focused: true,
+            },
         }
     }
 

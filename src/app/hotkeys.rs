@@ -1,4 +1,4 @@
-//! グローバルホットキーの適用と、押されたときの実行。
+//! ホットキーの適用と、押されたときの実行。
 //!
 //! **実処理は右クリックメニューや映像上の操作と同じ経路を通す。**
 //! 登録そのものは `crate::hotkey::HotkeyManager` が持つ。
@@ -149,6 +149,7 @@ impl CaptureCardViewer {
 mod tests {
     use super::*;
     use crate::hotkey::HotkeyError;
+    use crate::keyboard_hook::KeyboardHookError;
 
     #[test]
     fn hotkey_error_summary_without_errors_is_none() {
@@ -211,7 +212,7 @@ mod tests {
             HotkeyAction::Screenshot,
             HotkeyAssignmentError {
                 hotkey: "F5".to_string(),
-                reason: HotkeyError::RegisterFailed("HotKey already registered".to_string()),
+                reason: HotkeyError::HookUnavailable(KeyboardHookError::Unsupported),
             },
         )]);
 

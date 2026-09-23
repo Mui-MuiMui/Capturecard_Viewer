@@ -28,6 +28,26 @@ pub(super) fn show_hotkey_settings_tab(
     ui.add_space(10.0);
 
     show_hotkey_assignments(ui, settings, hotkey_errors, events);
+
+    ui.add_space(10.0);
+    show_hotkey_behavior(ui, settings);
+}
+
+/// ホットキーがいつ反応するかの設定を描く。
+///
+/// 書き換えるのはドラフトだけ。反映は「適用」「OK」の `commit_draft` が行う。
+fn show_hotkey_behavior(ui: &mut egui::Ui, settings: &mut AppSettings) {
+    ui.group(|ui| {
+        ui.strong("反応する条件");
+        ui.add_space(5.0);
+        ui.checkbox(
+            &mut settings.hotkey_settings.only_when_focused,
+            "このアプリにフォーカスがあるときだけ反応する",
+        );
+        ui.small(
+            "オフのときは、他のアプリを操作している間や最小化している間も反応します。どちらの場合も、押したキーは他のアプリにもそのまま届きます。",
+        );
+    });
 }
 
 /// アクションごとのホットキー割り当ての一覧を描く。
@@ -43,9 +63,7 @@ fn show_hotkey_assignments(
     ui.group(|ui| {
         ui.strong("ホットキー");
         ui.add_space(5.0);
-        ui.small(
-            "他のアプリを操作している間も効きます。スクリーンショット以外の操作にも割り当てられます。",
-        );
+        ui.small("スクリーンショット以外の操作にも割り当てられます。");
         ui.add_space(8.0);
 
         let duplicates = duplicate_hotkey_actions(&settings.hotkeys);
@@ -150,7 +168,7 @@ fn show_hotkey_assignments(
 /// 同じキーが 2 つ以上のアクションに割り当てられているものを返す。
 ///
 /// 比較は表記のゆれを吸収する。`"Ctrl+S"` と `"ctrl + s"`、`"Shift+Ctrl+S"` は
-/// どれも同じ `HotKey` になるため、文字列のまま比べると重複を見逃す。
+/// どれも同じキーの組み合わせになるため、文字列のまま比べると重複を見逃す。
 pub fn duplicate_hotkey_actions(
     hotkeys: &BTreeMap<HotkeyAction, String>,
 ) -> BTreeSet<HotkeyAction> {

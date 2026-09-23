@@ -83,6 +83,12 @@ pub struct AppSettings {
     // 旧版が書いた設定ファイル（既定の F5 を入れる）、後者はすべての
     // 割り当てを外した状態（何も入れない）。
     pub hotkeys: BTreeMap<HotkeyAction, String>,
+    // ホットキーの割り当て以外の設定。設定ファイルでは [hotkey_settings] になる。
+    //
+    // **[hotkeys] に混ぜないこと。** あちらは値が全て文字列である前提で
+    // 読んでおり（`RawAppSettings::hotkeys`）、真偽値が混ざると旧版では
+    // [hotkeys] ごと読めなくなる。
+    pub hotkey_settings: HotkeySettings,
     // 名前付きのプリセット。設定ファイルでは [[presets]] の並びになる。
     //
     // 中身は `video` と `audio` だけ。線引きの理由は `Preset` のコメントを見ること。
@@ -109,6 +115,7 @@ struct RawAppSettings {
     screenshot: ScreenshotSettings,
     ui: UiSettings,
     hotkeys: Option<BTreeMap<String, String>>,
+    hotkey_settings: HotkeySettings,
     presets: Vec<Preset>,
 }
 
@@ -121,6 +128,7 @@ impl From<RawAppSettings> for AppSettings {
             mut screenshot,
             ui,
             hotkeys,
+            hotkey_settings,
             presets,
         } = raw;
 
@@ -141,6 +149,7 @@ impl From<RawAppSettings> for AppSettings {
             screenshot,
             ui,
             hotkeys,
+            hotkey_settings,
             presets,
         };
         // 設定ファイルを手で書き換えて、選択中のプリセットと実際の値を
@@ -185,9 +194,10 @@ fn sanitize_presets(presets: Vec<Preset>) -> Vec<Preset> {
 
 // 既定のホットキー割り当て。
 //
-// **スクリーンショット以外は既定で未割り当てにしてある。** グローバル
-// ホットキーは他のアプリより先にキーを奪うため、こちらから勝手に
-// F11 や Ctrl+↑ のような一般的なキーを押さえるべきではない。
+// **スクリーンショット以外は既定で未割り当てにしてある。** ホットキーは
+// 既定で他のアプリを操作している間も反応するため、こちらから勝手に
+// F11 や Ctrl+↑ のような一般的なキーを割り当てると、他のアプリでそのキーを
+// 押すたびにこちらも動いてしまう。
 fn default_hotkeys() -> BTreeMap<HotkeyAction, String> {
     BTreeMap::from([(HotkeyAction::Screenshot, "F5".to_string())])
 }
@@ -244,6 +254,7 @@ impl Default for AppSettings {
             screenshot: ScreenshotSettings::default(),
             ui: UiSettings::default(),
             hotkeys: default_hotkeys(),
+            hotkey_settings: HotkeySettings::default(),
             presets: Vec::new(),
         }
     }
@@ -1042,6 +1053,21 @@ impl Default for UiSettings {
             borderless: false,
         }
     }
+}
+
+// ホットキーの割り当て以外の設定（「ホットキー」タブの下の段）。
+//
+// プリセットには入れない（`Preset` のコメント）。既定値は全て偽なので
+// `Default` は導出で足りる。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HotkeySettings {
+    // このアプリにキーボードフォーカスがあるときだけ反応するか。
+    //
+    // 既定はオフ。他のアプリを操作している間も、最小化している間も
+    // 反応する（#133）。オンにすると、他のアプリで同じキーを使っていても
+    // こちらは動かない（#202）。どちらの場合もキーは奪わず、他のアプリにも届く
+    pub only_when_focused: bool,
 }
 
 // 設定ファイルをどう読めたか。起動時に既定値を書き戻してよいかの判断に使う。
@@ -2627,6 +2653,35 @@ volume = 80.0
     }
 
     #[test]
+    fn hotkey_settings_missing_section_reacts_without_focus() {
+        // [hotkey_settings] が無い（この項目より前の版が書いた）設定ファイル。
+        // 従来どおり、他のアプリを操作している間も反応する側に倒す
+        let settings: AppSettings =
+            toml::from_str(LEGACY_CONFIG).expect("旧版の設定を読めなければならない");
+
+        assert!(!settings.hotkey_settings.only_when_focused);
+    }
+
+    #[test]
+    fn hotkey_settings_survive_a_save_and_load_roundtrip() {
+        let mut original = AppSettings::default();
+        original.hotkey_settings.only_when_focused = true;
+
+        let serialized = toml::to_string(&original).expect("設定を書き出せなければならない");
+        let restored: AppSettings =
+            toml::from_str(&serialized).expect("書き出した設定を読み直せなければならない");
+
+        assert!(restored.hotkey_settings.only_when_focused);
+        // [hotkeys] は値が文字列である前提で読んでいる。真偽値を混ぜると
+        // 旧版では [hotkeys] ごと読めなくなるので、別のセクションに書く
+        assert!(
+            serialized.contains("[hotkey_settings]"),
+            "別のセクションに書き出されること: {}",
+            serialized
+        );
+    }
+
+    #[test]
     fn saved_config_does_not_keep_the_legacy_hotkey_key() {
         // 移行したあとは旧版の項目を書き戻さない。残すと 2 つの置き場所が
         // 食い違ったときにどちらが正か決まらなくなる
@@ -2713,8 +2768,8 @@ volume = 80.0
 
     #[test]
     fn default_hotkeys_assign_only_the_screenshot() {
-        // 他のアクションを既定で割り当てない。グローバルホットキーは
-        // 他のアプリより先にキーを奪うため、こちらから押さえない
+        // 他のアクションを既定で割り当てない。ホットキーは既定で
+        // 他のアプリを操作している間も反応するため、こちらから押さえない
         let settings = AppSettings::default();
 
         assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("F5"));

@@ -45,8 +45,9 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
     }
     target.audio = draft.audio.clone();
     target.screenshot = draft.screenshot.clone();
-    // ホットキーの割り当てもダイアログの中だけで変わる
+    // ホットキーの割り当ても、反応する条件も、ダイアログの中だけで変わる
     target.hotkeys = draft.hotkeys.clone();
+    target.hotkey_settings = draft.hotkey_settings.clone();
     // プリセットの追加・上書き・削除もダイアログの中だけで行う。
     // 右クリックメニューからは選ぶだけで一覧を触らない
     target.presets = draft.presets.clone();
@@ -147,6 +148,8 @@ mod tests {
         assert_eq!(draft.audio.sample_rate, imported.audio.sample_rate);
         assert_eq!(draft.screenshot.format, imported.screenshot.format);
         assert_eq!(draft.hotkeys, imported.hotkeys);
+        // commit_draft が反映する項目なので、読み込んだ値を採る
+        assert_eq!(draft.hotkey_settings, imported.hotkey_settings);
     }
 
     #[test]
@@ -390,6 +393,19 @@ mod tests {
 
         assert_eq!(shared.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
         assert_eq!(shared.hotkey(HotkeyAction::ToggleFullscreen), Some("F11"));
+    }
+
+    #[test]
+    fn commit_draft_applies_hotkey_settings() {
+        // 「フォーカスがあるときだけ反応する」もダイアログの中だけで変わる
+        let mut shared = AppSettings::default();
+        let original = AppSettings::default();
+        let draft = sample_settings();
+        assert!(draft.hotkey_settings.only_when_focused);
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert!(shared.hotkey_settings.only_when_focused);
     }
 
     #[test]
