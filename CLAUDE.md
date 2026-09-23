@@ -63,7 +63,8 @@ cargo build --release
 | `src/audio/convert.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32）と、レート・チャンネル数が違う場合の変換（`PassthroughConverter`） |
 | `src/audio/resample.rs` | クロックドリフト補正の共有状態（`ResampleTelemetry`）と補正係数の決め方（`decide_resample_correction`） |
 | `src/audio/controls.rs` | `AudioControls`。音量・パススルー・ミュートの共有状態 |
-| `src/hotkey.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）、global-hotkey によるアクション別の登録とリスナースレッド、押下の検出とデバウンス、ホットキー文字列のパース |
+| `src/hotkey.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）、アクション別の登録とリスナースレッド、押下の照合とデバウンス、ホットキー文字列のパース |
+| `src/keyboard_hook.rs` | 低レベルキーボードフック（`WH_KEYBOARD_LL`）。キーを奪わずに押下を観測し、リスナースレッドのメッセージループへ渡す |
 | `src/screenshot.rs` | rodio による効果音の読み込みと再生 |
 | `src/settings.rs` | `AppSettings` とその serde 定義、confy による読み書き、保存パスの決定、旧形式からの移行 |
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |

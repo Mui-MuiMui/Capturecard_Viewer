@@ -190,6 +190,9 @@ impl CaptureCardViewer {
             // 2 秒ごとに unregister → register が走ってその瞬間のキー入力を
             // 取りこぼす
             self.apply_hotkey_assignments(&settings.hotkeys);
+            // フォーカスがあるときだけ反応するか。値を書くだけなので毎回渡す
+            self.hotkey_manager
+                .set_only_when_focused(settings.hotkey_settings.only_when_focused);
 
             // スクリーンショットの効果音
             //

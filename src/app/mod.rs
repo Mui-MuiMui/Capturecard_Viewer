@@ -578,9 +578,10 @@ impl eframe::App for CaptureCardViewer {
             }
 
             if let Some(candidate) = captured {
-                // 一時停止で自分自身の登録は解除済みなので、ここでの試し登録が
-                // 自分の他のアクションと衝突することはない。他のアプリが既に
-                // 使っているキー（F12 など）だけを弾ける
+                // 解釈できるかと、押下を観測するフックが使えているかを確かめる。
+                // キーは奪わないので、他のアプリが同じキーを使っていても弾かない
+                // （#202）。自分の他のアクションとの重複は、ダイアログが
+                // 確定の前に弾いている
                 match self.hotkey_manager.try_register(&candidate) {
                     Ok(()) => {
                         debug!("{} に {} を割り当てた", action.label(), candidate);
@@ -662,8 +663,12 @@ impl eframe::App for CaptureCardViewer {
 
         // 最小化しているかをホットキーのリスナーへ伝える。最小化すると
         // ここが呼ばれなくなるので、**最後に書いた値がそのまま残る**のが狙い。
-        // リスナーは真の間だけ、画面の要らないアクションをワーカーへ回す（#133）
-        self.hotkey_manager.set_minimized(minimized);
+        // リスナーは真の間だけ、画面の要らないアクションをワーカーへ回す（#133）。
+        // フォーカスは「フォーカスがあるときだけ反応する」の判定に使う（#202）。
+        // 出入りのたびに egui-winit が再描画を要求するので、ここで拾える。
+        // 取れない環境では「フォーカスあり」に倒す（反応しなくなる側に倒さない）
+        let focused = viewport.focused.unwrap_or(true);
+        self.hotkey_manager.set_window_state(minimized, focused);
         ctx.request_repaint_after(next_repaint_delay(condition));
     }
 
