@@ -336,7 +336,11 @@ impl FakeAudioCapture {
         if let Some(stream) = self.stream.take() {
             drop(stream.stop_input);
             drop(stream.stop_output);
-            if stream.input.join().is_err() || stream.output.join().is_err() {
+            // 両方を先に join する。`||` で繋ぐと、入力が異常終了していたときに
+            // 出力の `JoinHandle` が join されずに捨てられる
+            let input_panicked = stream.input.join().is_err();
+            let output_panicked = stream.output.join().is_err();
+            if input_panicked || output_panicked {
                 warn!("フェイクの音声のスレッドが異常終了していた");
             }
             info!("フェイクの音声デバイスを閉じた");
