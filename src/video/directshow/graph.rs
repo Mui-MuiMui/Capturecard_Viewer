@@ -14,13 +14,20 @@
 //!    DirectShow が間に変換フィルターを挟む）
 //! 5. グラフの基準時計を外し（届いたサンプルを待たせずに渡させるため）、
 //!    `IMediaControl::Run` で動かす
+//!
+//! 動かしたあとは、グラフが積むイベント（`IMediaEventEx`）をワーカーの
+//! 監視の周期で読み（`CaptureGraph::poll_device_lost`）、デバイスが消えた
+//! 知らせ（`EC_DEVICE_LOST` など）を拾う。
 
+use std::cell::Cell;
 use std::ptr;
 use std::time::Instant;
 
 use windows::core::Interface;
 use windows::Win32::Media::DirectShow::{
-    IAMStreamConfig, IBaseFilter, ICaptureGraphBuilder2, IGraphBuilder, IMediaControl, IMediaFilter,
+    IAMStreamConfig, IBaseFilter, ICaptureGraphBuilder2, IGraphBuilder, IMediaControl,
+    IMediaEventEx, IMediaFilter, EC_DEVICE_LOST, EC_ERRORABORT, EC_ERRORABORTEX,
+    EC_STREAM_ERROR_STOPPED,
 };
 use windows::Win32::Media::IReferenceClock;
 use windows::Win32::Media::MediaFoundation::{
@@ -54,10 +61,44 @@ pub(super) enum GraphError {
     Stream(windows::core::Error),
 }
 
+/// 1 回の `poll_device_lost` で読むイベントの上限。
+///
+/// タイムアウト 0 の `GetEvent` は積まれている分を返し切ると `E_ABORT` で
+/// 止まるので、ふつうはここに届かない。上流のフィルターがイベントを
+/// 積み続ける場合に、ワーカーの監視がここで回り続けないための歯止め。
+/// 残りは次の周期（100〜500ms 後）に読む。
+const MAX_EVENTS_PER_POLL: usize = 64;
+
+/// グラフのイベントが「デバイスが消えた（もうフレームは来ない）」ことを表すかを判定する。
+///
+/// - `EC_DEVICE_LOST` は `lparam2` が 0 のときが取り外し、1 のときが再び
+///   使えるようになった知らせ。後者は切断ではない
+/// - `EC_ERRORABORT` / `EC_ERRORABORTEX` はエラーでグラフが止まった知らせ、
+///   `EC_STREAM_ERROR_STOPPED` はエラーでストリームが止まった知らせ。どれも
+///   そのままではフレームが戻らないので、開き直しに回す
+/// - それ以外（`EC_COMPLETE`、`EC_CLOCK_CHANGED` など）は切断と関係ない
+pub(super) fn is_device_lost_event(code: i32, lparam2: isize) -> bool {
+    let Ok(code) = u32::try_from(code) else {
+        return false;
+    };
+    match code {
+        EC_DEVICE_LOST => lparam2 == 0,
+        EC_ERRORABORT | EC_ERRORABORTEX | EC_STREAM_ERROR_STOPPED => true,
+        _ => false,
+    }
+}
+
 /// キャプチャー用のグラフ 1 本。**ワーカースレッドから出さない。**
 pub(super) struct CaptureGraph {
     graph: IGraphBuilder,
     control: IMediaControl,
+    /// グラフのイベントの読み口。取れなかったら `None` で、途絶の検出だけに任せる
+    events: Option<IMediaEventEx>,
+    /// デバイスが消えた知らせを受けたか。**一度立てたらグラフを捨てるまで
+    /// 下ろさない。** イベントは読んだ時点で消えるので、自動再接続を切っている
+    /// 間などに下ろすと、次の周期で「繋がっている」に戻ってしまう。
+    /// `link_state` が `&self` で読むので `Cell` にしてある（触るのはワーカーだけ）
+    device_lost: Cell<bool>,
     source: IBaseFilter,
     renderer: Renderer,
     /// 上流と接続できた形式
@@ -214,9 +255,21 @@ impl CaptureGraph {
         let requested_fps = requested_fps
             .or_else(|| super::media_type::fps_from_interval(format.avg_time_per_frame))
             .unwrap_or(0);
+        let events = match graph.cast::<IMediaEventEx>() {
+            Ok(events) => Some(events),
+            Err(e) => {
+                log::debug!(
+                    "DirectShow のグラフのイベントを読めないので、切断はフレームの途絶だけで検出する: {}",
+                    e
+                );
+                None
+            }
+        };
         Ok(Self {
             graph,
             control,
+            events,
+            device_lost: Cell::new(false),
             source,
             renderer,
             format,
@@ -283,6 +336,45 @@ impl CaptureGraph {
     pub(super) fn format_name(&self) -> &'static str {
         self.format.kind.name()
     }
+
+    /// 積まれているグラフのイベントを待たずに読み、デバイスが消えたかを返す。
+    ///
+    /// ワーカーの監視（`link_state`）の周期で呼ばれる。**タイムアウト 0 で
+    /// 読むので待たない。** 読んだイベントは切断に関係ないものも含めて
+    /// `FreeEventParams` で必ず解放する（パラメータに文字列などを抱える
+    /// イベントがあり、解放しないと漏れる）。一度消えたと判断したら、
+    /// 以後はイベントを読まずに `true` を返し続ける。
+    pub(super) fn poll_device_lost(&self) -> bool {
+        if self.device_lost.get() {
+            return true;
+        }
+        let Some(events) = &self.events else {
+            return false;
+        };
+        for _ in 0..MAX_EVENTS_PER_POLL {
+            let mut code = 0i32;
+            let mut lparam1 = 0isize;
+            let mut lparam2 = 0isize;
+            // 積まれていなければ E_ABORT が返る
+            if unsafe { events.GetEvent(&mut code, &mut lparam1, &mut lparam2, 0) }.is_err() {
+                break;
+            }
+            let lost = is_device_lost_event(code, lparam2);
+            let _ = unsafe { events.FreeEventParams(code, lparam1, lparam2) };
+            if lost {
+                log::warn!(
+                    "DirectShow のグラフがデバイスの喪失を知らせてきた（イベント 0x{:X}、パラメータ {} / {}）",
+                    code,
+                    lparam1,
+                    lparam2
+                );
+                self.device_lost.set(true);
+                return true;
+            }
+            log::debug!("DirectShow のグラフのイベント 0x{:X} を読み捨てた", code);
+        }
+        false
+    }
 }
 
 impl Drop for CaptureGraph {
@@ -302,5 +394,48 @@ impl Drop for CaptureGraph {
             ),
         }
         Self::tear_down(&self.graph, &self.source, &self.renderer.filter);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn code(event: u32) -> i32 {
+        i32::try_from(event).expect("イベントの番号は i32 に収まる")
+    }
+
+    #[test]
+    fn is_device_lost_event_removal_is_lost() {
+        // EC_DEVICE_LOST の lparam2 が 0 なら取り外し
+        assert!(is_device_lost_event(code(EC_DEVICE_LOST), 0));
+    }
+
+    #[test]
+    fn is_device_lost_event_device_available_again_is_not_lost() {
+        // lparam2 が 1 は「再び使えるようになった」。切断として扱わない
+        assert!(!is_device_lost_event(code(EC_DEVICE_LOST), 1));
+    }
+
+    #[test]
+    fn is_device_lost_event_aborts_are_lost() {
+        // エラーでグラフ / ストリームが止まった。フレームは戻らない
+        for event in [EC_ERRORABORT, EC_ERRORABORTEX, EC_STREAM_ERROR_STOPPED] {
+            assert!(is_device_lost_event(code(event), 0), "event = {event}");
+        }
+    }
+
+    #[test]
+    fn is_device_lost_event_unrelated_events_are_not_lost() {
+        use windows::Win32::Media::DirectShow::{EC_CLOCK_CHANGED, EC_COMPLETE, EC_PAUSED};
+        for event in [EC_COMPLETE, EC_CLOCK_CHANGED, EC_PAUSED] {
+            assert!(!is_device_lost_event(code(event), 0), "event = {event}");
+        }
+    }
+
+    #[test]
+    fn is_device_lost_event_negative_code_is_not_lost() {
+        // i32 のまま受け取るので、負の値でも落ちないこと
+        assert!(!is_device_lost_event(-1, 0));
     }
 }

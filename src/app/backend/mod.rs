@@ -198,6 +198,9 @@ pub(super) mod mock {
         /// `link_state` が返す途絶時間。`None` は「まだ 1 枚も届いていない」。
         /// **ここへ `VIDEO_SIGNAL_TIMEOUT` より長い値を入れると切断になる**
         pub(in crate::app) since_last_frame: Option<Duration>,
+        /// `link_state` が返すデバイス喪失の知らせ（DirectShow の `EC_DEVICE_LOST`
+        /// の代わり）。立てると途絶時間に関係なく切断になる。開き直す・閉じると下りる
+        pub(in crate::app) device_lost: bool,
         /// 最後に開こうとしたデバイス名
         pub(in crate::app) last_device_name: Option<String>,
     }
@@ -245,8 +248,9 @@ pub(super) mod mock {
                     ));
                 }
                 state.capturing = true;
-                // 開き直したら途絶の記録も消える（実装と同じ）
+                // 開き直したら途絶の記録も喪失の知らせも消える（実装と同じ）
                 state.since_last_frame = None;
+                state.device_lost = false;
                 Ok(())
             })
         }
@@ -256,6 +260,7 @@ pub(super) mod mock {
                 state.stop_calls += 1;
                 state.capturing = false;
                 state.since_last_frame = None;
+                state.device_lost = false;
             });
         }
 
@@ -263,6 +268,7 @@ pub(super) mod mock {
             self.with(|state| VideoLinkState {
                 capturing: state.capturing,
                 since_last_frame: state.since_last_frame,
+                device_lost: state.device_lost,
             })
         }
 

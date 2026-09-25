@@ -217,6 +217,8 @@ impl FakeVideoCapture {
         VideoLinkState {
             capturing: self.stream.is_some(),
             since_last_frame: self.frames.since_last_frame(),
+            // フェイクの切断シナリオはフレームを止めるだけで、喪失は知らせない
+            device_lost: false,
         }
     }
 

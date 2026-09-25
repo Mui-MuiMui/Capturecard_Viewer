@@ -56,6 +56,11 @@ pub struct VideoLinkState {
     pub capturing: bool,
     /// 最後にフレームが届いてからの経過時間。1 枚も届いていなければ `None`
     pub since_last_frame: Option<Duration>,
+    /// デバイスが消えたことを、デバイス側（DirectShow のグラフのイベント
+    /// `EC_DEVICE_LOST` など）が知らせてきたか。**フレームの途絶を待たずに
+    /// 切断と判断するための値で、知らせる手段を持たない経路（Media Foundation、
+    /// フェイク）は常に `false`。** 一度立ったらストリームを閉じるまで下ろさない
+    pub device_lost: bool,
 }
 
 /// 実際に開いた映像ストリームの内容。
@@ -401,6 +406,9 @@ impl VideoCapture {
         VideoLinkState {
             capturing: self.camera.is_some(),
             since_last_frame: self.frames.since_last_frame(),
+            // nokhwa は Media Foundation のデバイス喪失を知らせてこない。
+            // 途絶の検出（`VIDEO_SIGNAL_TIMEOUT`）に任せる
+            device_lost: false,
         }
     }
 }
