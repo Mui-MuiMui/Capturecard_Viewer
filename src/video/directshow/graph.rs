@@ -27,7 +27,7 @@ use windows::core::Interface;
 use windows::Win32::Media::DirectShow::{
     IAMStreamConfig, IBaseFilter, ICaptureGraphBuilder2, IGraphBuilder, IMediaControl,
     IMediaEventEx, IMediaFilter, EC_DEVICE_LOST, EC_ERRORABORT, EC_ERRORABORTEX,
-    EC_STREAM_ERROR_STOPPED,
+    EC_ERROR_STILLPLAYING, EC_STREAM_ERROR_STOPPED,
 };
 use windows::Win32::Media::IReferenceClock;
 use windows::Win32::Media::MediaFoundation::{
@@ -76,6 +76,10 @@ const MAX_EVENTS_PER_POLL: usize = 64;
 /// - `EC_ERRORABORT` / `EC_ERRORABORTEX` はエラーでグラフが止まった知らせ、
 ///   `EC_STREAM_ERROR_STOPPED` はエラーでストリームが止まった知らせ。どれも
 ///   そのままではフレームが戻らないので、開き直しに回す
+/// - `EC_ERROR_STILLPLAYING` はグラフを動かす指示が失敗した知らせ（グラフは
+///   まだ動いていることがある）。1 枚目の前に止まりうるので、これも開き直しに
+///   回す。開いた直後に毎回これを出すデバイスでも開き直しが待ち無しで回らないのは、
+///   `ConnectRetry` が接続の成功から 1 秒の下限を置いているため（#232）
 /// - それ以外（`EC_COMPLETE`、`EC_CLOCK_CHANGED` など）は切断と関係ない
 pub(super) fn is_device_lost_event(code: i32, lparam2: isize) -> bool {
     let Ok(code) = u32::try_from(code) else {
@@ -83,7 +87,7 @@ pub(super) fn is_device_lost_event(code: i32, lparam2: isize) -> bool {
     };
     match code {
         EC_DEVICE_LOST => lparam2 == 0,
-        EC_ERRORABORT | EC_ERRORABORTEX | EC_STREAM_ERROR_STOPPED => true,
+        EC_ERRORABORT | EC_ERRORABORTEX | EC_STREAM_ERROR_STOPPED | EC_ERROR_STILLPLAYING => true,
         _ => false,
     }
 }
@@ -423,6 +427,12 @@ mod tests {
         for event in [EC_ERRORABORT, EC_ERRORABORTEX, EC_STREAM_ERROR_STOPPED] {
             assert!(is_device_lost_event(code(event), 0), "event = {event}");
         }
+    }
+
+    #[test]
+    fn is_device_lost_event_still_playing_error_is_lost() {
+        // グラフを動かす指示が失敗した。1 枚目の前に止まりうるので開き直す（#232）
+        assert!(is_device_lost_event(code(EC_ERROR_STILLPLAYING), 0));
     }
 
     #[test]
