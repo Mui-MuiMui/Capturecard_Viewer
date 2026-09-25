@@ -167,7 +167,7 @@ pub(super) fn show_screenshot_settings_tab(
             }
         });
 
-        if settings.screenshot.sound_file.is_some() {
+        if let Some(sound_file) = settings.screenshot.sound_file.clone() {
             ui.horizontal(|ui| {
                 ui.label("音量:");
                 ui.add(
@@ -177,8 +177,10 @@ pub(super) fn show_screenshot_settings_tab(
             });
 
             ui.horizontal(|ui| {
+                // 鳴らすのはドラフトの音。「適用」前に選び直した音を確かめられる
+                // ようにするため、適用済みの効果音は使わない（Issue #204）
                 if ui.button("テスト再生").clicked() {
-                    events.push(SettingsEvent::TestSound);
+                    events.push(SettingsEvent::TestSound(sound_file));
                 }
                 // None は「鳴らさない」の意味（ScreenshotManager::clear_sound）。
                 // 以前は「クリア」という文言で、既定音に戻る操作と区別が付かなかった
