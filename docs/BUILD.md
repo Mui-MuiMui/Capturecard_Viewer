@@ -134,6 +134,16 @@ capturecard_viewer.exe
 
 受け付ける値は `error` / `warn` / `info` / `debug` / `trace`。解釈できない値を渡した場合は `info` に戻る。
 
+キャプチャーボードやオーディオ入力が手元に無いときは、フェイクデバイスで起動できる（release ビルドにも入っているが、指定しなければ無効）。
+
+```
+set CAPTURECARD_VIEWER_FAKE_DEVICES=2
+set CAPTURECARD_VIEWER_FAKE_SCENARIO=fail:3,disconnect:10
+capturecard_viewer.exe
+```
+
+名乗るデバイス、シナリオの書式、確かめられることと確かめられないことは `docs/design/device-worker.md` の「フェイクデバイス（#142）」にある。
+
 **`println!` / `eprintln!` を足すと CI で落ちる。** `Cargo.toml` の `[lints.clippy]` で `print_stdout` / `print_stderr` を `warn` にしてあり、clippy を `-D warnings` で回しているため。
 
 テストコードの中は例外で、テストバイナリの標準出力は `cargo test -- --nocapture` で読めるため `println!` を使ってよい（`src/video/convert.rs` の計測用テストがその例）。`src/main.rs` 冒頭の `#![cfg_attr(test, allow(clippy::print_stdout))]` が許している。

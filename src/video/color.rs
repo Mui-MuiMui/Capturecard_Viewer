@@ -128,6 +128,17 @@ pub(super) static BT709_FULL: ColorMatrix = ColorMatrix {
 const HD_MIN_WIDTH: usize = 1280;
 const HD_MIN_HEIGHT: usize = 720;
 
+/// 解像度が HD（BT.709 で符号化される側）か。
+///
+/// 幅と高さのどちらかが HD の境界に達していれば HD とみなす。1440x1080 の
+/// ようにアスペクト比が 1:1 でない HD 形式があるため、片方だけを見ると
+/// 取りこぼす。色空間が「自動」のときの推定（`color_matrix_for`）と、
+/// フェイクデバイスがテストパターンをどちらの色空間で符号化するか
+/// （`super::fake`）の両方がこれを使う。
+pub(super) fn is_hd_resolution(width: usize, height: usize) -> bool {
+    width >= HD_MIN_WIDTH || height >= HD_MIN_HEIGHT
+}
+
 /// 設定とフレームの解像度から係数の表を選ぶ。
 ///
 /// `space` が `Auto` のときだけ解像度から推定する。幅と高さのどちらかが
@@ -143,7 +154,7 @@ pub(super) fn color_matrix_for(
     range: ColorRange,
 ) -> &'static ColorMatrix {
     let is_bt709 = match space {
-        ColorSpace::Auto => width >= HD_MIN_WIDTH || height >= HD_MIN_HEIGHT,
+        ColorSpace::Auto => is_hd_resolution(width, height),
         ColorSpace::Bt601 => false,
         ColorSpace::Bt709 => true,
     };

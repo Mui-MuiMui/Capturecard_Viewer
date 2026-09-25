@@ -4,7 +4,7 @@
 //! 触る。** UI スレッドが読むフレームと色変換の設定は、生成時に渡された
 //! `VideoFrames` / `SharedColorConversion` を通して共有する。
 
-use log::{debug, info, trace, warn};
+use log::{debug, info, warn};
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{
     ApiBackend, CameraFormat, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
@@ -13,30 +13,11 @@ use nokhwa::CallbackCamera;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::color::{adjusted_color_matrix, color_matrix_for, SharedColorConversion};
-use super::convert::yuy2_to_rgb_naive;
-use super::frame_buffer::{VideoFrame, VideoFrames};
+use super::color::SharedColorConversion;
+use super::frame_buffer::VideoFrames;
+use super::frame_sink::{FirstTimeOnly, FrameSink};
 use super::{elapsed_ms, VideoError};
 use crate::repaint::RepaintWaker;
-
-/// 「最初の 1 回だけ」を判定するフラグ。
-///
-/// フレームコールバックは 1080p60 なら毎秒 60 回呼ばれるため、到着や
-/// フォールバックをそのまま記録するとログが埋まる。初回だけ記録するための
-/// 判定をここに閉じ込めて、単体テストできるようにしてある。
-#[derive(Debug, Default)]
-struct FirstTimeOnly {
-    fired: bool,
-}
-
-impl FirstTimeOnly {
-    /// 最初に呼ばれたときだけ `true` を返す。2 回目以降は常に `false`。
-    fn take(&mut self) -> bool {
-        let first = !self.fired;
-        self.fired = true;
-        first
-    }
-}
 
 /// 実際に開いた解像度とフォーマットを 1 行にまとめる。
 ///
@@ -267,74 +248,29 @@ impl VideoCapture {
         };
 
         let frame_callback = {
-            let fb = self.frames.buffer();
-            let color_conversion = self.color_conversion.clone();
-            // フレームを置いたことを UI スレッドへ知らせる窓口。
-            // これが無いと、UI 側は保険の間隔でしか新着を見に来ない
-            let repaint_waker = self.repaint_waker.clone();
-            // 直前に置き換えられたフレーム。UI スレッドが手放していれば
-            // 中の Vec を次の変換先として回収し、毎フレームの確保を避ける。
-            // 1 世代ぶん遅らせて回収するのは、置き換えた直後のフレームは
-            // UI スレッドがテクスチャ化のために掴んでいることが多いため。
-            let mut recyclable: Option<Arc<VideoFrame>> = None;
-            // 毎フレーム流れる事象のうち、初回だけ記録したいもの。
-            // 2 回目以降は trace! に落とすか、何も出さない
-            let mut first_frame = FirstTimeOnly::default();
+            // 変換して積む本体はフェイクと共有する（`super::frame_sink`）。
+            // ここに残すのは nokhwa の `Buffer` からの取り出しと、
+            // YUY2 以外をデコーダへ倒す分岐だけ
+            let mut sink = FrameSink::new(
+                &self.frames,
+                self.color_conversion.clone(),
+                self.repaint_waker.clone(),
+            );
             let mut fallback_notice = FirstTimeOnly::default();
-            let mut short_frame_notice = FirstTimeOnly::default();
             let mut decode_error_notice = FirstTimeOnly::default();
-            let mut lock_error_notice = FirstTimeOnly::default();
             move |frame: nokhwa::Buffer| {
                 // 変換時間の計測と、フレーム間隔の基準を兼ねる受信時刻
                 let start = Instant::now();
                 let res = frame.resolution();
                 let width = res.width_x as usize;
                 let height = res.height_y as usize;
-                // YUY2 高速パス (naive) 試行
-                let mut used_fast = false;
-                // 高速パスで使った係数の表。デコーダへ倒れた場合は
-                // 色空間を選べないので、そのことが分かる文字列を残す
-                let mut matrix_name = "（デコーダ任せ）";
-                #[allow(unused_mut)]
-                let mut rgb_vec: Option<Vec<u8>> = None;
                 // フレームフォーマットを取得して適切な処理を行う
                 let source_format = frame.source_frame_format();
 
                 match source_format {
                     FrameFormat::YUYV if width.is_multiple_of(2) => {
                         // YUY2の高速パス
-                        let raw_data = frame.buffer_bytes();
-                        if raw_data.len() < width * height * 2 {
-                            // フレームを捨てるので画面が止まる。以降は同じ行が
-                            // 毎フレーム出るため初回だけ残す
-                            if short_frame_notice.take() {
-                                warn!(
-                                    "YUY2 のフレームが短いので破棄した（{}x{} に必要な {} バイトに対し {} バイト）。以降は記録しない",
-                                    width,
-                                    height,
-                                    width * height * 2,
-                                    raw_data.len()
-                                );
-                            }
-                        } else {
-                            // 回収できた Vec があれば使い回し、無ければ新規に確保する
-                            let mut rgb = recyclable
-                                .take()
-                                .and_then(|previous| Arc::try_unwrap(previous).ok())
-                                .map(|previous| previous.data)
-                                .unwrap_or_default();
-                            // 入力信号の色空間は通知されないため、設定が「自動」なら
-                            // 解像度から推定する。レンジは常に設定の値を使う
-                            let (space, range) = color_conversion.load();
-                            let matrix = adjusted_color_matrix(
-                                color_matrix_for(width, height, space, range),
-                                color_conversion.load_adjustments(),
-                            );
-                            matrix_name = matrix.name;
-                            yuy2_to_rgb_naive(width, height, &raw_data, &matrix, &mut rgb);
-                            rgb_vec = Some(rgb);
-                            used_fast = true;
-                        }
+                        sink.push_yuy2(width, height, &frame.buffer_bytes(), start);
                     }
 
                     _ => {
@@ -352,7 +288,15 @@ impl VideoCapture {
                             );
                         }
                         match frame.decode_image::<RgbFormat>() {
-                            Ok(rgb_data) => rgb_vec = Some(rgb_data.into_raw()),
+                            Ok(rgb_data) => {
+                                sink.push_decoded(
+                                    width,
+                                    height,
+                                    rgb_data.into_raw(),
+                                    start,
+                                    frame_format_name(source_format),
+                                );
+                            }
                             Err(e) => {
                                 if decode_error_notice.take() {
                                     warn!(
@@ -362,59 +306,6 @@ impl VideoCapture {
                                 }
                             }
                         }
-                    }
-                }
-                if let Some(data) = rgb_vec {
-                    let decode_ms = start.elapsed().as_secs_f32() * 1000.0;
-                    let format_name = frame_format_name(source_format);
-                    let vf = VideoFrame {
-                        width,
-                        height,
-                        data,
-                    };
-                    // フレームバッファへ置けたか。置けたときだけ UI スレッドを
-                    // 起こす。**起こすのはロックを手放してから。** 握ったまま
-                    // 呼ぶと、egui 側の待ちの間このバッファも止まる
-                    let mut pushed = false;
-                    match fb.lock() {
-                        Ok(mut guard) => {
-                            recyclable =
-                                guard.push_back(vf, start, decode_ms, used_fast, format_name);
-                            pushed = true;
-                            if first_frame.take() {
-                                // 「接続した」と「映像が出ている」は別物なので、
-                                // 最初の 1 枚が届いたことだけは info で残す
-                                info!(
-                                    "最初のフレームが届いた（{}x{}、フォーマット: {:?}、変換 {:.2}ms、経路: {}、色変換: {}）",
-                                    width,
-                                    height,
-                                    source_format,
-                                    decode_ms,
-                                    if used_fast { "高速パス" } else { "デコーダ" },
-                                    matrix_name
-                                );
-                            } else {
-                                trace!(
-                                    "フレームが届いた（{}x{}、変換 {:.2}ms）",
-                                    width,
-                                    height,
-                                    decode_ms
-                                );
-                            }
-                        }
-                        Err(_) => {
-                            if lock_error_notice.take() {
-                                warn!(
-                                    "フレームバッファのロックを取得できないのでフレームを捨てた。以降は記録しない"
-                                );
-                            }
-                        }
-                    }
-
-                    if pushed {
-                        // 届いたその場で UI スレッドを起こす。ここが映像の
-                        // 遅延を決めるので、重い処理を前に挟まないこと
-                        repaint_waker.wake();
                     }
                 }
             }
@@ -551,31 +442,5 @@ mod tests {
     fn format_actual_video_without_any_value_says_so() {
         // 取得できないことと「値が無い」ことを画面上で区別する
         assert_eq!(format_actual_video(None, None), "（取得できない）");
-    }
-
-    #[test]
-    fn first_time_only_first_take_returns_true() {
-        let mut flag = FirstTimeOnly::default();
-        assert!(flag.take());
-    }
-
-    #[test]
-    fn first_time_only_subsequent_takes_return_false() {
-        // 毎フレーム呼ばれる前提なので、2 回目以降は必ず false になること
-        let mut flag = FirstTimeOnly::default();
-        flag.take();
-        assert!(!flag.take());
-        assert!(!flag.take());
-        assert!(!flag.take());
-    }
-
-    #[test]
-    fn first_time_only_instances_are_independent() {
-        // 「初回のフレーム」と「初回のフォールバック」を別々に数えるため、
-        // 片方を消費してももう片方は初回のまま
-        let mut first = FirstTimeOnly::default();
-        let mut second = FirstTimeOnly::default();
-        assert!(first.take());
-        assert!(second.take());
     }
 }

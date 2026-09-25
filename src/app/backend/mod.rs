@@ -3,8 +3,9 @@
 //! **trait の境界は「ワーカーがデバイスへ触る場所」に置いてある。**
 //! 具体的には開く・閉じる・列挙する・能力を問い合わせる・観測値を読む、の
 //! 5 つだけで、`super::worker_connect` と `super::worker_timers` が呼ぶ操作が
-//! そのまま並ぶ。実装は `crate::video::VideoCapture` / `crate::audio::AudioCapture`
-//! で、どちらも中身には手を入れず、ここで trait に包んでいる。
+//! そのまま並ぶ。本番の実装は `crate::video::VideoCapture` /
+//! `crate::audio::AudioCapture` で、どちらも中身には手を入れず、`system` で
+//! trait に包んでいる。
 //!
 //! **フレームコールバックと cpal のコールバックの経路には挟まない。**
 //! 映像フレームは `VideoFrames`、音量とミュートは `AudioControls` の共有
@@ -12,20 +13,33 @@
 //! しない決まりなので、動的ディスパッチを足す場所ではない
 //! （`docs/design/video-pipeline.md` / `docs/design/audio.md`）。
 //!
-//! テスト用のモックは同じファイルの `mock`（`#[cfg(test)]`）にある。
-//! 実機なしで動くフェイクデバイス（カラーバーや正弦波を吐く実装）は
-//! #142 でこの trait の実装として足す予定で、ここには置かない。
+//! 実装は 3 つある。
+//!
+//! | 実装 | 置き場所 | 使われるとき |
+//! |---|---|---|
+//! | 本番（`SystemBackends`） | `system` | 通常の起動 |
+//! | フェイク（`fake::FakeBackends`） | `fake`。中身は `crate::video::FakeVideoCapture` / `crate::audio::FakeAudioCapture` | 環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` を指定して起動したとき |
+//! | モック | このファイルの `mock`（`#[cfg(test)]`） | ワーカーの単体テスト |
+//!
+//! 本番とフェイクのどちらを使うかは `backends_from_env` が決め、呼ぶのは
+//! `DeviceWorker::spawn` の 1 か所だけ。
 
 use crate::audio::{
-    self, ActiveAudio, AudioCapabilities, AudioCapture, AudioControls, AudioDirection, AudioError,
-    PassthroughRequest, ResampleStatus, ResampleTelemetry,
+    ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, AudioError, PassthroughRequest,
+    ResampleStatus, ResampleTelemetry,
 };
 use crate::repaint::RepaintWaker;
 use crate::video::{
-    ActiveVideo, DeviceCapabilities, SharedColorConversion, VideoCapture, VideoError, VideoFrames,
-    VideoLinkState,
+    ActiveVideo, DeviceCapabilities, SharedColorConversion, VideoError, VideoFrames, VideoLinkState,
 };
+use log::warn;
 use std::sync::Arc;
+
+mod fake;
+mod system;
+
+use fake::{FakeBackends, FAKE_DEVICES_ENV, FAKE_SCENARIO_ENV};
+pub(super) use system::SystemBackends;
 
 /// 映像デバイスの開閉・列挙・観測。
 ///
@@ -133,118 +147,29 @@ pub(super) trait DeviceBackends: Send {
     ) -> (Box<dyn VideoBackend>, Box<dyn AudioBackend>);
 }
 
-/// 本番のバックエンド。映像は Media Foundation（nokhwa）、音声は WASAPI（cpal）。
-pub(super) struct SystemBackends;
-
-impl DeviceBackends for SystemBackends {
-    fn create(
-        self: Box<Self>,
-        shared: BackendShared,
-    ) -> (Box<dyn VideoBackend>, Box<dyn AudioBackend>) {
-        let BackendShared {
-            frames,
-            color_conversion,
-            audio_controls,
-            repaint_waker,
-        } = shared;
-        (
-            Box::new(VideoCapture::new(frames, color_conversion, repaint_waker)),
-            Box::new(AudioCapture::new(audio_controls)),
-        )
-    }
-}
-
-impl VideoBackend for VideoCapture {
-    fn list_devices(&self) -> Vec<(String, String)> {
-        VideoCapture::list_devices()
-    }
-
-    fn capabilities(&self, device_name: Option<&str>) -> Result<DeviceCapabilities, VideoError> {
-        VideoCapture::get_device_capabilities(device_name)
-    }
-
-    fn start_capture(
-        &mut self,
-        device_name: Option<&str>,
-        resolution: Option<(u32, u32)>,
-        format: Option<&str>,
-        fps: Option<u32>,
-    ) -> Result<(), VideoError> {
-        VideoCapture::start_capture(self, device_name, resolution, format, fps)
-    }
-
-    fn stop_capture(&mut self) {
-        VideoCapture::stop_capture(self);
-    }
-
-    fn link_state(&self) -> VideoLinkState {
-        VideoCapture::link_state(self)
-    }
-
-    fn active(&self) -> Option<ActiveVideo> {
-        VideoCapture::active(self)
-    }
-}
-
-impl AudioBackend for AudioCapture {
-    fn list_input_devices(&self) -> Vec<String> {
-        AudioCapture::list_input_devices(self)
-    }
-
-    fn list_output_devices(&self) -> Vec<String> {
-        AudioCapture::list_output_devices(self)
-    }
-
-    fn default_input_device_name(&self) -> Option<String> {
-        AudioCapture::default_input_device_name(self)
-    }
-
-    fn default_output_device_name(&self) -> Option<String> {
-        AudioCapture::default_output_device_name(self)
-    }
-
-    fn capabilities(
-        &self,
-        direction: AudioDirection,
-        device_name: Option<&str>,
-    ) -> Result<AudioCapabilities, AudioError> {
-        // **`AudioCapture` のホストは使わない自由関数を呼ぶ。** 元から
-        // そういう作りで、`AudioCapture` を持たないスレッドからも使える
-        audio::query_capabilities(direction, device_name)
-    }
-
-    fn start_passthrough(&mut self, request: &PassthroughRequest<'_>) -> Result<(), AudioError> {
-        AudioCapture::start_passthrough(self, request)
-    }
-
-    fn stop_capture(&mut self) {
-        AudioCapture::stop_capture(self);
-    }
-
-    fn active(&self) -> Option<ActiveAudio> {
-        AudioCapture::active(self)
-    }
-
-    fn resample_status(&self) -> Option<ResampleStatus> {
-        AudioCapture::resample_status(self)
-    }
-
-    fn resample_telemetry(&self) -> Option<Arc<ResampleTelemetry>> {
-        AudioCapture::resample_telemetry(self).cloned()
-    }
-
-    fn underrun_count(&self) -> Option<u32> {
-        AudioCapture::underrun_count(self)
-    }
-
-    fn take_stream_error(&self) -> bool {
-        AudioCapture::take_stream_error(self)
+/// 環境変数を見て、使うバックエンドを選ぶ。
+///
+/// **呼ぶのは `DeviceWorker::spawn` の 1 か所だけ。** `CAPTURECARD_VIEWER_FAKE_DEVICES`
+/// が無ければ本番（`SystemBackends`）で、今までと何も変わらない。
+pub(super) fn backends_from_env() -> Box<dyn DeviceBackends> {
+    let devices = std::env::var(FAKE_DEVICES_ENV).ok();
+    let scenario = std::env::var(FAKE_SCENARIO_ENV).ok();
+    match FakeBackends::from_env_values(devices.as_deref(), scenario.as_deref()) {
+        Some(fake) => {
+            // 実機が映らない理由がログから分かるよう、目立つ段で残す
+            warn!(
+                "{} が指定されているので、実機ではなくフェイクデバイスで動く（{} 台、シナリオ: {:?}）",
+                FAKE_DEVICES_ENV, fake.device_count, fake.scenario
+            );
+            Box::new(fake)
+        }
+        None => Box::new(SystemBackends),
     }
 }
 
 /// テスト用のモック。**実機なしでワーカーの再試行と切断検出を回すためだけのもの。**
 ///
-/// 映像や音声の中身は作らない（カラーバーや正弦波を吐くフェイクは #142）。
+/// 映像や音声の中身は作らない（カラーバーや正弦波を吐くのは `fake`）。
 /// ここにあるのは「指定回数失敗してから成功する」「列挙結果を差し替える」
 /// 「フレームが止まったことにする」「音声ストリームのエラーを起こす」の
 /// 4 つだけ。

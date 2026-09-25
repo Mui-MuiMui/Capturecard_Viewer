@@ -13,11 +13,13 @@
 //! | `convert.rs` | 入出力の形が違う場合の変換（線形補間とミックス）とサンプル型の変換 |
 //! | `resample.rs` | クロックドリフト補正の共有状態と、補正係数の決め方 |
 //! | `controls.rs` | 音量・パススルー・ミュートの共有状態 |
+//! | `fake.rs` | 実機なしで動くフェイクの音声デバイス（正弦波の入力と、書き込みを捨てる出力）。環境変数で有効にしたときだけ使う |
 
 mod capabilities;
 mod capture;
 mod controls;
 mod convert;
+mod fake;
 mod resample;
 mod stream;
 mod stream_config;
@@ -32,6 +34,7 @@ pub use capabilities::{
 };
 pub use capture::{AudioCapture, PassthroughRequest};
 pub use controls::AudioControls;
+pub use fake::{FakeAudioCapture, FakeAudioOptions};
 pub(crate) use resample::decide_resample_correction;
 pub use resample::{ResampleStatus, ResampleTelemetry};
 

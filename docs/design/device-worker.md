@@ -52,7 +52,7 @@ eframe は最小化されたウィンドウの再描画要求を捨てるため�
 
 ## デバイスに触る入口は trait 1 枚で仕切る
 
-**ワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。** `worker_loop` / `worker_connect` / `worker_timers` はどれも `Box<dyn ..>` を持つだけで、`VideoCapture` / `AudioCapture` という具体型を知らない。実装を選ぶのは `DeviceWorker::spawn` の 1 か所（`SystemBackends`）で、そこが `BackendShared`（フレーム・色変換・音量・再描画の窓口）と一緒にワーカースレッドへ送り、**組み立てはあちら側で行う**（`cpal::Stream` が `!Send` なので、作る場所は使うスレッドでなければならない）。
+**ワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。** `worker_loop` / `worker_connect` / `worker_timers` はどれも `Box<dyn ..>` を持つだけで、`VideoCapture` / `AudioCapture` という具体型を知らない。実装を選ぶのは `DeviceWorker::spawn` の 1 か所（`backend::backends_from_env`。既定は `SystemBackends`、環境変数を指定したときだけフェイク）で、そこが `BackendShared`（フレーム・色変換・音量・再描画の窓口）と一緒にワーカースレッドへ送り、**組み立てはあちら側で行う**（`cpal::Stream` が `!Send` なので、作る場所は使うスレッドでなければならない）。
 
 ```mermaid
 flowchart LR
@@ -61,7 +61,7 @@ flowchart LR
     trait["VideoBackend / AudioBackend"]
     real["VideoCapture / AudioCapture<br/>video/capture.rs / audio/capture.rs"]
     mock["モック（テスト専用）"]
-    fake["フェイク（#142、未実装）"]
+    fake["FakeVideoCapture / FakeAudioCapture<br/>video/fake.rs / audio/fake.rs"]
 
     spawn -->|Box&lt;dyn DeviceBackends&gt;| loop
     loop --> trait
@@ -70,7 +70,7 @@ flowchart LR
     trait -.-> fake
 ```
 
-**境界はワーカーがデバイスへ触る場所に置く。** 開く・閉じる・列挙する・能力を問い合わせる・観測値を読む、の 5 つだけで、`worker_connect` と `worker_timers` が呼ぶ操作がそのまま trait のメソッドに並ぶ。ここより上（コマンドの解釈、再試行の期限、途絶の判定）はもともと `WorkerState` と `monitor` / `retry` の側にあり、デバイスを知らない。ここより下は、nokhwa の開閉とフレームコールバックが `src/video/capture.rs`、cpal の開閉が `src/audio/capture.rs`、cpal のストリームの組み立てと入出力のコールバックが `src/audio/stream.rs` にある。**`video` / `audio` の側は trait を知らない。** `VideoCapture` / `AudioCapture` は自分の固有メソッドを持つだけで、trait に包むのは `backend.rs` の `impl VideoBackend for VideoCapture` / `impl AudioBackend for AudioCapture` の役目。
+**境界はワーカーがデバイスへ触る場所に置く。** 開く・閉じる・列挙する・能力を問い合わせる・観測値を読む、の 5 つだけで、`worker_connect` と `worker_timers` が呼ぶ操作がそのまま trait のメソッドに並ぶ。ここより上（コマンドの解釈、再試行の期限、途絶の判定）はもともと `WorkerState` と `monitor` / `retry` の側にあり、デバイスを知らない。ここより下は、nokhwa の開閉とフレームコールバックが `src/video/capture.rs`、cpal の開閉が `src/audio/capture.rs`、cpal のストリームの組み立てと入出力のコールバックが `src/audio/stream.rs` にある。**`video` / `audio` の側は trait を知らない。** `VideoCapture` / `AudioCapture` は自分の固有メソッドを持つだけで、trait に包むのは `app/backend/system.rs` の `impl VideoBackend for VideoCapture` / `impl AudioBackend for AudioCapture` の役目（フェイクは `app/backend/fake.rs`）。
 
 **フレームコールバックと cpal のコールバックの経路には挟まない。** 映像フレームは `VideoFrames`、音量とミュートは `AudioControls` の共有ハンドル越しに今までどおり流れる。あの 2 つのコールバックはロックもアロケーションもしない決まりで（`docs/design/video-pipeline.md` / `docs/design/audio.md`）、動的ディスパッチを足す場所ではない。trait 化したのは開閉と問い合わせだけなので、1 回の接続につき数回しか通らない。
 
@@ -92,15 +92,60 @@ flowchart LR
 - **#142 のフェイクが作りやすくならない。** フェイクが開いたストリームとして持つのは「テストパターンや正弦波を吐くスレッド」と「開いた内容」くらいで、`VideoCapture` が `CallbackCamera` を抱えるのと同じ形で自分の中に持てる。フェイクを書くうえで引っかかるのは、次の項に書く可視性のほうで、ハンドルの有無とは関係がない
 - **ワーカー側の書き換えが得より大きい。** `WorkerState` がバックエンドと `Option<ハンドル>` を映像・音声それぞれ別に持つことになり、`worker_loop` / `worker_connect` / `worker_timers` で観測値を読む箇所（`link_state` / `active` / `resample_*` / `underrun_count` / `take_stream_error`）がすべて `Option` 越しになる。モックもハンドル側と二重になる。得られるのは主に、`AudioCapture` の「開き直すたびにエラーの旗とアンダーランの数え手を新しい `Arc` へ差し替える」決まりを型で強制できることだが、この差し替えは `start_passthrough` と `stop_capture` の 2 か所に閉じていて、手で守れている
 
-見直すのは、**新しいストリームを開いてから古いものを閉じたい**（切り替え時の暗転を縮める）ときか、フェイクの実装で旗の差し替えを同じように書き写すことになり、取り違えが心配になったとき。前者は「実装が同時に 1 本だけ持つ」今の形では書けないので、ハンドル型が要る。
+見直すのは、**新しいストリームを開いてから古いものを閉じたい**（切り替え時の暗転を縮める）ときか、フェイクの実装で旗の差し替えを同じように書き写すことになり、取り違えが心配になったとき。前者は「実装が同時に 1 本だけ持つ」今の形では書けないので、ハンドル型が要る。後者は #142 で現実になっていて、`FakeAudioCapture`（`src/audio/fake.rs`）が同じ差し替えを `start_passthrough` / `stop_capture` に書き写している。いまは 2 実装 × 2 か所で手で守れているが、実装がさらに増えるなら見直す。
 
-### フェイクデバイス（#142）の置き場所
+### フェイクデバイス（#142）
 
-**フェイクは `src/video/` / `src/audio/` の中に置き、`VideoCapture` / `AudioCapture` と同じく `backend.rs` で trait に包む。** `app::backend` に直接書くと、次の共有の窓口に届かない。
+**実機なしで映像と音声を流すための、trait の実装の 1 つ。** 環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES=<台数>` を指定して起動したときだけ使われ、指定が無ければ本番のまま何も変わらない。release ビルドにも入っているが既定では無効で、ログのレベル（`CAPTURECARD_VIEWER_LOG`、`docs/design/logging.md`）と同じく設定ファイルには持たせていない。ログを見る場面と同じで、使うのは開発や不具合の切り分けのときに限られるため。
 
-- **映像フレームを `FrameBuffer` へ直接積めるか:** 積めるのは `src/video/` の中からだけ。`VideoFrames::buffer()` / `VideoFrames::reset()` / `FrameBuffer::push_back` はどれも `pub(super)` になっている。さらに、実機と同じ変換を通した RGB の期待値を検証する（#142 の目的の 1 つ）には、`start_capture` の中でクロージャに書かれているフレームコールバックの本体（YUY2 → RGB、`push_back`、`RepaintWaker::wake`）を、`nokhwa::Buffer` ではなく「幅・高さ・フォーマット・バイト列」を受ける関数へ出し、フェイクと実機の両方から呼べるようにする必要がある。これは #142 の中で行う
-- **`AudioControls` を共有できるか:** 共有はできる。`BackendShared` が同じ `Arc<AudioControls>` を `DeviceBackends::create` へ渡すので、フェイクも受け取れる。ただし中身の読み方は `src/audio/` の中にしか無い。フィールドは `pub(super)` で、`audio` の外から読めるのは `volume_percent()` / `muted()` だけ（パススルーの有効 / 無効を読む窓口は無い）。出力コールバックと同じ判定（`output_is_audible`）と書き出し（`render_output_samples`）は `src/audio/stream.rs` の私有関数なので、フェイクは `src/audio/` に置き、これらを `pub(super)` にして使う
-- **実装を選ぶ場所:** `DeviceWorker::spawn` が `SystemBackends` を渡している 1 か所で、フェイク用の `DeviceBackends` と入れ替える。ワーカーの側は何も変えなくてよい
+| 置き場所 | 持つもの |
+|---|---|
+| `src/video/fake.rs` | `FakeVideoCapture`。デバイスとしての振る舞い（名乗る名前、対応形式、シナリオ）と生成スレッド |
+| `src/video/test_pattern.rs` | テストパターンの描画（カラーバー、ベタ塗り、フレーム番号の焼き込み）。純粋関数 |
+| `src/audio/fake.rs` | `FakeAudioCapture`。正弦波を出す入力と、書き込みを捨てる出力のスレッド |
+| `src/app/backend/fake.rs` | `FakeBackends`（`DeviceBackends`）、上の 2 つを trait に包む impl、環境変数の解釈 |
+
+**フェイクを `src/video/` / `src/audio/` の中に置いたのは、共有の窓口がそこにしか無いため。** `app::backend` に直接書くと届かない。
+
+- **映像フレームを `FrameBuffer` へ積む口:** `VideoFrames::buffer()` / `FrameBuffer::push_back` は `pub(super)` で、`src/video/` の外からは積めない。さらに実機と同じ変換を通した RGB を確かめるには、nokhwa のクロージャに書かれていたフレームコールバックの本体（YUY2 → RGB、`push_back`、`RepaintWaker::wake`）を共有する必要があった。これを「幅・高さ・バイト列」を受ける `FrameSink`（`src/video/frame_sink.rs`）へ出し、nokhwa のコールバックとフェイクの生成スレッドの両方がそこを通る
+- **`AudioControls` の読み方:** フィールドが `pub(super)` で、出力コールバックと同じ判定は `src/audio/stream.rs` にしか無い。cpal のクロージャの本体を `process_input` / `process_output` へ出し、フェイクの入出力スレッドも同じものを呼ぶ。開く設定の選び方も `choose_passthrough_configs`（`src/audio/stream_config.rs`）へ出して共有した。**音量・ミュート・パススルー、クロックドリフト補正の水位（`ResampleTelemetry`）、アンダーランの数え方は本物と同じ経路で動く**
+- **実装を選ぶ場所:** `DeviceWorker::spawn` が `backend::backends_from_env()` を呼ぶ 1 か所だけ。ワーカーの側は何も変えていない
+
+#### 名乗るデバイスと流すもの
+
+| デバイス | 中身 |
+|---|---|
+| Fake Camera 1, 3, … | 75% のカラーバー 8 本（白・黄・シアン・緑・マゼンタ・赤・青・黒）。YUY2 |
+| Fake Camera 2, 4, … | ベタ塗り。2 番が青、4 番が赤、6 番が緑、8 番が黄。YUY2 |
+| Fake Audio Input 1, 2, … | 48kHz 2ch の正弦波。1 番が 440Hz、2 番が 880Hz、… |
+| Fake Audio Output 1 | 48kHz 2ch。入力と形が揃うので変換しない |
+| Fake Audio Output 2 | 44.1kHz 1ch。入力と揃わないので変換し、ドリフト補正の対象になる |
+
+- 映像の台数と音声の入力の台数が `CAPTURECARD_VIEWER_FAKE_DEVICES` の値（1〜8。超えたら 8）。出力は常に 2 台。0・空・数字でない値はフェイクを使わない（打ち間違えでフェイクになるより、実機のまま起動するほうが害が小さい）
+- 映像の対応形式は YUY2 の 1920x1080 / 1280x720 / 640x480 × 60 / 30fps。一覧に無い解像度は画素数が最も近いものへ、fps は実機と同じく 15〜120 へ丸める。解像度が未指定なら実機と同じ 1280x720 60fps
+- 名前の引き方は実機と同じ。設定に実機のデバイス名が書かれていれば「見つからない」で再試行し続け、フェイクの先頭へは倒さない（`docs/design/reconnect.md` の「音声は繋がらなくても別のデバイスへ倒さない」と同じ考え方）。設定が空なら起動直後の既定の決定（`resolve_default_devices`）で「Fake Camera 1」「Fake Audio Input 1」が選ばれる
+- どの映像にも左上へフレーム番号を焼き込む。パターンの色は、解像度が HD なら BT.709、それ未満なら BT.601 のリミテッドレンジで符号化する。色空間を「自動」にしておけば意図した色に戻り、実機のキャプチャーボードと同じく、色空間やレンジを取り違えると色がずれて見える
+
+#### シナリオ
+
+`CAPTURECARD_VIEWER_FAKE_SCENARIO` に、次の項目をカンマで区切って並べる。大文字小文字と前後の空白は問わない。読めない項目はログに残して読み飛ばす。
+
+| 書式 | 起きること |
+|---|---|
+| `disconnect:<秒>` | 映像を開いてから `<秒>` 経つとフレームを止める（ストリームは開いたまま、信号だけが途絶える）。**開き直すたびに数え直す**ので、途絶の検出（3 秒）→ 再接続 → また `<秒>` 流れて止まる、を繰り返す。0 は受け付けない（1 枚も届かない状態は切断とみなさない決まりなので、再現にならない。`docs/design/reconnect.md`） |
+| `fail:<回数>` | 映像と音声のそれぞれで、最初の `<回数>` 回だけ開くのに失敗する。バックオフでの再試行を再現する |
+
+例: `CAPTURECARD_VIEWER_FAKE_SCENARIO=fail:3,disconnect:10`
+
+#### スレッド
+
+映像は開いている間だけ生成スレッドを 1 本（`fake-video`）、音声は入力と出力に 1 本ずつ（`fake-audio-in` / `fake-audio-out`）立てる。どれも `start_capture` / `start_passthrough` で起こし、`stop_capture` で止めて **join する**（`JoinHandle` は捨てない）。止める合図はチャネルの送り手を落とすことで、待ちは `recv_timeout` なのですぐ抜ける。「デバイスに触る使い捨てのスレッドを作らない」（`docs/design/threads.md`）とは別物で、cpal / nokhwa がストリームごとに持つコールバックスレッドの代役にあたる。
+
+音声のスレッドは 10ms ごとに起き、開始からの経過時間ぶんに足りない数のサンプルを処理する。起きる間隔が揺れても平均のレートはずれない。
+
+#### フェイクでは確かめられないもの
+
+Media Foundation と WASAPI そのものの挙動（列挙の遅さ、フォーマットの癖、`Camera::new` の所要時間、MJPEG のデコード、デバイスが消えたときの cpal のエラー）は再現できない。これらは実機と `docs/MANUAL-TEST.md` のまま。
 
 ### これで実機なしに何が試せるか
 
@@ -108,4 +153,4 @@ flowchart LR
 
 モックを載せた `WorkerState` は、スレッドを起こさずに `tick(now)` を呼べる。**渡す時刻はテストが決めてよい**ので、バックオフ（200ms → 400ms → …）もフレームの途絶（3 秒）も実時間を待たずに跨げる。`ConnectRetry` と `monitor` がもともと `Instant` / `Duration` を引数で受け取る形だったため、時刻の注入のために足した仕組みは無い。
 
-**カラーバーや正弦波を吐くフェイクデバイスはここには無い。** それはこの trait の実装の 1 つとして #142 で足す（置き場所は上の「フェイクデバイス（#142）の置き場所」）。色変換の期待値の検証や、デバイス切替 UI・自動復帰・スクリーンショットの通し確認はそちらの話で、ここにあるモックは「ワーカーの分岐を通す」ためだけのもの。
+**カラーバーや正弦波を吐くのはモックではなくフェイク**（上の「フェイクデバイス（#142）」）。モックは「ワーカーの分岐を通す」ためだけのもので、映像や音声の中身は作らない。色変換の期待値の検証（`src/video/test_pattern.rs` のテスト）や、ワーカー本体にフェイクを載せて再試行から映像が届くまでを通すテスト（`src/app/backend/fake.rs`）、デバイス切替 UI・自動復帰・スクリーンショットの通し確認はフェイクの側で行う。

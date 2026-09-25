@@ -15,7 +15,7 @@
 //! 越しに読む。イベントを取りこぼしても表示が食い違わないよう、状態は
 //! 必ずこちらを正とする。
 
-use super::backend::{BackendShared, SystemBackends};
+use super::backend::{self, BackendShared};
 use crate::audio::{ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, ResampleStatus};
 use crate::repaint::RepaintWaker;
 use crate::settings::AppSettings;
@@ -219,7 +219,9 @@ impl DeviceWorker {
     /// スレッドの中で作る。** `cpal::Stream` は `!Send` で、作ったスレッド以外へ
     /// 持ち出せないため。
     ///
-    /// デバイスに触る実装を選ぶのはここ 1 か所だけ（`SystemBackends`）。
+    /// デバイスに触る実装を選ぶのはここ 1 か所だけ（`backend::backends_from_env`。
+    /// 通常は `SystemBackends`、環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` が
+    /// あればフェイク）。
     /// ワーカー本体（`super::worker_loop::run`）は `super::backend` の trait
     /// しか知らないので、テストはモックを渡して同じループを回せる。
     pub(super) fn spawn(
@@ -239,16 +241,12 @@ impl DeviceWorker {
             audio_controls,
             repaint_waker,
         };
+        // 本番かフェイクか。環境変数を読むだけなので UI スレッドで決めてよい
+        let backends = backend::backends_from_env();
         let handle = std::thread::Builder::new()
             .name("device-worker".to_string())
             .spawn(move || {
-                super::worker_loop::run(
-                    command_rx,
-                    event_tx,
-                    thread_snapshot,
-                    shared,
-                    Box::new(SystemBackends),
-                );
+                super::worker_loop::run(command_rx, event_tx, thread_snapshot, shared, backends);
             });
 
         let handle = match handle {

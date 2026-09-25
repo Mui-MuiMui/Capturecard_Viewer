@@ -8,6 +8,8 @@
 
 キャプチャーデバイス → nokhwa `Buffer` → フレームコールバックで YUY2→RGB 変換 → `FrameBuffer` → `update_video_texture` で egui テクスチャ化 → 描画
 
+フレームコールバックの本体（YUY2→RGB 変換、`FrameBuffer` への格納、`RepaintWaker` で UI を起こす）は `video/frame_sink.rs` の `FrameSink` にある。nokhwa のコールバックは `Buffer` から幅・高さ・バイト列を取り出して渡すだけで、フェイクの映像デバイス（`video/fake.rs`）も同じ `FrameSink` を通る。
+
 `FrameBuffer` はフレームを `Arc<VideoFrame>` で保持し、取り出し側へは `Arc` の複製を渡す。**画素データを複製しないので、取り出しても 1080p で 6MB の memcpy は発生しない。**
 
 色変換の係数は `ColorMatrix` の表で持つ。**色空間・レンジの選択に加えて、明るさ・コントラスト・彩度もこの表へ畳み込む**（`adjusted_color_matrix`）。Y'CbCr → RGB がアフィン変換であることを使い、コントラストは輝度と色差の係数へ、彩度は色差の係数へ、明るさとコントラストの定数分は `ColorMatrix::offset` へ落とす。変換関数の入口で `y_offset` と `offset` を 1 つの `bias` に畳むので、**調整の有無で 1 画素あたりの演算数は変わらない。** 調整を後段のフィルタとして足さないこと。

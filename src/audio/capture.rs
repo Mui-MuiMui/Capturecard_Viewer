@@ -6,7 +6,7 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat};
-use log::{debug, info, warn};
+use log::{debug, info};
 use ringbuf::HeapRb;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,7 +18,7 @@ use super::convert::{
 };
 use super::resample::{ResampleStatus, ResampleTelemetry};
 use super::stream::{build_input_stream_with, build_output_stream_with, OutputSignals};
-use super::stream_config::{resolve_ranges, select_aligned_configs, select_best_config};
+use super::stream_config::{choose_passthrough_configs, resolve_ranges};
 use super::{ActiveAudio, AudioDirection, AudioError};
 
 /// パススルーを開くときの要求。
@@ -50,10 +50,12 @@ pub struct PassthroughRequest<'a> {
 /// 確保する。入力が先行しても後れても同じだけ余裕を持たせるためで、
 /// クロックドリフト補正の目標水位（`ResampleTelemetry::new`）もこの値になる。
 ///
+/// フェイクの音声（`super::fake`）も同じ長さで確保する。
+///
 /// **下限を 1 サンプルで止める。** `buffer_ms` は設定側で 20ms 以上に
 /// 丸めてあるので通常は効かないが、0 を返すと `HeapRb::new(0)` になり
 /// 入力も出力も 1 サンプルも運べなくなる。
-fn ring_buffer_samples(sample_rate: u32, channels: usize, buffer_ms: u32) -> usize {
+pub(super) fn ring_buffer_samples(sample_rate: u32, channels: usize, buffer_ms: u32) -> usize {
     let samples = (sample_rate as usize)
         .saturating_mul(channels)
         .saturating_mul(buffer_ms as usize)
@@ -230,49 +232,14 @@ impl AudioCapture {
                 .map(|it| it.collect())
         });
 
-        // 設定画面で選んだサンプルレート・チャンネル数を、デバイスが対応する
-        // 組み合わせの中で最も近いものへ寄せる。列挙できない、または選べる設定が
-        // 無いデバイスでは既定設定のまま開く（従来の挙動）
-        //
-        // **まず入出力で同じ設定に揃えられないかを見る。** 揃っていれば
-        // リングバッファのサンプルをそのまま流せる。揃わない組み合わせでは
-        // 再生速度とピッチがずれる
-        let aligned = select_aligned_configs(
+        let (input_config, output_config) = choose_passthrough_configs(
             &input_ranges,
             &output_ranges,
-            desired_sample_rate.unwrap_or_else(|| input_default.sample_rate().0),
-            desired_channels.unwrap_or_else(|| input_default.channels()),
+            input_default,
+            output_default,
+            desired_sample_rate,
+            desired_channels,
         );
-
-        let (input_config, output_config) = match aligned {
-            Some(pair) => pair,
-            None => {
-                let input_config = select_best_config(
-                    &input_ranges,
-                    desired_sample_rate.unwrap_or_else(|| input_default.sample_rate().0),
-                    desired_channels.unwrap_or_else(|| input_default.channels()),
-                )
-                .unwrap_or(input_default);
-                let output_config = select_best_config(
-                    &output_ranges,
-                    desired_sample_rate.unwrap_or_else(|| output_default.sample_rate().0),
-                    desired_channels.unwrap_or_else(|| output_default.channels()),
-                )
-                .unwrap_or(output_default);
-                if input_config.sample_rate() != output_config.sample_rate()
-                    || input_config.channels() != output_config.channels()
-                {
-                    warn!(
-                        "入出力で共通の設定が無いため別々の設定で開く（線形補間とミックスで変換する）- 入力: {}Hz {}ch、出力: {}Hz {}ch",
-                        input_config.sample_rate().0,
-                        input_config.channels(),
-                        output_config.sample_rate().0,
-                        output_config.channels()
-                    );
-                }
-                (input_config, output_config)
-            }
-        };
 
         info!(
             "音声の設定 - 入力: {}Hz {}ch ({:?})、出力: {}Hz {}ch ({:?})",
