@@ -311,7 +311,9 @@ impl WorkerState {
 #[cfg(test)]
 mod tests {
     use super::super::backend::mock::{MockAudioBackend, MockVideoBackend};
-    use super::super::worker_loop::testing::{apply_config, config_for, drain, mock_state};
+    use super::super::worker_loop::testing::{
+        apply_config, config_for, drain, mock_state, state_with,
+    };
     use super::*;
 
     // どのテストもモックのバックエンド（`super::super::backend::mock`）を載せ、
@@ -488,5 +490,61 @@ mod tests {
             2,
             "閉じたあと開き直すこと"
         );
+    }
+
+    #[test]
+    fn worker_picks_up_fake_audio_error_scenario_and_reopens() {
+        // フェイクの音声（シナリオ audio-error）が立てたエラーを、本物の cpal の
+        // エラーと同じ経路で拾って開き直す。期限は実時間なので短くして待つ
+        use crate::audio::{AudioControls, FakeAudioCapture, FakeAudioOptions};
+        use std::sync::Arc;
+
+        let after = Duration::from_millis(100);
+        let audio = FakeAudioCapture::new(
+            Arc::new(AudioControls::default()),
+            FakeAudioOptions {
+                input_count: 1,
+                failures_before_success: 0,
+                stream_error_after: Some(after),
+            },
+        );
+        let video = MockVideoBackend::default();
+        let (mut state, events) = state_with(Box::new(video), Box::new(audio));
+
+        let mut config = config_for(None, Some("Fake Audio Input 1"));
+        config.auto_reconnect = true;
+        apply_config(&mut state, config, false);
+
+        let base = Instant::now();
+        state.tick(base);
+        assert!(
+            drain(&events)
+                .iter()
+                .any(|event| matches!(event, DeviceEvent::AudioConnected)),
+            "まず繋がること"
+        );
+        assert!(!state.audio_stream_error_pending);
+        assert!(!state.audio_retry.is_active(), "期限前は開き直さないこと");
+
+        std::thread::sleep(after + Duration::from_millis(50));
+        state.tick(base + Duration::from_millis(200));
+        assert!(
+            state.audio_retry.is_active() || state.audio.active().is_some(),
+            "エラーを拾って再接続を積むこと"
+        );
+        assert!(
+            state.last_audio_error_reconnect.is_some(),
+            "再接続を積んだこと"
+        );
+
+        state.tick(base + Duration::from_millis(400));
+        assert!(
+            drain(&events)
+                .iter()
+                .any(|event| matches!(event, DeviceEvent::AudioConnected)),
+            "開き直して繋がること"
+        );
+        // 開き直したので数え直す。すぐにはまたエラーにならない
+        assert!(!state.audio.take_stream_error());
     }
 }

@@ -26,7 +26,7 @@ use std::time::Duration;
 pub(super) const FAKE_DEVICES_ENV: &str = "CAPTURECARD_VIEWER_FAKE_DEVICES";
 
 /// フェイクに起こさせる出来事を指定する環境変数。
-/// `disconnect:<秒>` と `fail:<回数>` をカンマで区切って並べる
+/// `disconnect:<秒>` / `fail:<回数>` / `audio-error:<秒>` をカンマで区切って並べる
 pub(super) const FAKE_SCENARIO_ENV: &str = "CAPTURECARD_VIEWER_FAKE_SCENARIO";
 
 /// 名乗れる台数の上限。設定画面の一覧が埋まらない程度にとどめる
@@ -39,6 +39,8 @@ pub(super) struct FakeScenario {
     pub(super) disconnect_after: Option<Duration>,
     /// 映像と音声のそれぞれで、最初にこの回数だけ開くのに失敗する
     pub(super) failures_before_success: u32,
+    /// 音声を開いてからこの時間が経つとストリームのエラーを立てる
+    pub(super) audio_error_after: Option<Duration>,
 }
 
 /// フェイクを組み立てる役。`DeviceWorker::spawn` が `SystemBackends` の
@@ -89,6 +91,7 @@ impl DeviceBackends for FakeBackends {
             FakeAudioOptions {
                 input_count: self.device_count,
                 failures_before_success: self.scenario.failures_before_success,
+                stream_error_after: self.scenario.audio_error_after,
             },
         );
         (Box::new(video), Box::new(audio))
@@ -145,6 +148,15 @@ fn parse_scenario(value: Option<&str>) -> FakeScenario {
                     .map(|secs| {
                         scenario.disconnect_after = Some(Duration::from_secs(secs));
                     }),
+                // 0 秒も受け付けない。開いた直後に毎回エラーになり、
+                // 再接続の間隔の下限でしか音が出なくなる
+                "audio-error" => arg
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|secs| *secs > 0)
+                    .map(|secs| {
+                        scenario.audio_error_after = Some(Duration::from_secs(secs));
+                    }),
                 "fail" => arg.parse::<u32>().ok().map(|count| {
                     scenario.failures_before_success = count;
                 }),
@@ -153,7 +165,7 @@ fn parse_scenario(value: Option<&str>) -> FakeScenario {
         });
         if parsed.is_none() {
             warn!(
-                "{} の '{}' を読めないので無視する（書式は disconnect:<秒> / fail:<回数>）",
+                "{} の '{}' を読めないので無視する（書式は disconnect:<秒> / fail:<回数> / audio-error:<秒>）",
                 FAKE_SCENARIO_ENV, item
             );
         }
@@ -294,6 +306,7 @@ mod tests {
             FakeScenario {
                 disconnect_after: Some(Duration::from_secs(10)),
                 failures_before_success: 0,
+                audio_error_after: None,
             }
         );
         assert_eq!(
@@ -301,6 +314,7 @@ mod tests {
             FakeScenario {
                 disconnect_after: None,
                 failures_before_success: 3,
+                audio_error_after: None,
             }
         );
         // カンマで並べられる。大文字小文字と前後の空白は問わない
@@ -309,6 +323,19 @@ mod tests {
             FakeScenario {
                 disconnect_after: Some(Duration::from_secs(5)),
                 failures_before_success: 2,
+                audio_error_after: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_scenario_reads_audio_error() {
+        assert_eq!(
+            parse_scenario(Some("Audio-Error: 3 ,fail:1")),
+            FakeScenario {
+                disconnect_after: None,
+                failures_before_success: 1,
+                audio_error_after: Some(Duration::from_secs(3)),
             }
         );
     }
@@ -321,7 +348,12 @@ mod tests {
             FakeScenario {
                 disconnect_after: None,
                 failures_before_success: 1,
+                audio_error_after: None,
             }
+        );
+        assert_eq!(
+            parse_scenario(Some("audio-error:0,audio-error:x,audio-error")),
+            FakeScenario::default()
         );
         assert_eq!(parse_scenario(None), FakeScenario::default());
         assert_eq!(parse_scenario(Some("")), FakeScenario::default());
