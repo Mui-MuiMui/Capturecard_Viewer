@@ -115,6 +115,21 @@ pub(super) fn interval_from_fps(fps: u32) -> i64 {
     UNITS_PER_SECOND / i64::from(fps.max(1))
 }
 
+/// `SetFormat` に書く 1 フレームの長さを決める。
+///
+/// fps は四捨五入した整数なので、そのまま間隔へ戻すと 29.97 / 59.94fps の
+/// デバイスでは `MinFrameInterval`（333667 / 166833）より短くなり、範囲を
+/// 厳しく見るドライバに `SetFormat` を断られる。デバイスが示した範囲が
+/// 読めれば、その中へ収める。
+pub(super) fn interval_within_caps(fps: u32, min_interval: i64, max_interval: i64) -> i64 {
+    let interval = interval_from_fps(fps);
+    if min_interval > 0 && max_interval >= min_interval {
+        interval.clamp(min_interval, max_interval)
+    } else {
+        interval
+    }
+}
+
 /// メディアタイプを読んで、受け取れる形式ならその形を返す。
 ///
 /// # Safety
@@ -375,6 +390,31 @@ mod tests {
         assert_eq!(fps_from_interval(interval_from_fps(60)), Some(60));
         // 0 は 1 として扱い、0 除算にしない
         assert_eq!(interval_from_fps(0), 10_000_000);
+    }
+
+    #[test]
+    fn interval_within_caps_keeps_the_ntsc_minimum_interval() {
+        // 29.97fps のデバイスで 30fps を選ぶと、333333 ではなく最短の 333667
+        assert_eq!(interval_within_caps(30, 333_667, 333_667), 333_667);
+        assert_eq!(interval_within_caps(60, 166_833, 333_667), 166_833);
+    }
+
+    #[test]
+    fn interval_within_caps_inside_the_range_is_unchanged() {
+        assert_eq!(interval_within_caps(30, 166_666, 666_666), 333_333);
+    }
+
+    #[test]
+    fn interval_within_caps_clamps_to_the_longest_interval() {
+        // 範囲より遅い fps は最長の間隔へ
+        assert_eq!(interval_within_caps(15, 166_666, 333_333), 333_333);
+    }
+
+    #[test]
+    fn interval_within_caps_ignores_an_unreadable_range() {
+        // 範囲が読めない（0 や逆転）ときは fps から戻した値のまま
+        assert_eq!(interval_within_caps(30, 0, 0), 333_333);
+        assert_eq!(interval_within_caps(30, 333_667, 166_833), 333_333);
     }
 
     #[test]

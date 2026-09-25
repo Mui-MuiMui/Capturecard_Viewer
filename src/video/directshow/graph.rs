@@ -32,7 +32,7 @@ use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use super::devices::{self, choose_candidate, DeviceEntry, StreamCandidate};
 use super::filter::Renderer;
 use super::media_type::{
-    delete_media_type, interval_from_fps, set_avg_time_per_frame, SampleFormat,
+    delete_media_type, interval_within_caps, set_avg_time_per_frame, SampleFormat,
 };
 use crate::video::elapsed_ms;
 use crate::video::frame_sink::FrameSink;
@@ -128,7 +128,8 @@ fn apply_format(config: &IAMStreamConfig, request: FormatRequest<'_>) -> Option<
         log::warn!("DirectShow の対応形式を読み直せないので、フィルターの既定の形式で開く");
         return None;
     }
-    unsafe { set_avg_time_per_frame(&mut *pmt, interval_from_fps(fps)) };
+    let interval = interval_within_caps(fps, caps.MinFrameInterval, caps.MaxFrameInterval);
+    unsafe { set_avg_time_per_frame(&mut *pmt, interval) };
     let set = unsafe { config.SetFormat(pmt) };
     unsafe { delete_media_type(pmt) };
     match set {
