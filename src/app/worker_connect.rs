@@ -87,7 +87,7 @@ impl WorkerState {
         match result {
             Ok(()) => {
                 info!("映像デバイスに接続した");
-                self.video_retry.record_success();
+                self.video_retry.record_success(now);
                 self.last_video_target = Some(config.video.clone());
                 self.emit(DeviceEvent::VideoConnected);
                 // 途絶から復帰したのであれば、音声も同時に戻っているはず。
@@ -182,7 +182,7 @@ impl WorkerState {
         match result {
             Ok(()) => {
                 info!("音声デバイスに接続した");
-                self.audio_retry.record_success();
+                self.audio_retry.record_success(now);
                 // 形を緩めて繋がった場合も、設定に書かれている値を記録する。
                 // ここで実際に開いた値を入れると、設定のレートやチャンネル数へ
                 // 戻せるようになっても差分が立たず、緩めたままになる
