@@ -3,6 +3,10 @@
 //! **コールバックの中ではロックもアロケーションもしない**
 //! （`docs/design/audio.md`）。入力はリングバッファへ積むだけ、出力は
 //! `convert::PassthroughConverter` を通して書き戻すだけにしてある。
+//!
+//! コールバック 1 回分の本体（`process_input` / `process_output`）は
+//! cpal のクロージャから切り離してあり、フェイクの入出力（`super::fake`）も
+//! 同じものを呼ぶ。
 
 use cpal::traits::DeviceTrait;
 use cpal::Device;
@@ -62,11 +66,7 @@ where
     device.build_input_stream(
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
-            if let Ok(mut prod) = producer.try_lock() {
-                for &sample in data {
-                    let _ = prod.push(to_f32(sample));
-                }
-            }
+            process_input(data, &producer, &to_f32);
         },
         move |e| {
             error!("入力ストリームのエラー: {}", e);
@@ -104,35 +104,14 @@ where
     device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-            let volume = load_volume(&controls.volume);
-            let audible = output_is_audible(
-                controls.passthrough_enabled.load(Ordering::Relaxed),
-                controls.muted.load(Ordering::Relaxed),
+            process_output(
+                data,
+                &consumer,
+                &controls,
+                &mut converter,
+                &underruns,
+                &to_sample,
             );
-            if let Ok(mut cons) = consumer.try_lock() {
-                // クロックドリフト補正の水位。この呼び出し分を消費する前の値を書く
-                converter.record_water_level(cons.len());
-                let mut pop = || cons.pop();
-                let starved = render_output_samples(
-                    data,
-                    volume,
-                    audible,
-                    || converter.next_sample(&mut pop),
-                    &to_sample,
-                );
-                if starved {
-                    // 1 回のコールバックで何サンプル足りなくても 1 回として数える。
-                    // 足りなかったサンプル数はバッファの大きさで意味が変わり、
-                    // 「何回途切れたか」ほど直感的に読めないため
-                    count_underrun(&underruns);
-                }
-            } else {
-                // 無音を表す値は型ごとに違う（u16 は 0 ではなく 32768）ので変換関数に通す
-                data.fill(to_sample(0.0));
-                // ロックを取れなかったときも無音を書く。聞こえ方は取り出せなかった
-                // ときと同じなので、同じく 1 回数える
-                count_underrun(&underruns);
-            }
         },
         move |e| {
             error!("出力ストリームのエラー: {}", e);
@@ -141,6 +120,69 @@ where
         },
         None,
     )
+}
+
+/// 入力コールバック 1 回分の処理。デバイスのサンプルを f32 へ直して
+/// リングバッファへ積む。
+///
+/// **cpal の入力コールバックとフェイクの入力（`super::fake`）の両方から
+/// 呼ぶ。** リングバッファが溢れた分は捨てる。ロックは `try_lock` だけで、
+/// 取れなければそのコールバック分を捨てる（待たない）。
+pub(super) fn process_input<T: Copy>(
+    data: &[T],
+    producer: &Mutex<AudioProducer>,
+    to_f32: impl Fn(T) -> f32,
+) {
+    if let Ok(mut prod) = producer.try_lock() {
+        for &sample in data {
+            let _ = prod.push(to_f32(sample));
+        }
+    }
+}
+
+/// 出力コールバック 1 回分の処理。リングバッファから取り出し、変換・音量・
+/// ミュートを通して `data` へ書く。足りなければアンダーランを 1 回数える。
+///
+/// **cpal の出力コールバックとフェイクの出力（`super::fake`）の両方から
+/// 呼ぶ。** `AudioControls` の読み方、クロックドリフト補正の水位の記録、
+/// アンダーランの数え方をフェイクでも本物と同じにするため。
+pub(super) fn process_output<T: Clone>(
+    data: &mut [T],
+    consumer: &Mutex<AudioConsumer>,
+    controls: &AudioControls,
+    converter: &mut PassthroughConverter,
+    underruns: &AtomicU32,
+    to_sample: impl Fn(f32) -> T,
+) {
+    let volume = load_volume(&controls.volume);
+    let audible = output_is_audible(
+        controls.passthrough_enabled.load(Ordering::Relaxed),
+        controls.muted.load(Ordering::Relaxed),
+    );
+    if let Ok(mut cons) = consumer.try_lock() {
+        // クロックドリフト補正の水位。この呼び出し分を消費する前の値を書く
+        converter.record_water_level(cons.len());
+        let mut pop = || cons.pop();
+        let starved = render_output_samples(
+            data,
+            volume,
+            audible,
+            || converter.next_sample(&mut pop),
+            &to_sample,
+        );
+        if starved {
+            // 1 回のコールバックで何サンプル足りなくても 1 回として数える。
+            // 足りなかったサンプル数はバッファの大きさで意味が変わり、
+            // 「何回途切れたか」ほど直感的に読めないため
+            count_underrun(underruns);
+        }
+    } else {
+        // 無音を表す値は型ごとに違う（u16 は 0 ではなく 32768）ので変換関数に通す
+        data.fill(to_sample(0.0));
+        // ロックを取れなかったときも無音を書く。聞こえ方は取り出せなかった
+        // ときと同じなので、同じく 1 回数える
+        count_underrun(underruns);
+    }
 }
 
 /// 出力に音を書き込んでよいか。
