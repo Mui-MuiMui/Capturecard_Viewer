@@ -745,9 +745,20 @@ impl HotkeyManager {
     pub fn set_window_state(&mut self, minimized: bool, focused: bool, typing: bool) {
         match self.state.lock() {
             Ok(mut state) => {
+                // 入力を始めたフレームに届いた押下を捨てる。この旗はフレームの
+                // 末尾で書くので、テキスト欄にフォーカスが移ってからここまでの
+                // 間の押下は、まだ偽のままの旗で保留に積まれている。そのキーは
+                // 次のフレームで egui がテキスト欄へ入れるので、実行すると
+                // 打った文字がホットキーとしても効いてしまう（#206）。
+                // 保留はフレームの先頭（`take_pressed`）で空にしているので、
+                // ここに残っているのはこのフレームの間の押下だけ
+                let started_typing = !state.typing && typing;
                 state.minimized = minimized;
                 state.focused = focused;
                 state.typing = typing;
+                if started_typing {
+                    state.pressed.clear();
+                }
             }
             // 最小化中のアクションが復帰まで保留されるだけで、検出は続く
             Err(_) => {
@@ -2075,6 +2086,47 @@ mod tests {
             rejected_by_window_state(true, true, true, true),
             Some(PressRouting::Unfocused)
         );
+    }
+
+    #[test]
+    fn set_window_state_drops_pending_presses_when_typing_starts() {
+        // 旗を書く前（入力を始めたフレームの間）に保留へ積まれた押下は、
+        // 次のフレームでテキスト欄へ入る文字なので実行しない
+        let mut manager = HotkeyManager::new();
+        manager
+            .state
+            .lock()
+            .expect("ロックが毒されていないこと")
+            .pressed
+            .insert(HotkeyAction::VolumeUp, 1);
+
+        manager.set_window_state(false, true, true);
+
+        assert!(manager.take_pressed().is_empty());
+    }
+
+    #[test]
+    fn set_window_state_keeps_pending_presses_unless_typing_starts() {
+        // 入力中のままの間や入力を終えたときは、保留を捨てない。
+        // 入力欄を選んだまま他のアプリで押したものも含まれる
+        for (before, after) in [(false, false), (true, true), (true, false)] {
+            let mut manager = HotkeyManager::new();
+            manager.set_window_state(false, true, before);
+            manager
+                .state
+                .lock()
+                .expect("ロックが毒されていないこと")
+                .pressed
+                .insert(HotkeyAction::VolumeUp, 1);
+
+            manager.set_window_state(false, true, after);
+
+            assert_eq!(
+                manager.take_pressed(),
+                vec![HotkeyAction::VolumeUp],
+                "{before} → {after} で保留が消えた"
+            );
+        }
     }
 
     #[test]
