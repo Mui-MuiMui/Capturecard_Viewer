@@ -56,7 +56,7 @@ use self::status_tab::show_status_tab;
 use crate::audio::AudioDirection;
 use crate::hotkey::{HotkeyAction, HotkeyAssignmentError};
 use crate::i18n::Text;
-use crate::settings::AppSettings;
+use crate::settings::{AppSettings, LanguageSetting};
 use crate::status::ConnectionStatus;
 use eframe::egui;
 use std::collections::BTreeMap;
@@ -123,6 +123,9 @@ pub enum SettingsEvent {
     SaveNewPreset,
     /// プリセット一覧の行のボタンが押された
     PresetRow(PresetRowAction),
+    /// 「その他」タブで言語を選んだ。入れるのはドラフトで、画面の言語が
+    /// 切り替わるのは「適用」「OK」のとき
+    SetLanguage(LanguageSetting),
     /// ホットキー入力ダイアログをこのアクションで開く
     OpenHotkeyCapture(HotkeyAction),
     /// スクリーンショットの保存フォルダーをファイルダイアログで選ぶ
@@ -348,7 +351,10 @@ pub fn show_settings_dialog(
     // min_size がこれを超えることはない
     let min_size = SETTINGS_WINDOW_MIN_SIZE;
 
+    // Id は固定にする。タイトルから作ると、「適用」で言語を切り替えた直後に
+    // 別のウィンドウとして扱われ、位置や大きさが初期値へ戻る（docs/design/i18n.md）
     egui::Window::new(Text::SettingsTitle.get())
+        .id(egui::Id::new("settings_dialog"))
         .open(&mut window_open)
         .default_size([650.0, 500.0])
         .resizable(true)
@@ -457,8 +463,9 @@ mod tests {
     use super::*;
     use crate::hotkey::HotkeyAction;
     use crate::settings::{
-        AppSettings, AudioSettings, ColorRange, ColorSpace, HotkeySettings, Preset,
-        ScreenshotDestination, ScreenshotFormat, ScreenshotSettings, UiSettings, VideoSettings,
+        AppSettings, AudioSettings, ColorRange, ColorSpace, HotkeySettings, LanguageSetting,
+        Preset, ScreenshotDestination, ScreenshotFormat, ScreenshotSettings, UiSettings,
+        VideoSettings,
     };
 
     use std::collections::{BTreeMap, BTreeSet};
@@ -519,6 +526,8 @@ mod tests {
                 enable_drag_move: false,
                 show_stats_overlay: true,
                 borderless: false,
+                // 既定値（自動）と異なる値にして、反映の有無を見分けられるようにする
+                language: LanguageSetting::English,
             },
             hotkeys: BTreeMap::from([
                 (HotkeyAction::Screenshot, "Ctrl+S".to_string()),

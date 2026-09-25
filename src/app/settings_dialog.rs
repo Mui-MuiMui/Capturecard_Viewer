@@ -54,6 +54,30 @@ impl CaptureCardViewer {
         );
     }
 
+    /// 実行中の設定の言語を画面へ反映する。
+    ///
+    /// `src/i18n/` の現在の言語を書き換えるだけで、再起動は要らない。
+    /// 次に文字列を引いたところから切り替わる。ウィンドウとコンボボックスの
+    /// Id は表示文字列から作らないようにしてあるので、切り替えても位置や
+    /// 開閉の状態は保たれる（`docs/design/i18n.md`）。
+    fn apply_language(&self) {
+        let setting = match self.settings.lock() {
+            Ok(settings) => settings.ui.language,
+            Err(_) => {
+                warn!("言語の反映で settings のロックを取得できない");
+                return;
+            }
+        };
+        let language = setting.resolve(self.os_language);
+        if language != i18n::language() {
+            info!(
+                "画面の言語を {:?} へ切り替えた（設定: {:?}）",
+                language, setting
+            );
+        }
+        i18n::set_language(language);
+    }
+
     /// 設定ダイアログの 1 フレームのイベントを処理する。
     ///
     /// 状態を書き換えるのも副作用を起こすのもここだけ
@@ -80,6 +104,9 @@ impl CaptureCardViewer {
                 ui::SettingsEvent::SaveNewPreset => self.settings_dialog.save_new_preset(),
                 ui::SettingsEvent::PresetRow(action) => {
                     self.settings_dialog.apply_preset_row(action)
+                }
+                ui::SettingsEvent::SetLanguage(language) => {
+                    self.settings_dialog.set_draft_language(language)
                 }
                 ui::SettingsEvent::OpenHotkeyCapture(action) => {
                     // どのアクションを編集しているかを入力ダイアログへ渡す。
@@ -176,6 +203,9 @@ impl CaptureCardViewer {
             } else {
                 warn!("設定ダイアログの反映に失敗した: settings のロックを取れない");
             }
+            // 画面の言語を切り替える。このフレームの残り（トーストや OSD）から
+            // 新しい言語で出る
+            self.apply_language();
             // 反映した内容でデバイスを開き直す
             self.apply_settings(false);
             // 「読み込みました。適用してください」の類の案内は役目を終えている。

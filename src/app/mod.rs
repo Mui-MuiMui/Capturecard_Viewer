@@ -31,7 +31,9 @@ use self::window::needs_drag_move_guard;
 use self::worker::{DeviceSnapshot, DeviceWorker};
 use crate::audio::AudioControls;
 use crate::hotkey::{HotkeyAction, HotkeyManager};
+use crate::i18n::{self, Language};
 use crate::overlay::TransientOverlay;
+use crate::platform;
 use crate::repaint::{next_repaint_delay, should_wake_on_event, RepaintCondition, RepaintWaker};
 use crate::screenshot::ScreenshotManager;
 use crate::settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace};
@@ -180,11 +182,21 @@ pub struct CaptureCardViewer {
     // 進行中の効果音ファイルの読み込みスレッド。デバイスには触らないが、
     // 保存スレッドと同じく切り離さず、終了時に join する
     sound_load_threads: Vec<JoinHandle<()>>,
+
+    // OS の表示言語から推定した言語。設定の言語が「自動」のときに使う。
+    //
+    // **起動時に 1 回だけ決める。** 実行中に Windows の表示言語を変えても
+    // サインアウトするまで反映されないので、問い合わせ直す意味が無い
+    os_language: Language,
 }
 
 impl Default for CaptureCardViewer {
     fn default() -> Self {
         let (loaded_settings, load_outcome) = AppSettings::load();
+        // 画面の言語は何より先に決める。ここから先で作る文言（読み込みの
+        // 失敗のトーストなど）も、設定した言語で出す
+        let os_language = platform::os_ui_language();
+        i18n::set_language(loaded_settings.ui.language.resolve(os_language));
         // 表示状態はここで読み込んだ値をそのままフィールドの初期値にする。
         // apply_settings(true) も最初の update() で同じ値を書き戻すが、
         // 構築時点で確定させておけば以降の初期化順序に依存せずに済む
@@ -272,6 +284,8 @@ impl Default for CaptureCardViewer {
 
             screenshot_save_threads: Vec::new(),
             sound_load_threads: Vec::new(),
+
+            os_language,
         };
 
         // 最小化中のホットキーは UI スレッドを通せないので、リスナーから

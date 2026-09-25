@@ -46,7 +46,7 @@ embed-resource = "2.4"
 # ウィンドウ位置の復元時にモニタの作業領域を列挙する（src/platform.rs の monitor_work_areas）。
 # ホットキーの押下を低レベルキーボードフックで観測する（src/keyboard_hook.rs）。
 # libloaderapi / processthreadsapi / winbase はフックの登録とメッセージの待ち受けに使う
-winapi = { version = "0.3", features = ["minwindef", "winuser", "windef", "libloaderapi", "processthreadsapi", "winbase"] }
+winapi = { version = "0.3", features = ["minwindef", "winuser", "windef", "libloaderapi", "processthreadsapi", "winbase", "winnls"] }
 
 [[bin]]
 name = "capturecard_viewer"

@@ -33,6 +33,10 @@ use crate::settings::AppSettings;
 /// ホットキーで切り替える）。ここで触らないので、ダイアログを開いている間の
 /// 切り替えはそのまま残る。
 ///
+/// `ui` の `language` は「その他」タブだけで変える項目なので、ホットキーと
+/// 同じく無条件に反映する。画面の言語を切り替えるのは呼び出し側
+/// （`app::settings_dialog` の `apply_language`）。
+///
 /// **ダイアログに `ui` セクションの項目を足すときは、ここにも足すこと。**
 /// **逆に、ダイアログの外だけで変える項目を足すときは、ここで残すこと。**
 pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &AppSettings) {
@@ -60,6 +64,8 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
     if draft.ui.volume != original.ui.volume {
         target.ui.volume = draft.ui.volume;
     }
+    // 「その他」タブの言語。ダイアログの外からは変わらない
+    target.ui.language = draft.ui.language;
 
     // video / audio を入れ替えたあとなので、ここで選択中のプリセットの
     // 辻褄を合わせる。**この 1 行が無いと、プリセットを読み込んでから
@@ -70,8 +76,8 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
 /// 読み込んだ設定からドラフトを作る。
 ///
 /// `current` は差し替える前のドラフト。`imported` の `ui` セクションは
-/// **ダイアログが編集する 2 項目（`volume` / `maintain_aspect_ratio`）だけ**を
-/// 採り、残りは `current` の値を保つ。
+/// **ダイアログが編集する 3 項目（`volume` / `maintain_aspect_ratio` / `language`）
+/// だけ**を採り、残りは `current` の値を保つ。
 ///
 /// ウィンドウの位置とサイズを持ち込まないのがいちばんの理由。別の画面構成の
 /// PC で書き出したファイルを読むと、画面の外にウィンドウが飛ぶ。
@@ -99,10 +105,12 @@ pub fn draft_from_imported(imported: AppSettings, current: &AppSettings) -> AppS
     let mut draft = imported;
     let volume = draft.ui.volume;
     let maintain_aspect_ratio = draft.ui.maintain_aspect_ratio;
+    let language = draft.ui.language;
 
     draft.ui = current.ui.clone();
     draft.ui.volume = volume;
     draft.ui.maintain_aspect_ratio = maintain_aspect_ratio;
+    draft.ui.language = language;
     draft
 }
 
@@ -131,7 +139,9 @@ pub fn draft_from_defaults(current: &AppSettings) -> AppSettings {
 mod tests {
     use super::*;
     use crate::hotkey::HotkeyAction;
-    use crate::settings::{AppSettings, Preset, ScreenshotDestination, ScreenshotFormat};
+    use crate::settings::{
+        AppSettings, LanguageSetting, Preset, ScreenshotDestination, ScreenshotFormat,
+    };
 
     use crate::ui::tests::{defaults_with_presets, preset_named, sample_settings};
 
@@ -247,8 +257,8 @@ mod tests {
     }
 
     #[test]
-    fn draft_from_imported_takes_the_two_ui_items_the_dialog_edits() {
-        // commit_draft が反映する 2 項目だけは読み込む。
+    fn draft_from_imported_takes_the_ui_items_the_dialog_edits() {
+        // commit_draft が反映する 3 項目だけは読み込む。
         // 読み込んでも反映されない項目を作らないため
         let imported = sample_settings();
         let current = AppSettings::default();
@@ -257,6 +267,7 @@ mod tests {
             imported.ui.maintain_aspect_ratio,
             current.ui.maintain_aspect_ratio
         );
+        assert_ne!(imported.ui.language, current.ui.language);
 
         let draft = draft_from_imported(imported.clone(), &current);
 
@@ -265,6 +276,7 @@ mod tests {
             draft.ui.maintain_aspect_ratio,
             imported.ui.maintain_aspect_ratio
         );
+        assert_eq!(draft.ui.language, imported.ui.language);
     }
 
     #[test]
@@ -305,6 +317,8 @@ mod tests {
             draft.ui.maintain_aspect_ratio,
             defaults.ui.maintain_aspect_ratio
         );
+        // 言語も既定（自動）へ戻る
+        assert_eq!(draft.ui.language, defaults.ui.language);
         assert_eq!(draft.ui.last_window_size, Some((640.0, 480.0)));
         assert_eq!(draft.ui.last_window_pos, Some((5.0, 6.0)));
     }
@@ -328,6 +342,7 @@ mod tests {
             target.ui.maintain_aspect_ratio,
             imported.ui.maintain_aspect_ratio
         );
+        assert_eq!(target.ui.language, imported.ui.language);
         // ウィンドウの位置とサイズは動かない
         assert_eq!(target.ui.last_window_size, original.ui.last_window_size);
         assert_eq!(target.ui.last_window_pos, original.ui.last_window_pos);
@@ -434,6 +449,7 @@ mod tests {
 
         assert_eq!(shared.ui.volume, 80.0);
         assert!(!shared.ui.maintain_aspect_ratio);
+        assert_eq!(shared.ui.language, LanguageSetting::English);
     }
 
     #[test]

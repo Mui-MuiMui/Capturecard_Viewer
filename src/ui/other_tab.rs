@@ -1,11 +1,11 @@
 //! 「その他」タブ。
 //!
-//! プリセットと、設定の書き出し・読み込み・初期化を置いてある。
+//! プリセット、画面の言語、設定の書き出し・読み込み・初期化を置いてある。
 //! **ここでは何も実行しない。** ファイルダイアログもファイル I/O も
 //! `CaptureCardViewer` が行う（`docs/design/settings-dialog.md`）。
 
 use crate::i18n::{self, Text};
-use crate::settings::AppSettings;
+use crate::settings::{AppSettings, LanguageSetting};
 use eframe::egui;
 
 use super::preset::{active_preset_label, PresetRowAction};
@@ -36,6 +36,10 @@ pub(super) fn show_other_tab(
     ui.add_space(10.0);
 
     show_preset_group(ui, draft, view.new_preset_name, events);
+
+    ui.add_space(15.0);
+
+    show_language_group(ui, draft, events);
 
     ui.add_space(15.0);
 
@@ -188,5 +192,36 @@ fn show_preset_group(
         ui.small(Text::PresetAutoReconnectHint.get());
         ui.small(Text::PresetDraftHint.get());
         ui.small(Text::PresetMenuHint.get());
+    });
+}
+
+/// 「その他」タブの言語の節を描く。
+///
+/// 選んだ言語はドラフトへ入るだけで、画面が切り替わるのは「適用」「OK」の
+/// とき。**他の設定と同じ扱いにしてある。** 選んだ瞬間に切り替えると、
+/// 「キャンセル」で閉じたときに戻すべき言語が分からなくなる。
+fn show_language_group(ui: &mut egui::Ui, draft: &AppSettings, events: &mut Vec<SettingsEvent>) {
+    ui.group(|ui| {
+        ui.strong(Text::LanguageGroup.get());
+        ui.add_space(5.0);
+
+        let current = draft.ui.language;
+        // Id は表示文字列から作らない。言語を切り替えると変わってしまうため
+        egui::ComboBox::from_id_source("language_combo")
+            .selected_text(current.label())
+            .show_ui(ui, |ui| {
+                for language in LanguageSetting::ALL {
+                    if ui
+                        .selectable_label(current == language, language.label())
+                        .clicked()
+                        && current != language
+                    {
+                        events.push(SettingsEvent::SetLanguage(language));
+                    }
+                }
+            });
+
+        ui.add_space(5.0);
+        ui.small(Text::LanguageHint.get());
     });
 }
