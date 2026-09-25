@@ -53,6 +53,12 @@ pub(super) enum VideoLinkAction {
 ///   0.8 秒かかるうえ、入力信号が無いデバイスは開けても永久にフレームを
 ///   出さない。ここで切断と見なすと、開き直しを延々と繰り返すことになる
 /// - 期限ちょうどは切断とみなす側に倒す。1 フレーム待って得るものが無いため
+/// - **デバイス側が喪失を知らせてきた（`device_lost`）なら、途絶時間を待たずに
+///   切断とみなす。** DirectShow のグラフの `EC_DEVICE_LOST` などで、抜いた
+///   瞬間に分かる。1 枚も届いていなくても切断とみなすのは、これが時間からの
+///   推測ではなくデバイスそのものが消えたという知らせだから。入力信号が無い
+///   だけのデバイスはこの知らせを出さないので、開き直しが止まらなくなる心配は
+///   上の「1 枚も届いていない」の場合と違って無い
 pub(super) fn decide_video_link(
     state: video::VideoLinkState,
     auto_reconnect: bool,
@@ -61,10 +67,11 @@ pub(super) fn decide_video_link(
     if !state.capturing {
         return VideoLinkAction::Keep;
     }
-    let Some(elapsed) = state.since_last_frame else {
-        return VideoLinkAction::Keep;
-    };
-    if elapsed < timeout {
+    let lost = state.device_lost
+        || state
+            .since_last_frame
+            .is_some_and(|elapsed| elapsed >= timeout);
+    if !lost {
         return VideoLinkAction::Keep;
     }
     if auto_reconnect {
@@ -224,7 +231,61 @@ mod tests {
         video::VideoLinkState {
             capturing,
             since_last_frame,
+            device_lost: false,
         }
+    }
+
+    /// デバイス側が喪失を知らせてきた観測値を組み立てる補助。
+    fn lost_link_state(
+        capturing: bool,
+        since_last_frame: Option<Duration>,
+    ) -> video::VideoLinkState {
+        video::VideoLinkState {
+            device_lost: true,
+            ..link_state(capturing, since_last_frame)
+        }
+    }
+
+    #[test]
+    fn decide_video_link_device_lost_reconnects_without_waiting_for_timeout() {
+        // DirectShow の EC_DEVICE_LOST。フレームが直前まで届いていても、
+        // 3 秒待たずにその場で切断として扱う
+        let state = lost_link_state(true, Some(Duration::ZERO));
+        assert_eq!(
+            decide_video_link(state, true, VIDEO_SIGNAL_TIMEOUT),
+            VideoLinkAction::ClearTextureAndReconnect
+        );
+    }
+
+    #[test]
+    fn decide_video_link_device_lost_before_first_frame_reconnects() {
+        // 1 枚目が届く前に抜かれた場合。途絶の検出はここでは働かないので、
+        // 知らせを受けたら切断とみなす
+        let state = lost_link_state(true, None);
+        assert_eq!(
+            decide_video_link(state, true, VIDEO_SIGNAL_TIMEOUT),
+            VideoLinkAction::ClearTextureAndReconnect
+        );
+    }
+
+    #[test]
+    fn decide_video_link_device_lost_without_auto_reconnect_only_clears_texture() {
+        let state = lost_link_state(true, Some(Duration::ZERO));
+        assert_eq!(
+            decide_video_link(state, false, VIDEO_SIGNAL_TIMEOUT),
+            VideoLinkAction::ClearTexture
+        );
+    }
+
+    #[test]
+    fn decide_video_link_device_lost_while_not_capturing_keeps_current_state() {
+        // 閉じたあとの面倒は ConnectRetry が見る。閉じたグラフの知らせで
+        // 二重に動かない
+        let state = lost_link_state(false, None);
+        assert_eq!(
+            decide_video_link(state, true, VIDEO_SIGNAL_TIMEOUT),
+            VideoLinkAction::Keep
+        );
     }
 
     #[test]
