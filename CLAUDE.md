@@ -63,7 +63,12 @@ cargo build --release
 | `src/audio/convert.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32）と、レート・チャンネル数が違う場合の変換（`PassthroughConverter`） |
 | `src/audio/resample.rs` | クロックドリフト補正の共有状態（`ResampleTelemetry`）と補正係数の決め方（`decide_resample_correction`） |
 | `src/audio/controls.rs` | `AudioControls`。音量・パススルー・ミュートの共有状態 |
-| `src/hotkey.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）、アクション別の登録とリスナースレッド、押下の照合とデバウンス、ホットキー文字列のパース |
+| `src/hotkey/mod.rs` | 外から使う経路（`crate::hotkey::...`）の `pub use` だけ |
+| `src/hotkey/action.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）と設定ファイル上の名前、溜まった押下の畳み方 |
+| `src/hotkey/parse.rs` | `HotkeyError` と、ホットキー文字列のパース |
+| `src/hotkey/manager.rs` | `HotkeyManager` の本体（リスナーの起動と停止、ウィンドウ状態の受け渡し）と `BackgroundHotkeyRunner` |
+| `src/hotkey/assignments.rs` | `HotkeyAssignmentError`、アクション別の登録（差分適用・一時停止と再開・試し登録）と押下の取り出し |
+| `src/hotkey/listener.rs` | リスナースレッドと共有状態 `ListenerState`、押下の照合とデバウンス |
 | `src/keyboard_hook.rs` | 低レベルキーボードフック（`WH_KEYBOARD_LL`）。キーを奪わずに押下を観測し、リスナースレッドのメッセージループへ渡す |
 | `src/screenshot.rs` | rodio による効果音の読み込みと再生 |
 | `src/settings.rs` | `AppSettings` とその serde 定義、confy による読み書き、保存パスの決定、旧形式からの移行 |
