@@ -138,6 +138,9 @@ pub struct FakeAudioCapture {
     opened_at: Option<Instant>,
     /// 今のストリームでシナリオのエラーをもう立てたか。開き直すと下ろす
     scenario_error_raised: AtomicBool,
+    /// 「今」を返す時計。本番は `Instant::now`。テストが差し替えて、
+    /// シナリオの期限を実時間を待たずに跨ぐ（`with_clock`）
+    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
     underruns: Arc<AtomicU32>,
 }
 
@@ -153,8 +156,16 @@ impl FakeAudioCapture {
             stream_error: Arc::new(AtomicBool::new(false)),
             opened_at: None,
             scenario_error_raised: AtomicBool::new(false),
+            clock: Arc::new(Instant::now),
             underruns: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// シナリオの期限の判定に使う時計を差し替える。テスト専用
+    #[cfg(test)]
+    pub(crate) fn with_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub fn list_input_devices(&self) -> Vec<String> {
@@ -302,7 +313,7 @@ impl FakeAudioCapture {
             output: output_handle,
         });
         self.stream_error = stream_error;
-        self.opened_at = Some(Instant::now());
+        self.opened_at = Some((self.clock)());
         self.scenario_error_raised = AtomicBool::new(false);
         self.resample_telemetry = resample_telemetry;
         self.underruns = underruns;
@@ -365,7 +376,7 @@ impl FakeAudioCapture {
         // シナリオ（audio-error）の期限を過ぎていたら、開いている間に 1 回だけ
         // 旗を立てる。本物の cpal のエラーコールバックが立てるのと同じ旗
         if let (Some(after), Some(opened_at)) = (self.options.stream_error_after, self.opened_at) {
-            if opened_at.elapsed() >= after
+            if (self.clock)().saturating_duration_since(opened_at) >= after
                 && !self.scenario_error_raised.swap(true, Ordering::Relaxed)
             {
                 info!("フェイクの音声ストリームのエラーを立てた（シナリオ audio-error）");

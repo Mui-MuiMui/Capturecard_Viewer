@@ -495,11 +495,24 @@ mod tests {
     #[test]
     fn worker_picks_up_fake_audio_error_scenario_and_reopens() {
         // フェイクの音声（シナリオ audio-error）が立てたエラーを、本物の cpal の
-        // エラーと同じ経路で拾って開き直す。期限は実時間なので短くして待つ
+        // エラーと同じ経路で拾って開き直す。フェイクの時計を `tick` へ渡す時刻と
+        // 揃え、実時間を待たずに期限を跨ぐ
         use crate::audio::{AudioControls, FakeAudioCapture, FakeAudioOptions};
+        use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc;
 
-        let after = Duration::from_millis(100);
+        let base = Instant::now();
+        let elapsed_ms = Arc::new(AtomicU64::new(0));
+        let clock = {
+            let elapsed_ms = Arc::clone(&elapsed_ms);
+            move || base + Duration::from_millis(elapsed_ms.load(Ordering::Relaxed))
+        };
+        let at = |ms: u64| {
+            elapsed_ms.store(ms, Ordering::Relaxed);
+            base + Duration::from_millis(ms)
+        };
+
+        let after = Duration::from_secs(5);
         let audio = FakeAudioCapture::new(
             Arc::new(AudioControls::default()),
             FakeAudioOptions {
@@ -507,7 +520,8 @@ mod tests {
                 failures_before_success: 0,
                 stream_error_after: Some(after),
             },
-        );
+        )
+        .with_clock(Arc::new(clock));
         let video = MockVideoBackend::default();
         let (mut state, events) = state_with(Box::new(video), Box::new(audio));
 
@@ -515,36 +529,36 @@ mod tests {
         config.auto_reconnect = true;
         apply_config(&mut state, config, false);
 
-        let base = Instant::now();
-        state.tick(base);
+        state.tick(at(0));
         assert!(
             drain(&events)
                 .iter()
                 .any(|event| matches!(event, DeviceEvent::AudioConnected)),
             "まず繋がること"
         );
-        assert!(!state.audio_stream_error_pending);
-        assert!(!state.audio_retry.is_active(), "期限前は開き直さないこと");
-
-        std::thread::sleep(after + Duration::from_millis(50));
-        state.tick(base + Duration::from_millis(200));
+        state.tick(at(4_900));
         assert!(
-            state.audio_retry.is_active() || state.audio.active().is_some(),
-            "エラーを拾って再接続を積むこと"
+            state.last_audio_error_reconnect.is_none(),
+            "期限前は開き直さないこと"
         );
+
+        state.tick(at(5_000));
         assert!(
             state.last_audio_error_reconnect.is_some(),
-            "再接続を積んだこと"
+            "エラーを拾って再接続を積むこと"
         );
 
-        state.tick(base + Duration::from_millis(400));
+        state.tick(at(5_300));
         assert!(
             drain(&events)
                 .iter()
                 .any(|event| matches!(event, DeviceEvent::AudioConnected)),
             "開き直して繋がること"
         );
-        // 開き直したので数え直す。すぐにはまたエラーにならない
-        assert!(!state.audio.take_stream_error());
+        // 開き直した時刻から数え直す。元の期限の倍ではまだ立たない
+        at(10_000);
+        assert!(!state.audio.take_stream_error(), "開き直したら数え直すこと");
+        at(10_400);
+        assert!(state.audio.take_stream_error(), "新しい期限で立つこと");
     }
 }
