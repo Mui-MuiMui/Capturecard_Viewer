@@ -34,6 +34,7 @@ mod fake;
 pub(crate) mod frame_buffer;
 mod frame_sink;
 mod test_pattern;
+mod yuv420;
 
 pub use capabilities::{DeviceCapabilities, VideoMode};
 pub use capture::{ActiveVideo, VideoCapture, VideoLinkState};
