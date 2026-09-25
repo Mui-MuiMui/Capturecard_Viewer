@@ -236,6 +236,12 @@ impl DirectShowCapture {
         VideoLinkState {
             capturing: self.graph.is_some(),
             since_last_frame: self.frames.since_last_frame(),
+            // グラフのイベントをここで読む。ワーカーの監視の周期で呼ばれるので、
+            // そのまま EC_DEVICE_LOST を拾う周期になる
+            device_lost: self
+                .graph
+                .as_ref()
+                .is_some_and(|graph| graph.poll_device_lost()),
         }
     }
 
@@ -347,5 +353,34 @@ mod tests {
         capture.stop_capture();
         assert!(!capture.link_state().capturing);
         assert!(capture.frames.latest().is_none());
+    }
+    #[test]
+    #[ignore = "OBS の仮想カメラが必要。開始したあと 30 秒以内に OBS 側で仮想カメラを止める（または OBS を終了する）"]
+    fn link_state_reports_device_lost_when_the_source_goes_away() {
+        // 実行: cargo test link_state_reports_device_lost -- --ignored --nocapture
+        let mut capture = capture();
+        let name = capture
+            .list_friendly_names()
+            .into_iter()
+            .find(|name| name.contains("OBS"))
+            .expect("OBS の仮想カメラがある");
+        let display = display_name(&name);
+        capture
+            .start_capture(&display, None, None, None)
+            .expect("開ける");
+        println!("開いた。30 秒以内に OBS 側で仮想カメラを止める");
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        let mut state = capture.link_state();
+        while !state.device_lost && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            state = capture.link_state();
+        }
+        println!("観測値: {state:?}");
+        assert!(state.device_lost, "30 秒以内に喪失の知らせが届く");
+        // 一度立ったら閉じるまで下りない
+        assert!(capture.link_state().device_lost);
+        capture.stop_capture();
+        assert!(!capture.link_state().device_lost);
     }
 }

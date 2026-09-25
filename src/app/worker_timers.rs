@@ -154,14 +154,19 @@ impl WorkerState {
         }
         self.last_video_link_action = action;
 
-        let elapsed_ms = state
-            .since_last_frame
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or_default();
-        info!(
-            "映像フレームが {} ms 途絶えたので、表示を落として切断として扱う",
-            elapsed_ms
-        );
+        if state.device_lost {
+            // 知らせの中身（イベントの種類）はバックエンドが出している
+            info!("映像デバイスが喪失を知らせてきたので、表示を落として切断として扱う");
+        } else {
+            let elapsed_ms = state
+                .since_last_frame
+                .map(|elapsed| elapsed.as_millis())
+                .unwrap_or_default();
+            info!(
+                "映像フレームが {} ms 途絶えたので、表示を落として切断として扱う",
+                elapsed_ms
+            );
+        }
         // 最後のフレームが残り続けると、止まっているのか映っているのか判らない。
         // テクスチャを捨てて「映像信号がありません」の表示へ戻すのは UI の仕事
         self.emit(DeviceEvent::VideoSignalLost);
@@ -419,6 +424,55 @@ mod tests {
         assert!(
             state.video_reconnect_after_loss,
             "次に繋がったとき音声も開き直す目印を立てること"
+        );
+    }
+
+    #[test]
+    fn worker_video_device_lost_requests_a_reconnect_without_waiting_for_timeout() {
+        // DirectShow のグラフが EC_DEVICE_LOST を知らせてきた場合。フレームは
+        // 直前まで届いているが、途絶の閾値を待たずに次の tick で開き直しを積む
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        let (mut state, events) = mock_state(&video, &audio);
+
+        let mut config = config_for(Some("モックカメラ"), Some("モック入力"));
+        config.auto_reconnect = true;
+        apply_config(&mut state, config, false);
+
+        let base = Instant::now();
+        state.tick(base);
+        assert!(video.with(|state| state.capturing), "まず繋がること");
+        drain(&events);
+
+        video.with(|state| {
+            state.since_last_frame = Some(Duration::from_millis(16));
+            state.device_lost = true;
+        });
+        state.tick(base + Duration::from_millis(100));
+
+        assert!(
+            drain(&events)
+                .iter()
+                .any(|event| matches!(event, DeviceEvent::VideoSignalLost)),
+            "表示中のテクスチャを捨てるよう UI へ知らせること"
+        );
+        assert_eq!(
+            video.with(|state| state.stop_calls),
+            1,
+            "ストリームを閉じること"
+        );
+        assert_eq!(
+            video.with(|state| state.start_calls),
+            1,
+            "監視の中では開かないこと（開くのは次の tick の poll_connection）"
+        );
+        assert!(state.video_retry.is_active(), "開き直しを要求すること");
+
+        state.tick(base + Duration::from_millis(200));
+        assert_eq!(
+            video.with(|state| state.start_calls),
+            2,
+            "次の tick で開き直すこと"
         );
     }
 
