@@ -216,22 +216,39 @@ fn rgb_to_rgba(rgb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, Scree
 /// **ホットキーの登録と押下の検出は持たない。** グローバルホットキーは
 /// スクリーンショット以外のアクションにも割り当てられるため、`hotkey.rs` の
 /// `HotkeyManager` が一手に扱う。
+///
+/// **ファイルの読み込みはしない。** 読み込みは `app::screenshot_sound` が
+/// 別スレッドで行い、ここには番号の払い出し（`begin_load`）と結果の反映
+/// （`finish_load`）だけを置く。大きなファイルや遅いドライブで UI スレッドが
+/// 止まらないようにするため（Issue #214）。
 pub struct ScreenshotManager {
     sound_data: Option<Vec<u8>>,
+    // 適用の読み込み要求。テスト再生の要求とは別に数える
+    loads: SoundLoadRequests,
+    // 設定画面の「テスト再生」の要求。適用済みの音には触れない
+    test_plays: SoundLoadRequests,
 }
 
 impl ScreenshotManager {
     pub fn new() -> Self {
-        Self { sound_data: None }
+        Self {
+            sound_data: None,
+            loads: SoundLoadRequests::default(),
+            test_plays: SoundLoadRequests::default(),
+        }
     }
 
     /// 効果音を捨て、以降スクリーンショットを無音にする。
     ///
-    /// 設定画面で「効果音を鳴らさない」を選んだときに呼ぶ。`set_sound_file` は
-    /// ファイルが見つからなければ埋め込みの既定音へ倒すため、「鳴らさない」は
-    /// 設定を `None` にすることでしか表せない。その `None` をここで実行時へ
-    /// 反映する。
+    /// 設定画面で「効果音を鳴らさない」を選んだときに呼ぶ。読み込み
+    /// （`load_sound_data`）はファイルが見つからなければ埋め込みの既定音へ
+    /// 倒すため、「鳴らさない」は設定を `None` にすることでしか表せない。
+    /// その `None` をここで実行時へ反映する。
+    ///
+    /// **読み込み中の要求も取り消す。** 取り消さないと、ファイルを選んだ直後に
+    /// 「鳴らさない」へ切り替えたとき、後から届いた読み込みで音が戻る。
     pub fn clear_sound(&mut self) {
+        self.loads.cancel();
         if self.sound_data.is_none() {
             return;
         }
@@ -239,30 +256,123 @@ impl ScreenshotManager {
         self.sound_data = None;
     }
 
-    // 効果音を読み込む。
-    //
-    // 相対パスは exe の置き場所を基準に解決し、見つからなければ埋め込みの
-    // 既定音を使う。そのため呼び出し後は必ず鳴らせる状態になっている。
-    // Err を返すのは、解決したファイルが存在したのに読めなかった場合だけ。
-    // このときも既定音を入れてあるので、鳴らないという結果にはならない。
-    pub fn set_sound_file(&mut self, sound_path: &Path) -> Result<(), ScreenshotError> {
-        let (data, error) = load_sound_data(sound_path);
+    /// 適用する効果音の読み込みを始める。返した番号を読み込みの結果に添えて
+    /// `finish_load` へ渡す。これより前に始めた読み込みの結果は以降捨てられる。
+    ///
+    /// 結果が届くまでは直前の音（無ければ内蔵音）で鳴らす（`select_shot_sound`）。
+    pub fn begin_load(&mut self) -> u64 {
+        self.loads.issue()
+    }
+
+    /// 読み込んだ効果音を反映する。最新の要求の結果でなければ何もせず
+    /// `false` を返す。
+    pub fn finish_load(&mut self, id: u64, data: Vec<u8>) -> bool {
+        if !self.loads.complete(id) {
+            return false;
+        }
         self.sound_data = Some(data);
-        error.map_or(Ok(()), Err)
+        true
+    }
+
+    /// テスト再生の読み込みを始める。適用済みの音には触れない。
+    pub fn begin_test_play(&mut self) -> u64 {
+        self.test_plays.issue()
+    }
+
+    /// テスト再生の読み込み結果を鳴らしてよいかを判定する。
+    ///
+    /// 「テスト再生」を続けて押した場合、鳴らすのは最後の 1 回だけ。
+    /// 古い結果まで鳴らすと、ファイルを選び直す前の音が重なって聞こえる。
+    pub fn finish_test_play(&mut self, id: u64) -> bool {
+        self.test_plays.complete(id)
     }
 
     pub fn play_screenshot_sound(&self, volume: f32) {
-        if let Some(sound_data) = &self.sound_data {
-            play_sound_data(sound_data.clone(), volume);
+        if let Some(sound_data) =
+            select_shot_sound(self.sound_data.as_deref(), self.loads.is_pending())
+        {
+            play_sound_data(sound_data.to_vec(), volume);
         }
+    }
+}
+
+/// 効果音の読み込み要求に振る番号と、結果を受け入れてよいかの判定。
+///
+/// 読み込みは要求ごとに別スレッドで行うので、先に出した要求の結果が後から
+/// 届くことがある（大きいファイルから小さいファイルへ選び直した場合など）。
+/// **受け入れるのは最後に出した要求の結果だけ。** 古い結果を反映すると、
+/// ユーザーが最後に選んだものと違う音に戻ってしまう。
+#[derive(Debug, Default)]
+struct SoundLoadRequests {
+    // 次に振る番号。巻き戻さない
+    next: u64,
+    // 結果を待っている要求。None は待っていないか、取り消したことを表す
+    pending: Option<u64>,
+}
+
+impl SoundLoadRequests {
+    /// 新しい要求に番号を振る。これより前の要求の結果は以降すべて捨てられる。
+    fn issue(&mut self) -> u64 {
+        let id = self.next;
+        self.next = self.next.wrapping_add(1);
+        self.pending = Some(id);
+        id
+    }
+
+    /// 届いた結果を受け入れてよいかを判定し、受け入れるなら待ちを終える。
+    fn complete(&mut self, id: u64) -> bool {
+        if !is_latest_sound_load(self.pending, id) {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
+
+    /// 待っている要求を取り消す。以降に届いた結果はどれも受け入れない。
+    fn cancel(&mut self) {
+        self.pending = None;
+    }
+
+    /// 結果を待っている要求があるか。
+    fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+}
+
+/// 届いた読み込み結果 `id` が、待っている最新の要求 `pending` のものかを判定する。
+///
+/// 待っていない（`None`）ときは何も受け入れない。取り消し（「効果音を鳴らさない」
+/// への切り替え）のあとに古い読み込みが届いても、音を復活させないため。
+fn is_latest_sound_load(pending: Option<u64>, id: u64) -> bool {
+    pending == Some(id)
+}
+
+/// 撮影時に鳴らす音を選ぶ。`None` なら鳴らさない。
+///
+/// `applied` は適用済みの音（`None` は「鳴らさない」か、まだ何も読み込めて
+/// いない）、`loading` は適用の読み込みが終わっていないか。
+///
+/// **読み込み中は直前の音で鳴らし、直前の音が無ければ内蔵音で鳴らす。**
+/// 読み込みは別スレッドなので、起動直後や適用の直後に撮ると結果がまだ
+/// 届いていないことがある。そこで無音にすると、撮れたのかが分からない。
+/// 読み込み中でなく音も無いのは「鳴らさない」を選んだときだけ。
+fn select_shot_sound(applied: Option<&[u8]>, loading: bool) -> Option<&[u8]> {
+    match (applied, loading) {
+        (Some(data), _) => Some(data),
+        (None, true) => Some(EMBEDDED_SOUND),
+        (None, false) => None,
     }
 }
 
 /// 設定の効果音パスから、鳴らす音のデータを読み込む。
 ///
-/// **`ScreenshotManager` の状態には触れない。** 設定画面の「テスト再生」が、
-/// 適用済みの効果音を差し替えずにドラフトの音を鳴らすために使う。
-/// `set_sound_file` もこれを通すので、テスト再生と撮影時で音の選び方が揃う。
+/// **`ScreenshotManager` の状態には触れない。** 適用（`apply_settings`）と
+/// 設定画面の「テスト再生」の両方がこれを通すので、テスト再生と撮影時で
+/// 音の選び方が揃う。
+///
+/// **UI スレッドから呼ばない。** ファイル全体を読んでデコードを試すので、
+/// 大きなファイルや遅いドライブでは描画が止まる。`app::screenshot_sound` が
+/// 別スレッドから呼ぶ（Issue #214）。
 ///
 /// 解決の仕方は `resolve_sound_path` と同じで、見つからなければ埋め込みの
 /// 既定音を返す。ファイルがあるのに読めなかった場合も既定音を返し、
@@ -623,15 +733,106 @@ mod tests {
     #[test]
     fn clear_sound_discards_loaded_sound() {
         // 設定の効果音を「クリア」したセッションで鳴り続けていた不具合の再現。
-        // 空パスは埋め込みの既定音へ倒れるので、実ファイルは要らない
         let mut manager = ScreenshotManager::new();
-        manager
-            .set_sound_file(Path::new(""))
-            .expect("埋め込みの既定音は必ず読める");
+        let id = manager.begin_load();
+        assert!(manager.finish_load(id, EMBEDDED_SOUND.to_vec()));
         assert!(manager.sound_data.is_some());
 
         manager.clear_sound();
 
         assert!(manager.sound_data.is_none());
+    }
+
+    #[test]
+    fn is_latest_sound_load_matching_pending_returns_true() {
+        assert!(is_latest_sound_load(Some(3), 3));
+    }
+
+    #[test]
+    fn is_latest_sound_load_older_request_returns_false() {
+        // 先に出した要求の結果が後から届いた場合。最後の要求を上書きさせない
+        assert!(!is_latest_sound_load(Some(3), 2));
+    }
+
+    #[test]
+    fn is_latest_sound_load_nothing_pending_returns_false() {
+        // 取り消し後や、受け入れ済みの要求の結果がもう一度来た場合
+        assert!(!is_latest_sound_load(None, 0));
+    }
+
+    #[test]
+    fn finish_load_overlapping_requests_keeps_only_the_latest() {
+        // 同じファイルの読み込みが重なり、先の要求が後から終わった場合（Issue #214）。
+        // 後の要求の結果だけが反映され、遅れて届いた先の結果は捨てられること
+        let mut manager = ScreenshotManager::new();
+        let first = manager.begin_load();
+        let second = manager.begin_load();
+
+        assert!(manager.finish_load(second, b"second".to_vec()));
+        assert!(!manager.finish_load(first, b"first".to_vec()));
+
+        assert_eq!(manager.sound_data.as_deref(), Some(&b"second"[..]));
+    }
+
+    #[test]
+    fn finish_load_after_clear_sound_is_discarded() {
+        // ファイルを選んだ直後に「効果音を鳴らさない」へ切り替えた場合。
+        // 後から届いた読み込みで音が戻らないこと
+        let mut manager = ScreenshotManager::new();
+        let id = manager.begin_load();
+
+        manager.clear_sound();
+
+        assert!(!manager.finish_load(id, EMBEDDED_SOUND.to_vec()));
+        assert!(manager.sound_data.is_none());
+    }
+
+    #[test]
+    fn finish_test_play_repeated_clicks_play_only_the_last() {
+        // 「テスト再生」を続けて押した場合、鳴らすのは最後の 1 回だけ
+        let mut manager = ScreenshotManager::new();
+        let first = manager.begin_test_play();
+        let second = manager.begin_test_play();
+
+        assert!(!manager.finish_test_play(first));
+        assert!(manager.finish_test_play(second));
+        // 同じ結果が 2 度来ても 2 度は鳴らさない
+        assert!(!manager.finish_test_play(second));
+    }
+
+    #[test]
+    fn begin_test_play_does_not_disturb_applied_load() {
+        // テスト再生と適用は番号を別に数える。テスト再生を押しても
+        // 読み込み中の適用の結果が捨てられないこと
+        let mut manager = ScreenshotManager::new();
+        let load = manager.begin_load();
+        let _ = manager.begin_test_play();
+
+        assert!(manager.finish_load(load, b"applied".to_vec()));
+    }
+
+    #[test]
+    fn select_shot_sound_applied_sound_is_used_even_while_loading() {
+        // 読み込み中は直前の音で鳴らす
+        assert_eq!(
+            select_shot_sound(Some(b"previous"), true),
+            Some(&b"previous"[..])
+        );
+        assert_eq!(
+            select_shot_sound(Some(b"previous"), false),
+            Some(&b"previous"[..])
+        );
+    }
+
+    #[test]
+    fn select_shot_sound_loading_without_previous_uses_embedded() {
+        // 起動直後や「鳴らさない」から切り替えた直後。無音にせず内蔵音で鳴らす
+        assert_eq!(select_shot_sound(None, true), Some(EMBEDDED_SOUND));
+    }
+
+    #[test]
+    fn select_shot_sound_nothing_loaded_and_idle_is_silent() {
+        // 「効果音を鳴らさない」を選んでいる場合
+        assert_eq!(select_shot_sound(None, false), None);
     }
 }

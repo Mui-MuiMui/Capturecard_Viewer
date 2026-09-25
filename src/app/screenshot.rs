@@ -2,7 +2,8 @@
 //!
 //! エンコードと書き出し（クリップボードへの転送も）は撮影ごとに起こす
 //! スレッドが行い、UI スレッドは結果をチャネルで受け取るだけにする。
-//! 効果音の再生は `crate::screenshot::ScreenshotManager` の担当。
+//! 効果音の再生は `crate::screenshot::ScreenshotManager` の担当で、
+//! 効果音ファイルの読み込みは `app::screenshot_sound` の担当。
 
 use super::CaptureCardViewer;
 use crate::screenshot;
@@ -106,7 +107,7 @@ fn screenshot_outcome_supersedes(last: Option<Instant>, started_at: Instant) -> 
 ///
 /// `JoinHandle` を持ち続けるのは終了時に `join` するためだけなので、
 /// 終わったものは落としてよい。落とさないと撮影のたびに要素が増え続ける
-fn drop_finished_threads<T>(handles: &mut Vec<JoinHandle<T>>) {
+pub(super) fn drop_finished_threads<T>(handles: &mut Vec<JoinHandle<T>>) {
     handles.retain(|handle| !handle.is_finished());
 }
 
