@@ -668,7 +668,13 @@ impl eframe::App for CaptureCardViewer {
         // 出入りのたびに egui-winit が再描画を要求するので、ここで拾える。
         // 取れない環境では「フォーカスあり」に倒す（反応しなくなる側に倒さない）
         let focused = viewport.focused.unwrap_or(true);
-        self.hotkey_manager.set_window_state(minimized, focused);
+        // テキスト欄に入力中かも伝える。キーを奪わないので、プリセット名などへ
+        // 打った文字がホットキーとしても実行されてしまう（#206）。
+        // **描画を全て終えたここで読む。** このフレームでフォーカスが移った分まで
+        // 反映される。フックの中から egui へは問い合わせない
+        let typing = ctx.wants_keyboard_input();
+        self.hotkey_manager
+            .set_window_state(minimized, focused, typing);
         ctx.request_repaint_after(next_repaint_delay(condition));
     }
 

@@ -245,6 +245,8 @@ enum PressRouting {
     Debounced,
     /// 「フォーカスがあるときだけ反応する」がオンで、フォーカスが無いので捨てる
     Unfocused,
+    /// このアプリのテキスト欄に入力中なので捨てる（#206）
+    Typing,
 }
 
 /// リスナースレッドと共有する状態。
@@ -281,6 +283,13 @@ struct ListenerState {
     focused: bool,
     /// 「フォーカスがあるときだけ反応する」がオンか。設定の反映のたびに書く。
     only_when_focused: bool,
+    /// egui がキーボード入力を受けているか（`Context::wants_keyboard_input`）。
+    /// UI スレッドが毎フレーム書き込む。
+    ///
+    /// キーを奪わなくなったので、設定ダイアログのテキスト欄へ打った文字も
+    /// ここへ届く（#206）。`focused` と同じく、フックの中で egui に
+    /// 問い合わせずに UI スレッドが知っている値を書いておく。
+    typing: bool,
     /// 動いていたリスナーが止まった理由。止まっていなければ `None`。
     ///
     /// リスナーはキー入力を待てなくなると終わる（フックも外れる）。ここに
@@ -312,6 +321,7 @@ impl Default for ListenerState {
             focused: true,
             // 既定はオフ。#133 のとおり、他のアプリの操作中や最小化中も効かせる
             only_when_focused: false,
+            typing: false,
             listener_failure: None,
             background: BackgroundHotkeyRunner::default(),
             waker: RepaintWaker::default(),
@@ -326,11 +336,16 @@ impl ListenerState {
     /// 更新しないのは、押しっぱなしのキーリピートで抑止が延々と続き、
     /// いつまでも実行できない状態にしないため（`decide_trigger`）。
     ///
-    /// 「フォーカスがあるときだけ反応する」がオンで前面にいないときは、
-    /// デバウンスの基準も更新せずに捨てる。最小化中は前面にいないものとして扱う。
+    /// ウィンドウの状態で捨てるとき（`rejected_by_window_state`）は、
+    /// デバウンスの基準も更新せずに捨てる。
     fn record_press(&mut self, action: HotkeyAction, now: Instant) -> PressRouting {
-        if self.only_when_focused && (!self.focused || self.minimized) {
-            return PressRouting::Unfocused;
+        if let Some(rejected) = rejected_by_window_state(
+            self.only_when_focused,
+            self.focused,
+            self.minimized,
+            self.typing,
+        ) {
+            return rejected;
         }
 
         let since_last = self
@@ -348,6 +363,33 @@ impl ListenerState {
         *self.pressed.entry(action).or_insert(0) += 1;
         PressRouting::Deferred
     }
+}
+
+/// ウィンドウの状態から、押下を捨てるかを決める。捨てるならその理由を返す。
+///
+/// - 「フォーカスがあるときだけ反応する」がオンで前面にいないときは捨てる。
+///   最小化中は前面にいないものとして扱う
+/// - このアプリのテキスト欄に入力中（`typing`）なら捨てる（#206）。打った文字が
+///   ホットキーとしても実行されないようにするため
+///
+/// **`typing` は前面にいて最小化していないときだけ見る。** egui はウィンドウが
+/// フォーカスを失ってもテキスト欄のフォーカスを手放さないので、入力欄を
+/// 選んだまま他のアプリへ移ると `typing` が真のまま残る。そこで捨てると、
+/// 他のアプリの操作中にホットキーが効かなくなる。
+fn rejected_by_window_state(
+    only_when_focused: bool,
+    focused: bool,
+    minimized: bool,
+    typing: bool,
+) -> Option<PressRouting> {
+    let foreground = focused && !minimized;
+    if only_when_focused && !foreground {
+        return Some(PressRouting::Unfocused);
+    }
+    if typing && foreground {
+        return Some(PressRouting::Typing);
+    }
+    None
 }
 
 /// ホットキーの登録と押下の検出。
@@ -522,7 +564,7 @@ fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord) {
             match routing {
                 PressRouting::Deferred => wake = Some(state.waker.clone()),
                 PressRouting::Background => background = Some((state.background.clone(), action)),
-                PressRouting::Debounced | PressRouting::Unfocused => {}
+                PressRouting::Debounced | PressRouting::Unfocused | PressRouting::Typing => {}
             }
             (action, routing)
         }),
@@ -559,6 +601,9 @@ fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord) {
         ),
         Some((action, PressRouting::Unfocused)) => {
             trace!("フォーカスが無いので {} の押下を捨てた", action.label())
+        }
+        Some((action, PressRouting::Typing)) => {
+            trace!("テキスト入力中なので {} の押下を捨てた", action.label())
         }
         None => {}
     }
@@ -689,18 +734,20 @@ impl HotkeyManager {
         }
     }
 
-    /// ウィンドウが最小化されているか、キーボードフォーカスがあるかを伝える。
-    /// **毎フレーム呼ぶ。**
+    /// ウィンドウが最小化されているか、キーボードフォーカスがあるか、
+    /// テキスト欄に入力中かを伝える。**毎フレーム呼ぶ。**
     ///
     /// 最小化すると `update()` が呼ばれなくなるので、最後に書き込んだ値が
     /// そのまま残る。リスナーはその値を見て、画面の要らないアクションだけを
     /// `BackgroundHotkeyRunner` へ回す（#133）。フォーカスは「フォーカスが
-    /// あるときだけ反応する」がオンのときの判定に使う（#202）。
-    pub fn set_window_state(&mut self, minimized: bool, focused: bool) {
+    /// あるときだけ反応する」がオンのときの判定に使う（#202）。入力中の間は
+    /// 押下を捨てる（#206）。
+    pub fn set_window_state(&mut self, minimized: bool, focused: bool, typing: bool) {
         match self.state.lock() {
             Ok(mut state) => {
                 state.minimized = minimized;
                 state.focused = focused;
+                state.typing = typing;
             }
             // 最小化中のアクションが復帰まで保留されるだけで、検出は続く
             Err(_) => {
@@ -1968,13 +2015,90 @@ mod tests {
     fn set_window_state_and_only_when_focused_reach_the_listener() {
         let mut manager = HotkeyManager::new();
 
-        manager.set_window_state(true, false);
+        manager.set_window_state(true, false, true);
         manager.set_only_when_focused(true);
 
         let state = manager.state.lock().expect("ロックが毒されていないこと");
         assert!(state.minimized);
         assert!(!state.focused);
+        assert!(state.typing);
         assert!(state.only_when_focused);
+    }
+
+    // ---- テキスト入力中は反応しない（#206） ----
+
+    #[test]
+    fn rejected_by_window_state_accepts_when_nothing_applies() {
+        assert_eq!(rejected_by_window_state(false, true, false, false), None);
+        assert_eq!(rejected_by_window_state(true, true, false, false), None);
+        // 既定（オフ）なら前面にいなくても受け付ける
+        assert_eq!(rejected_by_window_state(false, false, false, false), None);
+        assert_eq!(rejected_by_window_state(false, true, true, false), None);
+    }
+
+    #[test]
+    fn rejected_by_window_state_drops_presses_while_typing() {
+        // 設定ダイアログのテキスト欄へ打った文字を実行しない。
+        // 「フォーカスがあるときだけ反応する」の設定に関係なく捨てる
+        assert_eq!(
+            rejected_by_window_state(false, true, false, true),
+            Some(PressRouting::Typing)
+        );
+        assert_eq!(
+            rejected_by_window_state(true, true, false, true),
+            Some(PressRouting::Typing)
+        );
+    }
+
+    #[test]
+    fn rejected_by_window_state_ignores_typing_without_focus() {
+        // egui はウィンドウがフォーカスを失ってもテキスト欄のフォーカスを
+        // 手放さない。入力欄を選んだまま他のアプリへ移っても効かせる
+        assert_eq!(rejected_by_window_state(false, false, false, true), None);
+    }
+
+    #[test]
+    fn rejected_by_window_state_ignores_typing_while_minimized() {
+        // 最小化中は入力欄へ打てない。旗が真のまま残っていても、
+        // 最小化中の実行（#133）を止めない
+        assert_eq!(rejected_by_window_state(false, true, true, true), None);
+    }
+
+    #[test]
+    fn rejected_by_window_state_reports_unfocused_before_typing() {
+        // 前面にいないときの理由は「フォーカスが無い」。入力中の旗は見ない
+        assert_eq!(
+            rejected_by_window_state(true, false, false, true),
+            Some(PressRouting::Unfocused)
+        );
+        assert_eq!(
+            rejected_by_window_state(true, true, true, true),
+            Some(PressRouting::Unfocused)
+        );
+    }
+
+    #[test]
+    fn record_press_while_typing_is_not_kept_and_does_not_start_the_debounce() {
+        // 保留に残すと入力欄から離れたときに実行される。デバウンスの
+        // 基準を更新すると、離れた直後の押下まで捨てられる
+        let mut state = ListenerState {
+            typing: true,
+            ..Default::default()
+        };
+        let now = Instant::now();
+
+        assert_eq!(
+            state.record_press(HotkeyAction::Screenshot, now),
+            PressRouting::Typing
+        );
+        assert!(state.pressed.is_empty(), "保留に残っている");
+
+        state.typing = false;
+
+        assert_eq!(
+            state.record_press(HotkeyAction::Screenshot, now),
+            PressRouting::Deferred
+        );
     }
 
     // ---- 溜まった押下の畳み方 ----
