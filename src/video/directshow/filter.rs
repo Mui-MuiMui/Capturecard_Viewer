@@ -137,6 +137,10 @@ impl StreamState {
                 self.sink
                     .push_yuv420(Yuv420Layout::I420, width, height, src, received_at);
             }
+            SampleKind::Yv12 => {
+                self.sink
+                    .push_yuv420(Yuv420Layout::Yv12, width, height, src, received_at);
+            }
             SampleKind::Rgb24 => {
                 self.sink
                     .push_bgr24(width, height, format.bottom_up, src, received_at);

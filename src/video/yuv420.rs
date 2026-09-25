@@ -1,4 +1,4 @@
-//! 4:2:0 の YUV（NV12 / I420）→ RGB24 の画素変換。
+//! 4:2:0 の YUV（NV12 / I420 / YV12）→ RGB24 の画素変換。
 //!
 //! 1 画素の式と係数表（`super::color` の `ColorMatrix`）は YUY2
 //! （`super::convert::yuy2_to_rgb_naive`）と同じで、違うのは色差の置き方だけ。
@@ -7,9 +7,9 @@
 
 use super::color::ColorMatrix;
 
-/// 4:2:0 の YUV（NV12 / I420）の面の並び。
+/// 4:2:0 の YUV（NV12 / I420 / YV12）の面の並び。
 ///
-/// どちらも Y 面（1 画素 1 バイト）のあとに、縦横とも半分の解像度の色差が続く。
+/// どれも Y 面（1 画素 1 バイト）のあとに、縦横とも半分の解像度の色差が続く。
 /// 違うのは色差の置き方だけで、1 画素の式と係数表は YUY2 と同じものを使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Yuv420Layout {
@@ -17,6 +17,8 @@ pub(super) enum Yuv420Layout {
     Nv12,
     /// Y 面のあとに U 面、V 面が順に並ぶ（IYUV も同じ並び）
     I420,
+    /// I420 の U 面と V 面が逆（Y 面、V 面、U 面の順）
+    Yv12,
 }
 
 impl Yuv420Layout {
@@ -25,11 +27,12 @@ impl Yuv420Layout {
         match self {
             Yuv420Layout::Nv12 => "NV12",
             Yuv420Layout::I420 => "I420",
+            Yuv420Layout::Yv12 => "YV12",
         }
     }
 }
 
-/// 4:2:0 の 1 フレームに要るバイト数。NV12 と I420 で同じ。
+/// 4:2:0 の 1 フレームに要るバイト数。NV12 / I420 / YV12 で同じ。
 ///
 /// **幅か高さが奇数なら、色差は切り上げた大きさを持つ**（右端の列・下端の行は
 /// 1 画素ぶんで色差を 1 組持つ）。libyuv と同じ扱い。各面の行に詰め物
@@ -38,7 +41,7 @@ pub(super) fn yuv420_frame_len(width: usize, height: usize) -> usize {
     width * height + 2 * width.div_ceil(2) * height.div_ceil(2)
 }
 
-/// NV12 / I420 → RGB24 の変換。
+/// NV12 / I420 / YV12 → RGB24 の変換。
 ///
 /// 係数は `matrix` で受け取り、1 画素の式は `yuy2_to_rgb_naive` と同じ
 /// （同じ Y・Cb・Cr なら同じ RGB になる）。`out` は使い回す前提で、
@@ -85,6 +88,7 @@ pub(super) fn yuv420_to_rgb(
     let (u_plane, v_plane, chroma_stride, step) = match layout {
         Yuv420Layout::Nv12 => (chroma, &chroma[1..], chroma_width * 2, 2),
         Yuv420Layout::I420 => (chroma, &chroma[chroma_plane..], chroma_width, 1),
+        Yuv420Layout::Yv12 => (&chroma[chroma_plane..], chroma, chroma_width, 1),
     };
 
     for (row, out_row) in out.chunks_exact_mut(row_bytes).enumerate() {
@@ -171,6 +175,24 @@ mod tests {
                 "{layout:?}"
             );
         }
+    }
+
+    #[test]
+    fn yuv420_to_rgb_yv12_reads_v_plane_before_u_plane() {
+        // YV12 は Y 面のあとに V 面、U 面の順。U=90, V=240 を V・U の順に置き、
+        // YUY2 の既知パターン（Y0=81, Y1=145）と同じ値になることを見る
+        let src = [81, 145, 81, 145, 240, 90];
+        let row = [254, 0, 0, 255, 73, 73];
+        let expected: Vec<u8> = row.iter().chain(row.iter()).copied().collect();
+        assert_eq!(
+            convert_420(Yuv420Layout::Yv12, 2, 2, &src, &BT601),
+            expected
+        );
+        assert_ne!(
+            convert_420(Yuv420Layout::I420, 2, 2, &src, &BT601),
+            expected,
+            "同じバイト列を I420 として読むと U と V が入れ替わる"
+        );
     }
 
     #[test]

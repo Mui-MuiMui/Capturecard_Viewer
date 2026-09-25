@@ -210,7 +210,7 @@ pub(super) fn fps_list(avg: i64, min_interval: i64, max_interval: i64) -> Vec<u3
 ///
 /// 形式ごとにまとめ、解像度の大きい順、同じ解像度なら fps の大きい順にする
 /// （Media Foundation の経路の `get_device_capabilities` と同じ並び）。
-/// 形式の並びは `SampleKind::ALL` の順（YUY2・NV12・I420・MJPEG・RGB24）。
+/// 形式の並びは `SampleKind::ALL` の順（YUY2・NV12・I420・YV12・MJPEG・RGB24）。
 pub(super) fn capabilities_from_candidates(candidates: &[StreamCandidate]) -> DeviceCapabilities {
     let mut result = Vec::new();
     for kind in SampleKind::ALL {
@@ -243,7 +243,7 @@ pub(super) fn capabilities_from_candidates(candidates: &[StreamCandidate]) -> De
 ///
 /// 1. 形式が指定されていて、その形式の候補があれば、その形式だけから選ぶ
 /// 2. 解像度が近いもの（画素数の差が小さいもの。一致が最優先）
-/// 3. 形式が未指定なら YUY2・NV12・I420・MJPEG・RGB24 の順（YUV の 3 つだけが
+/// 3. 形式が未指定なら YUY2・NV12・I420・YV12・MJPEG・RGB24 の順（YUV の 4 つだけが
 ///    色空間と映像調整の効く高速パスを通るため）
 /// 4. 開ける fps が要求に近いもの
 ///
