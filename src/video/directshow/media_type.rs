@@ -10,8 +10,9 @@ use std::ptr;
 use windows::core::GUID;
 use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
 use windows::Win32::Media::MediaFoundation::{
-    FORMAT_VideoInfo, FORMAT_VideoInfo2, MEDIATYPE_Video, AM_MEDIA_TYPE, MEDIASUBTYPE_MJPG,
-    MEDIASUBTYPE_RGB24, MEDIASUBTYPE_YUY2, MEDIASUBTYPE_YUYV, VIDEOINFOHEADER, VIDEOINFOHEADER2,
+    FORMAT_VideoInfo, FORMAT_VideoInfo2, MEDIATYPE_Video, AM_MEDIA_TYPE, MEDIASUBTYPE_I420,
+    MEDIASUBTYPE_IYUV, MEDIASUBTYPE_MJPG, MEDIASUBTYPE_NV12, MEDIASUBTYPE_RGB24, MEDIASUBTYPE_YUY2,
+    MEDIASUBTYPE_YUYV, VIDEOINFOHEADER, VIDEOINFOHEADER2,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemAlloc, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
@@ -24,18 +25,35 @@ const UNITS_PER_SECOND: i64 = 10_000_000;
 /// 受け取れるサンプルの形式。
 ///
 /// 名前は設定画面と同じ語彙（`VideoCapture` の対応形式と揃える）。
+///
+/// **並びは形式が未指定のときに選ぶ優先順を兼ねる**（`devices::choose_candidate`）。
+/// 係数表を通る（色空間と映像調整が効く）YUV を先に、その中でも 1 画素あたりの
+/// 情報が多い YUY2 を先頭に置く。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum SampleKind {
     Yuy2,
+    Nv12,
+    I420,
     Mjpeg,
     Rgb24,
 }
 
 impl SampleKind {
+    /// すべての形式を優先順に並べたもの
+    pub(super) const ALL: [SampleKind; 5] = [
+        SampleKind::Yuy2,
+        SampleKind::Nv12,
+        SampleKind::I420,
+        SampleKind::Mjpeg,
+        SampleKind::Rgb24,
+    ];
+
     /// 設定画面とログに出す名前
     pub(super) fn name(self) -> &'static str {
         match self {
             SampleKind::Yuy2 => "YUY2",
+            SampleKind::Nv12 => "NV12",
+            SampleKind::I420 => "I420",
             SampleKind::Mjpeg => "MJPEG",
             SampleKind::Rgb24 => "RGB24",
         }
@@ -43,19 +61,19 @@ impl SampleKind {
 
     /// 設定に書かれた名前から引く。知らない名前なら `None`
     pub(super) fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "YUY2" => Some(SampleKind::Yuy2),
-            "MJPEG" => Some(SampleKind::Mjpeg),
-            "RGB24" => Some(SampleKind::Rgb24),
-            _ => None,
-        }
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
     }
 
     /// メディアタイプのサブタイプから引く。受け取れない形式なら `None`
     fn from_subtype(subtype: &GUID) -> Option<Self> {
-        // YUYV は YUY2 と同じ並び（Y0 U Y1 V）で、呼び名が違うだけ
+        // YUYV は YUY2 と同じ並び（Y0 U Y1 V）で、呼び名が違うだけ。
+        // IYUV も I420 と同じ並び（Y 面、U 面、V 面）
         if *subtype == MEDIASUBTYPE_YUY2 || *subtype == MEDIASUBTYPE_YUYV {
             Some(SampleKind::Yuy2)
+        } else if *subtype == MEDIASUBTYPE_NV12 {
+            Some(SampleKind::Nv12)
+        } else if *subtype == MEDIASUBTYPE_I420 || *subtype == MEDIASUBTYPE_IYUV {
+            Some(SampleKind::I420)
         } else if *subtype == MEDIASUBTYPE_MJPG {
             Some(SampleKind::Mjpeg)
         } else if *subtype == MEDIASUBTYPE_RGB24 {
@@ -81,7 +99,7 @@ pub(super) struct SampleFormat {
 /// `BITMAPINFOHEADER` の幅・高さからサンプルの形を決める。
 ///
 /// **高さの符号の意味は形式で違う。** RGB は正なら下から上（ボトムアップ）、
-/// 負なら上から下。YUV（YUY2）と圧縮形式（MJPEG）は符号によらず上から下。
+/// 負なら上から下。YUV（YUY2 / NV12 / I420）と圧縮形式（MJPEG）は符号によらず上から下。
 /// 幅か高さが 0 のものは受け取らない。
 pub(super) fn sample_format_from_header(
     kind: SampleKind,
@@ -419,10 +437,42 @@ mod tests {
 
     #[test]
     fn sample_kind_names_round_trip() {
-        for kind in [SampleKind::Yuy2, SampleKind::Mjpeg, SampleKind::Rgb24] {
+        for kind in SampleKind::ALL {
             assert_eq!(SampleKind::from_name(kind.name()), Some(kind));
         }
-        assert_eq!(SampleKind::from_name("NV12"), None);
+        assert_eq!(SampleKind::from_name("NV12"), Some(SampleKind::Nv12));
+        assert_eq!(SampleKind::from_name("I420"), Some(SampleKind::I420));
+        // YV12（I420 の U と V が逆）は受け取らない
+        assert_eq!(SampleKind::from_name("YV12"), None);
         assert_eq!(SampleKind::from_name(""), None);
+    }
+
+    #[test]
+    fn sample_kind_from_subtype_maps_420_guids() {
+        assert_eq!(
+            SampleKind::from_subtype(&MEDIASUBTYPE_NV12),
+            Some(SampleKind::Nv12)
+        );
+        // IYUV は I420 と同じ並び
+        assert_eq!(
+            SampleKind::from_subtype(&MEDIASUBTYPE_I420),
+            Some(SampleKind::I420)
+        );
+        assert_eq!(
+            SampleKind::from_subtype(&MEDIASUBTYPE_IYUV),
+            Some(SampleKind::I420)
+        );
+        assert_eq!(
+            SampleKind::from_subtype(&windows::Win32::Media::MediaFoundation::MEDIASUBTYPE_YV12),
+            None
+        );
+    }
+
+    #[test]
+    fn sample_format_from_header_420_is_top_down_regardless_of_sign() {
+        for kind in [SampleKind::Nv12, SampleKind::I420] {
+            let format = sample_format_from_header(kind, 640, 480, 0).expect("受け取れる");
+            assert!(!format.bottom_up);
+        }
     }
 }

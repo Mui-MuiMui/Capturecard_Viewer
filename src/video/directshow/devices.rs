@@ -210,10 +210,10 @@ pub(super) fn fps_list(avg: i64, min_interval: i64, max_interval: i64) -> Vec<u3
 ///
 /// 形式ごとにまとめ、解像度の大きい順、同じ解像度なら fps の大きい順にする
 /// （Media Foundation の経路の `get_device_capabilities` と同じ並び）。
-/// 形式の並びは YUY2・MJPEG・RGB24。
+/// 形式の並びは `SampleKind::ALL` の順（YUY2・NV12・I420・MJPEG・RGB24）。
 pub(super) fn capabilities_from_candidates(candidates: &[StreamCandidate]) -> DeviceCapabilities {
     let mut result = Vec::new();
-    for kind in [SampleKind::Yuy2, SampleKind::Mjpeg, SampleKind::Rgb24] {
+    for kind in SampleKind::ALL {
         let mut modes: Vec<VideoMode> = candidates
             .iter()
             .filter(|candidate| candidate.format.kind == kind)
@@ -243,8 +243,8 @@ pub(super) fn capabilities_from_candidates(candidates: &[StreamCandidate]) -> De
 ///
 /// 1. 形式が指定されていて、その形式の候補があれば、その形式だけから選ぶ
 /// 2. 解像度が近いもの（画素数の差が小さいもの。一致が最優先）
-/// 3. 形式が未指定なら YUY2・MJPEG・RGB24 の順（YUY2 だけが色空間と映像調整の
-///    効く高速パスを通るため）
+/// 3. 形式が未指定なら YUY2・NV12・I420・MJPEG・RGB24 の順（YUV の 3 つだけが
+///    色空間と映像調整の効く高速パスを通るため）
 /// 4. 開ける fps が要求に近いもの
 ///
 /// 解像度が未指定なら 1280x720 60fps を要求したものとして扱う（Media
@@ -370,6 +370,39 @@ mod tests {
             choose_candidate(&candidates, Some((1920, 1080)), None, Some(30)),
             Some((0, 30))
         );
+    }
+
+    #[test]
+    fn choose_candidate_without_format_prefers_420_over_mjpeg() {
+        // YUY2 の無い仮想カメラ。同じ解像度なら係数表を通る NV12 を選ぶ
+        let candidates = vec![
+            candidate(0, SampleKind::Mjpeg, 1280, 720, &[30]),
+            candidate(1, SampleKind::I420, 1280, 720, &[30]),
+            candidate(2, SampleKind::Nv12, 1280, 720, &[30]),
+        ];
+        assert_eq!(
+            choose_candidate(&candidates, Some((1280, 720)), None, Some(30)),
+            Some((2, 30))
+        );
+        assert_eq!(
+            choose_candidate(&candidates, Some((1280, 720)), Some("I420"), Some(30)),
+            Some((1, 30))
+        );
+    }
+
+    #[test]
+    fn capabilities_from_candidates_lists_420_after_yuy2() {
+        let candidates = vec![
+            candidate(0, SampleKind::Rgb24, 640, 480, &[30]),
+            candidate(1, SampleKind::I420, 640, 480, &[30]),
+            candidate(2, SampleKind::Nv12, 640, 480, &[30]),
+            candidate(3, SampleKind::Yuy2, 640, 480, &[30]),
+        ];
+        let names: Vec<String> = capabilities_from_candidates(&candidates)
+            .into_iter()
+            .map(|capability| capability.name)
+            .collect();
+        assert_eq!(names, vec!["YUY2", "NV12", "I420", "RGB24"]);
     }
 
     #[test]

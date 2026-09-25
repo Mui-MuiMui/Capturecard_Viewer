@@ -50,6 +50,7 @@ use windows::Win32::System::Com::{
 use super::media_type::{
     delete_media_type, sample_format_of, OwnedMediaType, SampleFormat, SampleKind,
 };
+use crate::video::convert::Yuv420Layout;
 use crate::video::frame_sink::FrameSink;
 
 /// このフィルターのクラス ID。登録はしないので、`GetClassID` に答えるためだけの値
@@ -127,6 +128,14 @@ impl StreamState {
         match format.kind {
             SampleKind::Yuy2 => {
                 self.sink.push_yuy2(width, height, src, received_at);
+            }
+            SampleKind::Nv12 => {
+                self.sink
+                    .push_yuv420(Yuv420Layout::Nv12, width, height, src, received_at);
+            }
+            SampleKind::I420 => {
+                self.sink
+                    .push_yuv420(Yuv420Layout::I420, width, height, src, received_at);
             }
             SampleKind::Rgb24 => {
                 self.sink
