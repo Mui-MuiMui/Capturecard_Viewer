@@ -1,5 +1,5 @@
 use super::action::folded_repeats;
-use super::parse::{parse_hotkey, remove_hotkey_key_events};
+use super::parse::{chord_from_egui_event, parse_hotkey, remove_hotkey_key_events};
 use super::{HotkeyAction, HotkeyError, HotkeyManager};
 use crate::keyboard_hook::KeyChord;
 use eframe::egui;
@@ -106,12 +106,14 @@ impl HotkeyManager {
     /// 取り除いた数を返す（#217）。
     ///
     /// UI スレッドが `update()` の先頭で、描画より前に呼ぶ。判定は
-    /// `parse::remove_hotkey_key_events` が持つ。キーの押下が無いフレームでは
+    /// `parse::remove_hotkey_key_events` が持つ。取り除きうる押下が無いフレームでは
     /// 共有状態のロックを取らない。
     pub fn remove_hotkey_key_events(&self, events: &mut Vec<egui::Event>, typing: bool) -> usize {
+        // Ctrl+C などは Event::Key ではなく Event::Copy などで届くので、
+        // 押下の有無も `chord_from_egui_event` で見る
         let has_key_press = events
             .iter()
-            .any(|event| matches!(event, egui::Event::Key { pressed: true, .. }));
+            .any(|event| chord_from_egui_event(event).is_some());
         if typing || !has_key_press {
             return 0;
         }

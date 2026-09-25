@@ -180,16 +180,37 @@ pub(super) fn remove_hotkey_key_events(
         return 0;
     }
     let before = events.len();
-    events.retain(|event| match event {
+    events.retain(|event| {
+        chord_from_egui_event(event).is_none_or(|chord| !registered.contains_key(&chord))
+    });
+    before - events.len()
+}
+
+/// egui のイベント 1 つを、押されたキーの組み合わせとして読む。キーの押下でない
+/// もの（解放、マウス、文字入力など）は `None` を返す。
+///
+/// **Ctrl+C / Ctrl+X / Ctrl+V は `Event::Key` ではなく `Event::Copy` / `Cut` /
+/// `Paste` で届く。** egui-winit 0.26 が押下の時点でコマンドへ置き換え、
+/// `Event::Key` を作らないため。これらを割り当てたときも取り除けるように、
+/// それぞれ Ctrl+C / Ctrl+X / Ctrl+V として読む。egui-winit は Ctrl+Insert /
+/// Shift+Delete / Shift+Insert も同じイベントにするので区別できないが、
+/// Insert と Delete はホットキーに割り当てられないので、読み違えて困るのは
+/// 「Ctrl+C を割り当てているときに Ctrl+Insert でのコピーも効かなくなる」だけ。
+/// 入力中は取り除かないので、テキスト欄でのコピーと貼り付けには影響しない。
+pub(super) fn chord_from_egui_event(event: &egui::Event) -> Option<KeyChord> {
+    let (key, modifiers) = match event {
         egui::Event::Key {
             key,
             pressed: true,
             modifiers,
             ..
-        } => chord_from_egui(*key, *modifiers).is_none_or(|chord| !registered.contains_key(&chord)),
-        _ => true,
-    });
-    before - events.len()
+        } => (*key, *modifiers),
+        egui::Event::Copy => (egui::Key::C, egui::Modifiers::CTRL),
+        egui::Event::Cut => (egui::Key::X, egui::Modifiers::CTRL),
+        egui::Event::Paste(_) => (egui::Key::V, egui::Modifiers::CTRL),
+        _ => return None,
+    };
+    chord_from_egui(key, modifiers)
 }
 
 /// egui ではメイン列とテンキーを区別できない数字キーか（`chord_from_egui`）。
@@ -535,6 +556,61 @@ mod tests {
                 key_event(egui::Key::F5, egui::Modifiers::CTRL, true, false),
                 key_event(egui::Key::F11, egui::Modifiers::NONE, true, false),
             ]
+        );
+    }
+
+    #[test]
+    fn remove_hotkey_key_events_removes_clipboard_commands_of_assigned_keys() {
+        // Ctrl+C / Ctrl+X / Ctrl+V は Event::Key ではなくコマンドのイベントで届く
+        let registered = HashMap::from([
+            (
+                parse_hotkey("Ctrl+C").expect("解析できること"),
+                HotkeyAction::Screenshot,
+            ),
+            (
+                parse_hotkey("Ctrl+V").expect("解析できること"),
+                HotkeyAction::VolumeUp,
+            ),
+        ]);
+        let mut events = vec![
+            egui::Event::Copy,
+            egui::Event::Cut,
+            egui::Event::Paste("text".to_string()),
+        ];
+
+        let removed = remove_hotkey_key_events(&registered, &mut events, false);
+
+        assert_eq!(removed, 2);
+        assert_eq!(events, vec![egui::Event::Cut]);
+    }
+
+    #[test]
+    fn chord_from_egui_event_reads_only_presses_and_clipboard_commands() {
+        assert_eq!(
+            chord_from_egui_event(&key_event(
+                egui::Key::F5,
+                egui::Modifiers::NONE,
+                true,
+                false
+            )),
+            Some(parse_hotkey("F5").expect("解析できること"))
+        );
+        assert_eq!(
+            chord_from_egui_event(&egui::Event::Cut),
+            Some(parse_hotkey("Ctrl+X").expect("解析できること"))
+        );
+        assert_eq!(
+            chord_from_egui_event(&key_event(
+                egui::Key::F5,
+                egui::Modifiers::NONE,
+                false,
+                false
+            )),
+            None
+        );
+        assert_eq!(
+            chord_from_egui_event(&egui::Event::Text("a".to_string())),
+            None
         );
     }
 
