@@ -33,6 +33,9 @@ pub enum ScreenshotError {
     ClipboardWriteFailed(String),
     /// 効果音ファイルが見つかったのに読めない。既定の効果音へ倒してある
     SoundFileUnreadable { path: PathBuf, source: String },
+    /// 効果音ファイルは読めたが音声としてデコードできない（拡張子だけ mp3 など）。
+    /// 既定音へは倒さず、撮影時は無音になる（`docs/design/assets.md`）
+    SoundFileUndecodable { path: PathBuf, source: String },
 }
 
 impl fmt::Display for ScreenshotError {
@@ -58,6 +61,11 @@ impl fmt::Display for ScreenshotError {
             ScreenshotError::SoundFileUnreadable { path, source } => write!(
                 f,
                 "効果音ファイル {} を読み込めないため既定の効果音を使う: {source}",
+                path.display()
+            ),
+            ScreenshotError::SoundFileUndecodable { path, source } => write!(
+                f,
+                "効果音ファイル {} を音声として読めないため、撮影時は効果音が鳴らない: {source}",
                 path.display()
             ),
         }
@@ -264,7 +272,18 @@ pub fn load_sound_data(sound_path: &Path) -> (Vec<u8>, Option<ScreenshotError>) 
     match resolve_sound_path(sound_path, exe_dir().as_deref(), |path| path.exists()) {
         SoundSource::Embedded => (EMBEDDED_SOUND.to_vec(), None),
         SoundSource::File(path) => match std::fs::read(&path) {
-            Ok(data) => (data, None),
+            Ok(data) => {
+                // デコードできるかは選んだ時点（テスト再生と適用）で確かめる。
+                // 撮影時の再生スレッドは失敗を黙って捨てるため、ここで見ないと
+                // 無音の理由がどこにも出ない。データは差し替えない（撮影時は無音のまま）
+                let error = check_decodable(&data).err().map(|source| {
+                    ScreenshotError::SoundFileUndecodable {
+                        path: path.clone(),
+                        source,
+                    }
+                });
+                (data, error)
+            }
             Err(e) => (
                 EMBEDDED_SOUND.to_vec(),
                 Some(ScreenshotError::SoundFileUnreadable {
@@ -274,6 +293,13 @@ pub fn load_sound_data(sound_path: &Path) -> (Vec<u8>, Option<ScreenshotError>) 
             ),
         },
     }
+}
+
+/// 効果音のデータを rodio がデコードできるかを確かめる。失敗時は理由を返す。
+fn check_decodable(data: &[u8]) -> Result<(), String> {
+    Decoder::new(Cursor::new(data.to_vec()))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// 効果音のデータを、別スレッドで 1 回鳴らす。
@@ -526,6 +552,10 @@ mod tests {
                 path: PathBuf::from("C:/sounds/SS.mp3"),
                 source: "missing".to_string(),
             },
+            ScreenshotError::SoundFileUndecodable {
+                path: PathBuf::from("C:/sounds/SS.mp3"),
+                source: "unrecognized format".to_string(),
+            },
         ];
 
         for error in all {
@@ -540,12 +570,29 @@ mod tests {
         // 渡したファイルの中身そのものが返ること（Issue #204）
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("custom.mp3");
+        std::fs::write(&path, EMBEDDED_SOUND).expect("書き込めること");
+
+        let (data, error) = load_sound_data(&path);
+
+        assert_eq!(data, EMBEDDED_SOUND);
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn load_sound_data_undecodable_file_keeps_bytes_with_reason() {
+        // 拡張子だけ mp3 のファイルを選んだ場合（Issue #213）。
+        // 既定音へは倒さず中身をそのまま返し、トーストへ出す理由を添えること
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("fake.mp3");
         std::fs::write(&path, b"not really mp3").expect("書き込めること");
 
         let (data, error) = load_sound_data(&path);
 
         assert_eq!(data, b"not really mp3");
-        assert_eq!(error, None);
+        assert!(
+            matches!(error, Some(ScreenshotError::SoundFileUndecodable { path: ref p, .. }) if *p == path),
+            "デコードできない理由が返ること: {error:?}"
+        );
     }
 
     #[test]

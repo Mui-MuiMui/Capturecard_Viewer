@@ -11,6 +11,7 @@
 use super::worker::{DeviceCommand, DeviceConfig, DeviceEvent};
 use super::CaptureCardViewer;
 use crate::audio::AudioDirection;
+use crate::screenshot::ScreenshotError;
 use crate::status::ErrorSource;
 use crate::video::VideoAdjustments;
 use log::warn;
@@ -199,6 +200,8 @@ impl CaptureCardViewer {
             // **`None`（効果音を鳴らさない）も差分として扱う。** 以前は `if let Some(..)` で
             // 包んでいたため、設定画面で効果音を外してもそのセッション中は
             // 効果音が鳴り続けていた
+            // report_error は self 全体を借りるので、ロックを離してから呼ぶ
+            let mut pending_error: Option<ScreenshotError> = None;
             if let Ok(mut ss) = self.screenshot_manager.lock() {
                 // 無条件に呼ぶと 2 秒ごとに効果音ファイル全体を読み直すことになる
                 if Self::needs_reapply(
@@ -210,9 +213,20 @@ impl CaptureCardViewer {
                         Some(sf) => match ss.set_sound_file(sf) {
                             Ok(()) => self.last_sound_file = Some(Some(sf.clone())),
                             // 見つからない場合は埋め込みの既定音へ倒して Ok になる。
-                            // ここへ来るのはファイルがあるのに読めなかった場合なので、
-                            // last を空にして次の適用タイミングで読み直す
-                            Err(_) => self.last_sound_file = None,
+                            // デコードできないファイルは読み直しても変わらないので
+                            // 適用済みとして扱う（撮影時は無音。docs/design/assets.md）
+                            Err(e @ ScreenshotError::SoundFileUndecodable { .. }) => {
+                                warn!("効果音の適用: {}", e);
+                                self.last_sound_file = Some(Some(sf.clone()));
+                                pending_error = Some(e);
+                            }
+                            // ファイルがあるのに読めなかった場合。last を空にして
+                            // 次の適用タイミングで読み直す
+                            Err(e) => {
+                                warn!("効果音の適用: {}", e);
+                                self.last_sound_file = None;
+                                pending_error = Some(e);
+                            }
                         },
                         None => {
                             // 未選択は「鳴らさない」の意味。set_sound_file は
@@ -227,6 +241,9 @@ impl CaptureCardViewer {
                 warn!(
                     "スクリーンショットの効果音の反映で screenshot_manager のロックを取得できない"
                 );
+            }
+            if let Some(e) = pending_error {
+                self.report_error(ErrorSource::Screenshot, e.to_string());
             }
         }
 
