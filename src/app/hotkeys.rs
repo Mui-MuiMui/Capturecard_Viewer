@@ -76,6 +76,27 @@ impl CaptureCardViewer {
         }
     }
 
+    /// このフレームで egui へ渡るキー入力から、ホットキーに割り当てたキーの
+    /// 押下を取り除く（#217）。
+    ///
+    /// キーを奪わないフックにしたので、前面にいる間は割り当てたキーが egui にも
+    /// 届き、Escape を割り当てると右クリックメニューも同時に閉じていた。
+    /// **描画より前に呼ぶこと。** 描画の中で `key_pressed` を見る処理
+    /// （右クリックメニューの Escape など）より後だと取り除いても間に合わない。
+    ///
+    /// 入力中かはフレームの先頭の値で見る。リスナーへ渡している旗（`update()` の
+    /// 末尾で書く）と同じく、前のフレームの描画を終えた時点の状態になる。
+    pub(super) fn remove_hotkey_key_events(&self, ctx: &egui::Context) {
+        let typing = ctx.wants_keyboard_input();
+        let removed = ctx.input_mut(|input| {
+            self.hotkey_manager
+                .remove_hotkey_key_events(&mut input.events, typing)
+        });
+        if removed > 0 {
+            trace!("ホットキーのキー入力 {removed} 件を egui へ渡さずに捨てた");
+        }
+    }
+
     /// ホットキーに割り当てられたアクションを 1 つ実行する。
     ///
     /// **実処理は右クリックメニューや映像上の操作と同じ経路を通す。**

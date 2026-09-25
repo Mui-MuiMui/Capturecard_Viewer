@@ -1,7 +1,8 @@
 use super::action::folded_repeats;
-use super::parse::parse_hotkey;
+use super::parse::{parse_hotkey, remove_hotkey_key_events};
 use super::{HotkeyAction, HotkeyError, HotkeyManager};
 use crate::keyboard_hook::KeyChord;
+use eframe::egui;
 use log::{debug, error, info, warn};
 use std::collections::BTreeMap;
 
@@ -99,6 +100,30 @@ impl HotkeyManager {
             }
         }
         fired
+    }
+
+    /// egui へ渡す前のキー入力から、ホットキーに割り当てたキーの押下を取り除く。
+    /// 取り除いた数を返す（#217）。
+    ///
+    /// UI スレッドが `update()` の先頭で、描画より前に呼ぶ。判定は
+    /// `parse::remove_hotkey_key_events` が持つ。キーの押下が無いフレームでは
+    /// 共有状態のロックを取らない。
+    pub fn remove_hotkey_key_events(&self, events: &mut Vec<egui::Event>, typing: bool) -> usize {
+        let has_key_press = events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Key { pressed: true, .. }));
+        if typing || !has_key_press {
+            return 0;
+        }
+        match self.state.lock() {
+            Ok(state) => remove_hotkey_key_events(&state.registered, events, typing),
+            Err(_) => {
+                // release ビルドは panic = "abort" なので毒されない。
+                // 取り除けないだけで、egui へ渡る以前の挙動に戻る
+                warn!("ホットキーの共有状態のロックを取得できないのでキー入力をそのまま渡す");
+                0
+            }
+        }
     }
 
     /// 登録できなかったアクションと、その理由。設定画面に出す。
