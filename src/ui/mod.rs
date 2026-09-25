@@ -55,6 +55,7 @@ use self::status_tab::show_status_tab;
 
 use crate::audio::AudioDirection;
 use crate::hotkey::{HotkeyAction, HotkeyAssignmentError};
+use crate::i18n::Text;
 use crate::settings::AppSettings;
 use crate::status::ConnectionStatus;
 use eframe::egui;
@@ -347,7 +348,7 @@ pub fn show_settings_dialog(
     // min_size がこれを超えることはない
     let min_size = SETTINGS_WINDOW_MIN_SIZE;
 
-    egui::Window::new("設定")
+    egui::Window::new(Text::SettingsTitle.get())
         .open(&mut window_open)
         .default_size([650.0, 500.0])
         .resizable(true)
@@ -357,15 +358,23 @@ pub fn show_settings_dialog(
         .show(ctx, |ui| {
             // タブ選択
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut selected_tab, SettingsTab::Device, "デバイス設定");
+                ui.selectable_value(
+                    &mut selected_tab,
+                    SettingsTab::Device,
+                    Text::TabDevice.get(),
+                );
                 ui.selectable_value(
                     &mut selected_tab,
                     SettingsTab::Screenshot,
-                    "スクリーンショット設定",
+                    Text::TabScreenshot.get(),
                 );
-                ui.selectable_value(&mut selected_tab, SettingsTab::Hotkeys, "ホットキー");
-                ui.selectable_value(&mut selected_tab, SettingsTab::Other, "その他");
-                ui.selectable_value(&mut selected_tab, SettingsTab::Status, "接続状態");
+                ui.selectable_value(&mut selected_tab, SettingsTab::Hotkeys, Text::Hotkeys.get());
+                ui.selectable_value(&mut selected_tab, SettingsTab::Other, Text::TabOther.get());
+                ui.selectable_value(
+                    &mut selected_tab,
+                    SettingsTab::Status,
+                    Text::TabStatus.get(),
+                );
             });
 
             ui.separator();
@@ -381,15 +390,15 @@ pub fn show_settings_dialog(
             egui::TopBottomPanel::bottom("settings_dialog_buttons").show_inside(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
+                    if ui.button(Text::ButtonOk.get()).clicked() {
                         button = SettingsDialogAction::Ok;
                     }
 
-                    if ui.button("キャンセル").clicked() {
+                    if ui.button(Text::ButtonCancel.get()).clicked() {
                         button = SettingsDialogAction::Cancel;
                     }
 
-                    if ui.button("適用").clicked() {
+                    if ui.button(Text::ButtonApply.get()).clicked() {
                         button = SettingsDialogAction::Apply;
                     }
                 });

@@ -4,6 +4,7 @@
 //! **ここでは何も実行しない。** ファイルダイアログもファイル I/O も
 //! `CaptureCardViewer` が行う（`docs/design/settings-dialog.md`）。
 
+use crate::i18n::{self, Text};
 use crate::settings::AppSettings;
 use eframe::egui;
 
@@ -31,7 +32,7 @@ pub(super) fn show_other_tab(
     view: &SettingsDialogView<'_>,
     events: &mut Vec<SettingsEvent>,
 ) {
-    ui.heading("その他");
+    ui.heading(Text::TabOther.get());
     ui.add_space(10.0);
 
     show_preset_group(ui, draft, view.new_preset_name, events);
@@ -39,50 +40,48 @@ pub(super) fn show_other_tab(
     ui.add_space(15.0);
 
     ui.group(|ui| {
-        ui.strong("設定ファイル");
+        ui.strong(Text::SettingsFile.get());
         ui.add_space(5.0);
 
         ui.horizontal(|ui| {
-            if ui.button("設定を書き出す...").clicked() {
+            if ui.button(Text::ExportSettings.get()).clicked() {
                 events.push(SettingsEvent::ExportSettings);
             }
-            if ui.button("設定を読み込む...").clicked() {
+            if ui.button(Text::ImportSettings.get()).clicked() {
                 events.push(SettingsEvent::ImportSettings);
             }
         });
 
         ui.add_space(5.0);
-        ui.small("書き出すのは実行中の設定です。編集中の内容を含めたい場合は、先に「適用」を押してください。");
-        ui.small("読み込んだ内容は編集中の設定に入ります。「適用」か「OK」を押すまで反映されません。");
-        ui.small("ウィンドウの位置とサイズは読み込みません。別の画面構成で書き出したファイルを読んでも、ウィンドウは動きません。");
+        ui.small(Text::ExportHint.get());
+        ui.small(Text::ImportHint.get());
+        ui.small(Text::ImportWindowHint.get());
     });
 
     ui.add_space(15.0);
 
     ui.group(|ui| {
-        ui.strong("初期化");
+        ui.strong(Text::ResetGroup.get());
         ui.add_space(5.0);
 
         if view.reset_confirm {
-            warning_label(ui, "編集中の設定を初期値に戻します。よろしいですか？");
+            warning_label(ui, Text::ResetConfirm.get());
             ui.horizontal(|ui| {
-                if ui.button("初期化する").clicked() {
+                if ui.button(Text::ResetConfirmYes.get()).clicked() {
                     events.push(SettingsEvent::ResetDraft);
                     events.push(SettingsEvent::SetResetConfirm(false));
                 }
-                if ui.button("やめる").clicked() {
+                if ui.button(Text::ResetConfirmNo.get()).clicked() {
                     events.push(SettingsEvent::SetResetConfirm(false));
                 }
             });
-        } else if ui.button("設定を初期化...").clicked() {
+        } else if ui.button(Text::ResetButton.get()).clicked() {
             events.push(SettingsEvent::SetResetConfirm(true));
         }
 
         ui.add_space(5.0);
-        ui.small(
-            "初期化も編集中の設定に対して行います。「適用」か「OK」を押すまで反映されません。",
-        );
-        ui.small("戻る範囲は読み込みと同じです。ウィンドウの位置とサイズ、右クリックメニューで切り替える項目は初期化しません。");
+        ui.small(Text::ResetHint.get());
+        ui.small(Text::ResetScopeHint.get());
     });
 
     if let Some(message) = view.management_message {
@@ -113,16 +112,16 @@ fn show_preset_group(
     events: &mut Vec<SettingsEvent>,
 ) {
     ui.group(|ui| {
-        ui.strong("プリセット");
+        ui.strong(Text::Preset.get());
         ui.add_space(5.0);
 
-        ui.label(format!("現在: {}", active_preset_label(draft)));
+        ui.label(i18n::preset_current(active_preset_label(draft)));
         ui.add_space(5.0);
 
         let mut row_action: Option<PresetRowAction> = None;
 
         if draft.presets.is_empty() {
-            ui.small("プリセットはまだありません。下の入力欄から作れます。");
+            ui.small(Text::PresetEmpty.get());
         } else {
             egui::Grid::new("preset_list")
                 .num_columns(2)
@@ -132,24 +131,20 @@ fn show_preset_group(
                         ui.label(&preset.name);
                         ui.horizontal(|ui| {
                             if ui
-                                .button("読み込む")
-                                .on_hover_text(
-                                    "このプリセットのビデオ・オーディオ設定を編集中の設定へ入れます",
-                                )
+                                .button(Text::PresetLoad.get())
+                                .on_hover_text(Text::PresetLoadHint.get())
                                 .clicked()
                             {
                                 row_action = Some(PresetRowAction::Load(index));
                             }
                             if ui
-                                .button("上書き保存")
-                                .on_hover_text(
-                                    "編集中のビデオ・オーディオ設定でこのプリセットを置き換えます",
-                                )
+                                .button(Text::PresetOverwrite.get())
+                                .on_hover_text(Text::PresetOverwriteHint.get())
                                 .clicked()
                             {
                                 row_action = Some(PresetRowAction::Overwrite(index));
                             }
-                            if ui.button("削除").clicked() {
+                            if ui.button(Text::PresetDelete.get()).clicked() {
                                 row_action = Some(PresetRowAction::Delete(index));
                             }
                         });
@@ -163,7 +158,7 @@ fn show_preset_group(
         }
 
         ui.add_space(10.0);
-        ui.label("現在の設定を新しいプリセットとして保存:");
+        ui.label(Text::PresetSaveNewLabel.get());
         ui.horizontal(|ui| {
             // `TextEdit` は `&mut String` を要求するので、呼び出し側が持つ
             // 入力欄を複製して渡し、変わったらイベントで返す。**このフレームの
@@ -174,25 +169,24 @@ fn show_preset_group(
             let response = ui.add(
                 egui::TextEdit::singleline(&mut name)
                     .desired_width(200.0)
-                    .hint_text("例: 低遅延優先"),
+                    .hint_text(Text::PresetNameHint.get()),
             );
             if response.changed() {
                 events.push(SettingsEvent::SetNewPresetName(name));
             }
-            let entered =
-                response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let entered = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
             // **入力欄の内容は載せない。** 直前の `SetNewPresetName` を
             // 先に処理した呼び出し側が、自分の持つ値を使う
-            if ui.button("保存").clicked() || entered {
+            if ui.button(Text::PresetSave.get()).clicked() || entered {
                 events.push(SettingsEvent::SaveNewPreset);
             }
         });
 
         ui.add_space(5.0);
-        ui.small("プリセットに入るのは「デバイス設定」タブのビデオとオーディオだけです。スクリーンショット・ホットキー・ウィンドウの設定は含みません。");
-        ui.small("デバイスの自動再接続もプリセットには含みません。右クリックメニューで切り替えた状態がそのまま残ります。");
-        ui.small("追加・上書き・削除・読み込みは編集中の設定に対して行います。「適用」か「OK」を押すまで反映されません。");
-        ui.small("切り替えは右クリックメニューの「プリセット」からも行えます。");
+        ui.small(Text::PresetScopeHint.get());
+        ui.small(Text::PresetAutoReconnectHint.get());
+        ui.small(Text::PresetDraftHint.get());
+        ui.small(Text::PresetMenuHint.get());
     });
 }

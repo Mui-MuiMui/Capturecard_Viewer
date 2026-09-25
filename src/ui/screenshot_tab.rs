@@ -3,6 +3,7 @@
 //! 効果音の再生もファイルダイアログもここでは行わず、イベントとして
 //! 上へ返す（`docs/design/settings-dialog.md`）。
 
+use crate::i18n::Text;
 use crate::settings::{
     AppSettings, ScreenshotDestination, ScreenshotFormat, DEFAULT_SOUND_FILE, MAX_JPEG_QUALITY,
     MIN_JPEG_QUALITY,
@@ -24,37 +25,34 @@ pub(super) fn show_screenshot_settings_tab(
     settings: &mut AppSettings,
     events: &mut Vec<SettingsEvent>,
 ) {
-    ui.heading("スクリーンショット設定");
+    ui.heading(Text::TabScreenshot.get());
     ui.add_space(10.0);
 
     // 出力先
     ui.group(|ui| {
-        ui.strong("出力先");
+        ui.strong(Text::ScreenshotDestination.get());
         ui.add_space(5.0);
 
         ui.horizontal(|ui| {
             ui.radio_value(
                 &mut settings.screenshot.destination,
                 ScreenshotDestination::File,
-                "ファイルに保存",
+                Text::DestinationFile.get(),
             );
             ui.radio_value(
                 &mut settings.screenshot.destination,
                 ScreenshotDestination::Clipboard,
-                "クリップボードにコピー",
+                Text::DestinationClipboard.get(),
             );
             ui.radio_value(
                 &mut settings.screenshot.destination,
                 ScreenshotDestination::Both,
-                "両方",
+                Text::DestinationBoth.get(),
             );
         });
 
         ui.add_space(5.0);
-        ui.small(
-            "クリップボードへは圧縮せずそのままの画をコピーします。
-             保存場所と保存形式は、ファイルに保存するときだけ使われます。",
-        );
+        ui.small(Text::DestinationHint.get());
     });
 
     ui.add_space(15.0);
@@ -67,11 +65,11 @@ pub(super) fn show_screenshot_settings_tab(
     // 保存フォルダー
     ui.add_enabled_ui(saves_file, |ui| {
         ui.group(|ui| {
-            ui.strong("保存場所");
+            ui.strong(Text::SaveLocation.get());
             ui.add_space(5.0);
 
             ui.horizontal(|ui| {
-                ui.label("保存フォルダ:");
+                ui.label(Text::SaveFolderLabel.get());
                 let mut folder_str = settings
                     .screenshot
                     .save_folder
@@ -80,7 +78,7 @@ pub(super) fn show_screenshot_settings_tab(
                 ui.text_edit_singleline(&mut folder_str);
                 settings.screenshot.save_folder = std::path::PathBuf::from(folder_str);
 
-                if ui.button("参照...").clicked() {
+                if ui.button(Text::ButtonBrowse.get()).clicked() {
                     events.push(SettingsEvent::PickScreenshotFolder);
                 }
             });
@@ -90,7 +88,7 @@ pub(super) fn show_screenshot_settings_tab(
 
         // 保存形式
         ui.group(|ui| {
-            ui.strong("保存形式");
+            ui.strong(Text::SaveFormat.get());
             ui.add_space(5.0);
 
             ui.horizontal(|ui| {
@@ -110,7 +108,7 @@ pub(super) fn show_screenshot_settings_tab(
             // 変えても何も起きない項目を操作させない
             let jpeg_selected = settings.screenshot.format == ScreenshotFormat::Jpeg;
             ui.horizontal(|ui| {
-                ui.label("JPEG 品質:");
+                ui.label(Text::JpegQualityLabel.get());
                 ui.add_enabled(
                     jpeg_selected,
                     egui::Slider::new(
@@ -121,10 +119,7 @@ pub(super) fn show_screenshot_settings_tab(
             });
 
             ui.add_space(5.0);
-            ui.small(
-                "JPEG はファイルが小さくなりますが、文字や細い線ににじみが出ます。
-                 PNG は元の画をそのまま保存できるかわりに、ファイルが数倍の大きさになります。",
-            );
+            ui.small(Text::SaveFormatHint.get());
         });
     });
 
@@ -132,7 +127,7 @@ pub(super) fn show_screenshot_settings_tab(
 
     // サウンド設定
     ui.group(|ui| {
-        ui.strong("効果音");
+        ui.strong(Text::SoundEffect.get());
         ui.add_space(5.0);
 
         // 表示に要るものを先に取り出しておく。SoundChoice はドラフトを借りるので、
@@ -146,21 +141,24 @@ pub(super) fn show_screenshot_settings_tab(
         let is_default = choice == SoundChoice::Default;
 
         ui.horizontal(|ui| {
-            ui.label("サウンドファイル:");
+            ui.label(Text::SoundFileLabel.get());
             let shown = ui.label(label);
             // 欄にはファイル名しか出さないので、どこのファイルかは重ねて見せる
             if let Some(full_path) = full_path {
                 shown.on_hover_text(full_path);
             }
 
-            if ui.button("ファイル選択...").clicked() {
+            if ui.button(Text::ButtonSelectFile.get()).clicked() {
                 events.push(SettingsEvent::PickSoundFile);
             }
             // 内蔵の既定音はファイルとして配布していないので、ファイル選択からは
             // 選び直せない。既定値を書き戻すこのボタンが唯一の戻し方になる
             if ui
-                .add_enabled(!is_default, egui::Button::new("既定に戻す"))
-                .on_hover_text("内蔵の効果音を使います")
+                .add_enabled(
+                    !is_default,
+                    egui::Button::new(Text::SoundResetDefault.get()),
+                )
+                .on_hover_text(Text::SoundResetDefaultHint.get())
                 .clicked()
             {
                 settings.screenshot.sound_file = Some(PathBuf::from(DEFAULT_SOUND_FILE));
@@ -169,7 +167,7 @@ pub(super) fn show_screenshot_settings_tab(
 
         if let Some(sound_file) = settings.screenshot.sound_file.clone() {
             ui.horizontal(|ui| {
-                ui.label("音量:");
+                ui.label(Text::VolumeLabel.get());
                 ui.add(
                     egui::Slider::new(&mut settings.screenshot.sound_volume, 0.0..=200.0)
                         .suffix("%"),
@@ -179,12 +177,12 @@ pub(super) fn show_screenshot_settings_tab(
             ui.horizontal(|ui| {
                 // 鳴らすのはドラフトの音。「適用」前に選び直した音を確かめられる
                 // ようにするため、適用済みの効果音は使わない（Issue #204）
-                if ui.button("テスト再生").clicked() {
+                if ui.button(Text::SoundTest.get()).clicked() {
                     events.push(SettingsEvent::TestSound(sound_file));
                 }
                 // None は「鳴らさない」の意味（ScreenshotManager::clear_sound）。
                 // 以前は「クリア」という文言で、既定音に戻る操作と区別が付かなかった
-                if ui.button("効果音を鳴らさない").clicked() {
+                if ui.button(Text::SoundDisable.get()).clicked() {
                     settings.screenshot.sound_file = None;
                 }
             });
@@ -222,8 +220,8 @@ impl<'a> SoundChoice<'a> {
 
     fn label(&self) -> String {
         match self {
-            SoundChoice::Silent => "なし（効果音を鳴らさない）".to_string(),
-            SoundChoice::Default => "既定（内蔵）".to_string(),
+            SoundChoice::Silent => Text::SoundSilent.get().to_string(),
+            SoundChoice::Default => Text::SoundDefault.get().to_string(),
             SoundChoice::File(path) => path
                 .file_name()
                 .unwrap_or(path.as_os_str())

@@ -3,6 +3,7 @@
 //! 描画からは切り離してあり、操作はすべてドラフトに対して行う
 //! （`docs/design/presets.md`）。
 
+use crate::i18n::{self, Text};
 use crate::settings::{resolved_active_preset, validate_preset_name, AppSettings, Preset};
 use log::debug;
 
@@ -34,10 +35,8 @@ pub(super) fn active_preset_label(settings: &AppSettings) -> String {
         resolved_active_preset(settings),
     ) {
         (_, Some(name)) => name.to_string(),
-        (Some(name), None) if settings.preset(name).is_some() => {
-            format!("{}（変更あり）", name)
-        }
-        _ => "なし".to_string(),
+        (Some(name), None) if settings.preset(name).is_some() => i18n::preset_modified(name),
+        _ => Text::PresetNone.get().to_string(),
     }
 }
 
@@ -58,10 +57,7 @@ pub(super) fn apply_preset_row_action(
             draft.apply_preset(&name);
             debug!("プリセット「{}」を編集中の設定へ読み込んだ", name);
             *message = Some(ManagementMessage {
-                text: format!(
-                    "プリセット「{}」を読み込みました。「適用」または「OK」で反映します",
-                    name
-                ),
+                text: i18n::preset_loaded(&name),
                 is_error: false,
             });
         }
@@ -74,10 +70,7 @@ pub(super) fn apply_preset_row_action(
             draft.active_preset = Some(name.clone());
             debug!("プリセット「{}」を編集中の設定で上書きした", name);
             *message = Some(ManagementMessage {
-                text: format!(
-                    "プリセット「{}」を上書きしました。「適用」または「OK」で反映します",
-                    name
-                ),
+                text: i18n::preset_overwritten(&name),
                 is_error: false,
             });
         }
@@ -88,10 +81,7 @@ pub(super) fn apply_preset_row_action(
             draft.remove_preset(&name);
             debug!("プリセット「{}」を削除した", name);
             *message = Some(ManagementMessage {
-                text: format!(
-                    "プリセット「{}」を削除しました。取り消すには「キャンセル」を押してください",
-                    name
-                ),
+                text: i18n::preset_deleted(&name),
                 is_error: false,
             });
         }
@@ -124,10 +114,7 @@ pub(super) fn save_new_preset(
 
     debug!("プリセット「{}」を編集中の設定へ追加した", name);
     *message = Some(ManagementMessage {
-        text: format!(
-            "プリセット「{}」を追加しました。「適用」または「OK」で反映します",
-            name
-        ),
+        text: i18n::preset_added(&name),
         is_error: false,
     });
 }

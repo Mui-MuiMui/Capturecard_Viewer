@@ -5,6 +5,7 @@
 //! 選択肢として出すときの注意書き。
 
 use crate::audio::{AudioCapabilities, AudioDirection, ChoiceSource};
+use crate::i18n::{self, Text};
 use crate::video::DeviceCapabilities;
 use eframe::egui;
 use std::collections::HashMap;
@@ -159,8 +160,8 @@ impl<T> CapabilityCache<T> {
 /// チャンネル数の表示名。
 pub(super) fn channel_label(channels: u16) -> String {
     match channels {
-        1 => "1（モノラル）".to_string(),
-        2 => "2（ステレオ）".to_string(),
+        1 => Text::ChannelMono.get().to_string(),
+        2 => Text::ChannelStereo.get().to_string(),
         other => format!("{} ch", other),
     }
 }
@@ -180,9 +181,7 @@ pub fn out_of_range_note(values: &[u32], current: u32, unit: &str) -> Option<Str
         return None;
     }
     let nearest = values.iter().copied().min_by_key(|v| v.abs_diff(current))?;
-    Some(format!(
-        "{current}{unit} はこの組み合わせでは使えません。最も近い {nearest}{unit} で開きます"
-    ))
+    Some(i18n::out_of_range_note(current, nearest, unit))
 }
 
 /// 選択肢の出どころに応じた説明を添える。共通部分から作れているときは何も出さない。
@@ -191,25 +190,13 @@ pub(super) fn show_choice_note(ui: &mut egui::Ui, source: ChoiceSource, label: &
         // 入出力の両方が対応する値だけが並んでいる。説明は要らない
         ChoiceSource::Common => {}
         ChoiceSource::OneSided => {
-            ui.label(format!(
-                "{}の選択肢は、対応設定を取得できた側のデバイスだけから作っています",
-                label
-            ));
+            ui.label(i18n::choice_note_one_sided(label));
         }
         ChoiceSource::Disjoint => {
-            warning_label(
-                ui,
-                format!(
-                    "入力と出力で共通の{}がありません。それぞれ最も近い値で開き、変換して出力します（音質がわずかに落ちます）",
-                    label
-                ),
-            );
+            warning_label(ui, i18n::choice_note_disjoint(label));
         }
         ChoiceSource::Fallback => {
-            ui.label(format!(
-                "{}の選択肢は既定の一覧です（デバイスの対応設定を取得できていません）",
-                label
-            ));
+            ui.label(i18n::choice_note_fallback(label));
         }
     }
 }
@@ -225,8 +212,16 @@ pub(super) fn show_audio_capability_progress(
     output_key: &str,
     events: &mut Vec<SettingsEvent>,
 ) {
-    let retry_input = show_audio_capability_state(ui, caches.input.state(input_key), "入力");
-    let retry_output = show_audio_capability_state(ui, caches.output.state(output_key), "出力");
+    let retry_input = show_audio_capability_state(
+        ui,
+        caches.input.state(input_key),
+        AudioDirection::Input.label(),
+    );
+    let retry_output = show_audio_capability_state(
+        ui,
+        caches.output.state(output_key),
+        AudioDirection::Output.label(),
+    );
 
     if retry_input {
         events.push(SettingsEvent::Capability(CapabilityEvent::RetryAudio(
@@ -253,16 +248,13 @@ fn show_audio_capability_state(
         Some(CapabilityState::Pending) => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(format!("{}デバイスの対応設定を取得中...", label));
+                ui.label(i18n::audio_capability_pending(label));
             });
         }
         Some(CapabilityState::Failed(reason)) => {
             // ビデオ側と同じく、理由が長くなっても折り返せるよう行を分ける
-            warning_label(
-                ui,
-                format!("{}デバイスの対応設定を取得できません: {}", label, reason),
-            );
-            if ui.button("再取得").clicked() {
+            warning_label(ui, i18n::audio_capability_failed(label, reason));
+            if ui.button(Text::ButtonRetry.get()).clicked() {
                 retry_requested = true;
             }
         }

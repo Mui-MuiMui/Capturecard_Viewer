@@ -241,3 +241,154 @@ pub fn underrun_count(count: u32) -> String {
         Language::Japanese => format!("アンダーラン: {count} 回"),
     }
 }
+
+// ---- 「デバイス設定」タブ（ui/device_tab.rs / ui/capability.rs） ----
+
+pub fn video_capability_failed(reason: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("対応形式を取得できませんでした: {reason}"),
+    }
+}
+
+/// 設定値が選択肢に無いとき。`unit` は値の直後に付ける単位（「 Hz」）。
+pub fn out_of_range_note(current: u32, nearest: u32, unit: &str) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "{current}{unit} はこの組み合わせでは使えません。最も近い {nearest}{unit} で開きます"
+        ),
+    }
+}
+
+/// `label` は `Text::SampleRate` / `Text::Channels` の文言。
+pub fn choice_note_one_sided(label: &str) -> String {
+    match language() {
+        Language::Japanese => {
+            format!("{label}の選択肢は、対応設定を取得できた側のデバイスだけから作っています")
+        }
+    }
+}
+
+pub fn choice_note_disjoint(label: &str) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "入力と出力で共通の{label}がありません。それぞれ最も近い値で開き、変換して出力します（音質がわずかに落ちます）"
+        ),
+    }
+}
+
+pub fn choice_note_fallback(label: &str) -> String {
+    match language() {
+        Language::Japanese => {
+            format!("{label}の選択肢は既定の一覧です（デバイスの対応設定を取得できていません）")
+        }
+    }
+}
+
+/// `direction` は `AudioDirection::label()` の文言。
+pub fn audio_capability_pending(direction: &str) -> String {
+    match language() {
+        Language::Japanese => format!("{direction}デバイスの対応設定を取得中..."),
+    }
+}
+
+pub fn audio_capability_failed(direction: &str, reason: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("{direction}デバイスの対応設定を取得できません: {reason}"),
+    }
+}
+
+// ---- 「ホットキー」タブと入力ダイアログ（ui/hotkeys_tab.rs / ui/hotkey_capture.rs） ----
+
+/// 同じキーが割り当てられたアクション名を並べた警告。
+pub fn hotkey_duplicates_warning(actions: &[&str]) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "同じキーが複数のアクションに割り当てられています（{}）。適用しても、上にある側だけが有効になります。",
+            actions.join("、")
+        ),
+    }
+}
+
+/// 登録できなかったホットキーの一覧の 1 行。
+pub fn hotkey_assignment_error_row(
+    action: impl Display,
+    hotkey: impl Display,
+    reason: impl Display,
+) -> String {
+    match language() {
+        Language::Japanese => format!("{action}（{hotkey}）— {reason}"),
+    }
+}
+
+pub fn hotkey_capture_heading(action: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("ホットキー設定: {action}"),
+    }
+}
+
+pub fn hotkey_capture_prompt(action: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("「{action}」に割り当てるキーの組み合わせを押してください"),
+    }
+}
+
+// ---- 「その他」タブとプリセット（ui/other_tab.rs / ui/preset.rs） ----
+
+pub fn preset_current(label: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("現在: {label}"),
+    }
+}
+
+/// プリセットを読み込んだあとに値を変えたとき。
+pub fn preset_modified(name: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("{name}（変更あり）"),
+    }
+}
+
+pub fn preset_loaded(name: impl Display) -> String {
+    match language() {
+        Language::Japanese => {
+            format!("プリセット「{name}」を読み込みました。「適用」または「OK」で反映します")
+        }
+    }
+}
+
+pub fn preset_overwritten(name: impl Display) -> String {
+    match language() {
+        Language::Japanese => {
+            format!("プリセット「{name}」を上書きしました。「適用」または「OK」で反映します")
+        }
+    }
+}
+
+pub fn preset_deleted(name: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "プリセット「{name}」を削除しました。取り消すには「キャンセル」を押してください"
+        ),
+    }
+}
+
+pub fn preset_added(name: impl Display) -> String {
+    match language() {
+        Language::Japanese => {
+            format!("プリセット「{name}」を追加しました。「適用」または「OK」で反映します")
+        }
+    }
+}
+
+// ---- 「接続状態」タブ（ui/status_tab.rs） ----
+
+pub fn consecutive_failures(count: u32) -> String {
+    match language() {
+        Language::Japanese => format!("連続失敗: {count} 回"),
+    }
+}
+
+pub fn error_time(time: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("発生時刻: {time}"),
+    }
+}
