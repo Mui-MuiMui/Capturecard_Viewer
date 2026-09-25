@@ -377,10 +377,19 @@ pub(super) mod testing {
         video: &MockVideoBackend,
         audio: &MockAudioBackend,
     ) -> (WorkerState, std::sync::mpsc::Receiver<DeviceEvent>) {
+        state_with(Box::new(video.clone()), Box::new(audio.clone()))
+    }
+
+    /// 任意のバックエンド（フェイクなど）を載せた `WorkerState` を作る。
+    /// 使い方は `mock_state` と同じ
+    pub(in crate::app) fn state_with(
+        video: Box<dyn VideoBackend>,
+        audio: Box<dyn AudioBackend>,
+    ) -> (WorkerState, std::sync::mpsc::Receiver<DeviceEvent>) {
         let (event_tx, event_rx) = channel();
         let state = WorkerState::new(
-            Box::new(video.clone()),
-            Box::new(audio.clone()),
+            video,
+            audio,
             Arc::new(AudioControls::default()),
             event_tx,
             Arc::new(RwLock::new(DeviceSnapshot::default())),
