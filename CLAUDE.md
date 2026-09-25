@@ -39,7 +39,9 @@ cargo build --release
 | `src/app/worker_loop.rs` | デバイスワーカースレッドの本体。`WorkerState` の定義、コマンドの受け口、待ち時間の決定、観測値の書き出し |
 | `src/app/worker_timers.rs` | ワーカーがタイマーで回す監視。再試行の期限、フレームの途絶、音声ストリームのエラー、既定デバイスの切り替え、クロックドリフト補正 |
 | `src/app/worker_connect.rs` | ワーカーが行うデバイス操作。開く・閉じる・列挙する・能力を問い合わせる |
-| `src/app/backend.rs` | ワーカーがデバイスに触るときの入口の trait（`VideoBackend` / `AudioBackend`）と、`VideoCapture` / `AudioCapture` をそれに載せる実装。テスト用のモックもここ（`#[cfg(test)]`） |
+| `src/app/backend/mod.rs` | ワーカーがデバイスに触るときの入口の trait（`VideoBackend` / `AudioBackend` / `DeviceBackends`）と、本番かフェイクかを環境変数で選ぶ `backends_from_env`。テスト用のモックもここ（`#[cfg(test)]`） |
+| `src/app/backend/system.rs` | 本番のバックエンド `SystemBackends`。`VideoCapture` / `AudioCapture` を trait に載せる |
+| `src/app/backend/fake.rs` | フェイクのバックエンド `FakeBackends`。`FakeVideoCapture` / `FakeAudioCapture` を trait に載せる実装と、環境変数（`CAPTURECARD_VIEWER_FAKE_DEVICES` / `CAPTURECARD_VIEWER_FAKE_SCENARIO`）の解釈 |
 | `src/app/monitor.rs` | 切断や既定デバイスの切り替えの**判定**（純粋関数）。ワーカーが使う |
 | `src/app/retry.rs` | `ConnectRetry` とバックオフ。「いつ試してよいか」だけを持つ。ワーカーが持つ |
 | `src/app/capabilities.rs` | デバイス一覧のキャッシュと、デバイス能力・対応設定の取得要求（ワーカーへ流すところまで） |
@@ -50,7 +52,10 @@ cargo build --release
 | `src/app/audio_control.rs` | 音量とミュートの操作、その OSD |
 | `src/app/error_report.rs` | 失敗の記録と、トースト・「接続状態」タブへの出し方 |
 | `src/video/mod.rs` | `VideoError` とログ用の `elapsed_ms`。外から使う経路（`crate::video::...`）の `pub use` もここ |
-| `src/video/capture.rs` | nokhwa `CallbackCamera` によるキャプチャ。開く・閉じる・列挙する、フレームコールバック、途絶の観測（`VideoLinkState`） |
+| `src/video/capture.rs` | nokhwa `CallbackCamera` によるキャプチャ。開く・閉じる・列挙する、フレームコールバック（nokhwa の `Buffer` から取り出して `FrameSink` へ渡す）、途絶の観測（`VideoLinkState`） |
+| `src/video/frame_sink.rs` | フレームコールバックの本体 `FrameSink`（YUY2→RGB、`FrameBuffer` へ積む、`RepaintWaker` で UI を起こす）。実機とフェイクで共有する |
+| `src/video/fake.rs` | 実機なしで動くフェイクの映像デバイス `FakeVideoCapture`。テストパターンを指定 fps で吐く生成スレッド、切断・接続失敗のシナリオ |
+| `src/video/test_pattern.rs` | フェイクが吐くテストパターン（カラーバー、ベタ塗り、フレーム番号の焼き込み）の描画。純粋関数 |
 | `src/video/capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の取得 |
 | `src/video/color.rs` | YCbCr→RGB の係数表とその選び方、映像調整の畳み込み、設定の共有（`SharedColorConversion`） |
 | `src/video/convert.rs` | YUY2→RGB24 の画素変換 |
@@ -59,10 +64,11 @@ cargo build --release
 | `src/audio/capabilities.rs` | デバイスの対応設定の取得（`query_capabilities`）と、設定画面に出す選択肢の組み立て（`selectable_*` / `ChoiceSource`） |
 | `src/audio/stream_config.rs` | 対応設定の中から実際に開く設定を選ぶ（`select_best_config` / `select_aligned_configs`）。扱えるサンプル型の一覧もここ |
 | `src/audio/capture.rs` | `AudioCapture`。パススルーの開始と停止、観測値（実際に開いた内容・アンダーラン・リサンプル）の取り出し |
-| `src/audio/stream.rs` | cpal のストリームの組み立てと入出力のコールバック、リングバッファの型、アンダーランの数え方 |
+| `src/audio/stream.rs` | cpal のストリームの組み立てと入出力のコールバック（本体は `process_input` / `process_output` で、フェイクと共有する）、リングバッファの型、アンダーランの数え方 |
 | `src/audio/convert.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32）と、レート・チャンネル数が違う場合の変換（`PassthroughConverter`） |
 | `src/audio/resample.rs` | クロックドリフト補正の共有状態（`ResampleTelemetry`）と補正係数の決め方（`decide_resample_correction`） |
 | `src/audio/controls.rs` | `AudioControls`。音量・パススルー・ミュートの共有状態 |
+| `src/audio/fake.rs` | 実機なしで動くフェイクの音声デバイス `FakeAudioCapture`。正弦波の入力と書き込みを捨てる出力のスレッド |
 | `src/hotkey.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）、アクション別の登録とリスナースレッド、押下の照合とデバウンス、ホットキー文字列のパース |
 | `src/keyboard_hook.rs` | 低レベルキーボードフック（`WH_KEYBOARD_LL`）。キーを奪わずに押下を観測し、リスナースレッドのメッセージループへ渡す |
 | `src/screenshot.rs` | rodio による効果音の読み込みと再生 |
@@ -85,13 +91,13 @@ cargo build --release
 
 `src/app/` の子モジュールは**基本どれも `impl CaptureCardViewer` を足す形**で、状態そのものは `app/mod.rs` の構造体 1 つに集めてある。**子モジュール側にフィールドや `static` を持たせないこと。** 他の子モジュールから呼ぶメソッドにだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
-**例外はデバイスワーカーの 5 つ**（`worker.rs` / `worker_loop.rs` / `worker_timers.rs` / `worker_connect.rs` / `backend.rs`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_timers.rs` と `worker_connect.rs` がそこへ `impl` を足す。`backend.rs` はアプリの状態（`CaptureCardViewer` / `WorkerState` に属するもの）を持たず、デバイスの入口の trait とその実装だけを持つ。テスト用のモックだけは自分の中に観測用の値を抱える。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
+**例外はデバイスワーカーの 5 つ**（`worker.rs` / `worker_loop.rs` / `worker_timers.rs` / `worker_connect.rs` / `backend/`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_timers.rs` と `worker_connect.rs` がそこへ `impl` を足す。`backend/` はアプリの状態（`CaptureCardViewer` / `WorkerState` に属するもの）を持たず、デバイスの入口の trait とその実装だけを持つ。テスト用のモックだけは自分の中に観測用の値を抱える。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
 
 `src/video/` の子モジュールは**役割で分けてあるだけで、状態はそれぞれのファイルが定義する型が持つ。** 他のファイルから呼ぶ項目にだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。**外から使う経路（`crate::video::...`）は `video/mod.rs` の `pub use` に集める。** ただし**呼び出し側のテストからしか参照されない項目は再輸出しない。** テストを含まないビルドで誰も使わない `pub use` が残り、`unused_imports` の警告になるため。そういう項目（`FormatCapability` / `IntervalStats`）は置いてある子モジュールを `pub(crate) mod` にして、`crate::video::capabilities::FormatCapability` のように子モジュールの経路で参照する。`src/ui/` と同じ考え方。
 
 `src/ui/` の子モジュールは**どれも状態を持たず、書き換えるのもドラフトだけ。** 起きたことは `SettingsEvent` / `HotkeyDialogEvent` の列で返す。ダイアログの状態は `state.rs` の `SettingsDialogState` 1 つに集めてある。**外から使う経路（`crate::ui::...`）は `ui/mod.rs` の `pub use` に集める。** `ui` の中だけで使う項目は再輸出せず、子モジュールの経路で参照する（`mod ui;` 自体が私有なので、誰も使わない再輸出は `unused_imports` の警告になる）。
 
-`src/audio/` の子モジュールで**状態を持つのは `capture.rs` の `AudioCapture` と、スレッドをまたいで共有する `AudioControls` / `ResampleTelemetry` だけ。** 残りは純粋関数か、cpal のストリームを組み立てて返すだけにする。**外から使う経路（`crate::audio::...`）は `audio/mod.rs` の `pub use` に集める**（`ui/mod.rs` と同じ理由で、誰も使わない再輸出は警告になる）。子モジュール同士で使うものには `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
+`src/audio/` の子モジュールで**状態を持つのは `capture.rs` の `AudioCapture`、`fake.rs` の `FakeAudioCapture` と、スレッドをまたいで共有する `AudioControls` / `ResampleTelemetry` だけ。** 残りは純粋関数か、cpal のストリームを組み立てて返すだけにする。**外から使う経路（`crate::audio::...`）は `audio/mod.rs` の `pub use` に集める**（`ui/mod.rs` と同じ理由で、誰も使わない再輸出は警告になる）。子モジュール同士で使うものには `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
 ## 設計の理由はどこにあるか
 
