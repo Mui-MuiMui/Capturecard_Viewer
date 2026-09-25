@@ -188,7 +188,7 @@ Windows の「環境変数」の設定に入れた場合は、そこから削除
 | 環境変数 | 値 | 意味 |
 |---|---|---|
 | `CAPTURECARD_VIEWER_FAKE_DEVICES` | 台数（1〜8） | この台数ぶんの映像デバイスと音声の入力デバイスを名乗る。指定が無い・0・数字でない場合は使わない（通常どおり実機で動く） |
-| `CAPTURECARD_VIEWER_FAKE_SCENARIO` | `disconnect:<秒>` / `fail:<回数>`（カンマで並べられる） | `disconnect` は映像を開いてから指定の秒数で映像を止める（信号断の再現）。`fail` は開くのを指定の回数だけ失敗させる（接続失敗の再現） |
+| `CAPTURECARD_VIEWER_FAKE_SCENARIO` | `disconnect:<秒>` / `fail:<回数>` / `audio-error:<秒>`（カンマで並べられる） | `disconnect` は映像を開いてから指定の秒数で映像を止める（信号断の再現）。`fail` は開くのを指定の回数だけ失敗させる（接続失敗の再現）。`audio-error` は音声を開いてから指定の秒数でストリームのエラーを起こす（音声の再接続の再現） |
 
 どちらも設定ファイルには保存されない。ログ（`CAPTURECARD_VIEWER_LOG`）と同じく、起動するときだけ指定する。
 
