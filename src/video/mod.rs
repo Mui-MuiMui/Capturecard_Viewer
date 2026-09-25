@@ -7,6 +7,7 @@
 //! | ファイル | 役割 |
 //! |---|---|
 //! | `capture.rs` | nokhwa の開閉、フレームコールバック、途絶の観測 |
+//! | `frame_sink.rs` | フレームコールバックの本体（YUY2 → RGB、`FrameBuffer` へ積む、UI を起こす）。実機とフェイクで共有する |
 //! | `capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の問い合わせ |
 //! | `color.rs` | 係数表とその選択、映像調整の畳み込み、設定の共有 |
 //! | `convert.rs` | YUY2 → RGB24 の画素変換 |
@@ -26,6 +27,7 @@ mod capture;
 mod color;
 mod convert;
 pub(crate) mod frame_buffer;
+mod frame_sink;
 
 pub use capabilities::{DeviceCapabilities, VideoMode};
 pub use capture::{ActiveVideo, VideoCapture, VideoLinkState};
