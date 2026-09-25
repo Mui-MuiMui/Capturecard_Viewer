@@ -256,6 +256,10 @@ What was actually opened is shown under Settings → Connection status.
 
 Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for a fuller list along with workarounds.
 
+**Hotkeys**
+
+- While an application running as administrator is in front, hotkeys may not react (a Windows restriction).
+
 **Device connection at startup**
 
 - If the device is not found, the application keeps retrying until it connects. The interval starts at 0.2 s and widens up to 5 s.
