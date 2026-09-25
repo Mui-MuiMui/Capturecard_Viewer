@@ -126,7 +126,16 @@ fn parse_key_code(key: &str) -> Result<u32, HotkeyError> {
 /// egui の修飾キーには Windows キーが無いので、`SUPER` は付かない。
 /// `Win+F5` を押したときも egui には `F5` として届くが、Windows キーとの
 /// 組み合わせはたいていシェルが先に使うので、区別しない。
+///
+/// **数字キーは `None` にする（取り除かない）。** egui-winit はメイン列の `0` と
+/// テンキーの `0` をどちらも `Key::Num0` にするので区別できない。フックの側では
+/// テンキーは `VK_NUMPAD0` で、`0` の割り当てには反応しない。取り除くと、
+/// ホットキーも発火せず egui にも届かない押下ができる。数字は egui では
+/// テキスト入力にしか使わず、その間は取り除かないので、残しても衝突しない。
 pub(super) fn chord_from_egui(key: egui::Key, modifiers: egui::Modifiers) -> Option<KeyChord> {
+    if is_ambiguous_digit(key) {
+        return None;
+    }
     let vk = parse_key_code(key.name()).ok()?;
     let mut chord_modifiers = Modifiers::empty();
     if modifiers.ctrl {
@@ -181,6 +190,23 @@ pub(super) fn remove_hotkey_key_events(
         _ => true,
     });
     before - events.len()
+}
+
+/// egui ではメイン列とテンキーを区別できない数字キーか（`chord_from_egui`）。
+fn is_ambiguous_digit(key: egui::Key) -> bool {
+    matches!(
+        key,
+        egui::Key::Num0
+            | egui::Key::Num1
+            | egui::Key::Num2
+            | egui::Key::Num3
+            | egui::Key::Num4
+            | egui::Key::Num5
+            | egui::Key::Num6
+            | egui::Key::Num7
+            | egui::Key::Num8
+            | egui::Key::Num9
+    )
 }
 
 /// 1 文字のキー名として受け付ける文字か（小文字化したあとの英字と数字）。
@@ -398,7 +424,6 @@ mod tests {
             (egui::Key::Enter, egui::Modifiers::NONE, "Enter"),
             (egui::Key::Space, egui::Modifiers::NONE, "Space"),
             (egui::Key::A, egui::Modifiers::NONE, "A"),
-            (egui::Key::Num0, egui::Modifiers::NONE, "0"),
             (egui::Key::F12, egui::Modifiers::CTRL, "Ctrl+F12"),
             (
                 egui::Key::F9,
@@ -414,6 +439,17 @@ mod tests {
                 Some(parse_hotkey(hotkey).expect("解析できること")),
                 "{hotkey}"
             );
+        }
+    }
+
+    #[test]
+    fn chord_from_egui_digit_returns_none() {
+        // egui ではメイン列の 0 とテンキーの 0 が同じ Key::Num0 になり、区別できない。
+        // フックはテンキーの 0 では `0` の割り当てに反応しないので、取り除くと
+        // ホットキーも発火せず egui にも届かない押下ができてしまう
+        for key in [egui::Key::Num0, egui::Key::Num5, egui::Key::Num9] {
+            assert_eq!(chord_from_egui(key, egui::Modifiers::NONE), None, "{key:?}");
+            assert_eq!(chord_from_egui(key, egui::Modifiers::CTRL), None, "{key:?}");
         }
     }
 
