@@ -7,7 +7,7 @@
 //! | ファイル | 役割 |
 //! |---|---|
 //! | `action.rs` | `HotkeyAction` と設定ファイル上の名前、溜まった押下の畳み方 |
-//! | `parse.rs` | `HotkeyError` と、ホットキー文字列 → `KeyChord` の解析 |
+//! | `parse.rs` | `HotkeyError` と、ホットキー文字列 → `KeyChord` の解析。egui のキー入力 → `KeyChord` と、egui へ渡すキー入力からホットキーのキーを取り除く判定（#217） |
 //! | `manager.rs` | `HotkeyManager` の本体と `BackgroundHotkeyRunner`、リスナーの起動と停止、ウィンドウ状態の受け渡し |
 //! | `assignments.rs` | 割り当ての差分適用、一時停止と再開、試し登録、押下の取り出し |
 //! | `listener.rs` | リスナースレッドと共有状態 `ListenerState`、押下の照合とデバウンス |

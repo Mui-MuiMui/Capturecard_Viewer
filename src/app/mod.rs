@@ -365,6 +365,10 @@ impl eframe::App for CaptureCardViewer {
         // 最初のフレームの到着を知らせる先が無い
         self.repaint_waker.bind(ctx);
 
+        // ホットキーに割り当てたキーの押下を egui へ渡さない（#217）。
+        // **描画より前に済ませること**（`remove_hotkey_key_events`）
+        self.remove_hotkey_key_events(ctx);
+
         // ワーカーから届いた結果（接続の成否、デバイス能力、デバイス一覧）を
         // 取り込む。設定ダイアログを開いていなくても受け取る
         self.drain_device_events();
