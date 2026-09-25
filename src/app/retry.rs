@@ -21,6 +21,18 @@ const CONNECT_BACKOFF_BASE: Duration = Duration::from_millis(200);
 /// ときの反応が悪くなる。5 秒で頭打ちにして、挿してから最大 5 秒で繋がるようにする。
 const CONNECT_BACKOFF_MAX: Duration = Duration::from_millis(5000);
 
+/// 接続に成功してから、次に開き直してよいまでの下限。
+///
+/// バックオフは失敗の連続でしか伸びないため、「開けた直後に切断を検出する」
+/// デバイスでは成功のたびに待ち時間が 0 へ戻り、開き直しが待ち無しで回り続ける
+/// （DirectShow で開いた直後に毎回 `EC_ERROR_STILLPLAYING` を出すデバイスなど）。
+/// 成功した時刻から数えるこの下限で、その繰り返しを 1 秒に 1 回へ抑える（#232）。
+///
+/// 1 秒にしてあるのは、開いてから 1 枚目が届くまでが実測 0.8 秒で、それより
+/// 短い間隔で開き直しても映像が出る前に閉じるだけになるため。一方で長くすると、
+/// 開いた直後に本当に抜かれたときの復帰がその分だけ遅れる。
+const RECONNECT_MIN_INTERVAL_AFTER_SUCCESS: Duration = Duration::from_secs(1);
+
 /// 連続 `attempt` 回失敗したあとに待つ時間を返す。
 ///
 /// `CONNECT_BACKOFF_BASE` から倍々に伸ばし、`CONNECT_BACKOFF_MAX` で頭打ちにする。
@@ -54,6 +66,19 @@ fn should_retry_now(next_attempt_at: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// 最後に接続に成功した時刻から、次に開いてよい時刻が来ているかを判定する。
+///
+/// `None` は「まだ一度も繋がっていない」で、下限は掛からない。
+/// 境界（下限ちょうど）では試す側に倒す。`should_retry_now` と揃えるため。
+fn min_interval_elapsed(connected_at: Option<Instant>, now: Instant) -> bool {
+    match connected_at {
+        None => true,
+        Some(connected_at) => {
+            now.saturating_duration_since(connected_at) >= RECONNECT_MIN_INTERVAL_AFTER_SUCCESS
+        }
+    }
+}
+
 /// デバイス接続の再試行を、デバイスワーカースレッドを止めずに回すための状態。
 ///
 /// デバイスワーカーのループが `tick()` のたびに `is_due()` を見て、期限が
@@ -73,6 +98,12 @@ pub(super) struct ConnectRetry<T> {
     attempts: u32,
     /// 次に試してよい時刻。`None` は「いますぐ試してよい」
     next_attempt_at: Option<Instant>,
+    /// 最後に接続に成功した時刻。`None` は「まだ一度も繋がっていない」。
+    ///
+    /// **要求や成功以外では消さない。** `request_now` がバックオフを捨てても、
+    /// 成功からの下限（`RECONNECT_MIN_INTERVAL_AFTER_SUCCESS`）は残す。
+    /// 切断の検出はどれも `request_now` で要求を積むため、ここで消すと下限が効かない
+    connected_at: Option<Instant>,
 }
 
 impl<T> Default for ConnectRetry<T> {
@@ -81,6 +112,7 @@ impl<T> Default for ConnectRetry<T> {
             target: None,
             attempts: 0,
             next_attempt_at: None,
+            connected_at: None,
         }
     }
 }
@@ -102,7 +134,11 @@ impl<T: PartialEq> ConnectRetry<T> {
     /// 対象が同じでもバックオフを捨てて即座に試す。
     ///
     /// 右クリックメニューの「デバイス再接続」のように、ユーザーが明示的に
-    /// やり直しを求めた場合に使う。
+    /// やり直しを求めた場合や、切断を検出した場合に使う。
+    ///
+    /// **接続に成功してからの下限（1 秒）は捨てない。** 成功した直後に切断を
+    /// 検出した場合は、ここで要求を積むだけで、下限が過ぎるまで開き直さない。
+    /// ユーザーの操作でも最大 1 秒しか待たないので、経路で分けていない。
     pub(super) fn request_now(&mut self, target: T) {
         self.target = Some(target);
         self.attempts = 0;
@@ -116,8 +152,12 @@ impl<T: PartialEq> ConnectRetry<T> {
     }
 
     /// このフレームで接続を試してよいか。
+    ///
+    /// 失敗のバックオフと、成功からの下限の両方を満たしたときだけ真になる。
     pub(super) fn is_due(&self, now: Instant) -> bool {
-        self.target.is_some() && should_retry_now(self.next_attempt_at, now)
+        self.target.is_some()
+            && should_retry_now(self.next_attempt_at, now)
+            && min_interval_elapsed(self.connected_at, now)
     }
 
     /// 接続を追いかけている最中か。繋がると `false` に戻る。
@@ -132,10 +172,13 @@ impl<T: PartialEq> ConnectRetry<T> {
     }
 
     /// 成功を記録する。以降は要求があるまで試さない。
-    pub(super) fn record_success(&mut self) {
+    ///
+    /// `now` は次に開き直してよい時刻の起点になる（`RECONNECT_MIN_INTERVAL_AFTER_SUCCESS`）。
+    pub(super) fn record_success(&mut self, now: Instant) {
         self.target = None;
         self.attempts = 0;
         self.next_attempt_at = None;
+        self.connected_at = Some(now);
     }
 
     /// 失敗を記録し、次に試してよい時刻を決める。
@@ -285,11 +328,15 @@ mod tests {
         let now = Instant::now();
         let mut retry = ConnectRetry::default();
         retry.request("デバイス A");
-        retry.record_success();
+        retry.record_success(now);
         assert!(!retry.is_due(now));
 
         retry.request("デバイス A");
-        assert!(retry.is_due(now), "成功済みでも要求されたら試す");
+        // 成功からの下限（1 秒）を過ぎた時点で見る。下限そのものは別のテストで見る
+        assert!(
+            retry.is_due(now + Duration::from_secs(1)),
+            "成功済みでも要求されたら試す"
+        );
     }
 
     #[test]
@@ -348,7 +395,7 @@ mod tests {
         let mut retry = ConnectRetry::default();
         retry.request("デバイス A");
         retry.record_failure(now);
-        retry.record_success();
+        retry.record_success(now);
 
         assert!(
             !retry.is_due(now + Duration::from_secs(60)),
@@ -365,12 +412,14 @@ mod tests {
         for _ in 0..8 {
             retry.record_failure(now);
         }
-        retry.record_success();
+        retry.record_success(now);
 
+        // 成功からの下限（1 秒）を過ぎてから失敗させ、バックオフだけを見る
+        let later = now + Duration::from_secs(1);
         retry.request("デバイス A");
-        retry.record_failure(now);
+        retry.record_failure(later);
         assert!(
-            retry.is_due(now + Duration::from_millis(200)),
+            retry.is_due(later + Duration::from_millis(200)),
             "再要求後は 200ms から数え直す"
         );
     }
@@ -384,15 +433,118 @@ mod tests {
 
     #[test]
     fn connect_retry_is_active_until_it_succeeds() {
+        let now = Instant::now();
         let mut retry = ConnectRetry::default();
         retry.request("デバイス A");
         assert!(retry.is_active());
 
-        retry.record_failure(Instant::now());
+        retry.record_failure(now);
         // 失敗しても追いかけ続けている間は「再接続中」
         assert!(retry.is_active());
 
-        retry.record_success();
+        retry.record_success(now);
         assert!(!retry.is_active());
+    }
+
+    #[test]
+    fn min_interval_elapsed_without_success_returns_true() {
+        // まだ一度も繋がっていない。初回の接続に下限は掛けない
+        assert!(min_interval_elapsed(None, Instant::now()));
+    }
+
+    #[test]
+    fn min_interval_elapsed_just_before_the_floor_returns_false() {
+        let connected_at = Instant::now();
+        assert!(!min_interval_elapsed(Some(connected_at), connected_at));
+        assert!(!min_interval_elapsed(
+            Some(connected_at),
+            connected_at + Duration::from_millis(999)
+        ));
+    }
+
+    #[test]
+    fn min_interval_elapsed_exactly_at_the_floor_returns_true() {
+        // 境界。下限ちょうどでは試す
+        let connected_at = Instant::now();
+        assert!(min_interval_elapsed(
+            Some(connected_at),
+            connected_at + Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn min_interval_elapsed_with_time_before_success_returns_false() {
+        // 呼び出し側の時刻が成功より前でもパニックしないこと
+        let now = Instant::now();
+        let connected_at = now + Duration::from_millis(10);
+        assert!(!min_interval_elapsed(Some(connected_at), now));
+    }
+
+    #[test]
+    fn connect_retry_loss_right_after_success_waits_for_the_floor() {
+        // #232 の再現。開けた直後に切断を検出して `request_now` で積んでも、
+        // 成功から 1 秒経つまでは開き直さない
+        let now = Instant::now();
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+        retry.record_success(now);
+
+        let lost_at = now + Duration::from_millis(50);
+        retry.request_now("デバイス A");
+
+        assert!(retry.is_active(), "要求は積まれている");
+        assert!(!retry.is_due(lost_at), "成功直後は開き直さない");
+        assert!(
+            !retry.is_due(now + Duration::from_millis(999)),
+            "下限の手前ではまだ待つ"
+        );
+        assert!(
+            retry.is_due(now + Duration::from_secs(1)),
+            "成功から 1 秒経てば開き直す"
+        );
+    }
+
+    #[test]
+    fn connect_retry_repeated_success_and_loss_is_throttled_to_the_floor() {
+        // 成功 → 即切断 → 成功 → 即切断 の繰り返し。バックオフは失敗でしか
+        // 伸びないので、下限が無いと待ち無しで回り続ける
+        let start = Instant::now();
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+
+        let mut now = start;
+        let mut opened = 0;
+        // 3 秒ぶんを 10ms 刻みで回し、開いた回数を数える
+        while now < start + Duration::from_secs(3) {
+            if retry.is_due(now) {
+                opened += 1;
+                retry.record_success(now);
+                // 開いた直後に切断を検出する
+                retry.request_now("デバイス A");
+            }
+            now += Duration::from_millis(10);
+        }
+
+        // 0 秒、1 秒、2 秒の 3 回だけ
+        assert_eq!(opened, 3);
+    }
+
+    #[test]
+    fn connect_retry_floor_and_backoff_both_apply() {
+        // 下限を過ぎていても、失敗のバックオフが残っていれば待つ
+        let now = Instant::now();
+        let mut retry = ConnectRetry::default();
+        retry.request("デバイス A");
+        retry.record_success(now);
+
+        let failed_at = now + Duration::from_millis(900);
+        retry.request_now("デバイス A");
+        retry.record_failure(failed_at);
+
+        assert!(
+            !retry.is_due(now + Duration::from_secs(1)),
+            "下限は過ぎたがバックオフ（200ms）が残っている"
+        );
+        assert!(retry.is_due(failed_at + Duration::from_millis(200)));
     }
 }

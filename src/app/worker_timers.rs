@@ -468,11 +468,19 @@ mod tests {
         );
         assert!(state.video_retry.is_active(), "開き直しを要求すること");
 
+        // 接続に成功してから 1 秒は開き直さない（#232）。要求は積んだまま待つ
         state.tick(base + Duration::from_millis(200));
         assert_eq!(
             video.with(|state| state.start_calls),
+            1,
+            "成功から 1 秒の下限までは開き直さないこと"
+        );
+
+        state.tick(base + Duration::from_secs(1));
+        assert_eq!(
+            video.with(|state| state.start_calls),
             2,
-            "次の tick で開き直すこと"
+            "下限を過ぎた tick で開き直すこと"
         );
     }
 
@@ -538,7 +546,15 @@ mod tests {
             "エラーを拾ったらストリームを閉じること"
         );
 
+        // 映像と同じく、接続に成功してから 1 秒は開き直さない（#232）
         state.tick(base + Duration::from_millis(200));
+        assert_eq!(
+            audio.with(|state| state.start_calls),
+            1,
+            "成功から 1 秒の下限までは開き直さないこと"
+        );
+
+        state.tick(base + Duration::from_secs(1));
         assert_eq!(
             audio.with(|state| state.start_calls),
             2,
