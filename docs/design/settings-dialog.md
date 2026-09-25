@@ -35,7 +35,7 @@
 
 タブ選択・デバイス能力キャッシュ・ホットキー入力・「その他」タブの表示状態も `SettingsDialogState` が持つ。これらは設定の中身ではないので「キャンセル」や `end_edit` では捨てず、ダイアログを開き直しても引き継ぐ（「その他」タブのメッセージと確認待ち、プリセットの名前入力だけは例外で、ドラフトについての表示なので `begin_edit` / `end_edit` で捨てる）。**`src/ui/` に `static` を追加しないこと。** ダイアログの新しい状態は `SettingsDialogState` へ追加し、**描画側へは `SettingsDialogView` の読み取り専用の借用として渡すこと。**
 
-「テスト再生」は `SettingsEvent::TestSound` として呼び出し側へ返し、`CaptureCardViewer` が鳴らす。ダイアログは閉じず、設定も保存もしない。
+「テスト再生」は `SettingsEvent::TestSound` として呼び出し側へ返し、`CaptureCardViewer` が鳴らす。ダイアログは閉じず、設定も保存もしない。**鳴らすのはドラフトの `screenshot.sound_file` で、イベントにそのパスを載せて返す。** 適用済みの効果音を鳴らすと、ファイルを選び直したり「既定に戻す」を押したりした直後に押しても「適用」するまで古い音が鳴る（Issue #204）。読み込みは `screenshot::load_sound_data` で行い、**適用済みの `ScreenshotManager` は書き換えない。** 書き換えると、キャンセルしても撮影時の音がテスト再生した音のまま残る。パスの解決は撮影時と同じ `resolve_sound_path` を通るので、既定値のパスは内蔵音で鳴る。ファイルが読めなかったときは内蔵音で鳴らし、理由を `ErrorSource::Screenshot` としてトーストに出す。`None`（鳴らさない）のときはボタン自体を出さない
 
 デバイス能力のキャッシュも描画中には触らない。描画は `CapabilityCache::awaits_defaults` のような `&self` のメソッドで読み、「取得したい」「既定値の選び直しを済ませたので目印を落としてよい」を `SettingsEvent::Capability` で返す。**目印（`awaiting_defaults`）を読んだら必ず落とす要求を返すこと。** 残すと、ユーザーが選び直したフォーマットを毎フレーム先頭へ戻してしまう。
 

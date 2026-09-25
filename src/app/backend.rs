@@ -31,9 +31,11 @@ use std::sync::Arc;
 ///
 /// **開いた結果を別のハンドル型では返さない。** ストリームを持つのは実装
 /// 自身で、`stop_capture` / `link_state` / `active` がその持ち物に対する窓口に
-/// なる。`VideoCapture` は `CallbackCamera` を内部に抱えたまま開き直しや
-/// 途絶の判定を行っており、開いた分だけを別の型へ切り出すには `video.rs` の
-/// 中身を動かす必要がある。そこはこの抽象化の目的ではない。
+/// なる。分割後は開いた分が `video/capture.rs` 1 ファイルに収まっていて
+/// 切り出せるが、あえてしていない。フェイク（#142）の作りやすさは変わらず、
+/// ワーカーの観測値の読み出しがすべて `Option<ハンドル>` 越しになるほうが
+/// 重いため。理由と見直す条件は `docs/design/device-worker.md` の
+/// 「開いたストリームは実装自身が持つ」。
 pub(super) trait VideoBackend {
     /// 映像デバイスの一覧。`(名前, 説明)`。失敗しても空の一覧を返す
     fn list_devices(&self) -> Vec<(String, String)>;
