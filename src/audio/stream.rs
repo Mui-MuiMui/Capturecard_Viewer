@@ -429,4 +429,79 @@ mod tests {
 
         assert_eq!(source.pop_count, 0);
     }
+
+    /// `process_input` / `process_output` に渡すリングバッファ一式
+    fn ring(capacity: usize) -> (Mutex<AudioProducer>, Mutex<AudioConsumer>) {
+        let (producer, consumer) = HeapRb::<f32>::new(capacity).split();
+        (Mutex::new(producer), Mutex::new(consumer))
+    }
+
+    #[test]
+    fn process_output_applies_volume_to_what_process_input_pushed() {
+        // 入力 → リングバッファ → 出力を、コールバックの本体だけで通す
+        let (producer, consumer) = ring(8);
+        let controls = AudioControls::default();
+        controls.set_volume(50.0);
+        let underruns = AtomicU32::new(0);
+        let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2);
+
+        process_input(&[1.0f32, -0.5], &producer, |sample| sample);
+        let mut data = [9.0f32; 2];
+        process_output(
+            &mut data,
+            &consumer,
+            &controls,
+            &mut converter,
+            &underruns,
+            |sample| sample,
+        );
+
+        assert_eq!(data, [0.5, -0.25]);
+        assert_eq!(underruns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn process_output_muted_writes_silence_but_consumes() {
+        let (producer, consumer) = ring(8);
+        let controls = AudioControls::default();
+        controls.set_muted(true);
+        let underruns = AtomicU32::new(0);
+        let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2);
+
+        process_input(&[1.0f32, 1.0, 1.0], &producer, |sample| sample);
+        let mut data = [9.0f32; 2];
+        process_output(
+            &mut data,
+            &consumer,
+            &controls,
+            &mut converter,
+            &underruns,
+            |sample| sample,
+        );
+
+        assert_eq!(data, [0.0, 0.0]);
+        // ミュート中も同じだけ取り出す（残りは 1 つ）
+        assert_eq!(consumer.lock().expect("ロックできる").len(), 1);
+    }
+
+    #[test]
+    fn process_output_empty_ring_counts_one_underrun() {
+        let (_producer, consumer) = ring(8);
+        let controls = AudioControls::default();
+        let underruns = AtomicU32::new(0);
+        let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2);
+
+        let mut data = [9.0f32; 4];
+        process_output(
+            &mut data,
+            &consumer,
+            &controls,
+            &mut converter,
+            &underruns,
+            |sample| sample,
+        );
+
+        assert_eq!(data, [0.0; 4]);
+        assert_eq!(underruns.load(Ordering::Relaxed), 1);
+    }
 }

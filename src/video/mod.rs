@@ -7,6 +7,8 @@
 //! | ファイル | 役割 |
 //! |---|---|
 //! | `capture.rs` | nokhwa の開閉、フレームコールバック、途絶の観測 |
+//! | `fake.rs` | 実機なしで動くフェイクの映像デバイス（テストパターンを吐く）。環境変数で有効にしたときだけ使う |
+//! | `test_pattern.rs` | フェイクが吐くテストパターン（カラーバー、ベタ塗り、フレーム番号の焼き込み）の描画 |
 //! | `frame_sink.rs` | フレームコールバックの本体（YUY2 → RGB、`FrameBuffer` へ積む、UI を起こす）。実機とフェイクで共有する |
 //! | `capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の問い合わせ |
 //! | `color.rs` | 係数表とその選択、映像調整の畳み込み、設定の共有 |
@@ -26,12 +28,15 @@ pub(crate) mod capabilities;
 mod capture;
 mod color;
 mod convert;
+mod fake;
 pub(crate) mod frame_buffer;
 mod frame_sink;
+mod test_pattern;
 
 pub use capabilities::{DeviceCapabilities, VideoMode};
 pub use capture::{ActiveVideo, VideoCapture, VideoLinkState};
 pub use color::{SharedColorConversion, VideoAdjustments};
+pub use fake::{FakeVideoCapture, FakeVideoOptions};
 pub use frame_buffer::{FrameStats, VideoFrame, VideoFrames};
 
 use std::fmt;

@@ -13,9 +13,16 @@
 //! しない決まりなので、動的ディスパッチを足す場所ではない
 //! （`docs/design/video-pipeline.md` / `docs/design/audio.md`）。
 //!
-//! テスト用のモックは同じファイルの `mock`（`#[cfg(test)]`）にある。
-//! 実機なしで動くフェイクデバイス（カラーバーや正弦波を吐く実装）は
-//! #142 でこの trait の実装として足す予定で、ここには置かない。
+//! 実装は 3 つある。
+//!
+//! | 実装 | 置き場所 | 使われるとき |
+//! |---|---|---|
+//! | 本番（`SystemBackends`） | `system` | 通常の起動 |
+//! | フェイク（`fake::FakeBackends`） | `fake`。中身は `crate::video::FakeVideoCapture` / `crate::audio::FakeAudioCapture` | 環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` を指定して起動したとき |
+//! | モック | このファイルの `mock`（`#[cfg(test)]`） | ワーカーの単体テスト |
+//!
+//! 本番とフェイクのどちらを使うかは `backends_from_env` が決め、呼ぶのは
+//! `DeviceWorker::spawn` の 1 か所だけ。
 
 use crate::audio::{
     ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, AudioError, PassthroughRequest,
@@ -25,10 +32,13 @@ use crate::repaint::RepaintWaker;
 use crate::video::{
     ActiveVideo, DeviceCapabilities, SharedColorConversion, VideoError, VideoFrames, VideoLinkState,
 };
+use log::warn;
 use std::sync::Arc;
 
+mod fake;
 mod system;
 
+use fake::{FakeBackends, FAKE_DEVICES_ENV, FAKE_SCENARIO_ENV};
 pub(super) use system::SystemBackends;
 
 /// 映像デバイスの開閉・列挙・観測。
@@ -137,9 +147,29 @@ pub(super) trait DeviceBackends: Send {
     ) -> (Box<dyn VideoBackend>, Box<dyn AudioBackend>);
 }
 
+/// 環境変数を見て、使うバックエンドを選ぶ。
+///
+/// **呼ぶのは `DeviceWorker::spawn` の 1 か所だけ。** `CAPTURECARD_VIEWER_FAKE_DEVICES`
+/// が無ければ本番（`SystemBackends`）で、今までと何も変わらない。
+pub(super) fn backends_from_env() -> Box<dyn DeviceBackends> {
+    let devices = std::env::var(FAKE_DEVICES_ENV).ok();
+    let scenario = std::env::var(FAKE_SCENARIO_ENV).ok();
+    match FakeBackends::from_env_values(devices.as_deref(), scenario.as_deref()) {
+        Some(fake) => {
+            // 実機が映らない理由がログから分かるよう、目立つ段で残す
+            warn!(
+                "{} が指定されているので、実機ではなくフェイクデバイスで動く（{} 台、シナリオ: {:?}）",
+                FAKE_DEVICES_ENV, fake.device_count, fake.scenario
+            );
+            Box::new(fake)
+        }
+        None => Box::new(SystemBackends),
+    }
+}
+
 /// テスト用のモック。**実機なしでワーカーの再試行と切断検出を回すためだけのもの。**
 ///
-/// 映像や音声の中身は作らない（カラーバーや正弦波を吐くフェイクは #142）。
+/// 映像や音声の中身は作らない（カラーバーや正弦波を吐くのは `fake`）。
 /// ここにあるのは「指定回数失敗してから成功する」「列挙結果を差し替える」
 /// 「フレームが止まったことにする」「音声ストリームのエラーを起こす」の
 /// 4 つだけ。
