@@ -88,7 +88,7 @@ The settings window → **Hotkeys tab** lets you assign a key to each of the fol
 | Toggle mute | Toggles mute on and off | unassigned |
 
 - Press Set... on a row to open the capture dialog. **It accepts a key the instant it opens: press anything other than a modifier key and it captures that combination and closes automatically.** There is no "start capturing" or OK button. Use Clear in the list to remove an assignment.
-- Hotkeys are temporarily suspended while the dialog is open, so **you can capture a key that is already assigned to another action** — including reassigning the same key to the action you're currently editing.
+- Hotkeys are temporarily suspended while the dialog is open, so pressing an assigned key does not run its action. **You can press the key already assigned to the action you are editing to assign it again.** A key assigned to another action is not accepted (see the next item).
 - If the key you pressed cannot be accepted, the dialog stays open and shows the reason in red: it was only modifier keys, or it is already assigned to another action.
 - Changes take effect when you press Apply or OK.
 - A hotkey does exactly what the mouse does: changing the volume shows the volume bar at the bottom, toggling fullscreen shows the indicator at the top-left.
