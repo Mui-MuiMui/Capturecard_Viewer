@@ -392,3 +392,177 @@ pub fn error_time(time: impl Display) -> String {
         Language::Japanese => format!("発生時刻: {time}"),
     }
 }
+
+// ---- 「接続状態」タブへ渡す詳細（app/error_report.rs） ----
+
+pub fn link_device(name: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("デバイス: {name}"),
+    }
+}
+
+pub fn link_video(summary: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("映像: {summary}"),
+    }
+}
+
+pub fn link_requested_fps(fps: u32) -> String {
+    match language() {
+        Language::Japanese => format!("要求フレームレート: {fps} fps"),
+    }
+}
+
+pub fn link_audio_input(device: impl Display, summary: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("入力: {device}（{summary}）"),
+    }
+}
+
+pub fn link_audio_output(device: impl Display, summary: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("出力: {device}（{summary}）"),
+    }
+}
+
+// ---- 統計 OSD（app/view.rs） ----
+
+pub fn stats_fps(fps: f32, average_ms: f32, samples: usize) -> String {
+    match language() {
+        Language::Japanese => {
+            format!("FPS {fps:.1} (平均間隔 {average_ms:.1}ms / {samples} 件)")
+        }
+    }
+}
+
+pub fn stats_jitter(stddev_ms: f32, min_ms: f32, max_ms: f32) -> String {
+    match language() {
+        Language::Japanese => {
+            format!("ばらつき ±{stddev_ms:.2}ms (最小 {min_ms:.1} / 最大 {max_ms:.1})")
+        }
+    }
+}
+
+pub fn stats_decode(decode_ms: f32, fast_count: u64, fallback_count: u64) -> String {
+    match language() {
+        Language::Japanese => {
+            format!("デコード {decode_ms:.2}ms (高速 {fast_count} / 汎用 {fallback_count})")
+        }
+    }
+}
+
+pub fn stats_since_last_frame(elapsed_ms: f32) -> String {
+    match language() {
+        Language::Japanese => format!("最終フレーム {elapsed_ms:.0}ms 前"),
+    }
+}
+
+// ---- 音量とミュート（app/audio_control.rs / app/menu/items.rs） ----
+
+/// 音量の表示。右クリックメニューと OSD で同じ文言を使う。
+pub fn volume_percent(volume: i32) -> String {
+    match language() {
+        Language::Japanese => format!("音量: {volume}%"),
+    }
+}
+
+pub fn volume_percent_muted(volume: i32) -> String {
+    match language() {
+        Language::Japanese => format!("音量: {volume}%（ミュート中）"),
+    }
+}
+
+pub fn unmuted(volume: i32) -> String {
+    match language() {
+        Language::Japanese => format!("ミュート解除（音量: {volume}%）"),
+    }
+}
+
+// ---- スクリーンショットの保存（app/screenshot.rs） ----
+
+pub fn screenshot_copied_and_saved(path: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("クリップボードへコピーし、{path} へ保存した"),
+    }
+}
+
+pub fn screenshot_saved(path: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("{path} へ保存した"),
+    }
+}
+
+/// 片方の出力先だけ失敗したとき。`done` は成功したほうの説明。
+pub fn screenshot_partially_failed(reason: impl Display, done: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("{reason}（{done}）"),
+    }
+}
+
+pub fn screenshot_save_empty_frame(width: usize, height: usize) -> String {
+    match language() {
+        Language::Japanese => {
+            format!("大きさのない映像フレームは保存できない: {width}x{height}")
+        }
+    }
+}
+
+pub fn screenshot_create_dir_failed(dir: impl Display, source: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("保存先のディレクトリ {dir} を作成できない: {source}"),
+    }
+}
+
+pub fn screenshot_image_build_failed(width: u32, height: u32, len: usize) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "映像フレームから画像を組み立てられない: {width}x{height} に対して {len} バイト"
+        ),
+    }
+}
+
+pub fn file_create_failed(path: impl Display, source: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("{path} を作成できない: {source}"),
+    }
+}
+
+pub fn file_flush_failed(path: impl Display, source: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("{path} を書き切れない: {source}"),
+    }
+}
+
+// ---- 設定ダイアログの操作の結果とホットキーの失敗（app/settings_dialog.rs / app/hotkeys.rs） ----
+
+/// 右クリックメニューからプリセットを切り替えたときの OSD。
+pub fn preset_switched(name: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("プリセット: {name}"),
+    }
+}
+
+pub fn settings_exported(path: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("{path} へ書き出しました"),
+    }
+}
+
+pub fn settings_imported(path: impl Display) -> String {
+    match language() {
+        Language::Japanese => {
+            format!("{path} を読み込みました。「適用」または「OK」で反映します")
+        }
+    }
+}
+
+/// トーストに出す、登録できなかったホットキーの 1 件。
+pub fn hotkey_error_summary_item(
+    action: impl Display,
+    hotkey: impl Display,
+    reason: impl Display,
+) -> String {
+    match language() {
+        Language::Japanese => format!("{action}（{hotkey}）: {reason}"),
+    }
+}

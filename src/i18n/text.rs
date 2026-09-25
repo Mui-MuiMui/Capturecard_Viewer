@@ -217,6 +217,48 @@ texts! {
     StatusLogHint { ja: "詳しい経過はログファイルに残っています（%AppData%\\capturecard_viewer\\logs）。" },
     StateLabel { ja: "状態:" },
     NoRecentError { ja: "直近のエラー: なし" },
+
+    // ---- 右クリックメニュー（app/menu/items.rs） ----
+    Mute { ja: "ミュート" },
+    MenuAlwaysOnTop { ja: "最前面表示" },
+    MenuFullscreen { ja: "フルスクリーン表示" },
+    MenuHideTitleBar { ja: "タイトルバーを隠す" },
+    MenuHideTitleBarHint { ja: "タイトルバーと枠を消します。移動は映像のドラッグ、サイズ変更はウィンドウ端のドラッグ、終了はこのメニューの「終了」か Alt+F4 で行います" },
+    MenuHideTitleBarDisabledHint { ja: "フルスクリーン中は元から装飾がないため切り替えられません" },
+    MenuDragMove { ja: "画面ドラッグ移動" },
+    MenuDragMoveDisabledHint { ja: "タイトルバーを隠している間は、ウィンドウを動かす唯一の手段なので切れません" },
+    MenuStats { ja: "情報表示" },
+    MenuAutoReconnect { ja: "デバイスの自動再接続" },
+    MenuAutoReconnectHint { ja: "映像が途切れたり音声デバイスが消えたときに、自動でデバイスを開き直します" },
+    MenuResetWindowSize { ja: "ウィンドウサイズをリセット" },
+    MenuResetWindowSizeDisabledHint { ja: "フルスクリーン中は変更できません" },
+    MenuAdvancedSettings { ja: "詳細設定..." },
+    MenuQuit { ja: "終了" },
+    // サブメニューを開く項目。矢印は項目名の一部として訳ごとに持つ
+    MenuViewSubmenu { ja: "表示  ⏵" },
+    MenuWindowSubmenu { ja: "ウィンドウ  ⏵" },
+    MenuPresetSubmenu { ja: "プリセット  ⏵" },
+
+    // ---- 映像の上に出すもの（app/view.rs / app/window.rs） ----
+    PlaceholderNoSignal { ja: "映像信号がありません" },
+    PlaceholderReconnecting { ja: "デバイスが接続されていません（再接続を試しています）" },
+    PlaceholderDisconnected { ja: "デバイスが接続されていません" },
+    StatsFpsPending { ja: "FPS - (フレーム間隔の計測待ち)" },
+    StatsDecodeUnknown { ja: "デコード -" },
+    StatsNoFrame { ja: "映像フレームなし" },
+    DragMoveEnabledNotice { ja: "ウィンドウを動かすため、画面ドラッグ移動を有効にしました" },
+    FullscreenOn { ja: "フルスクリーン ON" },
+    FullscreenOff { ja: "フルスクリーン OFF" },
+
+    // ---- スクリーンショットの結果（app/screenshot.rs） ----
+    ScreenshotCopied { ja: "クリップボードへコピーした" },
+    ScreenshotNoDestination { ja: "出力先が 1 つも設定されていません" },
+    ScreenshotNoFrame { ja: "表示中の映像がありません" },
+
+    // ---- 設定ダイアログの操作の結果（app/settings_dialog.rs） ----
+    AudioFileFilter { ja: "音声ファイル" },
+    SettingsReadFailed { ja: "設定を読み取れない" },
+    SettingsResetDone { ja: "初期値に戻しました。「適用」または「OK」で反映します" },
 }
 
 #[cfg(test)]

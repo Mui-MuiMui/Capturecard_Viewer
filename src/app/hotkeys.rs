@@ -7,6 +7,7 @@ use super::audio_control::VOLUME_SCROLL_STEP;
 use super::worker::DeviceCommand;
 use super::CaptureCardViewer;
 use crate::hotkey::{BackgroundHotkeyRunner, HotkeyAction, HotkeyAssignmentError};
+use crate::i18n;
 use crate::status::ErrorSource;
 use eframe::egui;
 use log::{debug, trace, warn};
@@ -58,7 +59,9 @@ fn hotkey_error_summary(errors: &BTreeMap<HotkeyAction, HotkeyAssignmentError>) 
 
     let detail = errors
         .iter()
-        .map(|(action, error)| format!("{}（{}）: {}", action.label(), error.hotkey, error.reason))
+        .map(|(action, error)| {
+            i18n::hotkey_error_summary_item(action.label(), &error.hotkey, &error.reason)
+        })
         .collect::<Vec<_>>()
         .join(" / ");
     Some(detail)

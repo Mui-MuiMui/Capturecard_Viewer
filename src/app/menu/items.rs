@@ -10,6 +10,7 @@
 //! 返すアクションを 1 か所に集め、片方だけ直す事故を起こさないため。
 
 use super::MenuView;
+use crate::i18n::{self, Text};
 use crate::settings::{MAX_VOLUME, MIN_VOLUME};
 use eframe::egui;
 
@@ -84,7 +85,7 @@ impl MenuAction {
 
 /// 音量スライダーとミュート。どちらのレイアウトでも先頭に置く。
 fn volume_items(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction>) {
-    ui.label(format!("音量: {}%", view.volume as i32));
+    ui.label(i18n::volume_percent(view.volume as i32));
 
     // スライダーが書き換えるのはスナップショットの複製。実際の反映は
     // `handle_menu_action` が `set_volume_from_ui` で行う（書き出しはデバウンス）
@@ -98,7 +99,7 @@ fn volume_items(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction
     // ミュートはスライダーのすぐ下に置く。音量 0% にする代わりの
     // 操作なので、離すと探されない
     let mut muted = view.muted;
-    if ui.checkbox(&mut muted, "ミュート").changed() {
+    if ui.checkbox(&mut muted, Text::Mute.get()).changed() {
         actions.push(MenuAction::SetMuted(muted));
     }
 }
@@ -106,7 +107,10 @@ fn volume_items(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction
 /// 「アスペクト比を維持」のチェックボックス。
 fn aspect_ratio_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction>) {
     let mut value = view.maintain_aspect_ratio;
-    if ui.checkbox(&mut value, "アスペクト比を維持").changed() {
+    if ui
+        .checkbox(&mut value, Text::MaintainAspectRatio.get())
+        .changed()
+    {
         actions.push(MenuAction::SetMaintainAspectRatio(value));
     }
 }
@@ -114,7 +118,10 @@ fn aspect_ratio_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuA
 /// 「最前面表示」のチェックボックス。
 fn always_on_top_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction>) {
     let mut value = view.always_on_top;
-    if ui.checkbox(&mut value, "最前面表示").changed() {
+    if ui
+        .checkbox(&mut value, Text::MenuAlwaysOnTop.get())
+        .changed()
+    {
         actions.push(MenuAction::SetAlwaysOnTop(value));
     }
 }
@@ -126,7 +133,10 @@ fn always_on_top_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<Menu
 /// サブメニューへ入れずに直下へ置く。
 fn fullscreen_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction>) {
     let mut value = view.is_fullscreen;
-    if ui.checkbox(&mut value, "フルスクリーン表示").changed() {
+    if ui
+        .checkbox(&mut value, Text::MenuFullscreen.get())
+        .changed()
+    {
         actions.push(MenuAction::SetFullscreen(value));
     }
 }
@@ -141,12 +151,10 @@ fn borderless_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAct
     let response = ui
         .add_enabled(
             !view.is_fullscreen,
-            egui::Checkbox::new(&mut value, "タイトルバーを隠す"),
+            egui::Checkbox::new(&mut value, Text::MenuHideTitleBar.get()),
         )
-        .on_hover_text(
-            "タイトルバーと枠を消します。移動は映像のドラッグ、サイズ変更はウィンドウ端のドラッグ、終了はこのメニューの「終了」か Alt+F4 で行います",
-        )
-        .on_disabled_hover_text("フルスクリーン中は元から装飾がないため切り替えられません");
+        .on_hover_text(Text::MenuHideTitleBarHint.get())
+        .on_disabled_hover_text(Text::MenuHideTitleBarDisabledHint.get());
     if response.changed() {
         actions.push(MenuAction::SetBorderless(value));
     }
@@ -160,11 +168,9 @@ fn drag_move_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuActi
     let response = ui
         .add_enabled(
             !view.borderless,
-            egui::Checkbox::new(&mut value, "画面ドラッグ移動"),
+            egui::Checkbox::new(&mut value, Text::MenuDragMove.get()),
         )
-        .on_disabled_hover_text(
-            "タイトルバーを隠している間は、ウィンドウを動かす唯一の手段なので切れません",
-        );
+        .on_disabled_hover_text(Text::MenuDragMoveDisabledHint.get());
     if response.changed() {
         actions.push(MenuAction::SetEnableDragMove(value));
     }
@@ -173,7 +179,7 @@ fn drag_move_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuActi
 /// 「情報表示」（統計オーバーレイ）のチェックボックス。
 fn stats_overlay_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction>) {
     let mut value = view.show_stats_overlay;
-    if ui.checkbox(&mut value, "情報表示").changed() {
+    if ui.checkbox(&mut value, Text::MenuStats.get()).changed() {
         actions.push(MenuAction::SetShowStatsOverlay(value));
     }
 }
@@ -186,8 +192,8 @@ fn stats_overlay_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<Menu
 fn auto_reconnect_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction>) {
     let mut value = view.auto_reconnect;
     let response = ui
-        .checkbox(&mut value, "デバイスの自動再接続")
-        .on_hover_text("映像が途切れたり音声デバイスが消えたときに、自動でデバイスを開き直します");
+        .checkbox(&mut value, Text::MenuAutoReconnect.get())
+        .on_hover_text(Text::MenuAutoReconnectHint.get());
     if response.changed() {
         actions.push(MenuAction::SetAutoReconnect(value));
     }
@@ -208,9 +214,9 @@ fn reset_window_size_item(
     let clicked = ui
         .add_enabled(
             !view.is_fullscreen,
-            egui::Button::new("ウィンドウサイズをリセット"),
+            egui::Button::new(Text::MenuResetWindowSize.get()),
         )
-        .on_disabled_hover_text("フルスクリーン中は変更できません")
+        .on_disabled_hover_text(Text::MenuResetWindowSizeDisabledHint.get())
         .clicked();
     if clicked {
         actions.push(MenuAction::ResetWindowSize);
@@ -223,14 +229,14 @@ fn reset_window_size_item(
 /// 映像が出なくなったときの復帰手段なので、どちらのレイアウトでも
 /// サブメニューへ入れずに直下へ置く。
 fn reconnect_item(ui: &mut egui::Ui, actions: &mut Vec<MenuAction>) {
-    if ui.button("デバイス再接続").clicked() {
+    if ui.button(Text::ActionReconnectDevices.get()).clicked() {
         actions.push(MenuAction::ReconnectDevices);
     }
 }
 
 /// 「詳細設定...」のボタン。
 fn settings_item(ui: &mut egui::Ui, actions: &mut Vec<MenuAction>) {
-    if ui.button("詳細設定...").clicked() {
+    if ui.button(Text::MenuAdvancedSettings.get()).clicked() {
         actions.push(MenuAction::OpenSettings);
     }
 }
@@ -240,7 +246,7 @@ fn settings_item(ui: &mut egui::Ui, actions: &mut Vec<MenuAction>) {
 /// 装飾なしでは × が無いので、ここが閉じる手段になる。
 /// 押すと `on_exit` が走り、保留中の設定も書き出される。
 fn quit_item(ui: &mut egui::Ui, actions: &mut Vec<MenuAction>) {
-    if ui.button("終了").clicked() {
+    if ui.button(Text::MenuQuit.get()).clicked() {
         actions.push(MenuAction::Quit);
     }
 }
@@ -256,7 +262,7 @@ fn view_submenu(
     menu_rects: &mut Vec<egui::Rect>,
     actions: &mut Vec<MenuAction>,
 ) {
-    ui.menu_button("表示  ⏵", |ui| {
+    ui.menu_button(Text::MenuViewSubmenu.get(), |ui| {
         // サブメニューの幅は egui の既定が 150px で、項目名が折り返す。
         // 本体と同じ幅に揃える（狭いウィンドウでは本体ごと縮んでいる）
         ui.set_max_width(width);
@@ -282,7 +288,7 @@ fn window_submenu(
     menu_rects: &mut Vec<egui::Rect>,
     actions: &mut Vec<MenuAction>,
 ) {
-    ui.menu_button("ウィンドウ  ⏵", |ui| {
+    ui.menu_button(Text::MenuWindowSubmenu.get(), |ui| {
         ui.set_max_width(width);
 
         drag_move_item(ui, view, actions);
@@ -315,7 +321,7 @@ fn preset_submenu(
         return;
     }
 
-    ui.menu_button("プリセット  ⏵", |ui| {
+    ui.menu_button(Text::MenuPresetSubmenu.get(), |ui| {
         ui.set_max_width(width);
 
         for name in &view.preset_names {
