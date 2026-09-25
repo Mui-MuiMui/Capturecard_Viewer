@@ -214,7 +214,7 @@ fn rgb_to_rgba(rgb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, Scree
 /// スクリーンショットの効果音を持つ。
 ///
 /// **ホットキーの登録と押下の検出は持たない。** グローバルホットキーは
-/// スクリーンショット以外のアクションにも割り当てられるため、`hotkey.rs` の
+/// スクリーンショット以外のアクションにも割り当てられるため、`hotkey/` の
 /// `HotkeyManager` が一手に扱う。
 ///
 /// **ファイルの読み込みはしない。** 読み込みは `app::screenshot_sound` が
