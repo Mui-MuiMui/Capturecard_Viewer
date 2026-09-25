@@ -73,10 +73,10 @@ mv "$APPDATA/capturecard_viewer/config/default-config.toml.agent-bak" "$APPDATA/
 ```text
 Refs: #<Issue 番号>
 
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Co-Authored-By: <自分のモデル名> <noreply@anthropic.com>
 ```
 
-`Closes` / `Fixes` などのクローズ用キーワードは使わない（`GUARDRAIL.md`、理由は `naming-conventions` skill の「`Closes` ではなく `Refs` を使う」）。
+`<自分のモデル名>` には system prompt に書かれている自分のモデル名（例: `Claude Opus 5.5`）をそのまま入れる。`Closes` / `Fixes` などのクローズ用キーワードは使わない（`GUARDRAIL.md`、理由は `naming-conventions` skill の「`Closes` ではなく `Refs` を使う」）。
 
 ## 5. PR を出す
 
