@@ -11,6 +11,7 @@
 | egui/eframe の UI スレッド | 1 | `update()` が再描画のたびに呼ばれる。呼ばれる間隔は「再描画をいつ要求するか」を参照 |
 | デバイスワーカー（`device-worker`） | 1 | デバイスを開く・閉じる・列挙する・能力を問い合わせる。接続の再試行と切断の監視のタイマーもここ |
 | nokhwa のフレームコールバック | 1（キャプチャ中） | nokhwa が作る。YUY2→RGB 変換と `FrameBuffer` への格納（本体は `video/frame_sink.rs` の `FrameSink`） |
+| DirectShow のストリーミングスレッド | 1（「(DirectShow)」のデバイスをキャプチャ中） | 上流のフィルターが作る。上の行の代わりに立ち、自前のレンダラーの `IMemInputPin::Receive` から同じ `FrameSink` へ渡す。ロックもアロケーションもしない（`docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」） |
 | cpal の入力コールバック／出力コールバック | 各 1（再生中） | cpal が作る。リングバッファの読み書き |
 | フェイクの映像生成（`fake-video`） / 音声入力・出力（`fake-audio-in` / `fake-audio-out`） | 映像 1、音声 各 1（開いている間） | 環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` で起動したときだけ、上の 2 行の代わりに立つ。ワーカーが開くときに起こし、閉じるときに join する（`docs/design/device-worker.md` の「フェイクデバイス（#142）」） |
 | ホットキーリスナー | 1 | `HotkeyManager::new` で起動し、`Drop` で join する。低レベルキーボードフックを持ち、そのメッセージループを回す |
