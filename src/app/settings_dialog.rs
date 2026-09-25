@@ -6,11 +6,13 @@
 
 use super::CaptureCardViewer;
 use crate::overlay::OverlayContent;
+use crate::screenshot;
 use crate::settings;
 use crate::status::{self, ErrorSource};
 use crate::ui;
 use chrono::Local;
 use log::{debug, error, info, warn};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// プリセットを切り替えたときに OSD を出しておく時間。
@@ -65,7 +67,7 @@ impl CaptureCardViewer {
             match event {
                 ui::SettingsEvent::Dialog(action) => self.apply_dialog_action(action),
                 ui::SettingsEvent::SelectTab(tab) => self.settings_dialog.select_tab(tab),
-                ui::SettingsEvent::TestSound => self.play_test_sound(),
+                ui::SettingsEvent::TestSound(sound_file) => self.play_test_sound(&sound_file),
                 ui::SettingsEvent::ExportSettings => self.export_settings_to_file(),
                 ui::SettingsEvent::ImportSettings => self.import_settings_into_draft(),
                 ui::SettingsEvent::ResetDraft => self.reset_draft_to_defaults(),
@@ -199,10 +201,15 @@ impl CaptureCardViewer {
 
     /// 設定ダイアログの「テスト再生」で効果音を鳴らす。
     ///
-    /// ダイアログを開いている間はドラフトの音量で鳴らす。スライダーを
-    /// 動かした結果をその場で確かめられるようにするため。
-    /// 効果音のファイル自体は「適用」か「OK」まで差し替わらない。
-    fn play_test_sound(&self) {
+    /// 音もドラフトの `sound_file`（イベントに載ってくる）、音量もドラフトの
+    /// 値で鳴らす。ファイルを選び直したりスライダーを動かしたりした結果を、
+    /// 「適用」の前にその場で確かめられるようにするため（Issue #204）。
+    ///
+    /// **適用済みの `ScreenshotManager` は触らない。** 読み込みは
+    /// `screenshot::load_sound_data` で行い、撮影時に鳴る音は「適用」か
+    /// 「OK」まで差し替わらない。解決の仕方は撮影時と同じで、既定値のパスは
+    /// 内蔵音へ倒れる。ファイルが読めなければ内蔵音で鳴らし、理由をトーストへ出す
+    fn play_test_sound(&mut self, sound_file: &Path) {
         // この操作が返るのはダイアログを描画しているときだけなので、ドラフトは必ずある
         let Some(volume) = self
             .settings_dialog
@@ -212,11 +219,12 @@ impl CaptureCardViewer {
             return;
         };
 
-        if let Ok(ss) = self.screenshot_manager.lock() {
-            ss.play_screenshot_sound(volume);
-        } else {
-            warn!("テスト再生で screenshot_manager のロックを取得できない");
+        let (sound_data, error) = screenshot::load_sound_data(sound_file);
+        if let Some(error) = error {
+            warn!("テスト再生で効果音を読み込めない: {}", error);
+            self.report_error(ErrorSource::Screenshot, error.to_string());
         }
+        screenshot::play_sound_data(sound_data, volume);
     }
 
     /// 設定ダイアログの「設定を書き出す」。

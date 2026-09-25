@@ -238,45 +238,62 @@ impl ScreenshotManager {
     // Err を返すのは、解決したファイルが存在したのに読めなかった場合だけ。
     // このときも既定音を入れてあるので、鳴らないという結果にはならない。
     pub fn set_sound_file(&mut self, sound_path: &Path) -> Result<(), ScreenshotError> {
-        match resolve_sound_path(sound_path, exe_dir().as_deref(), |path| path.exists()) {
-            SoundSource::Embedded => {
-                self.sound_data = Some(EMBEDDED_SOUND.to_vec());
-                Ok(())
-            }
-            SoundSource::File(path) => match std::fs::read(&path) {
-                Ok(data) => {
-                    self.sound_data = Some(data);
-                    Ok(())
-                }
-                Err(e) => {
-                    self.sound_data = Some(EMBEDDED_SOUND.to_vec());
-                    Err(ScreenshotError::SoundFileUnreadable {
-                        path,
-                        source: e.to_string(),
-                    })
-                }
-            },
-        }
+        let (data, error) = load_sound_data(sound_path);
+        self.sound_data = Some(data);
+        error.map_or(Ok(()), Err)
     }
 
     pub fn play_screenshot_sound(&self, volume: f32) {
         if let Some(sound_data) = &self.sound_data {
-            let sound_data = sound_data.clone();
-            let volume = (volume / 100.0).clamp(0.0, 2.0); // パーセンテージを0.0-2.0範囲に変換
-            std::thread::spawn(move || {
-                if let Ok((_stream, stream_handle)) = OutputStream::try_default() {
-                    if let Ok(sink) = Sink::try_new(&stream_handle) {
-                        sink.set_volume(volume);
-                        let cursor = Cursor::new(sound_data);
-                        if let Ok(decoder) = Decoder::new(cursor) {
-                            sink.append(decoder);
-                            sink.sleep_until_end();
-                        }
-                    }
-                }
-            });
+            play_sound_data(sound_data.clone(), volume);
         }
     }
+}
+
+/// 設定の効果音パスから、鳴らす音のデータを読み込む。
+///
+/// **`ScreenshotManager` の状態には触れない。** 設定画面の「テスト再生」が、
+/// 適用済みの効果音を差し替えずにドラフトの音を鳴らすために使う。
+/// `set_sound_file` もこれを通すので、テスト再生と撮影時で音の選び方が揃う。
+///
+/// 解決の仕方は `resolve_sound_path` と同じで、見つからなければ埋め込みの
+/// 既定音を返す。ファイルがあるのに読めなかった場合も既定音を返し、
+/// その理由を 2 つ目の値で添える。どの場合もデータは必ず返るので、
+/// 呼び出し側は失敗を報告したうえでそのまま鳴らしてよい。
+pub fn load_sound_data(sound_path: &Path) -> (Vec<u8>, Option<ScreenshotError>) {
+    match resolve_sound_path(sound_path, exe_dir().as_deref(), |path| path.exists()) {
+        SoundSource::Embedded => (EMBEDDED_SOUND.to_vec(), None),
+        SoundSource::File(path) => match std::fs::read(&path) {
+            Ok(data) => (data, None),
+            Err(e) => (
+                EMBEDDED_SOUND.to_vec(),
+                Some(ScreenshotError::SoundFileUnreadable {
+                    path,
+                    source: e.to_string(),
+                }),
+            ),
+        },
+    }
+}
+
+/// 効果音のデータを、別スレッドで 1 回鳴らす。
+///
+/// `volume` は設定画面と同じパーセント表記（100 で等倍、上限 200）。
+/// 再生の終わりを待たずに戻る。
+pub fn play_sound_data(sound_data: Vec<u8>, volume: f32) {
+    let volume = (volume / 100.0).clamp(0.0, 2.0); // パーセンテージを0.0-2.0範囲に変換
+    std::thread::spawn(move || {
+        if let Ok((_stream, stream_handle)) = OutputStream::try_default() {
+            if let Ok(sink) = Sink::try_new(&stream_handle) {
+                sink.set_volume(volume);
+                let cursor = Cursor::new(sound_data);
+                if let Ok(decoder) = Decoder::new(cursor) {
+                    sink.append(decoder);
+                    sink.sleep_until_end();
+                }
+            }
+        }
+    });
 }
 
 impl Default for ScreenshotManager {
@@ -515,6 +532,45 @@ mod tests {
             let text = error.to_string();
             assert!(!text.is_ascii(), "日本語が含まれていない: {text}");
         }
+    }
+
+    #[test]
+    fn load_sound_data_readable_file_returns_its_bytes() {
+        // テスト再生でドラフトのファイルを選んだ場合。適用済みの音ではなく、
+        // 渡したファイルの中身そのものが返ること（Issue #204）
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("custom.mp3");
+        std::fs::write(&path, b"not really mp3").expect("書き込めること");
+
+        let (data, error) = load_sound_data(&path);
+
+        assert_eq!(data, b"not really mp3");
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn load_sound_data_default_path_returns_embedded_sound() {
+        // 「既定に戻す」が書く値。既定値のファイルは配布していないので、
+        // テスト再生でも撮影時と同じく内蔵音が鳴ること
+        let (data, error) = load_sound_data(Path::new(crate::settings::DEFAULT_SOUND_FILE));
+
+        assert_eq!(data, EMBEDDED_SOUND);
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn load_sound_data_unreadable_file_falls_back_with_reason() {
+        // 存在するのに読めないもの（ここではディレクトリ）を渡した場合。
+        // 内蔵音で鳴らせるデータと、トーストへ出す理由の両方が返ること
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+
+        let (data, error) = load_sound_data(dir.path());
+
+        assert_eq!(data, EMBEDDED_SOUND);
+        assert!(
+            matches!(error, Some(ScreenshotError::SoundFileUnreadable { ref path, .. }) if path == dir.path()),
+            "読めなかった理由が返ること: {error:?}"
+        );
     }
 
     #[test]
