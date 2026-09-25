@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use super::color::{adjusted_color_matrix, color_matrix_for, SharedColorConversion};
-use super::convert::yuy2_to_rgb_naive;
+use super::convert::{bgr24_stride, bgr24_to_rgb, mjpeg_to_rgb, yuy2_to_rgb_naive};
 use super::frame_buffer::{FrameBuffer, VideoFrame, VideoFrames};
 use crate::repaint::RepaintWaker;
 
@@ -27,6 +27,9 @@ const YUY2_FORMAT_NAME: &str = "YUY2";
 /// デコーダへ倒れたフレームの「色変換」欄に出す文字列。
 /// 係数表を選べないので、そのことが分かる文言にしてある
 const DECODER_MATRIX_NAME: &str = "（デコーダ任せ）";
+
+/// RGB24 のまま届いたフレームの「色変換」欄に出す文字列（ログ用）
+const RGB_MATRIX_NAME: &str = "（RGB のまま）";
 
 /// 「最初の 1 回だけ」を判定するフラグ。
 ///
@@ -69,6 +72,7 @@ pub(super) struct FrameSink {
     first_frame: FirstTimeOnly,
     short_frame_notice: FirstTimeOnly,
     lock_error_notice: FirstTimeOnly,
+    decode_error_notice: FirstTimeOnly,
 }
 
 impl FrameSink {
@@ -85,7 +89,18 @@ impl FrameSink {
             first_frame: FirstTimeOnly::default(),
             short_frame_notice: FirstTimeOnly::default(),
             lock_error_notice: FirstTimeOnly::default(),
+            decode_error_notice: FirstTimeOnly::default(),
         }
+    }
+
+    /// 次の変換先にする Vec。回収できたものがあれば使い回し、無ければ空
+    /// （変換側がリサイズするので、その時だけ確保が起きる）。
+    fn recycled_buffer(&mut self) -> Vec<u8> {
+        self.recyclable
+            .take()
+            .and_then(|previous| Arc::try_unwrap(previous).ok())
+            .map(|previous| previous.data)
+            .unwrap_or_default()
     }
 
     /// YUY2 のフレームを自前の変換（高速パス）で RGB に直して積む。
@@ -119,12 +134,7 @@ impl FrameSink {
         }
 
         // 回収できた Vec があれば使い回し、無ければ新規に確保する
-        let mut rgb = self
-            .recyclable
-            .take()
-            .and_then(|previous| Arc::try_unwrap(previous).ok())
-            .map(|previous| previous.data)
-            .unwrap_or_default();
+        let mut rgb = self.recycled_buffer();
         // 入力信号の色空間は通知されないため、設定が「自動」なら
         // 解像度から推定する。レンジは常に設定の値を使う
         let (space, range) = self.color_conversion.load();
@@ -144,6 +154,84 @@ impl FrameSink {
             true,
             YUY2_FORMAT_NAME,
             matrix.name,
+        )
+    }
+
+    /// DirectShow の RGB24（BGR の並び、行は 4 バイト境界）を RGB に並べ替えて積む。
+    ///
+    /// **係数表を通らないので、色空間・色レンジ・映像調整は効かない。**
+    /// 変換先の Vec は YUY2 と同じく使い回す。データが足りなければ捨てる。
+    pub(super) fn push_bgr24(
+        &mut self,
+        width: usize,
+        height: usize,
+        bottom_up: bool,
+        src: &[u8],
+        received_at: Instant,
+    ) -> bool {
+        let stride = bgr24_stride(width);
+        if src.len() < stride * height {
+            if self.short_frame_notice.take() {
+                warn!(
+                    "RGB24 のフレームが短いので破棄した（{}x{} に必要な {} バイトに対し {} バイト）。以降は記録しない",
+                    width,
+                    height,
+                    stride * height,
+                    src.len()
+                );
+            }
+            return false;
+        }
+        let mut rgb = self.recycled_buffer();
+        bgr24_to_rgb(width, height, stride, bottom_up, src, &mut rgb);
+        self.push(
+            VideoFrame {
+                width,
+                height,
+                data: rgb,
+            },
+            received_at,
+            false,
+            "RGB24",
+            RGB_MATRIX_NAME,
+        )
+    }
+
+    /// MJPEG の 1 フレームを展開して積む。
+    ///
+    /// **この経路でも色空間・色レンジ・映像調整は効かない**（`push_decoded` と
+    /// 同じ）。展開先の Vec は使い回すが、デコーダの内部では確保が起きる
+    /// （`convert::mjpeg_to_rgb`）。壊れたフレームは捨て、初回だけ記録する。
+    pub(super) fn push_mjpeg(
+        &mut self,
+        width: usize,
+        height: usize,
+        src: &[u8],
+        received_at: Instant,
+    ) -> bool {
+        let mut rgb = self.recycled_buffer();
+        if let Err(reason) = mjpeg_to_rgb(width, height, src, &mut rgb) {
+            if self.decode_error_notice.take() {
+                warn!(
+                    "MJPEG のフレームを展開できないので破棄した（{}x{}、{} バイト）: {}。以降は記録しない",
+                    width,
+                    height,
+                    src.len(),
+                    reason
+                );
+            }
+            return false;
+        }
+        self.push(
+            VideoFrame {
+                width,
+                height,
+                data: rgb,
+            },
+            received_at,
+            false,
+            "MJPEG",
+            DECODER_MATRIX_NAME,
         )
     }
 
@@ -313,5 +401,72 @@ mod tests {
         assert_eq!(stats.fallback_count, 1);
         assert_eq!(stats.source_format, Some("MJPEG"));
         assert_eq!(frames.latest().expect("積んだ").data, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn frame_sink_push_bgr24_reorders_into_rgb() {
+        // 1x1 の赤（BGR の並びで 0, 0, 255、詰め物 1 バイト）
+        let frames = VideoFrames::new();
+        let mut sink = FrameSink::new(
+            &frames,
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::default(),
+        );
+
+        assert!(sink.push_bgr24(1, 1, true, &[0, 0, 255, 0], Instant::now()));
+
+        let frame = frames.latest().expect("積んだフレームが読める");
+        assert_eq!(frame.data, vec![255, 0, 0]);
+        let stats = frames.stats();
+        assert_eq!(stats.fallback_count, 1);
+        assert_eq!(stats.source_format, Some("RGB24"));
+    }
+
+    #[test]
+    fn frame_sink_push_bgr24_short_frame_is_dropped() {
+        // 1x2 は詰め物込みで 8 バイト要る
+        let frames = VideoFrames::new();
+        let mut sink = FrameSink::new(
+            &frames,
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::default(),
+        );
+
+        assert!(!sink.push_bgr24(1, 2, true, &[0, 0, 255, 0], Instant::now()));
+        assert!(frames.latest().is_none());
+    }
+
+    #[test]
+    fn frame_sink_push_mjpeg_broken_frame_is_dropped() {
+        let frames = VideoFrames::new();
+        let mut sink = FrameSink::new(
+            &frames,
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::default(),
+        );
+
+        assert!(!sink.push_mjpeg(2, 2, &[0xFF, 0xD8], Instant::now()));
+        assert!(frames.latest().is_none());
+    }
+
+    #[test]
+    fn frame_sink_push_mjpeg_decodes_and_stores_the_frame() {
+        let rgb = vec![200u8; 2 * 2 * 3];
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 100)
+            .encode(&rgb, 2, 2, image::ColorType::Rgb8)
+            .expect("JPEG にできる");
+        let frames = VideoFrames::new();
+        let mut sink = FrameSink::new(
+            &frames,
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::default(),
+        );
+
+        assert!(sink.push_mjpeg(2, 2, &jpeg, Instant::now()));
+
+        let frame = frames.latest().expect("積んだフレームが読める");
+        assert_eq!((frame.width, frame.height), (2, 2));
+        assert_eq!(frames.stats().source_format, Some("MJPEG"));
     }
 }

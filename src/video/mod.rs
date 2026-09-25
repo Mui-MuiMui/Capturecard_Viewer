@@ -7,12 +7,13 @@
 //! | ファイル | 役割 |
 //! |---|---|
 //! | `capture.rs` | nokhwa の開閉、フレームコールバック、途絶の観測 |
+//! | `directshow/` | DirectShow の映像デバイス（Media Foundation に出ない仮想カメラや古いキャプチャーボード）。列挙・対応形式・フィルターグラフ・自前のレンダラーフィルター |
 //! | `fake.rs` | 実機なしで動くフェイクの映像デバイス（テストパターンを吐く）。環境変数で有効にしたときだけ使う |
 //! | `test_pattern.rs` | フェイクが吐くテストパターン（カラーバー、ベタ塗り、フレーム番号の焼き込み）の描画 |
 //! | `frame_sink.rs` | フレームコールバックの本体（YUY2 → RGB、`FrameBuffer` へ積む、UI を起こす）。実機とフェイクで共有する |
 //! | `capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の問い合わせ |
 //! | `color.rs` | 係数表とその選択、映像調整の畳み込み、設定の共有 |
-//! | `convert.rs` | YUY2 → RGB24 の画素変換 |
+//! | `convert.rs` | YUY2 → RGB24 の画素変換と、DirectShow の RGB24 / MJPEG の展開 |
 //! | `frame_buffer.rs` | `FrameBuffer` と世代番号、観測値（`FrameStats`） |
 //!
 //! ここに置いてあるのは、どのファイルからも使う `VideoError` と
@@ -28,6 +29,7 @@ pub(crate) mod capabilities;
 mod capture;
 mod color;
 mod convert;
+mod directshow;
 mod fake;
 pub(crate) mod frame_buffer;
 mod frame_sink;
@@ -36,6 +38,10 @@ mod test_pattern;
 pub use capabilities::{DeviceCapabilities, VideoMode};
 pub use capture::{ActiveVideo, VideoCapture, VideoLinkState};
 pub use color::{SharedColorConversion, VideoAdjustments};
+pub use directshow::{
+    display_name as directshow_display_name, friendly_name as directshow_friendly_name,
+    DirectShowCapture,
+};
 pub use fake::{FakeVideoCapture, FakeVideoOptions};
 pub use frame_buffer::{FrameStats, VideoFrame, VideoFrames};
 
