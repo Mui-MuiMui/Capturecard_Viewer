@@ -1,4 +1,4 @@
-//! YUY2 → RGB24 の画素変換。
+//! YUY2 → RGB24 と、DirectShow の RGB24（BGR の並び）/ MJPEG → RGB24 の画素変換。
 //!
 //! 使う係数は `super::color` が決めた `ColorMatrix` を受け取るだけで、
 //! ここは変換のループだけを持つ。**フレームコールバックから毎フレーム
@@ -86,6 +86,86 @@ pub(super) fn yuy2_to_rgb_naive(
     // 変換しなかった領域は 0 で埋める。使い回した Vec では
     // 前フレームの画素が残っているため、埋めないと画面に出てしまう
     out[converted_len..].fill(0);
+}
+
+/// DirectShow の RGB24（`MEDIASUBTYPE_RGB24`）を、上から下へ並んだ RGB へ並べ替える。
+///
+/// DirectShow の RGB24 は Windows のビットマップと同じ並びで、**1 画素が
+/// B・G・R の順、各行は 4 バイト境界まで詰め物が入り、`bottom_up` なら
+/// 最終行から先に並ぶ。** 係数表は通らない（色空間・映像調整は効かない）。
+///
+/// `stride` は 1 行のバイト数（詰め物を含む）。`out` は `yuy2_to_rgb_naive` と
+/// 同じく使い回す前提で、`width * height * 3` バイトへリサイズして全域を書き切る。
+/// 入力が足りない行は 0 で埋める。
+pub(super) fn bgr24_to_rgb(
+    width: usize,
+    height: usize,
+    stride: usize,
+    bottom_up: bool,
+    src: &[u8],
+    out: &mut Vec<u8>,
+) {
+    let row_bytes = width * 3;
+    out.resize(row_bytes * height, 0);
+    if row_bytes == 0 {
+        return;
+    }
+    for (row, out_row) in out.chunks_exact_mut(row_bytes).enumerate() {
+        let src_row_index = if bottom_up { height - 1 - row } else { row };
+        let start = src_row_index * stride;
+        let Some(src_row) = src.get(start..start + row_bytes) else {
+            out_row.fill(0);
+            continue;
+        };
+        let (dst_pixels, _) = out_row.as_chunks_mut::<3>();
+        let (src_pixels, _) = src_row.as_chunks::<3>();
+        for (dst, bgr) in dst_pixels.iter_mut().zip(src_pixels) {
+            dst[0] = bgr[2];
+            dst[1] = bgr[1];
+            dst[2] = bgr[0];
+        }
+    }
+}
+
+/// MJPEG の 1 フレーム（JPEG 1 枚）を RGB24 へ展開する。
+///
+/// **`image` クレートの JPEG デコーダ（jpeg-decoder）を使い、nokhwa の
+/// デコーダ（mozjpeg）は使わない。** mozjpeg は壊れたデータを panic で知らせて
+/// 内部で `catch_unwind` するが、release ビルドは `panic = "abort"` なので
+/// そのままプロセスが落ちる（`docs/design/logging.md`）。キャプチャーの
+/// MJPEG は途中で欠けたフレームが混ざりうるので、エラーを値で返すほうを選ぶ。
+///
+/// `out` は `width * height * 3` バイトへリサイズして書き込む。デコーダの中では
+/// 作業用の確保が起きる（避けられない。MJPEG が「重い経路」である理由）。
+/// 大きさがメディアタイプと食い違う・カラーでない・壊れている場合は
+/// エラーの理由を返し、`out` の中身は不定。
+pub(super) fn mjpeg_to_rgb(
+    width: usize,
+    height: usize,
+    src: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    use image::codecs::jpeg::JpegDecoder;
+    use image::{ColorType, ImageDecoder};
+
+    let decoder = JpegDecoder::new(std::io::Cursor::new(src)).map_err(|e| e.to_string())?;
+    let (decoded_width, decoded_height) = decoder.dimensions();
+    if (decoded_width as usize, decoded_height as usize) != (width, height) {
+        return Err(format!(
+            "{}x{} のはずが {}x{}",
+            width, height, decoded_width, decoded_height
+        ));
+    }
+    if decoder.color_type() != ColorType::Rgb8 {
+        return Err(format!("{:?} は扱わない", decoder.color_type()));
+    }
+    out.resize(width * height * 3, 0);
+    decoder.read_image(out).map_err(|e| e.to_string())
+}
+
+/// RGB24 の 1 行のバイト数。Windows のビットマップと同じく 4 バイト境界へ揃える
+pub(super) fn bgr24_stride(width: usize) -> usize {
+    (width * 3 + 3) & !3
 }
 
 #[cfg(test)]
@@ -434,5 +514,84 @@ mod tests {
             "1080p YUY2->RGB {} frames: allocate={:.3} ms/frame, reuse={:.3} ms/frame, adjusted={:.3} ms/frame",
             FRAMES, allocating_ms, reusing_ms, adjusted_ms
         );
+    }
+
+    #[test]
+    fn bgr24_to_rgb_bottom_up_reverses_rows_and_swaps_channels() {
+        // 1x2。幅 1 なので 1 行 3 バイト + 詰め物 1 バイト = 4 バイト。
+        // 下の行（青）が先に並んでいる
+        let src = [255, 0, 0, 0, 0, 0, 255, 0];
+        let mut out = Vec::new();
+        bgr24_to_rgb(1, 2, 4, true, &src, &mut out);
+        // 上の行が赤、下の行が青
+        assert_eq!(out, vec![255, 0, 0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn bgr24_to_rgb_top_down_keeps_row_order() {
+        let src = [255, 0, 0, 0, 0, 0, 255, 0];
+        let mut out = Vec::new();
+        bgr24_to_rgb(1, 2, 4, false, &src, &mut out);
+        assert_eq!(out, vec![0, 0, 255, 255, 0, 0]);
+    }
+
+    #[test]
+    fn bgr24_to_rgb_short_input_fills_missing_rows_with_zero() {
+        // 2 行ぶん要るのに 1 行しか無い。使い回した Vec の前の画素を残さない
+        let src = [10, 20, 30, 0];
+        let mut out = vec![9; 6];
+        bgr24_to_rgb(1, 2, 4, false, &src, &mut out);
+        assert_eq!(out, vec![30, 20, 10, 0, 0, 0]);
+    }
+
+    #[test]
+    fn bgr24_to_rgb_zero_width_produces_empty_output() {
+        let mut out = vec![1, 2, 3];
+        bgr24_to_rgb(0, 2, 0, true, &[], &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn bgr24_stride_aligns_to_four_bytes() {
+        assert_eq!(bgr24_stride(1), 4);
+        assert_eq!(bgr24_stride(2), 8);
+        assert_eq!(bgr24_stride(4), 12);
+        assert_eq!(bgr24_stride(640), 1920);
+        assert_eq!(bgr24_stride(0), 0);
+    }
+
+    #[test]
+    fn mjpeg_to_rgb_decodes_a_small_jpeg() {
+        // 2x2 の単色（灰色）を image で JPEG にしてから展開する
+        let rgb = vec![128u8; 2 * 2 * 3];
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 100)
+            .encode(&rgb, 2, 2, image::ColorType::Rgb8)
+            .expect("JPEG にできる");
+
+        let mut out = Vec::new();
+        mjpeg_to_rgb(2, 2, &jpeg, &mut out).expect("展開できる");
+        assert_eq!(out.len(), 12);
+        // 非可逆なので 128 ちょうどとは限らない
+        assert!(out.iter().all(|v| v.abs_diff(128) <= 2), "{out:?}");
+    }
+
+    #[test]
+    fn mjpeg_to_rgb_size_mismatch_is_an_error() {
+        let rgb = vec![0u8; 2 * 2 * 3];
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(&rgb, 2, 2, image::ColorType::Rgb8)
+            .expect("JPEG にできる");
+        let mut out = Vec::new();
+        assert!(mjpeg_to_rgb(4, 4, &jpeg, &mut out).is_err());
+    }
+
+    #[test]
+    fn mjpeg_to_rgb_broken_data_is_an_error_not_a_panic() {
+        // release は panic = "abort" なので、壊れたデータは値で返ること
+        let mut out = Vec::new();
+        assert!(mjpeg_to_rgb(2, 2, &[0xFF, 0xD8, 0x00, 0x01], &mut out).is_err());
+        assert!(mjpeg_to_rgb(2, 2, &[], &mut out).is_err());
     }
 }

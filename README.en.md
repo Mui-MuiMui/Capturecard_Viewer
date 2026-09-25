@@ -9,6 +9,7 @@ A viewer for displaying video and audio from a capture card. For Windows 10/11.
 - This application displays video and audio from a capture card (capture board) with low latency, good image quality, and a minimal interface.
 - Recent capture cards (as of 2025) should work, but older ones may not. The author has no way to verify this, as those devices are not available for testing.
   - More precisely, it should work with any device that Windows recognizes as a webcam.
+  - Devices that only support DirectShow (such as the OBS Virtual Camera) also work. They appear in the device list with "(DirectShow)" appended to their name.
 - The interface is available in English and Japanese. By default it follows the Windows display language (see "Language").
 - AI is used in parts of this project's development. If you would rather not use software developed this way, please do not use it.
 
@@ -278,11 +279,17 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
   - **No device connected (trying to reconnect)** — the device itself is gone. Check the USB connection.
 - This behaviour can be turned off with Right-click → "Reconnect devices automatically". Even when it is off, a stale frame is never left on screen; only the reopening is skipped.
 
+**DirectShow devices**
+
+- Devices whose name ends with "(DirectShow)" are ones that Media Foundation does not list (the OBS Virtual Camera, older capture cards and so on). A device that appears in both Media Foundation and DirectShow is listed only once, as the Media Foundation device.
+- The accepted formats are YUY2, MJPEG and RGB24. A device that only outputs other formats, such as NV12, shows no video.
+- Colour space, colour range and brightness / contrast / saturation only take effect with YUY2 (not with MJPEG or RGB24).
+
 **Settings that are not yet implemented**
 
 Some options can be changed in the settings window but have no effect yet. These are tracked as known issues.
 
-- Selecting MJPEG or RGB24 as the video format (YUY2 is always used internally)
+- Selecting MJPEG or RGB24 as the video format for a device without "(DirectShow)" in its name (YUY2 is always used internally). DirectShow devices are opened in the selected format.
 
 ## Reporting problems
 

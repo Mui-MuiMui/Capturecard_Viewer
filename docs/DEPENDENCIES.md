@@ -64,6 +64,8 @@
 | `serde` | 1.0 | 1.x | 追随 | 設定のシリアライズ |
 | `chrono` | 0.4 | 0.4.x | 追随 | スクリーンショットのタイムスタンプ |
 | `winapi` | 0.3 | 0.3.x | 後述 | Windows API |
+| `windows` | 0.62 | 0.62.2 | 追随 | DirectShow のバックエンド（`src/video/directshow/`） |
+| `windows-core` | 0.62 | 0.100.0 | 後述 | 同上。`#[implement]` が生成するコードの参照先 |
 | `tempfile`（dev） | 3.27 | 3.27.x | 追随 | テストで一時ディレクトリに設定ファイルを書く |
 | `toml`（dev） | 1.1 | 1.1.x | 追随 | テストで設定の TOML を直接組み立てて読ませる |
 
@@ -160,6 +162,12 @@ flowchart TD
 `nokhwa` 0.10 → 0.10.11 はパッチ更新のみ。API の互換性は保たれているはず。
 
 ただし **Media Foundation まわりの挙動が変わる可能性があるため、実機確認が必須。** 現在「MJPEG / RGB24 を選んでも YUYV に差し替わる」という回避策が入っているが、これが必要だった理由は記録されていない。更新後に改めて検証する価値がある。
+
+### `windows` / `windows-core` は nokhwa と同じ版にそろえる
+
+DirectShow のバックエンド（#143）は、`winapi` に無い DirectShow のインターフェース（`IBaseFilter` / `IPin` / `IMemInputPin` / `ICaptureGraphBuilder2` / `IAMStreamConfig` など）と、自前のレンダラーフィルターを書くための `#[implement]` マクロが要るので `windows` を使う。**`nokhwa-bindings-windows` が `windows` 0.62 を既に使っているので、クレートは増えない**（増えるのは `Win32_Graphics_Gdi` / `Win32_System_Com_StructuredStorage` / `Win32_System_Ole` / `Win32_System_Variant` のフィーチャの分だけ）。`THIRD-PARTY-LICENSES.txt` も変わらない。
+
+`windows-core` を別に書いているのは、`#[implement]` が展開するコードが `::windows_core` を直接参照するため。**`windows-core` は `windows` と同じ 0.62 に固定する。** crates.io の最新（0.100 系）へ上げると、`windows` 0.62 が使う `windows-core` 0.62 と別のクレートになり、`#[implement]` で書いた型が `windows` のインターフェースの trait を満たさなくなる。上げるときは `windows` と `nokhwa` の側がそろって上がるのを待つ。
 
 ### 別軸 — `winapi` の扱い
 

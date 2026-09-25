@@ -8,7 +8,7 @@
 
 キャプチャーデバイス → nokhwa `Buffer` → フレームコールバックで YUY2→RGB 変換 → `FrameBuffer` → `update_video_texture` で egui テクスチャ化 → 描画
 
-フレームコールバックの本体（YUY2→RGB 変換、`FrameBuffer` への格納、`RepaintWaker` で UI を起こす）は `video/frame_sink.rs` の `FrameSink` にある。nokhwa のコールバックは `Buffer` から幅・高さ・バイト列を取り出して渡すだけで、フェイクの映像デバイス（`video/fake.rs`）も同じ `FrameSink` を通る。
+フレームコールバックの本体（YUY2→RGB 変換、`FrameBuffer` への格納、`RepaintWaker` で UI を起こす）は `video/frame_sink.rs` の `FrameSink` にある。nokhwa のコールバックは `Buffer` から幅・高さ・バイト列を取り出して渡すだけで、フェイクの映像デバイス（`video/fake.rs`）と DirectShow のデバイス（`video/directshow/`、自前のレンダラーの `Receive`）も同じ `FrameSink` を通る。DirectShow の経路だけは RGB24（`push_bgr24`）と MJPEG（`push_mjpeg`）も受ける。どちらも係数表を通らないので、色空間・レンジ・映像調整は効かない（`docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」）。
 
 `FrameBuffer` はフレームを `Arc<VideoFrame>` で保持し、取り出し側へは `Arc` の複製を渡す。**画素データを複製しないので、取り出しても 1080p で 6MB の memcpy は発生しない。**
 
@@ -44,6 +44,6 @@ eframe は **`update()` の中で要求された再描画しか予約しない�
 
 以下は設定画面から変更できるが実装が追いついていない。README の記述もこれらを前提に書かれているため、修正時は README も合わせて更新すること。
 
-- ビデオフォーマットの MJPEG / RGB24（内部で YUYV に強制される）
+- ビデオフォーマットの MJPEG / RGB24（Media Foundation の経路では内部で YUYV に強制される。DirectShow の経路〈「(DirectShow)」のデバイス〉では選んだ形式で開く）
 
 オーディオのサンプリングレート／チャンネル数は `select_best_config` でストリームに反映され、**選択肢も入出力デバイスの対応設定から生成している**（`audio::selectable_sample_rates` / `selectable_channels`）。デバイスの能力を取得できなかった場合だけ固定の既定一覧へ倒すので、そのときは対応しない値も選べる。

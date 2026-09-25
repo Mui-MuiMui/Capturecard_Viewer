@@ -47,6 +47,23 @@ embed-resource = "2.4"
 # ホットキーの押下を低レベルキーボードフックで観測する（src/keyboard_hook.rs）。
 # libloaderapi / processthreadsapi / winbase はフックの登録とメッセージの待ち受けに使う
 winapi = { version = "0.3", features = ["minwindef", "winuser", "windef", "libloaderapi", "processthreadsapi", "winbase", "winnls"] }
+# DirectShow のバックエンド（src/video/directshow/）。winapi には DirectShow の
+# インターフェースが無いため使う。nokhwa（nokhwa-bindings-windows）が同じ版を
+# 既に使っているので、クレートは増えない。増えるのは下のフィーチャの分だけ
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media",
+    "Win32_Media_DirectShow",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
+# 自前のレンダラーフィルターを `#[implement]` で書く。マクロが生成するコードは
+# `windows_core` を直接参照するので、`windows` とは別に依存へ入れる
+windows-core = "0.62"
 
 [[bin]]
 name = "capturecard_viewer"
