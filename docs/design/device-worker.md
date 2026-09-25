@@ -136,16 +136,17 @@ flowchart LR
 | 形式 | `FrameSink` の受け口 | 色空間・映像調整 | 変換先の確保 |
 |---|---|---|---|
 | YUY2 | `push_yuy2`（nokhwa の経路と同じ高速パス） | 効く | 使い回す |
+| NV12 / I420 | `push_yuv420`（YUY2 と同じ係数表。IYUV は I420 として受ける。#228） | 効く | 使い回す |
 | RGB24 | `push_bgr24`（B・G・R を R・G・B へ、ボトムアップなら行を逆順に） | 効かない | 使い回す |
 | MJPEG | `push_mjpeg`（`convert::mjpeg_to_rgb`） | 効かない | 展開先は使い回すが、デコーダの内部で確保が起きる |
 
 **MJPEG の展開に nokhwa のデコーダ（mozjpeg）は使わない。** mozjpeg は壊れたデータを panic で知らせて内部で `catch_unwind` するが、release は `panic = "abort"` なので（`docs/design/logging.md`）そのままプロセスが落ちる。キャプチャーの MJPEG は途中で欠けたフレームが混ざりうるので、エラーを値で返す `image` クレートの JPEG デコーダを使い、壊れたフレームは捨てて初回だけ記録する。
 
-開く形式の選び方（`choose_candidate`）は、指定された形式がデバイスにあればその形式の中から、解像度が一致するもの → 画素数が近いもの → 形式が未指定なら YUY2・MJPEG・RGB24 の順 → fps が近いもの。解像度が未指定なら Media Foundation の経路と同じく 1280x720 60fps を求め、fps は 15〜120 へ丸める。**Media Foundation の経路と違い、MJPEG / RGB24 を選べばその形式で開く**（`docs/design/video-pipeline.md` の「UI にあるが動作していない設定がある」）。
+開く形式の選び方（`choose_candidate`）は、指定された形式がデバイスにあればその形式の中から、解像度が一致するもの → 画素数が近いもの → 形式が未指定なら YUY2・NV12・I420・MJPEG・RGB24 の順 → fps が近いもの。解像度が未指定なら Media Foundation の経路と同じく 1280x720 60fps を求め、fps は 15〜120 へ丸める。**Media Foundation の経路と違い、MJPEG / RGB24 を選べばその形式で開く**（`docs/design/video-pipeline.md` の「UI にあるが動作していない設定がある」）。
 
 #### DirectShow では確かめていないもの
 
-手元で確かめたのは OBS の仮想カメラ（YUY2 / NV12 / I420 を出し、受け取れるのは YUY2 だけ）だけ。**DirectShow 専用の実機のキャプチャーボード、MJPEG / RGB24 を出すデバイス、途中で形式が変わるデバイス、変換フィルターが間に入る組み合わせは試していない。** 抜き差しの検出はフレームの途絶（3 秒）に任せていて、DirectShow のイベント（`EC_DEVICE_LOST`）は見ていない。
+手元で確かめたのは OBS の仮想カメラ（YUY2 / NV12 / I420 を出す。#143 の時点で受け取れたのは YUY2 だけ）だけ。**NV12 / I420 の受け口（#228）は実機では未確認。DirectShow 専用の実機のキャプチャーボード、MJPEG / RGB24 を出すデバイス、途中で形式が変わるデバイス、変換フィルターが間に入る組み合わせは試していない。** 抜き差しの検出はフレームの途絶（3 秒）に任せていて、DirectShow のイベント（`EC_DEVICE_LOST`）は見ていない。
 
 ### フェイクデバイス（#142）
 
