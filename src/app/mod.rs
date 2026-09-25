@@ -14,6 +14,7 @@ mod menu;
 mod monitor;
 mod retry;
 mod screenshot;
+mod screenshot_sound;
 mod settings_dialog;
 mod settings_store;
 mod view;
@@ -25,6 +26,7 @@ mod worker_timers;
 
 use self::menu::MenuLayout;
 use self::screenshot::ScreenshotResult;
+use self::screenshot_sound::SoundLoadResult;
 use self::window::needs_drag_move_guard;
 use self::worker::{DeviceSnapshot, DeviceWorker};
 use crate::audio::AudioControls;
@@ -81,6 +83,10 @@ pub struct CaptureCardViewer {
     // 能力取得と同じく、UI スレッドが update() で try_recv するだけにする
     screenshot_tx: Sender<ScreenshotResult>,
     screenshot_rx: Receiver<ScreenshotResult>,
+    // 効果音ファイルの読み込み結果を受け取るチャネル。適用とテスト再生の両方。
+    // 読み込みも別スレッドで行うため、保存結果と同じ形で受け取る
+    sound_load_tx: Sender<SoundLoadResult>,
+    sound_load_rx: Receiver<SoundLoadResult>,
 
     // 発生源ごとの直近の失敗。トーストの間引きもここが判断する
     errors: ErrorCenter,
@@ -171,6 +177,9 @@ pub struct CaptureCardViewer {
     // このスレッドが行う。
     // 終了時に join して、書き出し途中の画像ファイルが残らないようにする
     screenshot_save_threads: Vec<JoinHandle<()>>,
+    // 進行中の効果音ファイルの読み込みスレッド。デバイスには触らないが、
+    // 保存スレッドと同じく切り離さず、終了時に join する
+    sound_load_threads: Vec<JoinHandle<()>>,
 }
 
 impl Default for CaptureCardViewer {
@@ -192,6 +201,7 @@ impl Default for CaptureCardViewer {
 
         let screenshot_manager = Arc::new(Mutex::new(ScreenshotManager::new()));
         let (screenshot_tx, screenshot_rx) = std::sync::mpsc::channel();
+        let (sound_load_tx, sound_load_rx) = std::sync::mpsc::channel();
 
         // デバイスに触るものは、すべてワーカースレッドの中で作る。
         // ここから渡すのは UI スレッドとも共有する 3 つだけ
@@ -219,6 +229,8 @@ impl Default for CaptureCardViewer {
             repaint_waker,
             screenshot_tx,
             screenshot_rx,
+            sound_load_tx,
+            sound_load_rx,
             errors: ErrorCenter::default(),
             last_screenshot_outcome_at: None,
             show_settings: false,
@@ -259,6 +271,7 @@ impl Default for CaptureCardViewer {
             borderless: false,
 
             screenshot_save_threads: Vec::new(),
+            sound_load_threads: Vec::new(),
         };
 
         // 最小化中のホットキーは UI スレッドを通せないので、リスナーから
@@ -365,6 +378,8 @@ impl eframe::App for CaptureCardViewer {
         // 別スレッドで行ったスクリーンショットの保存結果を取り込む。
         // 失敗はここでトーストになる
         self.drain_screenshot_results();
+        // 別スレッドで読み込んだ効果音を取り込む。テスト再生はここで鳴る
+        self.drain_sound_load_results();
 
         // 起動直後に 1 度だけ行う処理。
         //
@@ -706,6 +721,8 @@ impl eframe::App for CaptureCardViewer {
         // ここで待たないと、main が返った時点でプロセスごと落ちて
         // 書きかけの画像ファイルがディスクに残る
         self.join_screenshot_save_threads();
+        // 効果音の読み込みも切り離さずに待つ。結果は使わない
+        self.join_sound_load_threads();
 
         // 終了中に終わった保存の結果をログへ残す。**待ったあとに読むこと。**
         // 画面はもう出ないので通知はされないが、閉じる直前に撮った 1 枚が

@@ -6,7 +6,6 @@
 
 use super::CaptureCardViewer;
 use crate::overlay::OverlayContent;
-use crate::screenshot;
 use crate::settings;
 use crate::status::{self, ErrorSource};
 use crate::ui;
@@ -205,10 +204,11 @@ impl CaptureCardViewer {
     /// 値で鳴らす。ファイルを選び直したりスライダーを動かしたりした結果を、
     /// 「適用」の前にその場で確かめられるようにするため（Issue #204）。
     ///
-    /// **適用済みの `ScreenshotManager` は触らない。** 読み込みは
-    /// `screenshot::load_sound_data` で行い、撮影時に鳴る音は「適用」か
-    /// 「OK」まで差し替わらない。解決の仕方は撮影時と同じで、既定値のパスは
-    /// 内蔵音へ倒れる。ファイルが読めなければ内蔵音で鳴らし、理由をトーストへ出す
+    /// **適用済みの効果音は差し替えない。** 読み込みは別スレッドで
+    /// `screenshot::load_sound_data` を通して行い（`request_test_sound`）、
+    /// 撮影時に鳴る音は「適用」か「OK」まで差し替わらない。解決の仕方は撮影時と
+    /// 同じで、既定値のパスは内蔵音へ倒れる。ファイルが読めなければ内蔵音で
+    /// 鳴らし、理由をトーストへ出す
     fn play_test_sound(&mut self, sound_file: &Path) {
         // この操作が返るのはダイアログを描画しているときだけなので、ドラフトは必ずある
         let Some(volume) = self
@@ -219,12 +219,8 @@ impl CaptureCardViewer {
             return;
         };
 
-        let (sound_data, error) = screenshot::load_sound_data(sound_file);
-        if let Some(error) = error {
-            warn!("テスト再生で効果音を読み込めない: {}", error);
-            self.report_error(ErrorSource::Screenshot, error.to_string());
-        }
-        screenshot::play_sound_data(sound_data, volume);
+        // 読み込みは別スレッドで行い、届いたら鳴らす（app::screenshot_sound）
+        self.request_test_sound(sound_file, volume);
     }
 
     /// 設定ダイアログの「設定を書き出す」。
