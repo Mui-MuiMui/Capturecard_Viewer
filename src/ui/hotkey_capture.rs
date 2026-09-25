@@ -5,6 +5,7 @@
 //! （`docs/design/hotkeys.md`）。
 
 use crate::hotkey::HotkeyAction;
+use crate::i18n::{self, Text};
 use eframe::egui;
 use std::collections::BTreeMap;
 
@@ -279,11 +280,10 @@ pub fn show_hotkey_capture_dialog(
     // `Rejected` を返しただけでは `rejection` に入るのは次のフレーム。
     // キーを押したまま次の再描画が来ないと、理由が一度も出ないことがある
     let judged_rejection = match &judgement {
-        HotkeyCaptureJudgement::ModifiersOnly => Some("修飾キーだけでは登録できません".to_string()),
-        HotkeyCaptureJudgement::Duplicate { other, .. } => Some(format!(
-            "同じキーが「{}」に割り当てられています",
-            other.label()
-        )),
+        HotkeyCaptureJudgement::ModifiersOnly => Some(Text::HotkeyModifiersOnly.get().to_string()),
+        HotkeyCaptureJudgement::Duplicate { other, .. } => {
+            Some(i18n::hotkey_duplicate_assignment(other.label()))
+        }
         // 待機中でもここでは理由を消さない。呼び出し側（app/mod.rs）が
         // `HotkeyManager::try_register` の失敗理由をこのフレームより後で
         // `set_rejection` することがあり、ここで無条件に消すと次のフレームの
@@ -311,7 +311,7 @@ pub fn show_hotkey_capture_dialog(
     let max_size = (screen_rect.size() - egui::Vec2::splat(SETTINGS_WINDOW_SCREEN_MARGIN))
         .max(HOTKEY_CAPTURE_DIALOG_MIN_SIZE);
 
-    egui::Window::new("ホットキー設定")
+    egui::Window::new(Text::HotkeySettings.get())
         .open(&mut window_open)
         .default_size([360.0, 180.0])
         .collapsible(false)
@@ -326,7 +326,7 @@ pub fn show_hotkey_capture_dialog(
             egui::TopBottomPanel::bottom("hotkey_capture_dialog_buttons").show_inside(ui, |ui| {
                 ui.add_space(4.0);
                 ui.vertical_centered(|ui| {
-                    if ui.button("キャンセル").clicked() {
+                    if ui.button(Text::ButtonCancel.get()).clicked() {
                         events.push(HotkeyDialogEvent::Cancelled);
                         close_dialog = true;
                     }
@@ -338,20 +338,21 @@ pub fn show_hotkey_capture_dialog(
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.heading(format!("ホットキー設定: {}", action.label()));
+                        ui.heading(i18n::hotkey_capture_heading(action.label()));
                         ui.add_space(10.0);
 
                         // 受け付けている最中であることを示すバッジ。失敗ではないので
                         // 注意ではなく、進行中を表す種別で出す
                         status_badge(
                             ui,
-                            &format!("{} キー入力待機中...", NoticeKind::Success.symbol()),
+                            &format!(
+                                "{} {}",
+                                NoticeKind::Success.symbol(),
+                                Text::HotkeyCaptureWaiting.get()
+                            ),
                             NoticeKind::Success,
                         );
-                        ui.label(format!(
-                            "「{}」に割り当てるキーの組み合わせを押してください",
-                            action.label()
-                        ));
+                        ui.label(i18n::hotkey_capture_prompt(action.label()));
 
                         if let Some(reason) = shown_rejection {
                             ui.add_space(10.0);

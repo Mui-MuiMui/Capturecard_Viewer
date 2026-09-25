@@ -5,6 +5,7 @@
 //! フルスクリーン切替）は `super::window`、右クリックメニューは `super::menu`。
 
 use super::CaptureCardViewer;
+use crate::i18n::{self, Text};
 use crate::status::{self, ErrorSource};
 use crate::video::FrameStats;
 use eframe::egui;
@@ -16,11 +17,12 @@ use log::warn;
 /// ユーザーの取るべき行動が違う（入力機器の電源を見るのか、ケーブルを挿し直すのか）
 /// ため、同じ文言にしない。
 fn video_placeholder_message(capturing: bool, reconnecting: bool) -> &'static str {
-    match (capturing, reconnecting) {
-        (true, _) => "映像信号がありません",
-        (false, true) => "デバイスが接続されていません（再接続を試しています）",
-        (false, false) => "デバイスが接続されていません",
-    }
+    let text = match (capturing, reconnecting) {
+        (true, _) => Text::PlaceholderNoSignal,
+        (false, true) => Text::PlaceholderReconnecting,
+        (false, false) => Text::PlaceholderDisconnected,
+    };
+    text.get()
 }
 
 /// 映像が出ていないときに画面へ出す文言を、理由の 1 行を添えて組み立てる。
@@ -53,36 +55,39 @@ fn format_stats_lines(stats: &FrameStats, audio_underruns: Option<u32>) -> Vec<S
 
     match stats.intervals {
         Some(intervals) => {
-            lines.push(format!(
-                "FPS {:.1} (平均間隔 {:.1}ms / {} 件)",
-                intervals.fps, intervals.average_ms, intervals.samples
+            lines.push(i18n::stats_fps(
+                intervals.fps,
+                intervals.average_ms,
+                intervals.samples,
             ));
-            lines.push(format!(
-                "ばらつき ±{:.2}ms (最小 {:.1} / 最大 {:.1})",
-                intervals.stddev_ms, intervals.min_ms, intervals.max_ms
+            lines.push(i18n::stats_jitter(
+                intervals.stddev_ms,
+                intervals.min_ms,
+                intervals.max_ms,
             ));
         }
-        None => lines.push("FPS - (フレーム間隔の計測待ち)".to_string()),
+        None => lines.push(Text::StatsFpsPending.get().to_string()),
     }
 
     match (stats.resolution, stats.source_format) {
         (Some((width, height)), Some(format)) => {
             // フレームが 1 枚でも届いていれば、変換の計測値は実測値
-            lines.push(format!(
-                "デコード {:.2}ms (高速 {} / 汎用 {})",
-                stats.last_decode_ms, stats.fast_count, stats.fallback_count
+            lines.push(i18n::stats_decode(
+                stats.last_decode_ms,
+                stats.fast_count,
+                stats.fallback_count,
             ));
             lines.push(format!("{}x{} {}", width, height, format));
         }
         _ => {
             // 計測前の 0 を実測値と読み違えられないようにする
-            lines.push("デコード -".to_string());
-            lines.push("映像フレームなし".to_string());
+            lines.push(Text::StatsDecodeUnknown.get().to_string());
+            lines.push(Text::StatsNoFrame.get().to_string());
         }
     }
 
     if let Some(elapsed_ms) = stats.since_last_frame_ms {
-        lines.push(format!("最終フレーム {:.0}ms 前", elapsed_ms));
+        lines.push(i18n::stats_since_last_frame(elapsed_ms));
     }
 
     // 文言は「接続状態」タブと共通（`status::format_underrun_count`）

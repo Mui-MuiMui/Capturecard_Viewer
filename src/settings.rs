@@ -1,4 +1,5 @@
 use crate::hotkey::HotkeyAction;
+use crate::i18n::{self, Text};
 use chrono::Datelike;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 /// 読み書き（`AppSettings::load` / `save`）は成否を `bool` で扱い、理由は
 /// ログにしか出していないのでここを通らない。
 ///
-/// **表示用の日本語はこの型の `Display` が持つ。** 定型文
+/// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
 /// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事
 /// （`docs/design/error-reporting.md`）。文言に「設定ファイル」を付けないのは、
 /// 定型文が既に「設定ファイルを読み書きできません」で始まるため。
@@ -30,20 +31,17 @@ pub enum SettingsError {
 
 impl fmt::Display for SettingsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SettingsError::FileNotFound(path) => {
-                write!(f, "{} が見つからない", path.display())
-            }
-            SettingsError::NotAFile(path) => {
-                write!(f, "{} はファイルではない", path.display())
-            }
+        let text = match self {
+            SettingsError::FileNotFound(path) => i18n::settings_file_not_found(path.display()),
+            SettingsError::NotAFile(path) => i18n::settings_not_a_file(path.display()),
             SettingsError::ExportFailed { path, source } => {
-                write!(f, "{} へ書き出せない: {source}", path.display())
+                i18n::file_write_failed(path.display(), source)
             }
             SettingsError::ImportFailed { path, source } => {
-                write!(f, "{} を読み込めない: {source}", path.display())
+                i18n::settings_import_failed(path.display(), source)
             }
-        }
+        };
+        f.write_str(&text)
     }
 }
 
@@ -324,8 +322,8 @@ impl PresetNameError {
     // 設定ダイアログに出す文言。
     pub fn message(self) -> &'static str {
         match self {
-            PresetNameError::Empty => "プリセット名を入力してください",
-            PresetNameError::Duplicate => "同じ名前のプリセットが既にあります",
+            PresetNameError::Empty => Text::PresetNameEmpty.get(),
+            PresetNameError::Duplicate => Text::PresetNameDuplicate.get(),
         }
     }
 }
@@ -444,9 +442,9 @@ impl ColorSpace {
     // 設定ダイアログのコンボボックスに出す表示名
     pub fn label(self) -> &'static str {
         match self {
-            ColorSpace::Auto => "自動（解像度から判断）",
-            ColorSpace::Bt601 => "BT.601（SD）",
-            ColorSpace::Bt709 => "BT.709（HD）",
+            ColorSpace::Auto => Text::ColorSpaceAuto.get(),
+            ColorSpace::Bt601 => Text::ColorSpaceBt601.get(),
+            ColorSpace::Bt709 => Text::ColorSpaceBt709.get(),
         }
     }
 
@@ -470,8 +468,8 @@ impl ColorRange {
     // 設定ダイアログのコンボボックスに出す表示名
     pub fn label(self) -> &'static str {
         match self {
-            ColorRange::Limited => "リミテッド（16〜235）",
-            ColorRange::Full => "フル（0〜255）",
+            ColorRange::Limited => Text::ColorRangeLimited.get(),
+            ColorRange::Full => Text::ColorRangeFull.get(),
         }
     }
 

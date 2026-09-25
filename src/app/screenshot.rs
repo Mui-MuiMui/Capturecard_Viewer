@@ -6,6 +6,7 @@
 //! 効果音ファイルの読み込みは `app::screenshot_sound` の担当。
 
 use super::CaptureCardViewer;
+use crate::i18n::{self, Text};
 use crate::screenshot;
 use crate::settings::ScreenshotEncoding;
 use crate::status::ErrorSource;
@@ -60,12 +61,9 @@ fn summarize_screenshot_delivery(
     };
 
     let succeeded = match (copied, &saved_to) {
-        (true, Some(path)) => Some(format!(
-            "クリップボードへコピーし、{} へ保存した",
-            path.display()
-        )),
-        (true, None) => Some("クリップボードへコピーした".to_string()),
-        (false, Some(path)) => Some(format!("{} へ保存した", path.display())),
+        (true, Some(path)) => Some(i18n::screenshot_copied_and_saved(path.display())),
+        (true, None) => Some(Text::ScreenshotCopied.get().to_string()),
+        (false, Some(path)) => Some(i18n::screenshot_saved(path.display())),
         (false, None) => None,
     };
 
@@ -78,14 +76,14 @@ fn summarize_screenshot_delivery(
         // 片方だけ失敗した場合に、成功したほうを黙って捨てない。
         // 「クリップボードには入っているのか」が分からないと次の操作を選べない
         if let Some(done) = succeeded {
-            reason = format!("{}（{}）", reason, done);
+            reason = i18n::screenshot_partially_failed(reason, done);
         }
         return Err(reason);
     }
 
     // 出力先の enum が必ずどちらかを含むので通常は起きない。
     // 黙って成功にすると、何も出力していないのに撮れたように見える
-    succeeded.ok_or_else(|| "出力先が 1 つも設定されていません".to_string())
+    succeeded.ok_or_else(|| Text::ScreenshotNoDestination.get().to_string())
 }
 
 /// 届いた結果を画面の記録へ反映してよいかを判定する。
@@ -123,44 +121,27 @@ fn save_frame(
     // 大きさのないフレームは画像として書き出せてしまうが、開けない
     // ファイルが残るだけなので、ディレクトリを作る前に弾く
     if frame.width == 0 || frame.height == 0 {
-        return Err(format!(
-            "大きさのない映像フレームは保存できない: {}x{}",
-            frame.width, frame.height
-        ));
+        return Err(i18n::screenshot_save_empty_frame(frame.width, frame.height));
     }
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "保存先のディレクトリ {} を作成できない: {}",
-                parent.display(),
-                e
-            )
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| i18n::screenshot_create_dir_failed(parent.display(), e))?;
     }
 
     let (Ok(width), Ok(height)) = (u32::try_from(frame.width), u32::try_from(frame.height)) else {
-        return Err(format!(
-            "画像として扱えない大きさのフレーム: {}x{}",
-            frame.width, frame.height
-        ));
+        return Err(i18n::screenshot_frame_too_large(frame.width, frame.height));
     };
 
     // image クレートが Vec の所有権を要求するため、ここだけは複製が要る。
     // UI スレッドの外なので、1080p で 6MB の複製が描画を止めることはない
-    let img = image::RgbImage::from_raw(width, height, frame.data.clone()).ok_or_else(|| {
-        format!(
-            "映像フレームから画像を組み立てられない: {}x{} に対して {} バイト",
-            width,
-            height,
-            frame.data.len()
-        )
-    })?;
+    let img = image::RgbImage::from_raw(width, height, frame.data.clone())
+        .ok_or_else(|| i18n::screenshot_image_build_failed(width, height, frame.data.len()))?;
 
     // image の save() は拡張子から形式を決めるうえ、JPEG は品質 75 固定に
     // なるため使わない。形式は encoding で決め、書き出し先は自分で開く
-    let file = std::fs::File::create(path)
-        .map_err(|e| format!("{} を作成できない: {}", path.display(), e))?;
+    let file =
+        std::fs::File::create(path).map_err(|e| i18n::file_create_failed(path.display(), e))?;
     let mut writer = std::io::BufWriter::new(file);
 
     let encoded = match encoding {
@@ -175,15 +156,15 @@ fn save_frame(
     // BufWriter は drop のときにも書き出すが、そこで起きた失敗は捨てられる。
     // 取りこぼすと、書き切れていないファイルを保存できたものとして扱ってしまう
     let result = encoded
-        .map_err(|e| format!("{} へ書き出せない: {}", path.display(), e))
+        .map_err(|e| i18n::file_write_failed(path.display(), e))
         .and_then(|()| {
             writer
                 .into_inner()
-                .map_err(|e| format!("{} へ書き出せない: {}", path.display(), e))
+                .map_err(|e| i18n::file_write_failed(path.display(), e))
         })
         .and_then(|file| {
             file.sync_all()
-                .map_err(|e| format!("{} を書き切れない: {}", path.display(), e))
+                .map_err(|e| i18n::file_flush_failed(path.display(), e))
         });
 
     if result.is_err() {
@@ -253,7 +234,10 @@ impl CaptureCardViewer {
             // ホットキーを押しても何も起きないように見えるので画面にも出す。
             // 非同期の結果と同じ経路を通して、先に始めた保存の結果に
             // 追い越されないようにする
-            self.apply_screenshot_outcome(started_at, Err("表示中の映像がありません".to_string()));
+            self.apply_screenshot_outcome(
+                started_at,
+                Err(Text::ScreenshotNoFrame.get().to_string()),
+            );
             return;
         };
         debug!(

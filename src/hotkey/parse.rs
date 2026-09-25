@@ -1,4 +1,5 @@
 use super::HotkeyAction;
+use crate::i18n::{self, Text};
 use crate::keyboard_hook::{KeyChord, KeyboardHookError, Modifiers};
 use eframe::egui;
 use std::collections::HashMap;
@@ -10,7 +11,7 @@ use std::fmt;
 /// 1 つの enum にまとめてある。どちらも `ErrorSource::Hotkey` として同じ経路で
 /// 表示され、呼び出し側は「どの段で失敗したか」で処理を分けないため。
 ///
-/// **表示用の日本語はこの型の `Display` が持つ。** 定型文
+/// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
 /// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事
 /// （`docs/design/error-reporting.md`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,17 +30,16 @@ pub enum HotkeyError {
 
 impl fmt::Display for HotkeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HotkeyError::MultipleKeys => write!(f, "通常キーを 2 つ以上は指定できません"),
-            HotkeyError::MissingKey => write!(f, "通常キーが指定されていません"),
-            HotkeyError::UnsupportedKey(key) => write!(f, "未対応のキー: {key}"),
+        let text = match self {
+            HotkeyError::MultipleKeys => Text::HotkeyMultipleKeys.get().to_string(),
+            HotkeyError::MissingKey => Text::HotkeyMissingKey.get().to_string(),
+            HotkeyError::UnsupportedKey(key) => i18n::hotkey_unsupported_key(key),
             HotkeyError::DuplicateAssignment { other } => {
-                write!(f, "同じキーが「{}」に割り当てられています", other.label())
+                i18n::hotkey_duplicate_assignment(other.label())
             }
-            HotkeyError::HookUnavailable(source) => {
-                write!(f, "ホットキーの仕組みを初期化できません: {source}")
-            }
-        }
+            HotkeyError::HookUnavailable(source) => i18n::hotkey_hook_unavailable(source),
+        };
+        f.write_str(&text)
     }
 }
 

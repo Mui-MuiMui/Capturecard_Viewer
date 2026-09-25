@@ -42,6 +42,8 @@ pub use frame_buffer::{FrameStats, VideoFrame, VideoFrames};
 use std::fmt;
 use std::time::Instant;
 
+use crate::i18n::{self, Text};
+
 /// 映像デバイスの操作が失敗した理由。
 ///
 /// **文字列ではなく種別で返す。** 呼び出し側（`app::worker_connect`）が
@@ -49,7 +51,7 @@ use std::time::Instant;
 /// ため。下位のエラーは `nokhwa` の型をそのまま持ち回すと公開 API に
 /// nokhwa が漏れるので、文字列に落として持たせる。
 ///
-/// **表示用の日本語はこの型の `Display` が持つ。** 定型文
+/// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
 /// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VideoError {
@@ -67,24 +69,18 @@ pub enum VideoError {
 
 impl fmt::Display for VideoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            VideoError::DeviceQueryFailed(source) => {
-                write!(f, "映像デバイスを列挙できない: {source}")
-            }
-            VideoError::DeviceNotFound(name) => {
-                write!(f, "映像デバイス '{name}' が見つからない")
-            }
-            VideoError::NoDevices => write!(f, "映像デバイスが 1 台も見つからない"),
+        let text = match self {
+            VideoError::DeviceQueryFailed(source) => i18n::video_device_query_failed(source),
+            VideoError::DeviceNotFound(name) => i18n::video_device_not_found(name),
+            VideoError::NoDevices => Text::VideoNoDevices.get().to_string(),
             VideoError::CameraOpenFailed { device, source } => {
-                write!(f, "映像デバイス '{device}' を開けない: {source}")
+                i18n::video_camera_open_failed(device, source)
             }
             VideoError::StreamOpenFailed { device, source } => {
-                write!(
-                    f,
-                    "映像デバイス '{device}' のストリームを開けない: {source}"
-                )
+                i18n::video_stream_open_failed(device, source)
             }
-        }
+        };
+        f.write_str(&text)
     }
 }
 

@@ -41,6 +41,8 @@ pub use resample::{ResampleStatus, ResampleTelemetry};
 use cpal::SampleFormat;
 use std::fmt;
 
+use crate::i18n::{self, Text};
+
 /// 実際に開いた音声ストリームの内容。
 ///
 /// 設定ダイアログの「接続状態」タブに出すために持つ。**設定に書かれた値では
@@ -81,11 +83,11 @@ pub enum AudioDirection {
 }
 
 impl AudioDirection {
-    /// ログと画面に出す日本語の呼び名。
+    /// ログと画面に出す呼び名。
     pub fn label(self) -> &'static str {
         match self {
-            AudioDirection::Input => "入力",
-            AudioDirection::Output => "出力",
+            AudioDirection::Input => Text::Input.get(),
+            AudioDirection::Output => Text::Output.get(),
         }
     }
 }
@@ -102,7 +104,7 @@ impl AudioDirection {
 /// ストリームを開くため、向きが分からないと設定のどちらを直せばよいか
 /// 伝えられない。
 ///
-/// **表示用の日本語はこの型の `Display` が持つ。** 定型文
+/// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
 /// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioError {
@@ -147,40 +149,33 @@ pub enum AudioError {
 
 impl fmt::Display for AudioError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        let text = match self {
             AudioError::DeviceEnumerationFailed { direction, source } => {
-                write!(f, "{}デバイスを列挙できない: {source}", direction.label())
+                i18n::audio_device_enumeration_failed(direction.label(), source)
             }
             AudioError::DeviceNotFound { direction, name } => {
-                write!(f, "{}デバイス '{name}' が見つからない", direction.label())
+                i18n::audio_device_not_found(direction.label(), name)
             }
             AudioError::NoDefaultDevice(direction) => {
-                write!(f, "既定の{}デバイスがない", direction.label())
+                i18n::audio_no_default_device(direction.label())
             }
-            AudioError::DefaultConfigFailed { direction, source } => write!(
-                f,
-                "{}デバイスの既定の設定を取得できない: {source}",
-                direction.label()
-            ),
-            AudioError::SupportedConfigsFailed { direction, source } => write!(
-                f,
-                "{}デバイスの対応設定を列挙できない: {source}",
-                direction.label()
-            ),
-            AudioError::UnsupportedSampleFormat { direction, format } => write!(
-                f,
-                "{}デバイスのサンプルフォーマット {format} に対応していない（対応: f32 / i16 / u16 / i32）",
-                direction.label()
-            ),
-            AudioError::StreamBuildFailed { direction, source } => write!(
-                f,
-                "{}ストリームを組み立てられない: {source}",
-                direction.label()
-            ),
+            AudioError::DefaultConfigFailed { direction, source } => {
+                i18n::audio_default_config_failed(direction.label(), source)
+            }
+            AudioError::SupportedConfigsFailed { direction, source } => {
+                i18n::audio_supported_configs_failed(direction.label(), source)
+            }
+            AudioError::UnsupportedSampleFormat { direction, format } => {
+                i18n::audio_unsupported_sample_format(direction.label(), format)
+            }
+            AudioError::StreamBuildFailed { direction, source } => {
+                i18n::audio_stream_build_failed(direction.label(), source)
+            }
             AudioError::StreamPlayFailed { direction, source } => {
-                write!(f, "{}ストリームを開始できない: {source}", direction.label())
+                i18n::audio_stream_play_failed(direction.label(), source)
             }
-        }
+        };
+        f.write_str(&text)
     }
 }
 

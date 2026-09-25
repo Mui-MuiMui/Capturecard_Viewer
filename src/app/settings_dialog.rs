@@ -5,6 +5,7 @@
 //! ディスクへの書き出しそのものは `super::settings_store`。
 
 use super::CaptureCardViewer;
+use crate::i18n::{self, Text};
 use crate::overlay::OverlayContent;
 use crate::settings;
 use crate::status::{self, ErrorSource};
@@ -47,7 +48,7 @@ impl CaptureCardViewer {
         self.mark_settings_dirty();
         self.apply_settings(false);
         self.transient_overlay.show(
-            OverlayContent::Text(format!("プリセット: {}", name)),
+            OverlayContent::Text(i18n::preset_switched(name)),
             PRESET_OSD_DURATION,
             Instant::now(),
         );
@@ -149,7 +150,7 @@ impl CaptureCardViewer {
     /// スクリーンショットの効果音をファイルダイアログで選ぶ。
     fn pick_sound_file(&mut self) {
         let Some(file) = rfd::FileDialog::new()
-            .add_filter("音声ファイル", &["mp3", "wav", "ogg"])
+            .add_filter(Text::AudioFileFilter.get(), &["mp3", "wav", "ogg"])
             .pick_file()
         else {
             debug!("効果音ファイルの選択がキャンセルされた");
@@ -239,13 +240,13 @@ impl CaptureCardViewer {
         let settings = self.settings.lock().ok().map(|settings| settings.clone());
         let Some(settings) = settings else {
             warn!("設定の書き出しで settings のロックを取得できない");
-            self.report_settings_error("設定を読み取れない".to_string());
+            self.report_settings_error(Text::SettingsReadFailed.get().to_string());
             return;
         };
 
         let Some(path) = rfd::FileDialog::new()
             .set_file_name(&settings::export_file_name(&Local::now()))
-            .add_filter("設定ファイル", &["toml"])
+            .add_filter(Text::SettingsFile.get(), &["toml"])
             .save_file()
         else {
             debug!("設定の書き出しがキャンセルされた");
@@ -256,7 +257,7 @@ impl CaptureCardViewer {
             Ok(()) => {
                 info!("設定を {} へ書き出した", path.display());
                 self.settings_dialog
-                    .set_management_message(format!("{} へ書き出しました", path.display()), false);
+                    .set_management_message(i18n::settings_exported(path.display()), false);
             }
             Err(e) => {
                 // 書き出し先は SettingsError が持っているので、ここでは足さない
@@ -276,7 +277,7 @@ impl CaptureCardViewer {
     /// 作ると、どこまでが元の値か分からなくなる。
     fn import_settings_into_draft(&mut self) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("設定ファイル", &["toml"])
+            .add_filter(Text::SettingsFile.get(), &["toml"])
             .pick_file()
         else {
             debug!("設定の読み込みがキャンセルされた");
@@ -302,13 +303,8 @@ impl CaptureCardViewer {
         *draft = merged;
 
         info!("設定ファイル {} を編集中の設定へ読み込んだ", path.display());
-        self.settings_dialog.set_management_message(
-            format!(
-                "{} を読み込みました。「適用」または「OK」で反映します",
-                path.display()
-            ),
-            false,
-        );
+        self.settings_dialog
+            .set_management_message(i18n::settings_imported(path.display()), false);
     }
 
     /// 設定ダイアログの「設定を初期化」。
@@ -325,10 +321,8 @@ impl CaptureCardViewer {
         *draft = defaults;
 
         info!("編集中の設定を初期値へ戻した");
-        self.settings_dialog.set_management_message(
-            "初期値に戻しました。「適用」または「OK」で反映します".to_string(),
-            false,
-        );
+        self.settings_dialog
+            .set_management_message(Text::SettingsResetDone.get().to_string(), false);
     }
 
     /// 設定ファイルの読み書きの失敗を、トーストとダイアログの両方へ出す。

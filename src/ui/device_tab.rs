@@ -5,6 +5,7 @@
 //! 問い合わせない（`docs/design/error-reporting.md`）。
 
 use crate::audio::{self, AudioDirection, ChoiceSource};
+use crate::i18n::{self, Text};
 use crate::settings::{
     AppSettings, ColorRange, ColorSpace, DEFAULT_CHANNELS, DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS,
     MAX_VIDEO_ADJUSTMENT, MIN_BUFFER_MS, MIN_VIDEO_ADJUSTMENT,
@@ -40,12 +41,12 @@ pub(super) fn show_device_settings_tab(
     devices: &DeviceLists<'_>,
     events: &mut Vec<SettingsEvent>,
 ) {
-    ui.heading("デバイス設定");
+    ui.heading(Text::TabDevice.get());
     ui.add_space(10.0);
 
     // ビデオ設定
     ui.group(|ui| {
-        ui.strong("ビデオ設定");
+        ui.strong(Text::VideoSettings.get());
         ui.add_space(5.0);
 
         // ビデオデバイス選択
@@ -53,9 +54,9 @@ pub(super) fn show_device_settings_tab(
         let current_device = settings.video.device_name.clone().unwrap_or_default();
 
         let mut device_changed = false;
-        egui::ComboBox::from_label("ビデオデバイス")
+        egui::ComboBox::from_label(Text::VideoDevice.get())
             .selected_text(if current_device.is_empty() {
-                "デバイスを選択..."
+                Text::SelectDevice.get()
             } else {
                 &current_device
             })
@@ -105,17 +106,17 @@ pub(super) fn show_device_settings_tab(
             Some(CapabilityState::Pending) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("対応形式を取得中...");
+                    ui.label(Text::VideoCapabilityPending.get());
                 });
             }
             Some(CapabilityState::Failed(reason)) => {
                 // 理由はデバイス由来の長い文字列になることがある。ボタンと横に並べると
                 // 折り返せずダイアログからはみ出すので、行を分ける
-                warning_label(ui, format!("対応形式を取得できませんでした: {}", reason));
-                if ui.button("再取得").clicked() {
+                warning_label(ui, i18n::video_capability_failed(reason));
+                if ui.button(Text::ButtonRetry.get()).clicked() {
                     retry_requested = true;
                 }
-                ui.label("下の選択肢は既定値です。");
+                ui.label(Text::VideoCapabilityFallback.get());
             }
             _ => {}
         }
@@ -159,7 +160,7 @@ pub(super) fn show_device_settings_tab(
         // フォーマット選択（フォーマットが起点）
         let mut format_changed = false;
         ui.horizontal(|ui| {
-            ui.label("フォーマット:");
+            ui.label(Text::FormatLabel.get());
             let current_format = settings
                 .video
                 .format
@@ -225,7 +226,7 @@ pub(super) fn show_device_settings_tab(
         // 解像度選択（フォーマットに応じて動的に変更）
         let mut resolution_changed = false;
         ui.horizontal(|ui| {
-            ui.label("解像度:");
+            ui.label(Text::ResolutionLabel.get());
             let current_resolution = settings.video.resolution.unwrap_or((1280, 720));
 
             egui::ComboBox::from_id_source("resolution_combo")
@@ -311,7 +312,7 @@ pub(super) fn show_device_settings_tab(
 
         // FPS選択（フォーマットと解像度に応じて動的に変更）
         ui.horizontal(|ui| {
-            ui.label("フレームレート:");
+            ui.label(Text::FrameRateLabel.get());
             let current_fps = settings.video.fps.unwrap_or(30);
 
             egui::ComboBox::from_id_source("fps_combo")
@@ -357,7 +358,7 @@ pub(super) fn show_device_settings_tab(
         // 色空間の選択。デバイスは入力信号の色空間を通知してこないので、
         // 通常は解像度から推定する（自動）。推定が外れる機種のために固定できる
         ui.horizontal(|ui| {
-            ui.label("色空間:");
+            ui.label(Text::ColorSpaceLabel.get());
             egui::ComboBox::from_id_source("color_space_combo")
                 .selected_text(settings.video.color_space.label())
                 .show_ui(ui, |ui| {
@@ -366,13 +367,13 @@ pub(super) fn show_device_settings_tab(
                     }
                 })
                 .response
-                .on_hover_text("色がずれて見える場合に切り替えます。通常は自動のままで構いません");
+                .on_hover_text(Text::ColorSpaceHint.get());
         });
 
         // 輝度レンジの選択。フルレンジで出すかどうかはデバイス側の設定次第で、
         // 信号からも解像度からも判別できないため手で選ばせる
         ui.horizontal(|ui| {
-            ui.label("色レンジ:");
+            ui.label(Text::ColorRangeLabel.get());
             egui::ComboBox::from_id_source("color_range_combo")
                 .selected_text(settings.video.color_range.label())
                 .show_ui(ui, |ui| {
@@ -381,7 +382,7 @@ pub(super) fn show_device_settings_tab(
                     }
                 })
                 .response
-                .on_hover_text("黒が灰色に浮く、または黒潰れ・白飛びする場合に切り替えます");
+                .on_hover_text(Text::ColorRangeHint.get());
         });
 
         ui.add_space(5.0);
@@ -389,10 +390,10 @@ pub(super) fn show_device_settings_tab(
         // 映像調整。色空間・レンジを合わせても残る機種ごとのクセを手で埋める。
         // 3 つとも YUY2 → RGB の係数表へ畳み込まれるので、変換は重くならない
         ui.horizontal(|ui| {
-            ui.strong("映像調整");
+            ui.strong(Text::VideoAdjustments.get());
             if ui
-                .button("リセット")
-                .on_hover_text("明るさ・コントラスト・彩度を無調整（0）へ戻します")
+                .button(Text::ButtonReset.get())
+                .on_hover_text(Text::VideoAdjustmentsResetHint.get())
                 .clicked()
             {
                 settings.video.brightness = 0;
@@ -404,20 +405,20 @@ pub(super) fn show_device_settings_tab(
         video_adjustment_slider(
             ui,
             &mut settings.video.brightness,
-            "明るさ",
-            "映像全体を明るく（＋）または暗く（－）します",
+            Text::Brightness.get(),
+            Text::BrightnessHint.get(),
         );
         video_adjustment_slider(
             ui,
             &mut settings.video.contrast,
-            "コントラスト",
-            "明暗の差を強く（＋）または弱く（－）します。-100 で中間グレー一色になります",
+            Text::Contrast.get(),
+            Text::ContrastHint.get(),
         );
         video_adjustment_slider(
             ui,
             &mut settings.video.saturation,
-            "彩度",
-            "色の濃さを強く（＋）または弱く（－）します。-100 で白黒になります",
+            Text::Saturation.get(),
+            Text::SaturationHint.get(),
         );
     });
 
@@ -425,16 +426,16 @@ pub(super) fn show_device_settings_tab(
 
     // オーディオ設定
     ui.group(|ui| {
-        ui.strong("オーディオ設定");
+        ui.strong(Text::AudioSettings.get());
         ui.add_space(5.0);
 
         // オーディオ入力デバイス選択 - キャッシュリストを使用
         let current_input_device = settings.audio.input_device_name.clone().unwrap_or_default();
 
         let mut input_changed = false;
-        egui::ComboBox::from_label("オーディオ入力デバイス")
+        egui::ComboBox::from_label(Text::AudioInputDevice.get())
             .selected_text(if current_input_device.is_empty() {
-                "デバイスを選択..."
+                Text::SelectDevice.get()
             } else {
                 &current_input_device
             })
@@ -462,15 +463,19 @@ pub(super) fn show_device_settings_tab(
             .unwrap_or_default();
 
         let mut output_changed = false;
-        egui::ComboBox::from_label("オーディオ出力デバイス")
+        egui::ComboBox::from_label(Text::AudioOutputDevice.get())
             .selected_text(if current_output_device.is_empty() {
-                "デフォルト"
+                Text::DefaultDevice.get()
             } else {
                 &current_output_device
             })
             .show_ui(ui, |ui| {
                 if ui
-                    .selectable_value(&mut settings.audio.output_device_name, None, "デフォルト")
+                    .selectable_value(
+                        &mut settings.audio.output_device_name,
+                        None,
+                        Text::DefaultDevice.get(),
+                    )
                     .clicked()
                     && !current_output_device.is_empty()
                 {
@@ -562,7 +567,10 @@ pub(super) fn show_device_settings_tab(
                 .unwrap_or(DEFAULT_SAMPLE_RATE);
             if let Some(rate) = audio::nearest_sample_rate(&rates.values, desired_rate) {
                 if settings.audio.sample_rate != Some(rate) {
-                    debug!("オーディオデバイスの切り替えでサンプリングレートを {} Hz にした", rate);
+                    debug!(
+                        "オーディオデバイスの切り替えでサンプリングレートを {} Hz にした",
+                        rate
+                    );
                 }
                 settings.audio.sample_rate = Some(rate);
             }
@@ -571,10 +579,14 @@ pub(super) fn show_device_settings_tab(
                 .channels
                 .or(input_defaults.map(|(_, channels)| channels))
                 .unwrap_or(DEFAULT_CHANNELS);
-            if let Some(channels) = audio::nearest_channels(&channel_choices.values, desired_channels)
+            if let Some(channels) =
+                audio::nearest_channels(&channel_choices.values, desired_channels)
             {
                 if settings.audio.channels != Some(channels) {
-                    debug!("オーディオデバイスの切り替えでチャンネル数を {} ch にした", channels);
+                    debug!(
+                        "オーディオデバイスの切り替えでチャンネル数を {} ch にした",
+                        channels
+                    );
                 }
                 settings.audio.channels = Some(channels);
             }
@@ -588,7 +600,10 @@ pub(super) fn show_device_settings_tab(
         // チャンネル数のコンボは 1 択のとき操作できないので、ユーザーが直す手段が無い
         if let [only] = rates.values[..] {
             if settings.audio.sample_rate != Some(only) {
-                debug!("サンプリングレートの選択肢が 1 つなので {} Hz に寄せた", only);
+                debug!(
+                    "サンプリングレートの選択肢が 1 つなので {} Hz に寄せた",
+                    only
+                );
                 settings.audio.sample_rate = Some(only);
             }
         }
@@ -601,7 +616,7 @@ pub(super) fn show_device_settings_tab(
 
         // サンプルレート
         ui.horizontal(|ui| {
-            ui.label("サンプリングレート:");
+            ui.label(Text::SampleRateLabel.get());
             let current_rate = settings.audio.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE);
             egui::ComboBox::from_id_source("sample_rate_combo")
                 .selected_text(format!("{} Hz", current_rate))
@@ -615,7 +630,7 @@ pub(super) fn show_device_settings_tab(
                     }
                 });
         });
-        show_choice_note(ui, rates.source, "サンプリングレート");
+        show_choice_note(ui, rates.source, Text::SampleRate.get());
         // 設定ファイルを手で書き換えた場合など、選択肢に無い値が残ることがある。
         // 黙って別の値で開くと「選んだ値と違う」理由が分からない
         if let Some(note) = out_of_range_note(
@@ -629,7 +644,7 @@ pub(super) fn show_device_settings_tab(
         // チャンネル数
         let single_channel_choice = channel_choices.values.len() == 1;
         ui.horizontal(|ui| {
-            ui.label("チャンネル数:");
+            ui.label(Text::ChannelsLabel.get());
             let current_channels = settings.audio.channels.unwrap_or(DEFAULT_CHANNELS);
             // 選択肢が 1 つしか無いときは操作させない。開ける値が 1 つなのに
             // 選べると、選んだ値と実際の値が食い違う
@@ -650,9 +665,9 @@ pub(super) fn show_device_settings_tab(
         if single_channel_choice && channel_choices.source != ChoiceSource::Fallback {
             // WASAPI は共有モードのミックスフォーマットしか列挙しないため、
             // Windows では実質ここに落ちる
-            ui.label("このデバイスの組み合わせでは 1 つしか選べません（Windows の共有モードではデバイスのミックスフォーマットに固定されます）");
+            ui.label(Text::ChannelsFixedByDevice.get());
         }
-        show_choice_note(ui, channel_choices.source, "チャンネル数");
+        show_choice_note(ui, channel_choices.source, Text::Channels.get());
         let channel_values: Vec<u32> = channel_choices
             .values
             .iter()
@@ -674,24 +689,21 @@ pub(super) fn show_device_settings_tab(
         // 「OK」のときで、スライダーを動かしている間は何も起きない。
         // サンプリングレートやチャンネル数と同じ経路に乗せてある
         ui.horizontal(|ui| {
-            ui.label("音声バッファ:");
+            ui.label(Text::AudioBufferLabel.get());
             ui.add(
-                egui::Slider::new(
-                    &mut settings.audio.buffer_ms,
-                    MIN_BUFFER_MS..=MAX_BUFFER_MS,
-                )
-                .suffix(" ms"),
+                egui::Slider::new(&mut settings.audio.buffer_ms, MIN_BUFFER_MS..=MAX_BUFFER_MS)
+                    .suffix(" ms"),
             );
         });
-        ui.label("小さいほど低遅延だがノイズが出やすい（既定: 50 ms）");
+        ui.label(Text::AudioBufferHint.get());
 
         ui.add_space(10.0);
 
         // オーディオパススルー制御
         ui.horizontal(|ui| {
-            ui.label("音声パススルー:");
+            ui.label(Text::PassthroughLabel.get());
             if ui
-                .checkbox(&mut settings.audio.passthrough_enabled, "有効")
+                .checkbox(&mut settings.audio.passthrough_enabled, Text::Enabled.get())
                 .changed()
             {
                 // ここで書き換わるのはドラフト。実設定へ反映されるのは「適用」または「OK」のとき
@@ -703,7 +715,7 @@ pub(super) fn show_device_settings_tab(
         });
 
         if !settings.audio.passthrough_enabled {
-            warning_label(ui, "音声パススルーが無効です（音は出力されません）");
+            warning_label(ui, Text::PassthroughDisabledWarning.get());
         }
     });
 
@@ -711,13 +723,16 @@ pub(super) fn show_device_settings_tab(
 
     // UI設定
     ui.group(|ui| {
-        ui.strong("ユーザーインターフェース");
+        ui.strong(Text::UserInterface.get());
         ui.add_space(5.0);
 
-        ui.checkbox(&mut settings.ui.maintain_aspect_ratio, "アスペクト比を維持");
+        ui.checkbox(
+            &mut settings.ui.maintain_aspect_ratio,
+            Text::MaintainAspectRatio.get(),
+        );
 
         ui.horizontal(|ui| {
-            ui.label("初期音量:");
+            ui.label(Text::InitialVolumeLabel.get());
             ui.add(egui::Slider::new(&mut settings.ui.volume, 0.0..=200.0).suffix("%"));
         });
     });

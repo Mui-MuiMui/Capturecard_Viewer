@@ -1,3 +1,4 @@
+use crate::i18n;
 use crate::video::VideoFrame;
 use log::info;
 use rodio::{Decoder, OutputStream, Sink};
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 /// 出力先の種類で処理を分けないため（`app::screenshot` の
 /// `summarize_screenshot_delivery`）。
 ///
-/// **表示用の日本語はこの型の `Display` が持つ。** 定型文
+/// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
 /// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScreenshotError {
@@ -40,35 +41,30 @@ pub enum ScreenshotError {
 
 impl fmt::Display for ScreenshotError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ScreenshotError::EmptyFrame { width, height } => write!(
-                f,
-                "大きさのない映像フレームはクリップボードへコピーできない: {width}x{height}"
-            ),
-            ScreenshotError::FrameTooLarge { width, height } => {
-                write!(f, "画像として扱えない大きさのフレーム: {width}x{height}")
+        let text = match self {
+            ScreenshotError::EmptyFrame { width, height } => {
+                i18n::screenshot_empty_frame(*width, *height)
             }
-            ScreenshotError::FrameTooShort { width, height, len } => write!(
-                f,
-                "映像フレームの画素が足りない: {width}x{height} に対して {len} バイト"
-            ),
+            ScreenshotError::FrameTooLarge { width, height } => {
+                i18n::screenshot_frame_too_large(width, height)
+            }
+            ScreenshotError::FrameTooShort { width, height, len } => {
+                i18n::screenshot_frame_too_short(*width, *height, *len)
+            }
             ScreenshotError::ClipboardOpenFailed(source) => {
-                write!(f, "クリップボードを開けない: {source}")
+                i18n::screenshot_clipboard_open_failed(source)
             }
             ScreenshotError::ClipboardWriteFailed(source) => {
-                write!(f, "クリップボードへ画像を書き込めない: {source}")
+                i18n::screenshot_clipboard_write_failed(source)
             }
-            ScreenshotError::SoundFileUnreadable { path, source } => write!(
-                f,
-                "効果音ファイル {} を読み込めないため既定の効果音を使う: {source}",
-                path.display()
-            ),
-            ScreenshotError::SoundFileUndecodable { path, source } => write!(
-                f,
-                "効果音ファイル {} を音声として読めないため、撮影時は効果音が鳴らない: {source}",
-                path.display()
-            ),
-        }
+            ScreenshotError::SoundFileUnreadable { path, source } => {
+                i18n::sound_file_unreadable(path.display(), source)
+            }
+            ScreenshotError::SoundFileUndecodable { path, source } => {
+                i18n::sound_file_undecodable(path.display(), source)
+            }
+        };
+        f.write_str(&text)
     }
 }
 

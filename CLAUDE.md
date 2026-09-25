@@ -92,8 +92,11 @@ cargo build --release
 | `src/ui/hotkey_capture.rs` | ホットキー入力ダイアログ。キー入力の組み立てと確定の判定 |
 | `src/ui/other_tab.rs` | 「その他」タブの描画（プリセット、書き出し / 読み込み / 初期化） |
 | `src/ui/status_tab.rs` | 「接続状態」タブの描画 |
-| `src/status.rs` | 失敗の記録（`ErrorCenter`）とトーストの間引き判定、設定ダイアログへ渡す接続状態（`ConnectionStatus`）、日本語の定型文 |
+| `src/status.rs` | 失敗の記録（`ErrorCenter`）とトーストの間引き判定、設定ダイアログへ渡す接続状態（`ConnectionStatus`）、発生源ごとの定型文 |
 | `src/repaint.rs` | 次の再描画までの間隔の判定（`next_repaint_delay`）と、UI スレッド以外から再描画を促す窓口（`RepaintWaker`） |
+| `src/i18n/mod.rs` | 画面に出す文字列の入口。現在の言語（`Language` と `static LANGUAGE`）を持つ。外から使う経路（`crate::i18n::...`）の `pub use` もここ |
+| `src/i18n/text.rs` | 引数を取らない文字列の表（`texts!` が `Text` のキーと言語ごとの `match` を作る） |
+| `src/i18n/msg.rs` | 引数を取る文字列。1 関数が 1 件で、言語ごとに文全体を組み立てる |
 
 `src/app/` の子モジュールは**基本どれも `impl CaptureCardViewer` を足す形**で、状態そのものは `app/mod.rs` の構造体 1 つに集めてある。**子モジュール側にフィールドや `static` を持たせないこと。** 他の子モジュールから呼ぶメソッドにだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
@@ -124,6 +127,7 @@ cargo build --release
 | `docs/design/error-reporting.md` | 失敗の通知と間引き、「接続状態」タブ |
 | `docs/design/logging.md` | ログの出力先とレベル、`catch_unwind` が効かないこと |
 | `docs/design/assets.md` | アイコンと効果音の埋め込み、パスの解決 |
+| `docs/design/i18n.md` | 画面に出す文字列を `src/i18n/` に集める仕組み、入れるもの・入れないもの、文字列を足すときの手順 |
 
 目指す構造と現状との差分は `docs/ARCHITECTURE.md`。**同じ話が両方にある場合は `docs/ARCHITECTURE.md` を正とする。** デバイス起因の不具合を調べるときは `.claude/skills/device-debug/SKILL.md` の手順（ログの読み方、正常時の所要時間の目安、症状ごとの確認順）に従う。
 

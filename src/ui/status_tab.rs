@@ -3,6 +3,7 @@
 //! **ここでは何も編集しない。** 映像と音声が実際に何へ繋がっているかと、
 //! 直近の失敗を読むためのタブ（`docs/design/error-reporting.md`）。
 
+use crate::i18n::{self, Text};
 use crate::status::{ConnectionStatus, LinkStatus};
 use eframe::egui;
 
@@ -29,16 +30,16 @@ fn link_status_badge(status: &LinkStatus) -> (String, NoticeKind) {
 /// 直近の失敗を読むためのタブで、値は呼び出し側が複製して渡す
 /// （描画中にデバイスへ問い合わせないため）。
 pub(super) fn show_status_tab(ui: &mut egui::Ui, connection: &ConnectionStatus) {
-    ui.heading("接続状態");
+    ui.heading(Text::TabStatus.get());
     ui.add_space(10.0);
 
-    show_link_status(ui, "映像", &connection.video);
+    show_link_status(ui, Text::LinkVideo.get(), &connection.video);
     ui.add_space(15.0);
-    show_link_status(ui, "音声", &connection.audio);
+    show_link_status(ui, Text::LinkAudio.get(), &connection.audio);
 
     ui.add_space(15.0);
-    ui.label("この内容は表示だけで、「適用」や「OK」では変わりません。");
-    ui.label("詳しい経過はログファイルに残っています（%AppData%\\capturecard_viewer\\logs）。");
+    ui.label(Text::StatusReadOnlyHint.get());
+    ui.label(Text::StatusLogHint.get());
 }
 
 /// 映像か音声、片方の接続状態を 1 つの枠に描く。
@@ -48,7 +49,7 @@ fn show_link_status(ui: &mut egui::Ui, title: &str, status: &LinkStatus) {
         ui.add_space(5.0);
 
         ui.horizontal(|ui| {
-            ui.label("状態:");
+            ui.label(Text::StateLabel.get());
             let (text, kind) = link_status_badge(status);
             status_badge(ui, &text, kind);
         });
@@ -59,7 +60,7 @@ fn show_link_status(ui: &mut egui::Ui, title: &str, status: &LinkStatus) {
 
         // 繋がっている間は再試行していないので、回数を出しても 0 が並ぶだけ
         if !status.connected && status.attempts > 0 {
-            ui.label(format!("連続失敗: {} 回", status.attempts));
+            ui.label(i18n::consecutive_failures(status.attempts));
         }
 
         match &status.error {
@@ -68,10 +69,10 @@ fn show_link_status(ui: &mut egui::Ui, title: &str, status: &LinkStatus) {
                 // 繋がったあとも記録として残り続けるため、今まさに失敗している
                 // わけではない。失敗ではなく注意として出す
                 warning_label(ui, message);
-                ui.label(format!("発生時刻: {}", time));
+                ui.label(i18n::error_time(time));
             }
             None => {
-                ui.label("直近のエラー: なし");
+                ui.label(Text::NoRecentError.get());
             }
         }
     });
