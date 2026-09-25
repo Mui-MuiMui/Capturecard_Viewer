@@ -174,6 +174,11 @@ impl<T: PartialEq> ConnectRetry<T> {
     /// 成功を記録する。以降は要求があるまで試さない。
     ///
     /// `now` は次に開き直してよい時刻の起点になる（`RECONNECT_MIN_INTERVAL_AFTER_SUCCESS`）。
+    ///
+    /// **呼び出し側は、開き終えた時刻ではなく試行を始めた `tick` の時刻を渡す。**
+    /// 抑えたいのは試行の頻度なので、「試行の開始から次の試行の開始まで 1 秒」で
+    /// 足りる。開き終えた時刻を `Instant::now()` で取ると、ワーカーが `tick` へ
+    /// 渡している時刻（テストやフェイクの時計が進める時刻）と食い違う。
     pub(super) fn record_success(&mut self, now: Instant) {
         self.target = None;
         self.attempts = 0;
