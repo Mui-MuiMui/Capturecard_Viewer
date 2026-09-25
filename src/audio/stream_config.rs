@@ -110,6 +110,62 @@ pub(super) fn select_aligned_configs(
     Some((input_config, output_config))
 }
 
+/// パススルーで実際に開く入出力の設定を決める。
+///
+/// 設定画面で選んだサンプルレート・チャンネル数（`None` なら入力デバイスの
+/// 既定）を、デバイスが対応する組み合わせの中で最も近いものへ寄せる。
+/// 列挙できない、または選べる設定が無いデバイスでは既定設定のまま開く
+/// （従来の挙動）。
+///
+/// **まず入出力で同じ設定に揃えられないかを見る。** 揃っていれば
+/// リングバッファのサンプルをそのまま流せる。揃わない組み合わせでは
+/// それぞれの最寄りを選び、変換（線形補間とミックス）で吸収する。
+///
+/// 実機（`capture.rs`）とフェイク（`fake.rs`）の両方が使う。
+pub(super) fn choose_passthrough_configs(
+    input_ranges: &[SupportedStreamConfigRange],
+    output_ranges: &[SupportedStreamConfigRange],
+    input_default: SupportedStreamConfig,
+    output_default: SupportedStreamConfig,
+    desired_sample_rate: Option<u32>,
+    desired_channels: Option<u16>,
+) -> (SupportedStreamConfig, SupportedStreamConfig) {
+    let aligned = select_aligned_configs(
+        input_ranges,
+        output_ranges,
+        desired_sample_rate.unwrap_or_else(|| input_default.sample_rate().0),
+        desired_channels.unwrap_or_else(|| input_default.channels()),
+    );
+    if let Some(pair) = aligned {
+        return pair;
+    }
+
+    let input_config = select_best_config(
+        input_ranges,
+        desired_sample_rate.unwrap_or_else(|| input_default.sample_rate().0),
+        desired_channels.unwrap_or_else(|| input_default.channels()),
+    )
+    .unwrap_or(input_default);
+    let output_config = select_best_config(
+        output_ranges,
+        desired_sample_rate.unwrap_or_else(|| output_default.sample_rate().0),
+        desired_channels.unwrap_or_else(|| output_default.channels()),
+    )
+    .unwrap_or(output_default);
+    if input_config.sample_rate() != output_config.sample_rate()
+        || input_config.channels() != output_config.channels()
+    {
+        warn!(
+            "入出力で共通の設定が無いため別々の設定で開く（線形補間とミックスで変換する）- 入力: {}Hz {}ch、出力: {}Hz {}ch",
+            input_config.sample_rate().0,
+            input_config.channels(),
+            output_config.sample_rate().0,
+            output_config.channels()
+        );
+    }
+    (input_config, output_config)
+}
+
 /// 対応設定の一覧を用意する。
 ///
 /// ワーカーが先に取ったものがあればそれを使い、無いときだけその場で列挙する。
@@ -344,5 +400,55 @@ mod tests {
         let selected = select_best_config(&configs, 48000, 2).expect("選べるはず");
 
         assert_eq!(selected.sample_rate(), SampleRate(44100));
+    }
+
+    /// テスト用の既定設定。`default_input_config()` が返す形を模す
+    fn default_config(channels: u16, rate: u32) -> SupportedStreamConfig {
+        SupportedStreamConfig::new(
+            channels,
+            SampleRate(rate),
+            cpal::SupportedBufferSize::Unknown,
+            SampleFormat::F32,
+        )
+    }
+
+    #[test]
+    fn choose_passthrough_configs_without_a_common_setting_picks_each_nearest() {
+        // 入力 48kHz 2ch、出力 44.1kHz 1ch しか開けない組み合わせ。
+        // 揃えられないので、それぞれが開ける設定で開く
+        let input = [discrete_range(2, 48000, SampleFormat::F32)];
+        let output = [discrete_range(1, 44100, SampleFormat::F32)];
+
+        let (in_config, out_config) = choose_passthrough_configs(
+            &input,
+            &output,
+            default_config(2, 48000),
+            default_config(1, 44100),
+            None,
+            None,
+        );
+
+        assert_eq!(in_config.sample_rate(), SampleRate(48000));
+        assert_eq!(in_config.channels(), 2);
+        assert_eq!(out_config.sample_rate(), SampleRate(44100));
+        assert_eq!(out_config.channels(), 1);
+    }
+
+    #[test]
+    fn choose_passthrough_configs_without_ranges_falls_back_to_the_defaults() {
+        // 対応設定を列挙できなかったデバイスは既定設定のまま開く
+        let (in_config, out_config) = choose_passthrough_configs(
+            &[],
+            &[],
+            default_config(2, 48000),
+            default_config(2, 44100),
+            Some(96000),
+            Some(1),
+        );
+
+        assert_eq!(in_config.sample_rate(), SampleRate(48000));
+        assert_eq!(in_config.channels(), 2);
+        assert_eq!(out_config.sample_rate(), SampleRate(44100));
+        assert_eq!(out_config.channels(), 2);
     }
 }
