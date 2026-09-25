@@ -525,6 +525,73 @@ fn color_range_from_str(raw: &str) -> Option<ColorRange> {
     }
 }
 
+// 画面に出す言語の設定。設定ファイルには language = "auto" / "ja" / "en" と書かれる。
+//
+// 実際に使う言語（`i18n::Language`）とは別の型にしてある。こちらは
+// 「自動」を持ち、OS の言語と合わせて初めて 1 つに決まるため
+// （`resolve`、`docs/design/i18n.md`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LanguageSetting {
+    // 既存ユーザーの設定ファイルには language が無い。自動にしておけば、
+    // 日本語の Windows ではこれまでどおり日本語で出る
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "ja")]
+    Japanese,
+    #[serde(rename = "en")]
+    English,
+}
+
+impl LanguageSetting {
+    // 設定ダイアログのコンボボックスに出す表示名
+    pub fn label(self) -> &'static str {
+        match self {
+            LanguageSetting::Auto => Text::LanguageAuto.get(),
+            LanguageSetting::Japanese => Text::LanguageJapanese.get(),
+            LanguageSetting::English => Text::LanguageEnglish.get(),
+        }
+    }
+
+    pub const ALL: [LanguageSetting; 3] = [
+        LanguageSetting::Auto,
+        LanguageSetting::Japanese,
+        LanguageSetting::English,
+    ];
+
+    // 実際に使う言語を決める。`os_language` は起動時に 1 回だけ OS から
+    // 推定したもの（`platform::os_ui_language`）
+    pub fn resolve(self, os_language: i18n::Language) -> i18n::Language {
+        match self {
+            LanguageSetting::Auto => os_language,
+            LanguageSetting::Japanese => i18n::Language::Japanese,
+            LanguageSetting::English => i18n::Language::English,
+        }
+    }
+}
+
+// 設定ファイルの language に知らない値が書かれていても、設定全体を
+// 失わせない。色空間と同じ考え方で、自動として扱う
+fn deserialize_language<'de, D>(deserializer: D) -> Result<LanguageSetting, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(language_setting_from_str(&raw).unwrap_or_else(|| {
+        warn!("設定の言語 \"{}\" を解釈できないので自動として扱う", raw);
+        LanguageSetting::default()
+    }))
+}
+
+fn language_setting_from_str(raw: &str) -> Option<LanguageSetting> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(LanguageSetting::Auto),
+        "ja" | "japanese" => Some(LanguageSetting::Japanese),
+        "en" | "english" => Some(LanguageSetting::English),
+        _ => None,
+    }
+}
+
 // PartialEq は VideoSettings と同じくプリセットとの一致判定で使う。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -972,6 +1039,10 @@ pub struct UiSettings {
     // 切り替える。**有効にすると × が無くなる** ので、右クリックメニューの
     // 「終了」と Alt+F4 が閉じる手段になる
     pub borderless: bool,
+    // 画面に出す言語。設定ダイアログの「その他」タブで選び、「適用」で
+    // 再起動せずに切り替わる。プリセットには入れない（`docs/design/presets.md`）
+    #[serde(deserialize_with = "deserialize_language")]
+    pub language: LanguageSetting,
 }
 
 impl Default for VideoSettings {
@@ -1057,6 +1128,7 @@ impl Default for UiSettings {
             // 既定はタイトルバーありにする。装飾なしは閉じ方・動かし方が
             // 通常のウィンドウと変わるので、知らずにその状態で起動させない
             borderless: false,
+            language: LanguageSetting::Auto,
         }
     }
 }
@@ -2560,6 +2632,77 @@ volume = 80.0
             "{}",
             serialized
         );
+    }
+
+    #[test]
+    fn language_setting_serializes_as_short_codes() {
+        // 設定ファイルに書き出される綴り。ここが変わると、既に配布した版が
+        // 書いた設定ファイルを読めなくなる
+        for (setting, expected) in [
+            (LanguageSetting::Auto, r#"language = "auto""#),
+            (LanguageSetting::Japanese, r#"language = "ja""#),
+            (LanguageSetting::English, r#"language = "en""#),
+        ] {
+            let mut settings = AppSettings::default();
+            settings.ui.language = setting;
+            let serialized = toml::to_string(&settings).expect("設定を書き出せること");
+            assert!(serialized.contains(expected), "{}", serialized);
+
+            let restored: AppSettings = toml::from_str(&serialized).expect("読み戻せること");
+            assert_eq!(restored.ui.language, setting);
+        }
+    }
+
+    #[test]
+    fn language_setting_missing_defaults_to_auto() {
+        // 言語の項目ができる前の設定ファイル
+        let settings: AppSettings = toml::from_str("[ui]\nvolume = 40.0\n").expect("読めること");
+        assert_eq!(settings.ui.language, LanguageSetting::Auto);
+        assert_eq!(settings.ui.volume, 40.0);
+    }
+
+    #[test]
+    fn language_setting_unknown_value_falls_back_to_auto_and_keeps_other_items() {
+        let settings: AppSettings =
+            toml::from_str("[ui]\nvolume = 40.0\nlanguage = \"fr\"\n").expect("読めること");
+        assert_eq!(settings.ui.language, LanguageSetting::Auto);
+        assert_eq!(settings.ui.volume, 40.0);
+    }
+
+    #[test]
+    fn language_setting_from_str_accepts_known_spellings() {
+        assert_eq!(
+            language_setting_from_str("auto"),
+            Some(LanguageSetting::Auto)
+        );
+        assert_eq!(
+            language_setting_from_str(" JA "),
+            Some(LanguageSetting::Japanese)
+        );
+        assert_eq!(
+            language_setting_from_str("japanese"),
+            Some(LanguageSetting::Japanese)
+        );
+        assert_eq!(
+            language_setting_from_str("en"),
+            Some(LanguageSetting::English)
+        );
+        assert_eq!(
+            language_setting_from_str("English"),
+            Some(LanguageSetting::English)
+        );
+        assert_eq!(language_setting_from_str(""), None);
+        assert_eq!(language_setting_from_str("fr"), None);
+    }
+
+    #[test]
+    fn language_setting_resolve_uses_os_language_only_for_auto() {
+        use crate::i18n::Language;
+        for os in [Language::Japanese, Language::English] {
+            assert_eq!(LanguageSetting::Auto.resolve(os), os);
+            assert_eq!(LanguageSetting::Japanese.resolve(os), Language::Japanese);
+            assert_eq!(LanguageSetting::English.resolve(os), Language::English);
+        }
     }
 
     #[test]

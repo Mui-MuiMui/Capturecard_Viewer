@@ -54,7 +54,9 @@ pub(super) fn show_device_settings_tab(
         let current_device = settings.video.device_name.clone().unwrap_or_default();
 
         let mut device_changed = false;
-        egui::ComboBox::from_label(Text::VideoDevice.get())
+        // Id は表示文字列から作らない。言語を切り替えると Id が変わり、
+        // 開いていた一覧の状態が引き継がれないため（docs/design/i18n.md）
+        egui::ComboBox::new("video_device_combo", Text::VideoDevice.get())
             .selected_text(if current_device.is_empty() {
                 Text::SelectDevice.get()
             } else {
@@ -433,7 +435,7 @@ pub(super) fn show_device_settings_tab(
         let current_input_device = settings.audio.input_device_name.clone().unwrap_or_default();
 
         let mut input_changed = false;
-        egui::ComboBox::from_label(Text::AudioInputDevice.get())
+        egui::ComboBox::new("audio_input_device_combo", Text::AudioInputDevice.get())
             .selected_text(if current_input_device.is_empty() {
                 Text::SelectDevice.get()
             } else {
@@ -463,7 +465,7 @@ pub(super) fn show_device_settings_tab(
             .unwrap_or_default();
 
         let mut output_changed = false;
-        egui::ComboBox::from_label(Text::AudioOutputDevice.get())
+        egui::ComboBox::new("audio_output_device_combo", Text::AudioOutputDevice.get())
             .selected_text(if current_output_device.is_empty() {
                 Text::DefaultDevice.get()
             } else {

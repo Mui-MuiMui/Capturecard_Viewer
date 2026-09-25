@@ -28,7 +28,7 @@ cargo build --release
 | ファイル | 役割 |
 |---|---|
 | `src/main.rs` | エントリポイント。ロガーの初期化、`NativeOptions` の組み立て、`run_native` だけ |
-| `src/platform.rs` | Windows 固有処理。日本語フォントの探索、埋め込みアイコンの読み込み、モニタの作業領域の列挙、保存されたウィンドウの大きさ・位置が使えるかの判定 |
+| `src/platform.rs` | Windows 固有処理。日本語フォントの探索、埋め込みアイコンの読み込み、モニタの作業領域の列挙、保存されたウィンドウの大きさ・位置が使えるかの判定、OS の表示言語からの言語の推定 |
 | `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`Default`、`eframe::App` 実装（`update` / `on_exit`） |
 | `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、プレースホルダーの文言、統計 OSD、テクスチャの取り込み |
 | `src/app/menu/mod.rs` | 右クリックメニューの置き場所と閉じ方、平らな一覧／サブメニューの出し分け、描画が返した `MenuAction` の処理 |
@@ -90,11 +90,11 @@ cargo build --release
 | `src/ui/screenshot_tab.rs` | 「スクリーンショット設定」タブの描画 |
 | `src/ui/hotkeys_tab.rs` | 「ホットキー」タブの描画と、割り当ての重複判定 |
 | `src/ui/hotkey_capture.rs` | ホットキー入力ダイアログ。キー入力の組み立てと確定の判定 |
-| `src/ui/other_tab.rs` | 「その他」タブの描画（プリセット、書き出し / 読み込み / 初期化） |
+| `src/ui/other_tab.rs` | 「その他」タブの描画（プリセット、言語、書き出し / 読み込み / 初期化） |
 | `src/ui/status_tab.rs` | 「接続状態」タブの描画 |
 | `src/status.rs` | 失敗の記録（`ErrorCenter`）とトーストの間引き判定、設定ダイアログへ渡す接続状態（`ConnectionStatus`）、発生源ごとの定型文 |
 | `src/repaint.rs` | 次の再描画までの間隔の判定（`next_repaint_delay`）と、UI スレッド以外から再描画を促す窓口（`RepaintWaker`） |
-| `src/i18n/mod.rs` | 画面に出す文字列の入口。現在の言語（`Language` と `static LANGUAGE`）を持つ。外から使う経路（`crate::i18n::...`）の `pub use` もここ |
+| `src/i18n/mod.rs` | 画面に出す文字列の入口。現在の言語（`Language` と `static LANGUAGE`）を持ち、`set_language` で切り替える。外から使う経路（`crate::i18n::...`）の `pub use` もここ |
 | `src/i18n/text.rs` | 引数を取らない文字列の表（`texts!` が `Text` のキーと言語ごとの `match` を作る） |
 | `src/i18n/msg.rs` | 引数を取る文字列。1 関数が 1 件で、言語ごとに文全体を組み立てる |
 

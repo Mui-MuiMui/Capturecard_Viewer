@@ -311,7 +311,10 @@ pub fn show_hotkey_capture_dialog(
     let max_size = (screen_rect.size() - egui::Vec2::splat(SETTINGS_WINDOW_SCREEN_MARGIN))
         .max(HOTKEY_CAPTURE_DIALOG_MIN_SIZE);
 
+    // Id は固定にする。タイトルから作ると、言語を切り替えたときに
+    // 位置や大きさが引き継がれない（docs/design/i18n.md）
     egui::Window::new(Text::HotkeySettings.get())
+        .id(egui::Id::new("hotkey_capture_dialog"))
         .open(&mut window_open)
         .default_size([360.0, 180.0])
         .collapsible(false)

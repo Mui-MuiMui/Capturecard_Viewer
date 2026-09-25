@@ -49,6 +49,7 @@
 - `awaiting_defaults` を読んだら必ず落とす要求を返す（理由: `docs/design/settings-dialog.md`）
 - `commit_draft` が反映する項目を増減させたら `draft_from_imported` も合わせる（理由: `docs/design/settings-dialog.md`）
 - 描画中にデバイスへ問い合わせない（理由: `docs/design/error-reporting.md`）
+- `egui::Window` と `egui::ComboBox` の Id を表示文字列から作らない。`.id(..)` / `ComboBox::new(id, ..)` / `from_id_source(..)` で固定の Id を渡す（理由: `docs/design/i18n.md`）
 
 ## ホットキーとウィンドウ
 

@@ -5,7 +5,7 @@
 //! （`docs/design/settings-dialog.md`）。
 
 use crate::audio::AudioDirection;
-use crate::settings::AppSettings;
+use crate::settings::{AppSettings, LanguageSetting};
 
 use super::capability::{AudioCapabilityCache, VideoCapabilityCache};
 use super::draft::commit_draft;
@@ -183,6 +183,14 @@ impl SettingsDialogState {
     /// 新しいプリセットの名前入力欄を差し替える。
     pub fn set_new_preset_name(&mut self, name: String) {
         self.new_preset_name = name;
+    }
+
+    /// ドラフトの言語を差し替える。画面の言語はまだ変えない。
+    /// 切り替わるのは「適用」「OK」で実行中の設定へ反映したとき。
+    pub fn set_draft_language(&mut self, language: LanguageSetting) {
+        if let Some(draft) = self.draft.as_mut() {
+            draft.ui.language = language;
+        }
     }
 
     /// 入力欄の名前で、ドラフトを新しいプリセットとして保存する。
