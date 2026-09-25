@@ -15,9 +15,10 @@ use log::{info, trace, warn};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use super::color::{adjusted_color_matrix, color_matrix_for, SharedColorConversion};
+use super::color::{adjusted_color_matrix, color_matrix_for, ColorMatrix, SharedColorConversion};
 use super::convert::{bgr24_stride, bgr24_to_rgb, mjpeg_to_rgb, yuy2_to_rgb_naive};
 use super::frame_buffer::{FrameBuffer, VideoFrame, VideoFrames};
+use super::yuv420::{yuv420_frame_len, yuv420_to_rgb, Yuv420Layout};
 use crate::repaint::RepaintWaker;
 
 /// YUY2 の高速パスで積んだフレームに付けるフォーマット名。
@@ -135,13 +136,7 @@ impl FrameSink {
 
         // 回収できた Vec があれば使い回し、無ければ新規に確保する
         let mut rgb = self.recycled_buffer();
-        // 入力信号の色空間は通知されないため、設定が「自動」なら
-        // 解像度から推定する。レンジは常に設定の値を使う
-        let (space, range) = self.color_conversion.load();
-        let matrix = adjusted_color_matrix(
-            color_matrix_for(width, height, space, range),
-            self.color_conversion.load_adjustments(),
-        );
+        let matrix = self.current_matrix(width, height);
         yuy2_to_rgb_naive(width, height, src, &matrix, &mut rgb);
 
         self.push(
@@ -153,6 +148,61 @@ impl FrameSink {
             received_at,
             true,
             YUY2_FORMAT_NAME,
+            matrix.name,
+        )
+    }
+
+    /// いまの設定で使う係数表。色空間・レンジ・映像調整を畳み込んだもの。
+    ///
+    /// 入力信号の色空間は通知されないため、設定が「自動」なら解像度から
+    /// 推定する。レンジは常に設定の値を使う。読むのはアトミックだけ
+    fn current_matrix(&self, width: usize, height: usize) -> ColorMatrix {
+        let (space, range) = self.color_conversion.load();
+        adjusted_color_matrix(
+            color_matrix_for(width, height, space, range),
+            self.color_conversion.load_adjustments(),
+        )
+    }
+
+    /// NV12 / I420 / YV12（4:2:0 の YUV）のフレームを RGB に直して積む。
+    ///
+    /// **YUY2 と同じ係数表を通るので、色空間・色レンジ・映像調整が効く**
+    /// （統計でも高速パスとして数える）。変換先の Vec は使い回す。
+    /// データが `yuv420_frame_len` に満たなければ捨てる。積めたら `true`。
+    pub(super) fn push_yuv420(
+        &mut self,
+        layout: Yuv420Layout,
+        width: usize,
+        height: usize,
+        src: &[u8],
+        received_at: Instant,
+    ) -> bool {
+        let required = yuv420_frame_len(width, height);
+        if src.len() < required {
+            if self.short_frame_notice.take() {
+                warn!(
+                    "{} のフレームが短いので破棄した（{}x{} に必要な {} バイトに対し {} バイト）。以降は記録しない",
+                    layout.name(),
+                    width,
+                    height,
+                    required,
+                    src.len()
+                );
+            }
+            return false;
+        }
+        let mut rgb = self.recycled_buffer();
+        let matrix = self.current_matrix(width, height);
+        yuv420_to_rgb(layout, width, height, src, &matrix, &mut rgb);
+        self.push(
+            VideoFrame {
+                width,
+                height,
+                data: rgb,
+            },
+            received_at,
+            true,
+            layout.name(),
             matrix.name,
         )
     }
@@ -382,6 +432,45 @@ mod tests {
         );
 
         assert!(!sink.push_yuy2(2, 2, &[235, 128, 235, 128], Instant::now()));
+        assert!(frames.latest().is_none());
+    }
+
+    #[test]
+    fn frame_sink_push_yuv420_converts_through_the_color_table() {
+        // 白（Y=235、Cb = Cr = 128）の 2x2。YUY2 と同じ 254 になり、高速パスとして数える
+        for (layout, src, name) in [
+            (Yuv420Layout::Nv12, [235, 235, 235, 235, 128, 128], "NV12"),
+            (Yuv420Layout::I420, [235, 235, 235, 235, 128, 128], "I420"),
+        ] {
+            let frames = VideoFrames::new();
+            let mut sink = FrameSink::new(
+                &frames,
+                Arc::new(SharedColorConversion::new()),
+                RepaintWaker::default(),
+            );
+
+            assert!(sink.push_yuv420(layout, 2, 2, &src, Instant::now()));
+
+            let frame = frames.latest().expect("積んだフレームが読める");
+            assert_eq!((frame.width, frame.height), (2, 2));
+            assert_eq!(frame.data, vec![254; 12]);
+            let stats = frames.stats();
+            assert_eq!(stats.fast_count, 1);
+            assert_eq!(stats.source_format, Some(name));
+        }
+    }
+
+    #[test]
+    fn frame_sink_push_yuv420_short_frame_is_dropped() {
+        // 3x3 には 17 バイト要る（色差は切り上げて 2x2 組）
+        let frames = VideoFrames::new();
+        let mut sink = FrameSink::new(
+            &frames,
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::default(),
+        );
+
+        assert!(!sink.push_yuv420(Yuv420Layout::I420, 3, 3, &[235; 16], Instant::now()));
         assert!(frames.latest().is_none());
     }
 

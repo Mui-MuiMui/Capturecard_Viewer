@@ -1,4 +1,5 @@
 //! YUY2 → RGB24 と、DirectShow の RGB24（BGR の並び）/ MJPEG → RGB24 の画素変換。
+//! 4:2:0 の YUV（NV12 / I420）は `super::yuv420` にある。
 //!
 //! 使う係数は `super::color` が決めた `ColorMatrix` を受け取るだけで、
 //! ここは変換のループだけを持つ。**フレームコールバックから毎フレーム

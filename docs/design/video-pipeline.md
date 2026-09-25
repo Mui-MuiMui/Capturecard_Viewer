@@ -8,7 +8,25 @@
 
 キャプチャーデバイス → nokhwa `Buffer` → フレームコールバックで YUY2→RGB 変換 → `FrameBuffer` → `update_video_texture` で egui テクスチャ化 → 描画
 
-フレームコールバックの本体（YUY2→RGB 変換、`FrameBuffer` への格納、`RepaintWaker` で UI を起こす）は `video/frame_sink.rs` の `FrameSink` にある。nokhwa のコールバックは `Buffer` から幅・高さ・バイト列を取り出して渡すだけで、フェイクの映像デバイス（`video/fake.rs`）と DirectShow のデバイス（`video/directshow/`、自前のレンダラーの `Receive`）も同じ `FrameSink` を通る。DirectShow の経路だけは RGB24（`push_bgr24`）と MJPEG（`push_mjpeg`）も受ける。どちらも係数表を通らないので、色空間・レンジ・映像調整は効かない（`docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」）。
+フレームコールバックの本体（YUY2→RGB 変換、`FrameBuffer` への格納、`RepaintWaker` で UI を起こす）は `video/frame_sink.rs` の `FrameSink` にある。nokhwa のコールバックは `Buffer` から幅・高さ・バイト列を取り出して渡すだけで、フェイクの映像デバイス（`video/fake.rs`）と DirectShow のデバイス（`video/directshow/`、自前のレンダラーの `Receive`）も同じ `FrameSink` を通る。DirectShow の経路だけは YUY2 以外の形式も受ける（`docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」）。
+
+### `FrameSink` が受け取れる形式
+
+| 形式 | 受け口 | 変換（`video/convert.rs`、4:2:0 は `video/yuv420.rs`） | 係数表（色空間・レンジ・映像調整） | 届く経路 | DirectShow のサブタイプ |
+|---|---|---|---|---|---|
+| YUY2 | `push_yuy2` | `yuy2_to_rgb_naive` | 効く | Media Foundation・DirectShow・フェイク | `MEDIASUBTYPE_YUY2` / `MEDIASUBTYPE_YUYV` |
+| NV12 | `push_yuv420` | `yuv420_to_rgb` | 効く | DirectShow | `MEDIASUBTYPE_NV12` |
+| I420 | `push_yuv420` | `yuv420_to_rgb` | 効く | DirectShow | `MEDIASUBTYPE_I420` / `MEDIASUBTYPE_IYUV` |
+| YV12 | `push_yuv420` | `yuv420_to_rgb` | 効く | DirectShow | `MEDIASUBTYPE_YV12` |
+| MJPEG | `push_mjpeg` | `mjpeg_to_rgb` | 効かない（デコーダ任せ） | DirectShow | `MEDIASUBTYPE_MJPG` |
+| RGB24 | `push_bgr24` | `bgr24_to_rgb` | 効かない（RGB のまま） | DirectShow | `MEDIASUBTYPE_RGB24` |
+| そのほか | `push_decoded` | nokhwa のデコーダ | 効かない（デコーダ任せ） | Media Foundation | — |
+
+- **NV12 / I420 / YV12 は YUY2 と同じ係数表と同じ 1 画素の式を通る。** 同じ Y・Cb・Cr なら YUY2 と同じ RGB になる（`yuv420.rs` のテストでカラーバーを突き合わせている）。違うのは色差の置き場所だけで、4:2:0 なので縦横 2x2 画素が 1 組の色差を共有する。統計でも高速パスとして数える
+- 幅か高さが奇数なら、色差は切り上げた大きさを持つものとして読む（右端の列・下端の行は 1 画素で 1 組）。YUY2 の奇数幅は最後の 1 画素を黒で残すが、4:2:0 は全画素を変換する
+- 各面の行に詰め物（ストライドの余り）は無いものとして読む。足りないフレームは捨てる。**DirectShow の非圧縮 YUV では `biWidth` が行の長さ（ストライド）を表し、有効な範囲が狭いときは `rcSource` / `rcTarget` で示す決まり**なので、`biWidth` を幅として読めば Y 面の行の余りは出ない。YUY2 の経路も同じ前提。`rcTarget` で切り出す、あるいは `biWidth` と食い違うストライドのサンプルを検出する仕組みは入れていない（実機で必要になったら足す）
+- DirectShow で形式が未指定のときは、この表の上から順（YUY2・NV12・I420・YV12・MJPEG・RGB24）に選ぶ。係数表の効く形式を先にしてある（`SampleKind` の並び）
+- YV12 は I420 の U 面と V 面が逆に並んだもの。GUID も別なので、I420 には混ぜずに別の形式として扱う
 
 `FrameBuffer` はフレームを `Arc<VideoFrame>` で保持し、取り出し側へは `Arc` の複製を渡す。**画素データを複製しないので、取り出しても 1080p で 6MB の memcpy は発生しない。**
 

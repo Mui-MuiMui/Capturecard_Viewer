@@ -51,6 +51,7 @@ use super::media_type::{
     delete_media_type, sample_format_of, OwnedMediaType, SampleFormat, SampleKind,
 };
 use crate::video::frame_sink::FrameSink;
+use crate::video::yuv420::Yuv420Layout;
 
 /// このフィルターのクラス ID。登録はしないので、`GetClassID` に答えるためだけの値
 const RENDERER_CLSID: GUID = GUID::from_u128(0x6f3a8c21_4d2b_4e6a_9b1c_2f7d5e8a9c03);
@@ -127,6 +128,18 @@ impl StreamState {
         match format.kind {
             SampleKind::Yuy2 => {
                 self.sink.push_yuy2(width, height, src, received_at);
+            }
+            SampleKind::Nv12 => {
+                self.sink
+                    .push_yuv420(Yuv420Layout::Nv12, width, height, src, received_at);
+            }
+            SampleKind::I420 => {
+                self.sink
+                    .push_yuv420(Yuv420Layout::I420, width, height, src, received_at);
+            }
+            SampleKind::Yv12 => {
+                self.sink
+                    .push_yuv420(Yuv420Layout::Yv12, width, height, src, received_at);
             }
             SampleKind::Rgb24 => {
                 self.sink
