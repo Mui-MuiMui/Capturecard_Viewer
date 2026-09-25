@@ -1,3 +1,4 @@
+use crate::i18n::Text;
 use serde::{Serialize, Serializer};
 
 /// ホットキーで実行できるアクション。
@@ -56,17 +57,18 @@ impl HotkeyAction {
         Self::ALL.into_iter().find(|action| action.as_str() == key)
     }
 
-    /// 設定画面に出す日本語名。
+    /// 設定画面に出す名前。
     pub fn label(self) -> &'static str {
-        match self {
-            HotkeyAction::Screenshot => "スクリーンショット",
-            HotkeyAction::ToggleFullscreen => "フルスクリーン切替",
-            HotkeyAction::ToggleAlwaysOnTop => "最前面表示の切替",
-            HotkeyAction::ReconnectDevices => "デバイス再接続",
-            HotkeyAction::VolumeUp => "音量を上げる",
-            HotkeyAction::VolumeDown => "音量を下げる",
-            HotkeyAction::ToggleMute => "ミュート切替",
-        }
+        let text = match self {
+            HotkeyAction::Screenshot => Text::ActionScreenshot,
+            HotkeyAction::ToggleFullscreen => Text::ActionToggleFullscreen,
+            HotkeyAction::ToggleAlwaysOnTop => Text::ActionToggleAlwaysOnTop,
+            HotkeyAction::ReconnectDevices => Text::ActionReconnectDevices,
+            HotkeyAction::VolumeUp => Text::ActionVolumeUp,
+            HotkeyAction::VolumeDown => Text::ActionVolumeDown,
+            HotkeyAction::ToggleMute => Text::ActionToggleMute,
+        };
+        text.get()
     }
 
     /// 最小化している間も、その場で実行してよいか。

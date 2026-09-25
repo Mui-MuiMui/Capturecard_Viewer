@@ -17,6 +17,7 @@ use super::color::SharedColorConversion;
 use super::frame_buffer::VideoFrames;
 use super::frame_sink::{FirstTimeOnly, FrameSink};
 use super::{elapsed_ms, VideoError};
+use crate::i18n::{self, Text};
 use crate::repaint::RepaintWaker;
 
 /// 実際に開いた解像度とフォーマットを 1 行にまとめる。
@@ -27,9 +28,9 @@ use crate::repaint::RepaintWaker;
 fn format_actual_video(resolution: Option<(u32, u32)>, format: Option<&str>) -> String {
     match (resolution, format) {
         (Some((width, height)), Some(format)) => format!("{}x{} {}", width, height, format),
-        (Some((width, height)), None) => format!("{}x{} （フォーマット不明）", width, height),
-        (None, Some(format)) => format!("（解像度不明） {}", format),
-        (None, None) => "（取得できない）".to_string(),
+        (Some((width, height)), None) => i18n::video_actual_format_unknown(width, height),
+        (None, Some(format)) => i18n::video_actual_resolution_unknown(format),
+        (None, None) => Text::VideoActualUnknown.get().to_string(),
     }
 }
 

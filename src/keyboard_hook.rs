@@ -16,6 +16,8 @@ use std::fmt;
 use std::ops::{BitOr, BitOrAssign};
 use std::time::Duration;
 
+use crate::i18n::{self, Text};
+
 /// 修飾キーの組み合わせ。
 ///
 /// 左右の区別はしない（左 Ctrl でも右 Ctrl でも `CONTROL`）。
@@ -88,19 +90,15 @@ pub(crate) enum KeyboardHookError {
 
 impl fmt::Display for KeyboardHookError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            KeyboardHookError::Unsupported => write!(f, "この OS には対応していません"),
-            KeyboardHookError::InstallFailed(source) => {
-                write!(f, "キーボードフックを登録できません: {source}")
-            }
+        let text = match self {
+            KeyboardHookError::Unsupported => Text::KeyboardHookUnsupported.get().to_string(),
+            KeyboardHookError::InstallFailed(source) => i18n::keyboard_hook_install_failed(source),
             KeyboardHookError::ListenerStopped => {
-                write!(f, "ホットキーのリスナースレッドが起動しませんでした")
+                Text::KeyboardHookListenerStopped.get().to_string()
             }
-            KeyboardHookError::WaitFailed(source) => write!(
-                f,
-                "キー入力を待てなくなったのでホットキーを止めました。アプリを再起動してください: {source}"
-            ),
-        }
+            KeyboardHookError::WaitFailed(source) => i18n::keyboard_hook_wait_failed(source),
+        };
+        f.write_str(&text)
     }
 }
 

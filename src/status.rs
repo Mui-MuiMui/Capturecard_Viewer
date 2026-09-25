@@ -11,12 +11,13 @@
 //! **ログは従来どおり出す。** ここに記録するのは画面へ出すためのもので、
 //! `error!` / `warn!` の置き換えではない。
 //!
-//! 日本語の文言をこのモジュールで組み立てているのは、下位のモジュールが
-//! 返す `Result<_, String>` の中身が英語の技術的なメッセージだからで、
-//! 「どこで何に失敗したか」はそれを受け取る側しか知らないため。
-//! エラー型の整理（`thiserror` 化）は別タスクなので、`String` のまま扱う。
+//! このモジュールが持つ文言は、発生源ごとの定型文（`ErrorSource::headline`）と
+//! 「接続状態」タブの表示用の組み立てだけ。失敗の理由そのものは下位のエラー型の
+//! `Display` が持つ（`docs/design/error-reporting.md`）。どちらも文字列の実体は
+//! `crate::i18n` にある。
 
 use crate::audio::ResampleStatus;
+use crate::i18n::{self, Text};
 use chrono::{DateTime, Local};
 use std::time::{Duration, Instant};
 
@@ -70,13 +71,14 @@ pub enum ErrorSource {
 impl ErrorSource {
     /// 発生源ごとの定型文。元のエラー文の前に付ける。
     pub fn headline(self) -> &'static str {
-        match self {
-            ErrorSource::Video => "映像デバイスに接続できません",
-            ErrorSource::Audio => "音声デバイスに接続できません",
-            ErrorSource::Screenshot => "スクリーンショットを出力できません",
-            ErrorSource::Hotkey => "ホットキーを登録できません",
-            ErrorSource::Settings => "設定ファイルを読み書きできません",
-        }
+        let text = match self {
+            ErrorSource::Video => Text::HeadlineVideo,
+            ErrorSource::Audio => Text::HeadlineAudio,
+            ErrorSource::Screenshot => Text::HeadlineScreenshot,
+            ErrorSource::Hotkey => Text::HeadlineHotkey,
+            ErrorSource::Settings => Text::HeadlineSettings,
+        };
+        text.get()
     }
 
     /// `ErrorCenter` の格納位置。
@@ -250,19 +252,19 @@ pub fn truncate(text: &str, limit: usize) -> String {
 /// 表示が崩れるため、そのまま「バッファ水位: 不明」で逃がす。
 pub fn format_resample_status(status: Option<ResampleStatus>) -> Vec<String> {
     let Some(status) = status else {
-        return vec!["変換なし".to_string()];
+        return vec![Text::ResampleIdentity.get().to_string()];
     };
 
     let water_level_text = if status.target_level == 0 {
-        "不明".to_string()
+        Text::WaterLevelUnknown.get().to_string()
     } else {
         let percent = status.water_level as f64 / status.target_level as f64 * 100.0;
         format!("{:.0}%", percent)
     };
 
     vec![
-        format!("リサンプル比: {:.4}", status.ratio),
-        format!("バッファ水位: {}", water_level_text),
+        i18n::resample_ratio(status.ratio),
+        i18n::buffer_water_level(water_level_text),
     ]
 }
 
@@ -276,8 +278,8 @@ pub fn format_resample_status(status: Option<ResampleStatus>) -> Vec<String> {
 /// 一度も途切れていない状態と区別が付かなくなるため。
 pub fn format_underrun_count(count: Option<u32>) -> String {
     match count {
-        Some(count) => format!("アンダーラン: {} 回", count),
-        None => "アンダーラン: -".to_string(),
+        Some(count) => i18n::underrun_count(count),
+        None => Text::UnderrunUnknown.get().to_string(),
     }
 }
 
@@ -309,11 +311,12 @@ pub struct ConnectionStatus {
 impl LinkStatus {
     /// 状態を 1 行で表す見出し。
     pub fn headline(&self) -> &'static str {
-        match (self.connected, self.reconnecting) {
-            (true, _) => "接続中",
-            (false, true) => "未接続（再接続を試しています）",
-            (false, false) => "未接続",
-        }
+        let text = match (self.connected, self.reconnecting) {
+            (true, _) => Text::LinkConnected,
+            (false, true) => Text::LinkReconnecting,
+            (false, false) => Text::LinkDisconnected,
+        };
+        text.get()
     }
 }
 
