@@ -703,9 +703,10 @@ impl eframe::App for CaptureCardViewer {
         let focused = viewport.focused.unwrap_or(true);
         // テキスト欄に入力中かも伝える。キーを奪わないので、プリセット名などへ
         // 打った文字がホットキーとしても実行されてしまう（#206）。
+        // 見るのはテキスト欄のフォーカスだけで、ボタンなどのフォーカスは数えない（#238）。
         // **描画を全て終えたここで読む。** このフレームでフォーカスが移った分まで
         // 反映される。フックの中から egui へは問い合わせない
-        let typing = ctx.wants_keyboard_input();
+        let typing = hotkeys::is_typing_in_text_field(ctx);
         self.hotkey_manager
             .set_window_state(minimized, focused, typing);
         ctx.request_repaint_after(next_repaint_delay(condition));

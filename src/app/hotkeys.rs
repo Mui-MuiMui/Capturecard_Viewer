@@ -14,6 +14,23 @@ use log::{debug, trace, warn};
 use std::collections::BTreeMap;
 use std::sync::mpsc::Sender;
 
+/// このアプリのテキスト欄に入力中か。ホットキーを止める「入力中」の判定に使う（#206、#238）。
+///
+/// **`Context::wants_keyboard_input()` は使わない。** あちらはテキスト欄に限らず、
+/// 何かのウィジェットにキーボードフォーカスがあるだけで真になる。Tab キーで
+/// 映像エリアやボタンへフォーカスが移ると、以後ずっと入力中と判定されて
+/// ホットキーが効かなくなっていた。
+///
+/// フォーカスのあるウィジェットが `TextEdit` かは、その Id に `TextEdit` の状態が
+/// 保存されているかで見る。`TextEdit` は描画のたびに自分の Id へ状態を書くので、
+/// 設定ダイアログのプリセット名・保存先や、`DragValue` の数値入力（中身は
+/// `TextEdit`）のどれでも、個別に `has_focus()` を集めずに拾える。
+pub(super) fn is_typing_in_text_field(ctx: &egui::Context) -> bool {
+    // memory のロックを握ったまま data を読まない（同じ Context の中のロック）
+    let focused = ctx.memory(|memory| memory.focus());
+    focused.is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some())
+}
+
 /// 最小化中のアクションを、UI スレッドを介さずに実行する窓口を組み立てる。
 ///
 /// ホットキーのリスナースレッドから呼ばれる。**やってよいのはデバイス
@@ -90,7 +107,7 @@ impl CaptureCardViewer {
     /// 入力中かはフレームの先頭の値で見る。リスナーへ渡している旗（`update()` の
     /// 末尾で書く）と同じく、前のフレームの描画を終えた時点の状態になる。
     pub(super) fn remove_hotkey_key_events(&self, ctx: &egui::Context) {
-        let typing = ctx.wants_keyboard_input();
+        let typing = is_typing_in_text_field(ctx);
         let removed = ctx.input_mut(|input| {
             self.hotkey_manager
                 .remove_hotkey_key_events(&mut input.events, typing)
@@ -174,6 +191,62 @@ mod tests {
     use super::*;
     use crate::hotkey::HotkeyError;
     use crate::keyboard_hook::KeyboardHookError;
+
+    /// 何もしない入力で 1 フレーム回す。描画の中身は `add_contents` が決める
+    fn run_frame(ctx: &egui::Context, add_contents: impl FnMut(&mut egui::Ui)) {
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, add_contents);
+        });
+    }
+
+    #[test]
+    fn is_typing_in_text_field_is_false_without_focus() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        run_frame(&ctx, |ui| {
+            ui.text_edit_singleline(&mut text);
+        });
+
+        assert!(!is_typing_in_text_field(&ctx));
+    }
+
+    #[test]
+    fn is_typing_in_text_field_is_true_while_a_text_edit_has_focus() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        let mut focus_requested = false;
+        for _ in 0..2 {
+            run_frame(&ctx, |ui| {
+                let response = ui.text_edit_singleline(&mut text);
+                if !focus_requested {
+                    response.request_focus();
+                    focus_requested = true;
+                }
+            });
+        }
+
+        assert!(is_typing_in_text_field(&ctx));
+    }
+
+    #[test]
+    fn is_typing_in_text_field_ignores_focus_on_other_widgets() {
+        // Tab キーで映像エリアやボタンへフォーカスが移った状態（#238）。
+        // wants_keyboard_input() は真になるが、テキスト欄ではないので入力中ではない
+        let ctx = egui::Context::default();
+        let mut focus_requested = false;
+        for _ in 0..2 {
+            run_frame(&ctx, |ui| {
+                let response = ui.allocate_response(egui::vec2(100.0, 100.0), egui::Sense::click());
+                if !focus_requested {
+                    response.request_focus();
+                    focus_requested = true;
+                }
+            });
+        }
+
+        assert!(ctx.wants_keyboard_input());
+        assert!(!is_typing_in_text_field(&ctx));
+    }
 
     #[test]
     fn hotkey_error_summary_without_errors_is_none() {
