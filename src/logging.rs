@@ -211,6 +211,25 @@ fn remove_obsolete_logs(dir: &Path, keep: usize) -> Vec<String> {
         .collect()
 }
 
+/// レベルを INFO 以下へ落とすライブラリのターゲットの接頭辞。
+///
+/// symphonia は効果音のデコードに失敗すると自分で ERROR を出すが、アプリ側でも
+/// 同じ失敗を拾って WARN を出すため二重になる。捨てずに INFO として残す
+const DEMOTED_TARGET_PREFIXES: &[&str] = &["symphonia"];
+
+/// 実際に出すレベルを決める。`DEMOTED_TARGET_PREFIXES` に当たるターゲットの
+/// ERROR / WARN は INFO に落とし、それ以外はそのまま返す
+fn effective_level(target: &str, level: Level) -> Level {
+    let demoted = DEMOTED_TARGET_PREFIXES
+        .iter()
+        .any(|prefix| target.starts_with(prefix));
+    if demoted && level < Level::Info {
+        Level::Info
+    } else {
+        level
+    }
+}
+
 /// ログ 1 行を組み立てる。末尾の改行まで含む
 fn format_line(timestamp: &str, level: Level, target: &str, message: &str) -> String {
     format!("{} [{:<5}] {} - {}\n", timestamp, level, target, message)
@@ -228,7 +247,7 @@ struct FileLogger {
 
 impl Log for FileLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= self.level
+        effective_level(metadata.target(), metadata.level()) <= self.level
     }
 
     fn log(&self, record: &Record) {
@@ -238,7 +257,7 @@ impl Log for FileLogger {
 
         let line = format_line(
             &Local::now().format(LINE_TIMESTAMP_FORMAT).to_string(),
-            record.level(),
+            effective_level(record.target(), record.level()),
             record.target(),
             &record.args().to_string(),
         );
@@ -261,6 +280,40 @@ impl Log for FileLogger {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn effective_level_demotes_symphonia_errors_and_warnings_to_info() {
+        assert_eq!(
+            effective_level("symphonia_core::probe", Level::Error),
+            Level::Info
+        );
+        assert_eq!(
+            effective_level("symphonia_bundle_mp3", Level::Warn),
+            Level::Info
+        );
+    }
+
+    #[test]
+    fn effective_level_keeps_symphonia_info_and_below() {
+        assert_eq!(effective_level("symphonia_core", Level::Info), Level::Info);
+        assert_eq!(
+            effective_level("symphonia_core", Level::Debug),
+            Level::Debug
+        );
+        assert_eq!(
+            effective_level("symphonia_core", Level::Trace),
+            Level::Trace
+        );
+    }
+
+    #[test]
+    fn effective_level_keeps_other_targets() {
+        assert_eq!(
+            effective_level("capturecard_viewer::screenshot", Level::Error),
+            Level::Error
+        );
+        assert_eq!(effective_level("eframe", Level::Warn), Level::Warn);
+    }
 
     #[test]
     fn level_from_env_none_returns_default() {
