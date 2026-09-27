@@ -66,6 +66,11 @@ pub enum ErrorSource {
     /// ユーザーが場所を選ぶものではなく、失敗してもログに残す扱いのまま。
     /// ここで扱うのはユーザーが選んだファイルに対する操作だけ
     Settings,
+    /// 更新の確認（GitHub の Release への問い合わせ）。
+    ///
+    /// 起動時の確認と「その他」タブの「更新を確認」の両方。確認できたら
+    /// `ErrorCenter::clear` で取り下げる
+    Update,
 }
 
 impl ErrorSource {
@@ -77,6 +82,7 @@ impl ErrorSource {
             ErrorSource::Screenshot => Text::HeadlineScreenshot,
             ErrorSource::Hotkey => Text::HeadlineHotkey,
             ErrorSource::Settings => Text::HeadlineSettings,
+            ErrorSource::Update => Text::HeadlineUpdate,
         };
         text.get()
     }
@@ -89,12 +95,13 @@ impl ErrorSource {
             ErrorSource::Screenshot => 2,
             ErrorSource::Hotkey => 3,
             ErrorSource::Settings => 4,
+            ErrorSource::Update => 5,
         }
     }
 }
 
 /// `ErrorSource` の種類数。`ErrorCenter` の配列長。
-const SOURCE_COUNT: usize = 5;
+const SOURCE_COUNT: usize = 6;
 
 /// 記録した失敗 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]

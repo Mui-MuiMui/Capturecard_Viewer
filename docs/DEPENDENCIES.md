@@ -66,6 +66,9 @@
 | `winapi` | 0.3 | 0.3.x | 後述 | Windows API |
 | `windows` | 0.62 | 0.62.2 | 追随 | DirectShow のバックエンド（`src/video/directshow/`） |
 | `windows-core` | 0.62 | 0.100.0 | 後述 | 同上。`#[implement]` が生成するコードの参照先 |
+| `ureq` | 3.4 | 3.4.2 | 追随 | 更新の確認で GitHub の Release API へ問い合わせる（`src/update/`） |
+| `serde_json` | 1.0 | 1.0.151 | 追随 | 同上。API の応答（JSON）を読む |
+| `semver` | 1.0 | 1.0.28 | 追随 | 同上。タグと実行中の版を比べる |
 | `tempfile`（dev） | 3.27 | 3.27.x | 追随 | テストで一時ディレクトリに設定ファイルを書く |
 | `toml`（dev） | 1.1 | 1.1.x | 追随 | テストで設定の TOML を直接組み立てて読ませる |
 
@@ -83,6 +86,24 @@
 
 `default-features = false` にしてあるのは、既定に含まれる Linux 向けの
 `wayland-data-control` を持ち込まないため。
+
+### `ureq` は native-tls で使う（2026-09-27）
+
+更新の確認（Issue #240）のために入れた。**TLS は Windows の schannel（`native-tls`）で、
+既定の rustls と ring は入れない。** 証明書は `RootCerts::PlatformVerifier` で OS の証明書ストアを使う。
+社内のプロキシのように OS 側で信頼している証明書にも従えるようにするため。
+
+- フィーチャは `native-tls` にする。`native-tls-no-default` だけでは ureq が native-tls を
+  無効とみなし、問い合わせの時点でパニックする（release ビルドは `panic = "abort"` なので
+  アプリごと落ちる）
+- `native-tls` は同梱のルート証明書 `webpki-root-certs`（CDLA-Permissive-2.0）を必ず引き込む。
+  使わないが外せないので、`about.toml` の `accepted` に CDLA-Permissive-2.0 を足した。
+  表示義務だけの寛容なデータライセンスで、MIT での配布と両立する
+- 既定の `gzip` も切ってある。応答は 1 回きりの小さな JSON で、圧縮の恩恵が無い
+- `semver` は他の依存が元から使っていたので、クレートは増えていない。`Cargo.lock` に
+  増えたのは `ureq` / `ureq-proto` / `native-tls` / `schannel` / `serde_json` と、その下の
+  `http` / `httparse` / `der` / `base64` など。`openssl` 系や `security-framework` も lock には
+  載るが、Windows 以外のターゲット向けで、ビルドにも配布物にも入らない
 
 ## 更新の順序
 

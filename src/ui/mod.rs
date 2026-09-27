@@ -21,6 +21,7 @@
 //! | `hotkey_capture.rs` | ホットキー入力ダイアログ |
 //! | `other_tab.rs` | 「その他」タブ |
 //! | `status_tab.rs` | 「接続状態」タブ |
+//! | `update_dialog.rs` | 起動時に新しい版を知らせるダイアログ |
 
 mod capability;
 mod device_tab;
@@ -32,6 +33,7 @@ mod preset;
 mod screenshot_tab;
 mod state;
 mod status_tab;
+mod update_dialog;
 mod video_mode;
 
 // `ui` の外（`src/app/*.rs`）から使う経路は分割前と同じ `crate::ui::...` に
@@ -46,6 +48,7 @@ pub use self::draft::{draft_from_defaults, draft_from_imported};
 pub use self::hotkey_capture::{show_hotkey_capture_dialog, HotkeyDialogEvent};
 pub use self::preset::PresetRowAction;
 pub use self::state::{resolve_action, SettingsDialogState, SettingsDialogView};
+pub use self::update_dialog::{show_update_dialog, UpdateDialogEvent};
 
 use self::device_tab::show_device_settings_tab;
 use self::hotkeys_tab::show_hotkey_settings_tab;
@@ -56,8 +59,9 @@ use self::status_tab::show_status_tab;
 use crate::audio::AudioDirection;
 use crate::hotkey::{HotkeyAction, HotkeyAssignmentError};
 use crate::i18n::Text;
-use crate::settings::{AppSettings, LanguageSetting};
+use crate::settings::{AppSettings, LanguageSetting, UpdateSettings};
 use crate::status::ConnectionStatus;
+use crate::update::UpdateView;
 use eframe::egui;
 use std::collections::BTreeMap;
 
@@ -126,6 +130,12 @@ pub enum SettingsEvent {
     /// 「その他」タブで言語を選んだ。入れるのはドラフトで、画面の言語が
     /// 切り替わるのは「適用」「OK」のとき
     SetLanguage(LanguageSetting),
+    /// 「その他」タブの「更新を確認」。問い合わせは `app` が別スレッドで行う。
+    /// ドラフトも設定も動かさない
+    CheckForUpdates,
+    /// 「その他」タブの更新の節で、2 つのチェックか「解除」を操作した。
+    /// 載せるのは差し替えたあとのドラフトの `update` で、反映は「適用」「OK」
+    SetUpdateSettings(UpdateSettings),
     /// ホットキー入力ダイアログをこのアクションで開く
     OpenHotkeyCapture(HotkeyAction),
     /// スクリーンショットの保存フォルダーをファイルダイアログで選ぶ
@@ -324,6 +334,7 @@ pub fn show_settings_dialog(
     devices: &DeviceLists<'_>,
     connection: &ConnectionStatus,
     hotkey_errors: &BTreeMap<HotkeyAction, HotkeyAssignmentError>,
+    update: &UpdateView<'_>,
 ) -> Vec<SettingsEvent> {
     let mut events: Vec<SettingsEvent> = Vec::new();
     let mut button = SettingsDialogAction::None;
@@ -430,7 +441,7 @@ pub fn show_settings_dialog(
                     SettingsTab::Hotkeys => {
                         show_hotkey_settings_tab(ui, draft, hotkey_errors, &mut events)
                     }
-                    SettingsTab::Other => show_other_tab(ui, draft, view, &mut events),
+                    SettingsTab::Other => show_other_tab(ui, draft, view, update, &mut events),
                     SettingsTab::Status => show_status_tab(ui, connection),
                 });
         });
@@ -465,7 +476,7 @@ mod tests {
     use crate::settings::{
         AppSettings, AudioSettings, ColorRange, ColorSpace, HotkeySettings, LanguageSetting,
         Preset, ScreenshotDestination, ScreenshotFormat, ScreenshotSettings, UiSettings,
-        VideoSettings,
+        UpdateSettings, VideoSettings,
     };
 
     use std::collections::{BTreeMap, BTreeSet};
@@ -536,6 +547,12 @@ mod tests {
             // 既定値（false）と異なる値にして、反映の有無を見分けられるようにする
             hotkey_settings: HotkeySettings {
                 only_when_focused: true,
+            },
+            // 既定値（確認する・知らせる・飛ばさない）と全て異なる値にする
+            update: UpdateSettings {
+                check_on_startup: false,
+                notify_on_startup: false,
+                skipped_version: Some("1.2.0".to_string()),
             },
         }
     }

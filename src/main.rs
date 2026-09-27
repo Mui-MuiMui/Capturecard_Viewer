@@ -21,6 +21,7 @@ mod screenshot;
 mod settings;
 mod status;
 mod ui;
+mod update;
 mod video;
 
 use app::CaptureCardViewer;

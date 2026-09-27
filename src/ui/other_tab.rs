@@ -1,11 +1,12 @@
 //! 「その他」タブ。
 //!
-//! プリセット、画面の言語、設定の書き出し・読み込み・初期化を置いてある。
+//! プリセット、画面の言語、更新の確認、設定の書き出し・読み込み・初期化を置いてある。
 //! **ここでは何も実行しない。** ファイルダイアログもファイル I/O も
 //! `CaptureCardViewer` が行う（`docs/design/settings-dialog.md`）。
 
 use crate::i18n::{self, Text};
-use crate::settings::{AppSettings, LanguageSetting};
+use crate::settings::{AppSettings, LanguageSetting, UpdateSettings};
+use crate::update::{UpdateStatus, UpdateView};
 use eframe::egui;
 
 use super::preset::{active_preset_label, PresetRowAction};
@@ -30,6 +31,7 @@ pub(super) fn show_other_tab(
     ui: &mut egui::Ui,
     draft: &AppSettings,
     view: &SettingsDialogView<'_>,
+    update: &UpdateView<'_>,
     events: &mut Vec<SettingsEvent>,
 ) {
     ui.heading(Text::TabOther.get());
@@ -40,6 +42,10 @@ pub(super) fn show_other_tab(
     ui.add_space(15.0);
 
     show_language_group(ui, draft, events);
+
+    ui.add_space(15.0);
+
+    show_update_group(ui, &draft.update, update, events);
 
     ui.add_space(15.0);
 
@@ -224,4 +230,112 @@ fn show_language_group(ui: &mut egui::Ui, draft: &AppSettings, events: &mut Vec<
         ui.add_space(5.0);
         ui.small(Text::LanguageHint.get());
     });
+}
+
+/// 「その他」タブの更新の節を描く。
+///
+/// 現在の版と確認の結果（`update`）は実行中のアプリの状態で、ドラフトではない。
+/// 現在の版は、テスト用の環境変数で差し替えていればその版を出す
+/// （通知ダイアログの「いまは vA.B.C」と揃える）。
+/// 「更新を確認」は `SettingsEvent::CheckForUpdates` を返し、問い合わせは
+/// `app::update` が別スレッドで行う。2 つのチェックと「解除」はドラフトの
+/// `update` を差し替えるイベントを返すだけで、反映は「適用」「OK」のとき。
+///
+/// 「リリースページを開く」は egui のリンク。開くのは eframe（ブラウザの起動）で、
+/// アプリの状態は動かさない。
+fn show_update_group(
+    ui: &mut egui::Ui,
+    draft: &UpdateSettings,
+    update: &UpdateView<'_>,
+    events: &mut Vec<SettingsEvent>,
+) {
+    let update_status = update.status;
+    ui.group(|ui| {
+        ui.strong(Text::UpdateGroup.get());
+        ui.add_space(5.0);
+
+        ui.label(i18n::update_current_version(update.current));
+
+        ui.horizontal(|ui| {
+            // 問い合わせ中は押せなくする。同時に 2 本走らせない
+            let checking = matches!(update_status, UpdateStatus::Checking);
+            if ui
+                .add_enabled(!checking, egui::Button::new(Text::UpdateCheckNow.get()))
+                .clicked()
+            {
+                events.push(SettingsEvent::CheckForUpdates);
+            }
+            show_update_status(ui, update_status);
+        });
+
+        ui.hyperlink_to(
+            Text::UpdateOpenReleasePage.get(),
+            update_status.release_url(),
+        );
+
+        ui.add_space(5.0);
+
+        let mut check_on_startup = draft.check_on_startup;
+        if ui
+            .checkbox(&mut check_on_startup, Text::UpdateCheckOnStartup.get())
+            .changed()
+        {
+            events.push(SettingsEvent::SetUpdateSettings(UpdateSettings {
+                check_on_startup,
+                ..draft.clone()
+            }));
+        }
+        let mut notify_on_startup = draft.notify_on_startup;
+        if ui
+            .checkbox(&mut notify_on_startup, Text::UpdateNotifyOnStartup.get())
+            .changed()
+        {
+            events.push(SettingsEvent::SetUpdateSettings(UpdateSettings {
+                notify_on_startup,
+                ..draft.clone()
+            }));
+        }
+
+        if let Some(skipped) = &draft.skipped_version {
+            ui.horizontal(|ui| {
+                ui.label(i18n::update_skipped_version(skipped));
+                if ui.button(Text::UpdateClearSkipped.get()).clicked() {
+                    events.push(SettingsEvent::SetUpdateSettings(UpdateSettings {
+                        skipped_version: None,
+                        ..draft.clone()
+                    }));
+                }
+            });
+        }
+
+        ui.add_space(5.0);
+        ui.small(Text::UpdateHint.get());
+        ui.small(Text::UpdateDraftHint.get());
+    });
+}
+
+/// 確認の結果を 1 行で出す。
+fn show_update_status(ui: &mut egui::Ui, update_status: &UpdateStatus) {
+    match update_status {
+        UpdateStatus::NotChecked => {
+            ui.label(Text::UpdateNotChecked.get());
+        }
+        UpdateStatus::Checking => {
+            ui.spinner();
+            ui.label(Text::UpdateChecking.get());
+        }
+        UpdateStatus::UpToDate => {
+            notice_label(ui, NoticeKind::Success, Text::UpdateUpToDate.get());
+        }
+        UpdateStatus::Available(check) => {
+            notice_label(
+                ui,
+                NoticeKind::Warning,
+                i18n::update_status_available(&check.latest),
+            );
+        }
+        UpdateStatus::Failed(reason) => {
+            notice_label(ui, NoticeKind::Error, i18n::update_status_failed(reason));
+        }
+    }
 }

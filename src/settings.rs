@@ -91,6 +91,8 @@ pub struct AppSettings {
     //
     // 中身は `video` と `audio` だけ。線引きの理由は `Preset` のコメントを見ること。
     pub presets: Vec<Preset>,
+    // 更新の確認。設定ファイルでは [update] になる。プリセットには入れない
+    pub update: UpdateSettings,
 }
 
 // 設定ファイルから読んだままの形。
@@ -115,6 +117,7 @@ struct RawAppSettings {
     hotkeys: Option<BTreeMap<String, String>>,
     hotkey_settings: HotkeySettings,
     presets: Vec<Preset>,
+    update: UpdateSettings,
 }
 
 impl From<RawAppSettings> for AppSettings {
@@ -128,6 +131,7 @@ impl From<RawAppSettings> for AppSettings {
             hotkeys,
             hotkey_settings,
             presets,
+            update,
         } = raw;
 
         // 旧版の項目はここで読み切って捨てる。保存では書き出さない
@@ -149,6 +153,7 @@ impl From<RawAppSettings> for AppSettings {
             hotkeys,
             hotkey_settings,
             presets,
+            update,
         };
         // 設定ファイルを手で書き換えて、選択中のプリセットと実際の値を
         // 食い違わせることができる。読んだ時点で辻褄を合わせておく
@@ -254,6 +259,7 @@ impl Default for AppSettings {
             hotkeys: default_hotkeys(),
             hotkey_settings: HotkeySettings::default(),
             presets: Vec::new(),
+            update: UpdateSettings::default(),
         }
     }
 }
@@ -1146,6 +1152,33 @@ pub struct HotkeySettings {
     // 反応する（#133）。オンにすると、他のアプリで同じキーを使っていても
     // こちらは動かない（#202）。どちらの場合もキーは奪わず、他のアプリにも届く
     pub only_when_focused: bool,
+}
+
+// 更新の確認（「その他」タブの「更新」の欄）。`docs/design/update.md`。
+//
+// プリセットには入れない（`Preset` のコメント）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    // 起動時に GitHub へ新しい版を問い合わせるか。切っていても、
+    // 「その他」タブの「更新を確認」からは確認できる
+    pub check_on_startup: bool,
+    // 起動時の確認で新しい版が見つかったとき、ダイアログで知らせるか。
+    // 切っていると「その他」タブの「更新」の欄に出るだけ
+    pub notify_on_startup: bool,
+    // 「この版は通知しない」を選んだ版（`1.2.0` の形。`v` は付けない）。
+    // この版のあいだは起動時のダイアログを出さない。もっと新しい版が出たら出す
+    pub skipped_version: Option<String>,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            check_on_startup: true,
+            notify_on_startup: true,
+            skipped_version: None,
+        }
+    }
 }
 
 // 設定ファイルをどう読めたか。起動時に既定値を書き戻してよいかの判断に使う。
@@ -2799,6 +2832,50 @@ volume = 80.0
             serialized
         );
         assert!(restored.hotkeys.is_empty());
+    }
+
+    #[test]
+    fn update_settings_missing_section_uses_defaults() {
+        // [update] が無い（更新の確認を足す前の版が書いた）設定ファイル。
+        // 確認も通知もする側に倒し、他の項目は残る
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("[update] が無くても読めなければならない");
+
+        assert!(settings.update.check_on_startup);
+        assert!(settings.update.notify_on_startup);
+        assert_eq!(settings.update.skipped_version, None);
+        assert_eq!(settings.video.fps, Some(30));
+    }
+
+    #[test]
+    fn update_settings_missing_one_key_keeps_the_others() {
+        // 構造体レベルの #[serde(default)] なので、欠けた bool は false ではなく
+        // 構造体の既定値（true）になる
+        let settings: AppSettings =
+            toml::from_str("[update]\nnotify_on_startup = false\nskipped_version = \"1.2.0\"\n")
+                .expect("[update] の一部が欠けていても読めなければならない");
+
+        assert!(settings.update.check_on_startup);
+        assert!(!settings.update.notify_on_startup);
+        assert_eq!(settings.update.skipped_version.as_deref(), Some("1.2.0"));
+    }
+
+    #[test]
+    fn update_settings_survive_a_save_and_load_roundtrip() {
+        let mut original = AppSettings::default();
+        original.update.check_on_startup = false;
+        original.update.skipped_version = Some("1.2.0".to_string());
+
+        let serialized = toml::to_string(&original).expect("設定を書き出せなければならない");
+        let restored: AppSettings =
+            toml::from_str(&serialized).expect("書き出した設定を読み直せなければならない");
+
+        assert_eq!(restored.update, original.update);
+        assert!(
+            serialized.contains("[update]"),
+            "[update] セクションに書き出されること: {}",
+            serialized
+        );
     }
 
     #[test]

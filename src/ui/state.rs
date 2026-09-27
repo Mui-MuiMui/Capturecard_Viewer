@@ -5,7 +5,7 @@
 //! （`docs/design/settings-dialog.md`）。
 
 use crate::audio::AudioDirection;
-use crate::settings::{AppSettings, LanguageSetting};
+use crate::settings::{AppSettings, LanguageSetting, UpdateSettings};
 
 use super::capability::{AudioCapabilityCache, VideoCapabilityCache};
 use super::draft::commit_draft;
@@ -190,6 +190,14 @@ impl SettingsDialogState {
     pub fn set_draft_language(&mut self, language: LanguageSetting) {
         if let Some(draft) = self.draft.as_mut() {
             draft.ui.language = language;
+        }
+    }
+
+    /// ドラフトの更新の設定（2 つのチェックと「この版は通知しない」）を差し替える。
+    /// 反映は「適用」「OK」のとき。
+    pub fn set_draft_update(&mut self, update: UpdateSettings) {
+        if let Some(draft) = self.draft.as_mut() {
+            draft.update = update;
         }
     }
 
