@@ -15,7 +15,7 @@ A viewer for displaying video and audio from a capture card. For Windows 10/11.
 
 ## Installation
 
-Save it anywhere and run it.
+Download `capturecard_viewer-<version>-windows-x64.exe` from [Releases](https://github.com/Mui-MuiMui/Capturecard_Viewer/releases), put it in any folder, and run it. No installer or zip extraction is needed.
 
 ## Uninstallation
 
