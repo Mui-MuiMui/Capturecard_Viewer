@@ -214,6 +214,8 @@ pub(super) struct DeviceWorker {
     snapshot: SharedSnapshot,
     /// ワーカースレッドのハンドル。`shutdown` で join したら `None` になる
     handle: Option<JoinHandle<()>>,
+    /// フェイクデバイスで動いているか。起動時に決まり、以後変わらない（#252）
+    fake_devices: bool,
 }
 
 impl DeviceWorker {
@@ -247,7 +249,7 @@ impl DeviceWorker {
             repaint_waker,
         };
         // 本番かフェイクか。環境変数を読むだけなので UI スレッドで決めてよい
-        let backends = backend::backends_from_env();
+        let (backends, fake_devices) = backend::backends_from_env();
         let handle = std::thread::Builder::new()
             .name("device-worker".to_string())
             .spawn(move || {
@@ -272,7 +274,13 @@ impl DeviceWorker {
             events: event_rx,
             snapshot,
             handle,
+            fake_devices,
         }
+    }
+
+    /// 環境変数でフェイクデバイスが選ばれているか。
+    pub(super) fn fake_devices(&self) -> bool {
+        self.fake_devices
     }
 
     /// コマンドを送る。ワーカーが落ちている場合はログへ残して捨てる。

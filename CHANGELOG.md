@@ -6,6 +6,7 @@
 
 ### 変更
 
+- 開発者向けのフェイクデバイス（`CAPTURECARD_VIEWER_FAKE_DEVICES`）で動いているとき、起動直後のトーストと「接続状態」タブにその旨を出す
 - Release の配布物を単体の exe（`capturecard_viewer-<バージョン>-windows-x64.exe`）と `SHA256SUMS.txt` の 2 つにした。zip は付かない。exe をダウンロードして任意のフォルダに置けば使える
 
 ### 修正
