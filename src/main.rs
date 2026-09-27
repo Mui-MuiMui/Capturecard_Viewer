@@ -81,7 +81,13 @@ fn main() -> Result<(), eframe::Error> {
                 );
             }
             configure_japanese_font(&cc.egui_ctx);
-            Box::new(CaptureCardViewer::default())
+            let app = CaptureCardViewer::default();
+            // 画面の言語を設定と OS の表示言語から決める。**起動経路で 1 回だけ。**
+            // `default()` の中では決めない。テストで作ったときにプロセス全体の
+            // 言語を書き換えてしまうため（#256）。`default()` は文言を作らないので、
+            // 作った直後に決めても最初の描画から設定の言語で出る
+            app.apply_language();
+            Box::new(app)
         }),
     )
 }
