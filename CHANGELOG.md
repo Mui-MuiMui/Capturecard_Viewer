@@ -4,6 +4,32 @@
 
 ## [未リリース]
 
+## [1.2.0] - 2026-09-27
+
+1.1.0 以降の変更をまとめたバージョン。設定ファイルは 1.1.0 のまま読める。**このバージョンから自動アップデートが入るが、1.1.0 からの更新は手動で（zip を展開して exe を置き換える）。** 次のバージョン以降はアプリ内の「更新する」で更新できる。
+
+- **自動アップデート**: 起動時に新しいバージョンを検知してダイアログで知らせ、「更新する」でダウンロード・照合・置き換え・再起動まで行う。設定画面の「その他」タブに「更新」の欄
+- **英語表示**: 「言語（Language）」で 自動 / 日本語 / English。既定は Windows の表示言語に合わせる
+- **DirectShow 対応**: OBS の仮想カメラなど Media Foundation に出ないデバイスを「(DirectShow)」付きで一覧に出す。「映像の開き方」（自動 / Media Foundation / DirectShow）の設定も追加
+- **音声バッファ**の長さ（20〜200ms）を設定できるようにし、「接続状態」タブにリサンプル比・バッファ水位・アンダーラン回数を表示
+- **ホットキー**: 他のアプリからキーを奪わない方式に変更。最小化中もミュート・音量が効く。「このアプリにフォーカスがあるときだけ反応する」を追加。前面にいるとき効かない不具合を修正
+- **効果音**: 「既定に戻す」を追加、「テスト再生」が編集中の音を鳴らすように修正、読めないファイルを選んだときに通知
+- キャプチャーボードが Windows 側からも見えないときに、その旨を「接続状態」タブとトーストで案内
+- 開発者向け: 実機なしで動くフェイクデバイス（`CAPTURECARD_VIEWER_FAKE_DEVICES`）と、更新をテストする環境変数
+
+<hr>
+
+All changes since 1.1.0. Config files from 1.1.0 load as they are. **Auto-update ships in this version, but updating from 1.1.0 is manual (extract the zip and replace the exe).** From the next version on, use "Update" inside the app.
+
+- **Auto-update**: checks GitHub Releases at startup, shows a dialog, and "Update" downloads, verifies (SHA-256), replaces the exe and restarts. New "Update" section in the Other tab of Settings
+- **English UI**: "Language" setting with Auto / 日本語 / English. Default follows the Windows display language
+- **DirectShow support**: devices that only exist in DirectShow (e.g. OBS Virtual Camera) are listed with a "(DirectShow)" suffix. New "Video backend" setting (Auto / Media Foundation / DirectShow)
+- **Audio buffer** length (20–200 ms) is now configurable; the Connection tab shows resample ratio, buffer level and underrun count
+- **Hotkeys**: no longer steal keys from other apps. Mute and volume work while minimized. New "Only when this app is focused" option. Fixed hotkeys not working while the app is in front
+- **Screenshot sound**: "Restore default" button, "Test" now plays the sound being edited, and unreadable files are reported
+- When the capture card is missing from Windows itself, the Connection tab and a toast say so
+- For developers: fake devices (`CAPTURECARD_VIEWER_FAKE_DEVICES`) and environment variables to test the updater
+
 ### 追加
 
 - 起動時に GitHub の Release へ新しい版があるかを確かめ、あればダイアログで知らせ、「更新する」で更新の適用までできるようにした。「更新する」を押すと、新しい版の exe をいまの exe と同じフォルダへダウンロードし、Release の `SHA256SUMS.txt` と照合してから、いまの exe と置き換えて再起動する。ダウンロード中も映像と音声は止まらず、進み具合（%）が出て「キャンセル」で止められる。exe を書き込めないフォルダ（Program Files など）に置いている場合や、新しい版に自動更新用のファイルが無い場合（v1.1.0 以前）は、その旨を出して「リリースページを開く」から手で更新してもらう。**失敗しても元の exe はそのまま残る。** 置き換えた前の版（`.old`）は次の起動で消す。「後で」は次の起動でまた知らせ、「この版は通知しない」はその版のあいだ知らせない。設定画面の「その他」タブに「更新」の欄を追加し、いまの版の表示、手動の「更新を確認」、新しい版があれば「更新する」、「リリースページを開く」と、「起動時に更新を確認する」「新しい版があれば起動時にダイアログで知らせる」（どちらも既定はオン）を置いた。問い合わせは裏で行うので、ネットワークにつながっていなくても起動は待たされない。確認できなかったときは理由を「更新」の欄に出す（「更新を確認」を押したときは画面下部にも出す）。プリセットには含まれない。開発者向けに、環境変数 `CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION`（比較に使う「いまの版」）と `CAPTURECARD_VIEWER_UPDATE_API_URL`（問い合わせ先。`file://` で JSON ファイルも読め、その中の資産もローカルのファイルにできる）で、新しい Release が無くても通知と更新を試せる。**指定しなければ無効**
