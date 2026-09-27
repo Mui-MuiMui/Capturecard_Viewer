@@ -191,14 +191,14 @@ flowchart TD
 | ログ | 意味 | 出ないときに疑うこと |
 |---|---|---|
 | `DirectShow の映像デバイスの一覧を取得した（N 件、…）: [...]` | `ICreateDevEnum` の列挙。表示名（「(DirectShow)」なし）がそのまま並ぶ | 一覧に無ければ DirectShow にも登録されていない。OBS の仮想カメラなら OBS 側で一度「仮想カメラ開始」を押したか（押すまで登録されない版がある） |
-| `DirectShow の形式を YUY2 1920x1080 60fps にした` | `IAMStreamConfig::SetFormat` が通った | 代わりに `受け取れる形式が無い` が出ていれば、デバイスが YUY2 / MJPEG / RGB24 を出さない（NV12 だけなど）。フィルターの既定の形式で繋ぎにいくが、変換フィルターが見つからなければ次の段で失敗する |
+| `DirectShow の形式を YUY2 1920x1080 60fps にした` | `IAMStreamConfig::SetFormat` が通った | 代わりに `受け取れる形式が無い` が出ていれば、デバイスが受け取れる 6 形式（YUY2 / NV12 / I420 / YV12 / MJPEG / RGB24）のどれも出さない（UYVY だけなど）。フィルターの既定の形式で繋ぎにいくが、変換フィルターが見つからなければ次の段で失敗する |
 | `DirectShow の上流と接続した: SampleFormat { … }` | 自前のレンダラーが接続を受けた。実際に流れてくる形式 | `RenderStream` が失敗している。`映像デバイスへの接続に失敗した` の理由に HRESULT の文言が出る |
 | `DirectShow のグラフを動かした（デバイスを開く …ms、接続 …ms、Run …ms）` | 動き出した。OBS の仮想カメラでは接続が 600ms 前後かかる | — |
 | `最初のフレームが届いた` | ここから先は Media Foundation と同じ `FrameSink` | 出なければ上流がサンプルを出していない |
 
 - 破棄の `warn` に `RGB24 のフレームが短いので破棄した` と `MJPEG のフレームを展開できないので破棄した` が加わる（どちらも初回だけ）
 - 列挙は実測 3ms 前後、能力の取得は 4ms 前後（OBS の仮想カメラ）
-- 実機テストは `cargo test directshow -- --ignored --nocapture --test-threads=1`（`src/video/directshow/mod.rs` の 3 つ。DirectShow のデバイスが 1 台要る）
+- 実機テストは `cargo test directshow -- --ignored --nocapture --test-threads=1`（`src/video/directshow/mod.rs` の 4 つ。DirectShow のデバイスが 1 台要る。うち `link_state_reports_device_lost_when_the_source_goes_away` は 30 秒以内に OBS 側で「仮想カメラ停止」を押す手動操作が要り、押さなければ失敗する。それを除くなら `cargo test directshow -- --ignored --nocapture --test-threads=1 --skip device_lost`）
 
 **毎フレーム出るログを `info` 以上で足さないこと。** 1 行ごとにフラッシュしているため、1080p60 では毎秒 60 回のディスク書き込みになる。初回だけ出す判定は `video/frame_sink.rs` の `FirstTimeOnly` にまとめてある。
 
@@ -267,7 +267,7 @@ flowchart TD
 cargo test --locked -- --ignored
 ```
 
-`#[ignore]` が付いているのは、計測用でデバイスを使わない `src/video/convert.rs` の `yuy2_to_rgb_naive_1080p_conversion_time` と、DirectShow のデバイスを列挙・能力取得・キャプチャする `src/video/directshow/mod.rs` の 3 つ。**Media Foundation のデバイスを開くテストはまだ無い**ので、Media Foundation 側の不具合はこのコマンドでは捕まらない。DirectShow のテストは同じデバイスを並列に開くと対応形式が空で返ることがあるので、`--test-threads=1` を付ける。
+`#[ignore]` が付いているのは、計測用でデバイスを使わない `src/video/convert.rs` の `yuy2_to_rgb_naive_1080p_conversion_time` と、DirectShow のデバイスを列挙・能力取得・キャプチャ・喪失の検出をする `src/video/directshow/mod.rs` の 4 つ。**Media Foundation のデバイスを開くテストはまだ無い**ので、Media Foundation 側の不具合はこのコマンドでは捕まらない。DirectShow のテストは同じデバイスを並列に開くと対応形式が空で返ることがあるので、`--test-threads=1` を付ける。
 
 デバイスを開くテストを足すときの書き方は `.claude/skills/testing-conventions/SKILL.md` の「結合テスト（実機必須）」に従う。
 

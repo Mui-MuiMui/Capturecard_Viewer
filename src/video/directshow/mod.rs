@@ -146,7 +146,7 @@ impl DirectShowCapture {
 
     /// デバイスの対応形式。`display` は表示名（「(DirectShow)」付き）。
     ///
-    /// 受け取れる形式（YUY2 / MJPEG / RGB24）が 1 つも無ければ空の一覧を返す。
+    /// 受け取れる形式（YUY2 / NV12 / I420 / YV12 / MJPEG / RGB24）が 1 つも無ければ空の一覧を返す。
     pub fn capabilities(&self, display: &str) -> Result<DeviceCapabilities, VideoError> {
         let start = Instant::now();
         let entry = Self::find(display)?;

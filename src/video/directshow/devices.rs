@@ -144,7 +144,7 @@ pub(super) struct StreamCandidate {
     pub(super) fps: Vec<u32>,
 }
 
-/// `IAMStreamConfig` の対応形式を読む。受け取れない形式（NV12 など）は飛ばす。
+/// `IAMStreamConfig` の対応形式を読む。受け取れない形式（UYVY など）は飛ばす。
 pub(super) fn read_candidates(config: &IAMStreamConfig) -> Vec<StreamCandidate> {
     let (mut count, mut size) = (0i32, 0i32);
     if unsafe { config.GetNumberOfCapabilities(&mut count, &mut size) }.is_err() {

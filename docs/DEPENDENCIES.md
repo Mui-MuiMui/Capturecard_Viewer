@@ -207,7 +207,7 @@ DirectShow のバックエンド（#143）は、`winapi` に無い DirectShow �
 - `src/platform.rs` の `monitor_work_areas`。ウィンドウ位置の復元時に、保存された位置が画面内かを判定するためモニタの作業領域を列挙する用途（`EnumDisplayMonitors` / `GetMonitorInfoW`）
 - `src/keyboard_hook.rs` の `imp` モジュール。ホットキーの押下を低レベルキーボードフックで観測する用途（`SetWindowsHookExW` / `CallNextHookEx` / `MsgWaitForMultipleObjects` / `PeekMessageW` / `PostThreadMessageW` / `GetAsyncKeyState` など）。global-hotkey を外したときに、既に直接の依存だったこのクレートへ寄せた（#202）
 
-feature は `minwindef` / `winuser` / `windef` / `libloaderapi` / `processthreadsapi` / `winbase` の 6 つ。
+feature は `minwindef` / `winuser` / `windef` / `libloaderapi` / `processthreadsapi` / `winbase` / `winnls` の 7 つ。
 
 使用箇所はどちらも Windows 専用の小さな関数群に閉じているので、`windows-sys` へ移す場合の影響は小さい。移行するなら、この 2 か所の中だけを書き換えれば済む。
 
