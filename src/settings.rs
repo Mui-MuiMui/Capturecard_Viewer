@@ -543,7 +543,8 @@ fn color_range_from_str(raw: &str) -> Option<ColorRange> {
 // 実際に開いた経路（`video::CaptureApi`）とは別の型にしてある。こちらは
 // 「自動」を持ち、デバイス名と合わせて初めて 1 つに決まるため
 // （`app::backend::system` の `route_for`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+// `Hash` は設定ダイアログの能力キャッシュのキー（`ui::VideoCapabilityKey`）に使う
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum VideoBackendSetting {
     // 名前に「(DirectShow)」があれば DirectShow、無ければ Media Foundation
     #[default]

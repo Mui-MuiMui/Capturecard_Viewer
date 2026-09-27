@@ -126,7 +126,7 @@ flowchart LR
 - **一覧（`merge_video_devices`）は変えない。** 開き方ごとに一覧を作り分けると、設定に残る名前が開き方によって変わり、開き方を戻したときに別のデバイス扱いになる。そのかわり、選んだ経路の一覧に無いデバイスは「見つからない」になる。設定ダイアログでは「自動」以外のときに注意書きを出す
 - デバイスが未指定（`None`）なら開き方によらず Media Foundation の先頭を開く。DirectShow の経路は名前が無いと開けない
 - **開き方は `VideoTarget` に含めてある。** 同じデバイスでも経路が変われば開き直しが要るので、`DeviceConfig` の差分判定に載せ、「適用」で映像だけが開き直る。trait には `start_capture` の引数として渡し、経路が 1 つしか無いフェイクとモックは見ない
-- **能力の問い合わせ（`capabilities`）は開き方を見ず、名前だけで経路を決める。** 設定ダイアログの能力キャッシュがデバイス名で引く作りで、ドラフトの開き方を反映するにはキーを組み替える必要があるため。DirectShow で開くときに選択肢と違う形式しか無くても、`choose_candidate` が近いものを選ぶ
+- **能力の問い合わせ（`capabilities`）も開き方を受け取り、開くときと同じ `route_for` で経路を決める**（#249）。DirectShow で開く設定なら、設定ダイアログの解像度・フォーマット・fps の選択肢も DirectShow 側の対応形式（`GetStreamCaps`）になる。以前は名前だけで経路を決めていたため、両方に出るデバイスを DirectShow で開くと選択肢は Media Foundation 側のもので、選んだ形式が DirectShow に無ければ `choose_candidate` が近いものへ寄せていた。コマンド（`QueryVideoCapabilities`）とイベント（`VideoCapabilities`）はデバイス名と開き方の組を運び、UI の能力キャッシュはその組をキーにする（`docs/design/settings-dialog.md` の「能力キャッシュのキー」）。フェイクとモックは経路が 1 つなので開き方を見ない
 - 実際に開いた経路は `ActiveVideo::api`（`CaptureApi`）に持たせ、「接続状態」タブの映像の欄に「開き方」として出す
 - **プリセットに含める**（`video` の中にあるので `Preset::apply_to` と `matches_preset` の両方に自然に入る）。開き方はデバイスと一体の設定で、キャプチャーボードの使い分けというプリセットの用途に合う（`docs/design/presets.md`）
 - 名前の照合は表示名（`FriendlyName`）で行う。同じ名前のデバイスが 2 台あれば先に列挙されたほうを開く（Media Foundation の経路と同じ）

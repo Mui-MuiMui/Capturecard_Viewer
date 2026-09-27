@@ -48,9 +48,11 @@ impl CaptureCardViewer {
     /// 3 フォーマット分の対応表を引くため数百 ms 以上かかる。以前は設定ダイアログの
     /// 描画中に直接呼んでいたため、デバイスを切り替えるたびにアプリ全体が固まっていた。
     pub(super) fn dispatch_capability_requests(&mut self) {
-        for device in self.settings_dialog.capabilities_mut().take_requests() {
-            self.device
-                .send(DeviceCommand::QueryVideoCapabilities(device));
+        for key in self.settings_dialog.capabilities_mut().take_requests() {
+            self.device.send(DeviceCommand::QueryVideoCapabilities(
+                key.device,
+                key.backend,
+            ));
         }
         for key in self
             .settings_dialog

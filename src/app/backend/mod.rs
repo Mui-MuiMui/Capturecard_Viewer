@@ -55,8 +55,15 @@ pub(super) trait VideoBackend {
     /// 映像デバイスの一覧。`(名前, 説明)`。失敗しても空の一覧を返す
     fn list_devices(&self) -> Vec<(String, String)>;
 
-    /// デバイスが対応する形式の一覧。`None` なら先頭のデバイス
-    fn capabilities(&self, device_name: Option<&str>) -> Result<DeviceCapabilities, VideoError>;
+    /// デバイスが対応する形式の一覧。`None` なら先頭のデバイス。
+    ///
+    /// `backend` は `start_capture` と同じく設定の「映像の開き方」。開くときと
+    /// 同じ経路へ問い合わせる（#249）。経路が 1 つしかない実装は見ない
+    fn capabilities(
+        &self,
+        device_name: Option<&str>,
+        backend: VideoBackendSetting,
+    ) -> Result<DeviceCapabilities, VideoError>;
 
     /// ストリームを開く。既に開いていれば閉じてから開き直す。
     ///
@@ -235,6 +242,7 @@ pub(super) fn backends_from_env() -> (Box<dyn DeviceBackends>, bool) {
 #[cfg(test)]
 pub(super) mod mock {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -261,6 +269,10 @@ pub(super) mod mock {
         pub(in crate::app) last_device_name: Option<String>,
         /// 最後に開こうとしたときの「映像の開き方」
         pub(in crate::app) last_backend: Option<VideoBackendSetting>,
+        /// `capabilities` が開き方ごとに返す対応形式。無い開き方は空の一覧
+        pub(in crate::app) capabilities: HashMap<VideoBackendSetting, DeviceCapabilities>,
+        /// 最後に対応形式を問い合わせたときの「映像の開き方」
+        pub(in crate::app) last_capabilities_backend: Option<VideoBackendSetting>,
     }
 
     /// 映像バックエンドのモック。複製しても同じ中身を指す。
@@ -284,8 +296,16 @@ pub(super) mod mock {
         fn capabilities(
             &self,
             _device_name: Option<&str>,
+            backend: VideoBackendSetting,
         ) -> Result<DeviceCapabilities, VideoError> {
-            Ok(Vec::new())
+            self.with(|state| {
+                state.last_capabilities_backend = Some(backend);
+                Ok(state
+                    .capabilities
+                    .get(&backend)
+                    .cloned()
+                    .unwrap_or_default())
+            })
         }
 
         fn start_capture(
