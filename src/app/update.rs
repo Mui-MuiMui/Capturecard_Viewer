@@ -19,14 +19,13 @@ use super::screenshot::drop_finished_threads;
 use super::CaptureCardViewer;
 use crate::status::ErrorSource;
 use crate::ui::{self, UpdateDialogEvent, UpdateDialogView};
-use crate::update::apply::{self, ApplyError, ApplyProgress, ExePaths};
+use crate::update::apply::{self, ApplyControl, ApplyError, ApplyProgress, ExePaths};
 use crate::update::{
     self, CheckOutcome, CheckOverrides, UpdateCheck, UpdateError, UpdateStatus, UpdateView,
 };
 use eframe::egui;
 use log::{debug, error, info, warn};
 use semver::Version;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -79,8 +78,9 @@ enum ApplyMessage {
 /// 走っている更新（適用）1 つ。
 struct ApplyJob {
     rx: Receiver<ApplyMessage>,
-    // 立てると、スレッドが読み取りの合間か差し替えの直前で止まり `.new` を消す
-    cancel: Arc<AtomicBool>,
+    // キャンセルと差し替えの開始の取り合い。キャンセルが通れば、スレッドは
+    // 読み取りの合間か差し替えの直前で止まり `.new` を消す
+    cancel: Arc<ApplyControl>,
     // 更新している版。ダイアログの見出しと失敗の表示に使う
     check: UpdateCheck,
     paths: ExePaths,
@@ -397,7 +397,7 @@ impl CaptureCardViewer {
         };
 
         let (tx, rx) = mpsc::channel();
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(ApplyControl::default());
         let thread_cancel = Arc::clone(&cancel);
         let thread_paths = paths.clone();
         let thread_check = check.clone();
@@ -510,10 +510,17 @@ impl CaptureCardViewer {
     /// 結果は待たずにダイアログを閉じる。受信側を捨てるので、止まるまでに
     /// 届いた結果は使わない（`docs/design/update.md`）。
     fn cancel_update_apply(&mut self) {
-        if let Some(job) = self.update_check.apply.take() {
-            info!("v{} への更新をキャンセルする", job.check.latest);
-            job.cancel.store(true, Ordering::Release);
+        let Some(job) = &self.update_check.apply else {
+            self.update_check.dialog = None;
+            return;
+        };
+        if !job.cancel.cancel() {
+            // もう差し替えを始めている。止めずに結果を待つ（すぐ届く）
+            info!("差し替えを始めているので、キャンセルせずに終わるのを待つ");
+            return;
         }
+        info!("v{} への更新をキャンセルする", job.check.latest);
+        self.update_check.apply = None;
         self.update_check.dialog = None;
     }
 
@@ -561,12 +568,22 @@ impl CaptureCardViewer {
     /// 終了時の更新の後始末。`on_exit` の**最後**に呼ぶ。
     ///
     /// ダウンロードの最中なら止めさせる（待たない。残った `.new` は次の起動で消す）。
+    /// **差し替えの最中なら、それが終わるまで待つ。** 実行中の exe を `.old` へ
+    /// 動かしてから `.new` を元の名前へ置くまでの間に終わると、元の名前に exe が
+    /// 無くなる。差し替えはファイルの改名だけなので、待つのは一瞬。
     /// 差し替えが済んでいれば新しい exe を起動する。設定の保存とスレッドの join を
     /// 終えてから起動するので、新しい版は保存し終えた設定を読み、デバイスも
     /// 手放されたあとに開く。起動できなければ元の exe へ戻す。
     pub(super) fn relaunch_updated_exe(&mut self) {
         if let Some(job) = &self.update_check.apply {
-            job.cancel.store(true, Ordering::Release);
+            if !job.cancel.cancel() {
+                if let Some(handle) = self.update_check.apply_thread.take() {
+                    info!("差し替えの最中なので、終わるのを待ってから終了する");
+                    if handle.join().is_err() {
+                        error!("更新のスレッドが異常終了した");
+                    }
+                }
+            }
         }
         let Some(paths) = self.update_check.restart.take() else {
             return;

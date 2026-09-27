@@ -25,7 +25,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 /// 照合に使う資産の名前（`docs/RELEASE.md` の「配布物」）。
@@ -228,12 +228,13 @@ impl ApplyProgress {
 ///
 /// 失敗・キャンセルのどちらでも `.new` は消し、元の exe は元の名前のまま残す。
 /// 成功したら、新しい exe は `paths.exe` にあり、起動は呼び出し側が行う。
-/// `cancel` は読み取りの合間と差し替えの直前に見る。
+/// キャンセルは読み取りの合間に見る。差し替えの直前に `ApplyControl::begin_swap` で
+/// キャンセルと取り合い、先にキャンセルされていれば差し替えない。
 pub fn run_apply(
     check: &UpdateCheck,
     allow_any_source: bool,
     paths: &ExePaths,
-    cancel: &AtomicBool,
+    cancel: &ApplyControl,
     progress: &mut dyn FnMut(ApplyProgress),
 ) -> Result<(), ApplyError> {
     progress(ApplyProgress::Preparing);
@@ -254,9 +255,9 @@ pub fn run_apply(
     }
 
     progress(ApplyProgress::Installing);
-    if let Err(e) = check_cancelled(cancel) {
+    if !cancel.begin_swap() {
         remove_if_exists(&paths.new);
-        return Err(e);
+        return Err(ApplyError::Cancelled);
     }
     swap_in(paths)
 }
@@ -265,7 +266,7 @@ fn download_and_verify(
     plan: &ApplyPlan,
     paths: &ExePaths,
     expected: &str,
-    cancel: &AtomicBool,
+    cancel: &ApplyControl,
     progress: &mut dyn FnMut(ApplyProgress),
 ) -> Result<(), ApplyError> {
     let (mut reader, total) = open_source(&plan.exe)?;
@@ -340,11 +341,62 @@ fn should_report(last: Option<ApplyProgress>, now: ApplyProgress) -> bool {
     }
 }
 
-fn check_cancelled(cancel: &AtomicBool) -> Result<(), ApplyError> {
-    if cancel.load(Ordering::Acquire) {
+fn check_cancelled(control: &ApplyControl) -> Result<(), ApplyError> {
+    if control.is_cancelled() {
         Err(ApplyError::Cancelled)
     } else {
         Ok(())
+    }
+}
+
+/// 更新のスレッドと UI スレッドで共有する、キャンセルと差し替えの取り合い。
+///
+/// キャンセルと差し替えの開始は、どちらか先に来た方だけが通る（`compare_exchange`）。
+/// **差し替えを始めたら、もうキャンセルできない。** キャンセルが通らなかった側
+/// （`on_exit`）は差し替えが終わるのを待つ。実行中の exe を `.old` へ動かしてから
+/// `.new` を元の名前へ置くまでの間にプロセスが終わると、元の名前に exe が
+/// 1 つも無くなるため。ダウンロードの最中はキャンセルが通るので、待たない。
+///
+/// `Mutex` にしないのは、差し替え（ファイルの改名）の間ロックを握ることになるため
+/// （`GUARDRAIL.md`）。
+#[derive(Debug, Default)]
+pub struct ApplyControl {
+    state: AtomicU8,
+}
+
+const CONTROL_RUNNING: u8 = 0;
+const CONTROL_CANCELLED: u8 = 1;
+const CONTROL_SWAPPING: u8 = 2;
+
+impl ApplyControl {
+    /// キャンセルする。差し替えを始める前なら `true`（スレッドは止まり `.new` を消す）。
+    /// もう差し替えを始めていれば `false` で、呼び出し側は終わるのを待つ。
+    pub fn cancel(&self) -> bool {
+        match self.state.compare_exchange(
+            CONTROL_RUNNING,
+            CONTROL_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(current) => current == CONTROL_CANCELLED,
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.state.load(Ordering::Acquire) == CONTROL_CANCELLED
+    }
+
+    /// 差し替えを始める。先にキャンセルされていれば `false`。
+    fn begin_swap(&self) -> bool {
+        self.state
+            .compare_exchange(
+                CONTROL_RUNNING,
+                CONTROL_SWAPPING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 }
 
@@ -656,7 +708,10 @@ mod tests {
     }
 
     fn run(fixture: &Fixture, cancel: bool) -> (Result<(), ApplyError>, Vec<ApplyProgress>) {
-        let flag = AtomicBool::new(cancel);
+        let flag = ApplyControl::default();
+        if cancel {
+            flag.cancel();
+        }
         let mut seen = Vec::new();
         let result = run_apply(&fixture.check, true, &fixture.paths, &flag, &mut |p| {
             seen.push(p)
@@ -733,7 +788,7 @@ mod tests {
         ));
         // フォルダが無い = 書けない
         let paths = dummy_paths(&fixture.paths.dir().join("missing"));
-        let flag = AtomicBool::new(false);
+        let flag = ApplyControl::default();
 
         let result = run_apply(&fixture.check, true, &paths, &flag, &mut |_| {});
 
@@ -747,7 +802,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("一時ディレクトリ");
         let paths = dummy_paths(&dir.path().join("missing"));
         let no_assets = check_with_assets("v1.1.0", &[]);
-        let flag = AtomicBool::new(false);
+        let flag = ApplyControl::default();
 
         let unwritable = run_apply(&no_assets, false, &paths, &flag, &mut |_| {});
         let writable = run_apply(
@@ -760,6 +815,28 @@ mod tests {
 
         assert!(matches!(unwritable, Err(ApplyError::NotWritable(_))));
         assert_eq!(writable, Err(ApplyError::NoAssets));
+    }
+
+    // ---- キャンセルと差し替えの取り合い ----
+
+    #[test]
+    fn apply_control_cancel_before_swap_wins() {
+        let control = ApplyControl::default();
+
+        assert!(control.cancel());
+        // 2 回目も「止まる側」として扱う
+        assert!(control.cancel());
+        assert!(!control.begin_swap());
+    }
+
+    #[test]
+    fn apply_control_cancel_after_swap_started_is_refused() {
+        // 差し替えを始めたら止めない。呼び出し側は終わるのを待つ
+        let control = ApplyControl::default();
+
+        assert!(control.begin_swap());
+        assert!(!control.cancel());
+        assert!(!control.is_cancelled());
     }
 
     #[test]
