@@ -118,6 +118,11 @@ pub(super) struct UpdateState {
     apply: Option<ApplyJob>,
     // 差し替えが済んだ exe。`on_exit` の最後にこれを起動する
     restart: Option<ExePaths>,
+    // 更新のスレッド。**キャンセルしたあとも、終わるまで持っておく。**
+    // キャンセルは `apply` を先に捨てるが、スレッドは読み取りの合間まで動き続け、
+    // 止まるときに `.new` を消す。その前に次の更新を始めると、2 本が同じ `.new` を
+    // 書き、古い方が新しい方の `.new` を消してしまう。終わるまで次を始めない
+    apply_thread: Option<JoinHandle<()>>,
     // テスト用の環境変数で差し替えた版と問い合わせ先。起動時に 1 回だけ読む
     overrides: CheckOverrides,
     // 比較に使う「いまの版」。差し替えていなければ実行中の版
@@ -139,6 +144,7 @@ impl UpdateState {
             dialog: None,
             apply: None,
             restart: None,
+            apply_thread: None,
             overrides,
             current,
         }
@@ -149,8 +155,18 @@ impl UpdateState {
         UpdateView {
             current: &self.current,
             status: &self.status,
-            applying: self.apply.is_some() || self.restart.is_some(),
+            applying: self.is_applying(),
         }
+    }
+
+    /// 更新の最中か。キャンセルしたスレッドがまだ終わっていないときも最中とみなす。
+    fn is_applying(&self) -> bool {
+        self.apply.is_some()
+            || self.restart.is_some()
+            || self
+                .apply_thread
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished())
     }
 }
 
@@ -365,8 +381,9 @@ impl CaptureCardViewer {
     /// フォルダに書けるか、資産があるか（1.1.0 以前の Release には無い）は
     /// スレッドの最初で確かめる（ファイルを作って消すので UI スレッドでは行わない）。
     fn start_update_apply(&mut self, check: UpdateCheck) {
-        if self.update_check.apply.is_some() || self.update_check.restart.is_some() {
-            debug!("更新の最中なので、重ねて始めない");
+        if self.update_check.is_applying() {
+            // キャンセルした更新のスレッドがまだ `.new` を触っているうちも含む
+            debug!("更新の最中（またはキャンセルした更新の後始末の最中）なので、重ねて始めない");
             return;
         }
         // テスト用の問い合わせ先を使っているときだけ、ローカルの資産を受け付ける
@@ -414,8 +431,8 @@ impl CaptureCardViewer {
                     check.latest,
                     paths.exe.display()
                 );
-                drop_finished_threads(&mut self.update_check.threads);
-                self.update_check.threads.push(handle);
+                // 前のスレッドは `is_applying` で終わっているのを確かめてある
+                self.update_check.apply_thread = Some(handle);
                 self.update_check.apply = Some(ApplyJob {
                     rx,
                     cancel,
