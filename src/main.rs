@@ -71,6 +71,14 @@ fn main() -> Result<(), eframe::Error> {
         "Capturecard Viewer",
         options,
         Box::new(|cc| {
+            // イベントループを作り終えたここで外す。winit はイベントループを
+            // 作るときにキーボードの Raw Input を登録し、それが残っていると
+            // このアプリが前面にある間ホットキーのフックが呼ばれない（#238）
+            if let Err(e) = keyboard_hook::stop_raw_keyboard_input() {
+                log::warn!(
+                    "キーボードの Raw Input を外せないので、前面にいる間はホットキーが効かないかもしれない: {e}"
+                );
+            }
             configure_japanese_font(&cc.egui_ctx);
             Box::new(CaptureCardViewer::default())
         }),

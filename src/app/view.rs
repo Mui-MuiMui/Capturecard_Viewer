@@ -11,6 +11,20 @@ use crate::video::FrameStats;
 use eframe::egui;
 use log::warn;
 
+/// 映像エリア（映像が無いときのプレースホルダーを含む）が受け付ける操作。
+///
+/// クリック（右クリックメニュー・ダブルクリック・中クリック）とドラッグ
+/// （ウィンドウの移動）だけを受け、**キーボードフォーカスは受けない**
+/// （`focusable: false`）。`Sense::click_and_drag()` はフォーカスを受けるため、
+/// Tab キーで映像エリアにフォーカスが移ると、以後ずっと「何かのウィジェットに
+/// フォーカスがある」状態が続く（#238）。映像エリアにはキーボードで操作する
+/// ものが無いので、フォーカスを受ける理由も無い。
+const VIDEO_AREA_SENSE: egui::Sense = egui::Sense {
+    click: true,
+    drag: true,
+    focusable: false,
+};
+
 /// 映像が出ていないときに画面へ出す文言を決める。
 ///
 /// 「デバイスは開けているが信号が来ていない」と「デバイスそのものが消えた」は
@@ -205,7 +219,7 @@ impl CaptureCardViewer {
                         display_size,
                     );
 
-                    let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+                    let response = ui.allocate_rect(rect, VIDEO_AREA_SENSE);
                     ui.painter().image(
                         texture.id(),
                         rect,
@@ -241,8 +255,7 @@ impl CaptureCardViewer {
                         self.handle_volume_scroll(ctx);
                     }
                 } else {
-                    let response =
-                        ui.allocate_response(available_size, egui::Sense::click_and_drag());
+                    let response = ui.allocate_response(available_size, VIDEO_AREA_SENSE);
                     ui.centered_and_justified(|ui| {
                         ui.label(placeholder);
                     });
@@ -302,7 +315,7 @@ impl CaptureCardViewer {
                         display_size,
                     );
 
-                    let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+                    let response = ui.allocate_rect(rect, VIDEO_AREA_SENSE);
                     ui.painter().image(
                         texture.id(),
                         rect,
@@ -332,8 +345,7 @@ impl CaptureCardViewer {
                     }
                 } else {
                     // 映像信号がない場合
-                    let response =
-                        ui.allocate_response(available_size, egui::Sense::click_and_drag());
+                    let response = ui.allocate_response(available_size, VIDEO_AREA_SENSE);
                     ui.centered_and_justified(|ui| {
                         ui.label(placeholder);
                     });

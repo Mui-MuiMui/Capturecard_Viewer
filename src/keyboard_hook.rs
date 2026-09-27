@@ -181,6 +181,26 @@ impl KeyboardHook {
     }
 }
 
+/// winit が登録したキーボードの Raw Input を、このプロセスから外す（#238）。
+///
+/// **winit のウィンドウが前面にある間、同じプロセスの低レベルキーボードフックが
+/// 呼ばれなくなる。** winit はイベントループを作るときにマウスとキーボードの
+/// Raw Input を登録する。キーボードの登録が残っていると、このアプリが前面にある
+/// 間だけフックのコールバックが一度も呼ばれず、ホットキーが全く効かなかった。
+/// 他のアプリが前面なら呼ばれる。登録を外すと前面でも呼ばれる（実測。
+/// `docs/design/hotkeys.md` の「前面では Raw Input のキーボードを外す」）。
+///
+/// winit はキーボードの Raw Input から `DeviceEvent::Key` を作るだけで、
+/// egui はそれを使わない（キー入力は `WM_KEYDOWN` などのウィンドウメッセージから
+/// 作る）。外しても egui の入力は変わらない。マウスの登録は残す。
+///
+/// **イベントループを作ったあと（`run_native` がアプリを作るところ）で呼ぶ。**
+/// 先に呼んでも、あとから winit が登録し直す。Raw Input の登録はプロセスに
+/// 1 つなので、呼ぶスレッドはどこでもよい。
+pub(crate) fn stop_raw_keyboard_input() -> std::io::Result<()> {
+    imp::stop_raw_keyboard_input()
+}
+
 #[cfg(windows)]
 mod imp {
     use super::{
@@ -249,6 +269,30 @@ mod imp {
             }
         }
         CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    }
+
+    pub(super) fn stop_raw_keyboard_input() -> std::io::Result<()> {
+        use winapi::um::winuser::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_REMOVE};
+
+        // HID の Generic Desktop（0x01）の Keyboard（0x06）。winit が登録するのと同じ組
+        const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
+        const HID_USAGE_GENERIC_KEYBOARD: u16 = 0x06;
+
+        let device = RAWINPUTDEVICE {
+            usUsagePage: HID_USAGE_PAGE_GENERIC,
+            usUsage: HID_USAGE_GENERIC_KEYBOARD,
+            // 外すときは宛先のウィンドウを null にする決まり
+            dwFlags: RIDEV_REMOVE,
+            hwndTarget: std::ptr::null_mut(),
+        };
+        // SAFETY: 1 要素の配列とその大きさを渡すだけ
+        let registered = unsafe {
+            RegisterRawInputDevices(&device, 1, std::mem::size_of::<RAWINPUTDEVICE>() as UINT)
+        };
+        if registered == FALSE {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     pub(super) struct Hook {
@@ -325,6 +369,11 @@ mod imp {
 mod imp {
     use super::{KeyChord, KeyboardHookError};
     use std::time::Duration;
+
+    /// Windows 以外には Raw Input が無い。何もしない
+    pub(super) fn stop_raw_keyboard_input() -> std::io::Result<()> {
+        Ok(())
+    }
 
     /// Windows 以外では作れない。値が存在しないので `pump` は呼ばれない。
     pub(super) enum Hook {}
