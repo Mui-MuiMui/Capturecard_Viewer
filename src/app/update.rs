@@ -330,13 +330,16 @@ impl CaptureCardViewer {
                 }
             }
             UpdateDialogEvent::OpenReleasePage => {
-                let url = match self.update_check.dialog.take() {
-                    Some(UpdateDialogState::Available(check))
-                    | Some(UpdateDialogState::Failed { check, .. }) => check.release_url,
-                    other => {
-                        self.update_check.dialog = other;
-                        return;
+                // 知らせている間はダイアログを残す（読んでから「更新する」を押せるように）。
+                // 失敗の表示からは開いて閉じる
+                let url = match &self.update_check.dialog {
+                    Some(UpdateDialogState::Available(check)) => check.release_url.clone(),
+                    Some(UpdateDialogState::Failed { check, .. }) => {
+                        let url = check.release_url.clone();
+                        self.update_check.dialog = None;
+                        url
                     }
+                    _ => return,
                 };
                 // 自動で更新できないときの逃げ道。ブラウザの起動は eframe に任せる
                 info!("リリースページを開く: {}", url);
