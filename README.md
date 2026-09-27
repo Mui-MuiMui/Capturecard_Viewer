@@ -15,7 +15,7 @@ Windows10/11向け
 
 ## インストール方法
 
-任意の場所に保存し実行してください。
+[Releases](https://github.com/Mui-MuiMui/Capturecard_Viewer/releases) から `capturecard_viewer-<バージョン>-windows-x64.exe` をダウンロードし、任意のフォルダに置いて実行してください。インストーラーや zip の展開は要りません。
 
 
 ## アンインストール方法
