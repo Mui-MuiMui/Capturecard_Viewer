@@ -243,7 +243,7 @@ set CAPTURECARD_VIEWER_UPDATE_API_URL=
 
 ### 手で更新する
 
-1. 「リリースページを開く」（設定 > その他 の「更新」の欄にもある）で開いたページから、`capturecard_viewer-vX.Y.Z-windows-x64.zip` を落として展開する（exe 単体の `capturecard_viewer-vX.Y.Z-windows-x64.exe` を落としてもよい）
+1. 「リリースページを開く」（設定 > その他 の「更新」の欄にもある）で開いたページから、`capturecard_viewer.exe` を落とす（1.2.0 は `capturecard_viewer-v1.2.0-windows-x64.exe`、1.1.0 以前は zip で配っており、zip なら展開して中の exe を使う）
 2. アプリを閉じる
 3. いまの `capturecard_viewer.exe` を、落とした exe で置き換える（名前は `capturecard_viewer.exe` にする）。設定は `%AppData%` にあるので引き継がれる
 

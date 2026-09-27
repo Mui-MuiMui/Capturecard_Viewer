@@ -56,8 +56,13 @@ const CHUNK_BYTES: usize = 64 * 1024;
 /// 大きさが分からないときに進捗を知らせる間隔。
 const PROGRESS_STEP_BYTES: u64 = 256 * 1024;
 
-/// Release に添付する exe の名前。`tag` は Release のタグそのまま（`v1.2.0`）。
-pub fn exe_asset_name(tag: &str) -> String {
+/// Release に添付する exe の名前（1.2.1 から。`docs/RELEASE.md` の「配布物」）。
+/// 版を含めないので、ダウンロードした名前と、更新で維持される名前が一致する。
+pub const EXE_ASSET_NAME: &str = "capturecard_viewer.exe";
+
+/// 1.2.0 の Release に添付していた exe の名前。`tag` は Release のタグそのまま（`v1.2.0`）。
+/// `EXE_ASSET_NAME` が無い Release からも更新できるよう、こちらも探す。
+pub fn legacy_exe_asset_name(tag: &str) -> String {
     format!("capturecard_viewer-{tag}-windows-x64.exe")
 }
 
@@ -88,18 +93,21 @@ impl ApplyPlan {
     /// `allow_any_source` はテスト用の問い合わせ先を使っているとき。偽なら
     /// 資産の URL がこのリポジトリの Release のものでなければ落とさない。
     ///
+    /// exe は `EXE_ASSET_NAME` を探し、無ければ旧名（`legacy_exe_asset_name`）を探す。
+    /// `SHA256SUMS.txt` の行は選んだほうの名前で引く（`exe_name`）。
+    ///
     /// **資産が無い（1.1.0 以前の Release）なら `ApplyError::NoAssets`。**
     /// 自動では更新できないので、リリースページから手で更新してもらう。
     pub fn from_check(check: &UpdateCheck, allow_any_source: bool) -> Result<Self, ApplyError> {
-        let exe_name = exe_asset_name(&check.tag);
         let find = |name: &str| check.assets.iter().find(|asset| asset.name == name);
-        let (Some(exe), Some(checksums)) = (find(&exe_name), find(CHECKSUMS_ASSET_NAME)) else {
+        let exe = find(EXE_ASSET_NAME).or_else(|| find(&legacy_exe_asset_name(&check.tag)));
+        let (Some(exe), Some(checksums)) = (exe, find(CHECKSUMS_ASSET_NAME)) else {
             return Err(ApplyError::NoAssets);
         };
         Ok(Self {
             exe: asset_source(exe, &check.tag, allow_any_source)?,
             checksums: asset_source(checksums, &check.tag, allow_any_source)?,
-            exe_name,
+            exe_name: exe.name.clone(),
         })
     }
 }
@@ -487,8 +495,12 @@ mod tests {
         }
     }
 
-    const EXE_URL: &str = "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.0/capturecard_viewer-v1.2.0-windows-x64.exe";
+    const EXE_URL: &str =
+        "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.1/capturecard_viewer.exe";
     const SUMS_URL: &str =
+        "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.1/SHA256SUMS.txt";
+    const LEGACY_EXE_URL: &str = "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.0/capturecard_viewer-v1.2.0-windows-x64.exe";
+    const LEGACY_SUMS_URL: &str =
         "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.0/SHA256SUMS.txt";
 
     // "hello" の SHA-256
@@ -497,9 +509,10 @@ mod tests {
     // ---- 資産の選び方 ----
 
     #[test]
-    fn exe_asset_name_follows_the_release_naming() {
+    fn exe_asset_names_follow_the_release_naming() {
+        assert_eq!(EXE_ASSET_NAME, "capturecard_viewer.exe");
         assert_eq!(
-            exe_asset_name("v1.2.0"),
+            legacy_exe_asset_name("v1.2.0"),
             "capturecard_viewer-v1.2.0-windows-x64.exe"
         );
     }
@@ -507,22 +520,57 @@ mod tests {
     #[test]
     fn apply_plan_from_check_picks_exe_and_checksums() {
         let check = check_with_assets(
-            "v1.2.0",
+            "v1.2.1",
             &[
-                (
-                    "capturecard_viewer-v1.2.0-windows-x64.zip",
-                    "https://x.invalid/zip",
-                ),
-                ("capturecard_viewer-v1.2.0-windows-x64.exe", EXE_URL),
+                ("capturecard_viewer.exe", EXE_URL),
                 ("SHA256SUMS.txt", SUMS_URL),
             ],
         );
 
         let plan = ApplyPlan::from_check(&check, false).expect("資産は揃っている");
 
-        assert_eq!(plan.exe_name, "capturecard_viewer-v1.2.0-windows-x64.exe");
+        assert_eq!(plan.exe_name, "capturecard_viewer.exe");
         assert_eq!(plan.exe, AssetSource::Http(EXE_URL.to_string()));
         assert_eq!(plan.checksums, AssetSource::Http(SUMS_URL.to_string()));
+    }
+
+    #[test]
+    fn apply_plan_from_check_falls_back_to_the_legacy_exe_name() {
+        // 1.2.0 の Release は版付きの名前
+        let check = check_with_assets(
+            "v1.2.0",
+            &[
+                ("capturecard_viewer-v1.2.0-windows-x64.exe", LEGACY_EXE_URL),
+                ("SHA256SUMS.txt", LEGACY_SUMS_URL),
+            ],
+        );
+
+        let plan = ApplyPlan::from_check(&check, false).expect("旧名の資産でも揃っている");
+
+        assert_eq!(plan.exe_name, "capturecard_viewer-v1.2.0-windows-x64.exe");
+        assert_eq!(plan.exe, AssetSource::Http(LEGACY_EXE_URL.to_string()));
+        assert_eq!(
+            plan.checksums,
+            AssetSource::Http(LEGACY_SUMS_URL.to_string())
+        );
+    }
+
+    #[test]
+    fn apply_plan_from_check_prefers_the_plain_exe_name() {
+        let legacy_url = "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.1/capturecard_viewer-v1.2.1-windows-x64.exe";
+        let check = check_with_assets(
+            "v1.2.1",
+            &[
+                ("capturecard_viewer-v1.2.1-windows-x64.exe", legacy_url),
+                ("capturecard_viewer.exe", EXE_URL),
+                ("SHA256SUMS.txt", SUMS_URL),
+            ],
+        );
+
+        let plan = ApplyPlan::from_check(&check, false).expect("資産は揃っている");
+
+        assert_eq!(plan.exe_name, "capturecard_viewer.exe");
+        assert_eq!(plan.exe, AssetSource::Http(EXE_URL.to_string()));
     }
 
     #[test]
@@ -535,13 +583,22 @@ mod tests {
                 "https://x.invalid/zip",
             )],
         );
-        let exe_only = check_with_assets(
+        let exe_only = check_with_assets("v1.2.1", &[("capturecard_viewer.exe", EXE_URL)]);
+        let legacy_exe_only = check_with_assets(
             "v1.2.0",
-            &[("capturecard_viewer-v1.2.0-windows-x64.exe", EXE_URL)],
+            &[("capturecard_viewer-v1.2.0-windows-x64.exe", LEGACY_EXE_URL)],
         );
-        let sums_only = check_with_assets("v1.2.0", &[("SHA256SUMS.txt", SUMS_URL)]);
+        let sums_only = check_with_assets("v1.2.1", &[("SHA256SUMS.txt", SUMS_URL)]);
+        // 旧名はタグと版が合うものだけを探す
+        let other_tag = check_with_assets(
+            "v1.2.1",
+            &[
+                ("capturecard_viewer-v1.2.0-windows-x64.exe", LEGACY_EXE_URL),
+                ("SHA256SUMS.txt", SUMS_URL),
+            ],
+        );
 
-        for check in [zip_only, exe_only, sums_only] {
+        for check in [zip_only, exe_only, legacy_exe_only, sums_only, other_tag] {
             assert_eq!(
                 ApplyPlan::from_check(&check, false),
                 Err(ApplyError::NoAssets)
@@ -552,16 +609,16 @@ mod tests {
     #[test]
     fn apply_plan_from_check_rejects_foreign_urls() {
         for exe_url in [
-            "https://example.invalid/capturecard_viewer-v1.2.0-windows-x64.exe",
-            "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.0/../../../../attacker/x/releases/download/v1.2.0/capturecard_viewer-v1.2.0-windows-x64.exe",
-            "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.1.0/capturecard_viewer-v1.2.0-windows-x64.exe",
-            "http://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.0/capturecard_viewer-v1.2.0-windows-x64.exe",
-            "file:///C:/work/capturecard_viewer-v1.2.0-windows-x64.exe",
+            "https://example.invalid/capturecard_viewer.exe",
+            "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.1/../../../../attacker/x/releases/download/v1.2.1/capturecard_viewer.exe",
+            "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.0/capturecard_viewer.exe",
+            "http://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.1/capturecard_viewer.exe",
+            "file:///C:/work/capturecard_viewer.exe",
         ] {
             let check = check_with_assets(
-                "v1.2.0",
+                "v1.2.1",
                 &[
-                    ("capturecard_viewer-v1.2.0-windows-x64.exe", exe_url),
+                    ("capturecard_viewer.exe", exe_url),
                     ("SHA256SUMS.txt", SUMS_URL),
                 ],
             );
@@ -580,10 +637,7 @@ mod tests {
         let check = check_with_assets(
             "v9.9.9",
             &[
-                (
-                    "capturecard_viewer-v9.9.9-windows-x64.exe",
-                    "file:///C:/work/new.exe",
-                ),
+                ("capturecard_viewer.exe", "file:///C:/work/new.exe"),
                 ("SHA256SUMS.txt", "http://127.0.0.1:8000/SHA256SUMS.txt"),
             ],
         );
@@ -605,10 +659,7 @@ mod tests {
         let check = check_with_assets(
             "v9.9.9",
             &[
-                (
-                    "capturecard_viewer-v9.9.9-windows-x64.exe",
-                    "ftp://x.invalid/a.exe",
-                ),
+                ("capturecard_viewer.exe", "ftp://x.invalid/a.exe"),
                 ("SHA256SUMS.txt", "file://"),
             ],
         );
@@ -680,14 +731,13 @@ mod tests {
 
     /// 新しい exe（中身は "hello"）と SHA256SUMS.txt を資産として置き、
     /// 差し替え先にダミーの exe（中身は "old"）を置く。
-    fn fixture(sums: &str) -> Fixture {
+    fn fixture(exe_name: &str, sums: &str) -> Fixture {
         let dir = tempfile::tempdir().expect("一時ディレクトリ");
         let release = dir.path().join("release");
         let install = dir.path().join("install");
         fs::create_dir(&release).unwrap();
         fs::create_dir(&install).unwrap();
-        let exe_name = exe_asset_name("v9.9.9");
-        fs::write(release.join(&exe_name), "hello").unwrap();
+        fs::write(release.join(exe_name), "hello").unwrap();
         fs::write(release.join(CHECKSUMS_ASSET_NAME), sums).unwrap();
         let paths = dummy_paths(&install);
         fs::write(&paths.exe, "old").unwrap();
@@ -696,7 +746,7 @@ mod tests {
         let check = check_with_assets(
             "v9.9.9",
             &[
-                (&exe_name, &url(&exe_name)),
+                (exe_name, &url(exe_name)),
                 (CHECKSUMS_ASSET_NAME, &url(CHECKSUMS_ASSET_NAME)),
             ],
         );
@@ -722,10 +772,10 @@ mod tests {
     #[test]
     fn run_apply_downloads_verifies_and_swaps() {
         // 生成側は小文字だが、大文字の hash でも通す
-        let fixture = fixture(&format!(
-            "{}  capturecard_viewer-v9.9.9-windows-x64.exe\n",
-            HELLO_SHA256.to_uppercase()
-        ));
+        let fixture = fixture(
+            EXE_ASSET_NAME,
+            &format!("{}  capturecard_viewer.exe\n", HELLO_SHA256.to_uppercase()),
+        );
 
         let (result, seen) = run(&fixture, false);
 
@@ -742,11 +792,30 @@ mod tests {
     }
 
     #[test]
+    fn run_apply_with_the_legacy_exe_name_looks_up_its_own_line() {
+        // 旧名の Release では、SHA256SUMS.txt の行も旧名で引く
+        let legacy = legacy_exe_asset_name("v9.9.9");
+        let fixture = fixture(
+            &legacy,
+            &format!(
+                "{}  capturecard_viewer.exe\n{HELLO_SHA256}  {legacy}\n",
+                "0".repeat(64)
+            ),
+        );
+
+        let (result, _) = run(&fixture, false);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(read(&fixture.paths.exe), "hello");
+        assert!(!fixture.paths.new.exists());
+    }
+
+    #[test]
     fn run_apply_checksum_mismatch_keeps_the_exe_and_removes_new() {
-        let fixture = fixture(&format!(
-            "{}  capturecard_viewer-v9.9.9-windows-x64.exe\n",
-            "0".repeat(64)
-        ));
+        let fixture = fixture(
+            EXE_ASSET_NAME,
+            &format!("{}  capturecard_viewer.exe\n", "0".repeat(64)),
+        );
 
         let (result, _) = run(&fixture, false);
 
@@ -758,7 +827,10 @@ mod tests {
 
     #[test]
     fn run_apply_missing_checksum_line_downloads_nothing() {
-        let fixture = fixture(&format!("{HELLO_SHA256}  something-else.exe\n"));
+        let fixture = fixture(
+            EXE_ASSET_NAME,
+            &format!("{HELLO_SHA256}  something-else.exe\n"),
+        );
 
         let (result, _) = run(&fixture, false);
 
@@ -769,9 +841,10 @@ mod tests {
 
     #[test]
     fn run_apply_cancelled_keeps_the_exe_and_removes_new() {
-        let fixture = fixture(&format!(
-            "{HELLO_SHA256}  capturecard_viewer-v9.9.9-windows-x64.exe\n"
-        ));
+        let fixture = fixture(
+            EXE_ASSET_NAME,
+            &format!("{HELLO_SHA256}  capturecard_viewer.exe\n"),
+        );
 
         let (result, _) = run(&fixture, true);
 
@@ -783,9 +856,10 @@ mod tests {
 
     #[test]
     fn run_apply_unwritable_dir_downloads_nothing() {
-        let fixture = fixture(&format!(
-            "{HELLO_SHA256}  capturecard_viewer-v9.9.9-windows-x64.exe\n"
-        ));
+        let fixture = fixture(
+            EXE_ASSET_NAME,
+            &format!("{HELLO_SHA256}  capturecard_viewer.exe\n"),
+        );
         // フォルダが無い = 書けない
         let paths = dummy_paths(&fixture.paths.dir().join("missing"));
         let flag = ApplyControl::default();

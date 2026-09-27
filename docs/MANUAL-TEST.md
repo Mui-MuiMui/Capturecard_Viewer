@@ -786,18 +786,18 @@ set CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION=1.0.0
 
 **ローカルのファイルを資産にして最後まで通す**（ネットワークは要らない）
 
-作業用のフォルダ（例: `C:\work`）に、いまビルドした exe を「新しい版」として置き、その hash の `SHA256SUMS.txt` と、それらを資産に持つ Release の JSON を作る。差し替えられる側として、同じ exe を `C:\work\app` にもコピーする。PowerShell で次のとおり。
+作業用のフォルダ（例: `C:\work`）に、いまビルドした exe を「新しい版」として `C:\work\release` に資産名（`capturecard_viewer.exe`）で置き、その hash の `SHA256SUMS.txt` と、それらを資産に持つ Release の JSON を作る。差し替えられる側として、同じ exe を `C:\work\app` にもコピーする。PowerShell で次のとおり。
 
 ```powershell
 $w = "C:\work"
-New-Item -ItemType Directory -Force "$w\app" | Out-Null
+New-Item -ItemType Directory -Force "$w\app", "$w\release" | Out-Null
 Copy-Item target\release\capturecard_viewer.exe "$w\app\capturecard_viewer.exe"
-$exe = "capturecard_viewer-v9.9.9-windows-x64.exe"
-Copy-Item target\release\capturecard_viewer.exe "$w\$exe"
-$hash = (Get-FileHash "$w\$exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+$exe = "capturecard_viewer.exe"
+Copy-Item target\release\capturecard_viewer.exe "$w\release\$exe"
+$hash = (Get-FileHash "$w\release\$exe" -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText("$w\SHA256SUMS.txt", "$hash  $exe`n")
 @{ tag_name = "v9.9.9"; html_url = "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/v9.9.9"; body = "テスト用"; assets = @(
-    @{ name = $exe; browser_download_url = "file:///$w/$exe" },
+    @{ name = $exe; browser_download_url = "file:///$w/release/$exe" },
     @{ name = "SHA256SUMS.txt"; browser_download_url = "file:///$w/SHA256SUMS.txt" }) } |
   ConvertTo-Json -Depth 3 | ForEach-Object { [IO.File]::WriteAllText("$w\latest.json", $_) }
 ```
@@ -809,11 +809,13 @@ $hash = (Get-FileHash "$w\$exe" -Algorithm SHA256).Hash.ToLowerInvariant()
 - [ ] 閉じる前に変えた設定（ウィンドウの位置や音量）が、起動した新しい exe に引き継がれている
 - [ ] `C:\work\SHA256SUMS.txt` の hash を 1 文字変えてからもう一度「更新する」を押すと、「ダウンロードした exe の SHA-256 が SHA256SUMS.txt と合わない」が出る。`C:\work\app\capturecard_viewer.exe` はそのままで（更新日時が変わらない）、`.new` は残らない
 - [ ] `SHA256SUMS.txt` の hash を大文字にしても、更新は通る
+- [ ] 上の PowerShell の `$exe` を 1.2.0 の旧名 `"capturecard_viewer-v9.9.9-windows-x64.exe"` にして作り直しても、更新は通る。差し替わった exe の名前は `C:\work\app\capturecard_viewer.exe` のまま
 - [ ] 更新中も映像と音声は止まらない（ローカルのファイルでは一瞬で終わるので、次のリリースで確かめる）
 
 **次のリリース（自動更新用のファイルを添付した版）で確かめること**
 
-- [ ] 1 つ前の版を書き込めるフォルダに置いて起動し、「更新する」を押すと、進み具合が % で進み、終わるとウィンドウが閉じて新しい版が起動する。設定 > その他 の「現在のバージョン」が上がっている
+- [ ] 1.2.1 の公開後、1.2.0 で「更新する」を押すと「このバージョンには自動更新用のファイルがありません。リリースページから手動で更新してください」が出る（1.2.0 は版付きの名前しか探さないため。想定どおりの動き）。Release の資産が `capturecard_viewer.exe` と `SHA256SUMS.txt` の 2 つである
+- [ ] 1.2.1 以降の版（`capturecard_viewer.exe` を探す版）を書き込めるフォルダに置いて起動し、その次の版が出たあとで「更新する」を押すと、進み具合が % で進み、終わるとウィンドウが閉じて新しい版が起動する。設定 > その他 の「現在のバージョン」が上がっている
 - [ ] ダウンロード中に「キャンセル」を押すと、ダイアログが閉じ、exe の隣に `.new` が残らない（数秒以内に消える）。exe は元の版のまま
 - [ ] ダウンロード中にアプリを閉じると、待たされずに終わる。次の起動で `.new` が消える
 
