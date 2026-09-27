@@ -100,7 +100,8 @@ cargo build --release
 | `src/ui/status_tab.rs` | 「接続状態」タブの描画 |
 | `src/ui/update_dialog.rs` | 起動時に新しい版を知らせるダイアログの描画。押されたものを `UpdateDialogEvent` で返す |
 | `src/status.rs` | 失敗の記録（`ErrorCenter`）とトーストの間引き判定、設定ダイアログへ渡す接続状態（`ConnectionStatus`）、発生源ごとの定型文 |
-| `src/update.rs` | 更新の確認。GitHub の Release API への問い合わせ（`check_latest_release`）と、版の比較・リリースノートの要約・通知するかの判定（純粋関数）、`UpdateError` |
+| `src/update/mod.rs` | 更新の確認。GitHub の Release API への問い合わせ（`check_latest_release`）と、版の比較・リリースノートの要約・通知するかの判定（純粋関数）、`UpdateError` |
+| `src/update/overrides.rs` | 更新の確認を試すための環境変数（`CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` / `CAPTURECARD_VIEWER_UPDATE_API_URL`）の解釈（`CheckOverrides`） |
 | `src/repaint.rs` | 次の再描画までの間隔の判定（`next_repaint_delay`）と、UI スレッド以外から再描画を促す窓口（`RepaintWaker`） |
 | `src/i18n/mod.rs` | 画面に出す文字列の入口。現在の言語（`Language` と `static LANGUAGE`）を持ち、`set_language` で切り替える。外から使う経路（`crate::i18n::...`）の `pub use` もここ |
 | `src/i18n/text.rs` | 引数を取らない文字列の表（`texts!` が `Text` のキーと言語ごとの `match` を作る） |

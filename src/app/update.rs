@@ -11,9 +11,12 @@ use super::screenshot::drop_finished_threads;
 use super::CaptureCardViewer;
 use crate::status::ErrorSource;
 use crate::ui::{self, UpdateDialogEvent};
-use crate::update::{self, CheckOutcome, UpdateCheck, UpdateError, UpdateStatus};
+use crate::update::{
+    self, CheckOutcome, CheckOverrides, UpdateCheck, UpdateError, UpdateStatus, UpdateView,
+};
 use eframe::egui;
 use log::{debug, info, warn};
+use semver::Version;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
@@ -46,23 +49,36 @@ pub(super) struct UpdateState {
     status: UpdateStatus,
     // 起動時に知らせる新しい版。`Some` の間は通知ダイアログを出す
     dialog: Option<UpdateCheck>,
+    // テスト用の環境変数で差し替えた版と問い合わせ先。起動時に 1 回だけ読む
+    overrides: CheckOverrides,
+    // 比較に使う「いまの版」。差し替えていなければ実行中の版
+    current: Version,
 }
 
 impl UpdateState {
+    /// 起動時に 1 回だけ作る。テスト用の環境変数もここで読む
+    /// （指定されていれば WARN で残る）。
     pub(super) fn new() -> Self {
         let (tx, rx) = mpsc::channel();
+        let overrides = CheckOverrides::from_env();
+        let current = overrides.current_version_or(update::current_version());
         Self {
             tx,
             rx,
             threads: Vec::new(),
             status: UpdateStatus::default(),
             dialog: None,
+            overrides,
+            current,
         }
     }
 
-    /// 「その他」タブへ渡す確認の状態。
-    pub(super) fn status(&self) -> &UpdateStatus {
-        &self.status
+    /// 「その他」タブの「更新」の欄へ渡すもの。
+    pub(super) fn view(&self) -> UpdateView<'_> {
+        UpdateView {
+            current: &self.current,
+            status: &self.status,
+        }
     }
 }
 
@@ -91,12 +107,13 @@ impl CaptureCardViewer {
         }
 
         let tx = self.update_check.tx.clone();
+        let overrides = self.update_check.overrides.clone();
         // 映像が止まっている間は update() の間隔が広がっているので、届いたら起こす
         let waker = self.repaint_waker.clone();
         let spawned = std::thread::Builder::new()
             .name("update-check".to_string())
             .spawn(move || {
-                let result = update::check_latest_release();
+                let result = update::check_latest_release(&overrides);
                 // ログは受け取った UI スレッド側で出す（効果音の読み込みと同じ）
                 if tx.send(UpdateCheckResult { origin, result }).is_err() {
                     // 受信側が無いのはアプリが終了したときだけ。結果は捨ててよい
@@ -135,7 +152,7 @@ impl CaptureCardViewer {
             Ok(CheckOutcome::UpToDate) => {
                 info!(
                     "更新の確認: 新しい版は無い（いまは v{}）",
-                    update::current_version()
+                    self.update_check.current
                 );
                 self.errors.clear(ErrorSource::Update);
                 self.update_check.status = UpdateStatus::UpToDate;

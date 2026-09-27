@@ -6,7 +6,7 @@
 
 use crate::i18n::{self, Text};
 use crate::settings::{AppSettings, LanguageSetting, UpdateSettings};
-use crate::update::{self, UpdateStatus};
+use crate::update::{UpdateStatus, UpdateView};
 use eframe::egui;
 
 use super::preset::{active_preset_label, PresetRowAction};
@@ -31,7 +31,7 @@ pub(super) fn show_other_tab(
     ui: &mut egui::Ui,
     draft: &AppSettings,
     view: &SettingsDialogView<'_>,
-    update_status: &UpdateStatus,
+    update: &UpdateView<'_>,
     events: &mut Vec<SettingsEvent>,
 ) {
     ui.heading(Text::TabOther.get());
@@ -45,7 +45,7 @@ pub(super) fn show_other_tab(
 
     ui.add_space(15.0);
 
-    show_update_group(ui, &draft.update, update_status, events);
+    show_update_group(ui, &draft.update, update, events);
 
     ui.add_space(15.0);
 
@@ -234,7 +234,9 @@ fn show_language_group(ui: &mut egui::Ui, draft: &AppSettings, events: &mut Vec<
 
 /// 「その他」タブの更新の節を描く。
 ///
-/// 確認の結果（`update_status`）は実行中のアプリの状態で、ドラフトではない。
+/// 現在の版と確認の結果（`update`）は実行中のアプリの状態で、ドラフトではない。
+/// 現在の版は、テスト用の環境変数で差し替えていればその版を出す
+/// （通知ダイアログの「いまは vA.B.C」と揃える）。
 /// 「更新を確認」は `SettingsEvent::CheckForUpdates` を返し、問い合わせは
 /// `app::update` が別スレッドで行う。2 つのチェックと「解除」はドラフトの
 /// `update` を差し替えるイベントを返すだけで、反映は「適用」「OK」のとき。
@@ -244,14 +246,15 @@ fn show_language_group(ui: &mut egui::Ui, draft: &AppSettings, events: &mut Vec<
 fn show_update_group(
     ui: &mut egui::Ui,
     draft: &UpdateSettings,
-    update_status: &UpdateStatus,
+    update: &UpdateView<'_>,
     events: &mut Vec<SettingsEvent>,
 ) {
+    let update_status = update.status;
     ui.group(|ui| {
         ui.strong(Text::UpdateGroup.get());
         ui.add_space(5.0);
 
-        ui.label(i18n::update_current_version(update::current_version()));
+        ui.label(i18n::update_current_version(update.current));
 
         ui.horizontal(|ui| {
             // 問い合わせ中は押せなくする。同時に 2 本走らせない

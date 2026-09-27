@@ -547,7 +547,7 @@ impl eframe::App for CaptureCardViewer {
                     &devices,
                     &connection,
                     &hotkey_errors,
-                    self.update_check.status(),
+                    &self.update_check.view(),
                 ),
                 None => Vec::new(),
             };

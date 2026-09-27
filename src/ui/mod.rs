@@ -61,7 +61,7 @@ use crate::hotkey::{HotkeyAction, HotkeyAssignmentError};
 use crate::i18n::Text;
 use crate::settings::{AppSettings, LanguageSetting, UpdateSettings};
 use crate::status::ConnectionStatus;
-use crate::update::UpdateStatus;
+use crate::update::UpdateView;
 use eframe::egui;
 use std::collections::BTreeMap;
 
@@ -334,7 +334,7 @@ pub fn show_settings_dialog(
     devices: &DeviceLists<'_>,
     connection: &ConnectionStatus,
     hotkey_errors: &BTreeMap<HotkeyAction, HotkeyAssignmentError>,
-    update_status: &UpdateStatus,
+    update: &UpdateView<'_>,
 ) -> Vec<SettingsEvent> {
     let mut events: Vec<SettingsEvent> = Vec::new();
     let mut button = SettingsDialogAction::None;
@@ -441,9 +441,7 @@ pub fn show_settings_dialog(
                     SettingsTab::Hotkeys => {
                         show_hotkey_settings_tab(ui, draft, hotkey_errors, &mut events)
                     }
-                    SettingsTab::Other => {
-                        show_other_tab(ui, draft, view, update_status, &mut events)
-                    }
+                    SettingsTab::Other => show_other_tab(ui, draft, view, update, &mut events),
                     SettingsTab::Status => show_status_tab(ui, connection),
                 });
         });

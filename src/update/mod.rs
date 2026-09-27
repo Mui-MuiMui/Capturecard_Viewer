@@ -6,7 +6,14 @@
 //!
 //! **この段階では何もダウンロードしない。** 「更新する」はリリースページを
 //! 開くところまで。資産の取得・照合・差し替えは次の段階で足す。
+//!
+//! 試すための環境変数（比較に使う版と問い合わせ先の差し替え）は `overrides.rs`。
 
+mod overrides;
+
+pub use self::overrides::CheckOverrides;
+
+use self::overrides::ReleaseSource;
 use crate::i18n::{self, Text};
 use crate::settings::UpdateSettings;
 use log::debug;
@@ -84,6 +91,14 @@ pub enum CheckOutcome {
     Available(UpdateCheck),
 }
 
+/// 「その他」タブの「更新」の欄へ渡すもの。
+pub struct UpdateView<'a> {
+    /// 比較に使う「いまの版」。テスト用の環境変数で差し替えていればその版
+    pub current: &'a Version,
+    /// 確認の状態
+    pub status: &'a UpdateStatus,
+}
+
 /// 「その他」タブに出す確認の状態。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum UpdateStatus {
@@ -128,6 +143,8 @@ pub enum UpdateError {
     InvalidResponse(String),
     /// タグを版として読めない
     InvalidTag(String),
+    /// テスト用の環境変数で指定した Release の JSON のファイルを読めない
+    LocalFile(String),
 }
 
 impl fmt::Display for UpdateError {
@@ -140,6 +157,7 @@ impl fmt::Display for UpdateError {
             UpdateError::HttpStatus(code) => i18n::update_http_status(*code),
             UpdateError::InvalidResponse(source) => i18n::update_invalid_response(source),
             UpdateError::InvalidTag(tag) => i18n::update_invalid_tag(tag),
+            UpdateError::LocalFile(source) => i18n::update_local_file_failed(source),
         };
         f.write_str(&text)
     }
@@ -172,16 +190,22 @@ struct AssetJson {
 
 /// GitHub に最新の Release を問い合わせ、いまの版と比べる。
 ///
+/// `overrides` はテスト用の環境変数で差し替えた版と問い合わせ先。通常は空。
+///
 /// **ブロックする。** 最大で `REQUEST_TIMEOUT` かかるので、UI スレッドから
 /// 呼ばないこと（`app::update` が別スレッドで呼ぶ）。
-pub fn check_latest_release() -> Result<CheckOutcome, UpdateError> {
-    let json = fetch_latest_release_json()?;
+pub fn check_latest_release(overrides: &CheckOverrides) -> Result<CheckOutcome, UpdateError> {
+    let json = match overrides.source_or_default() {
+        ReleaseSource::Http(url) => fetch_release_json(&url)?,
+        ReleaseSource::File(path) => std::fs::read_to_string(&path)
+            .map_err(|e| UpdateError::LocalFile(format!("{}: {}", path.display(), e)))?,
+    };
     let release = parse_release_json(&json)?;
-    evaluate_release(&current_version(), release)
+    evaluate_release(&overrides.current_version_or(current_version()), release)
 }
 
-/// 最新の Release の JSON を取る。
-fn fetch_latest_release_json() -> Result<String, UpdateError> {
+/// Release の JSON を HTTP で取る。`url` は通常 `LATEST_RELEASE_API_URL`。
+fn fetch_release_json(url: &str) -> Result<String, UpdateError> {
     use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
     // TLS は Windows の schannel。証明書は OS の証明書ストアで確かめる
@@ -197,9 +221,9 @@ fn fetch_latest_release_json() -> Result<String, UpdateError> {
         .build();
     let agent = ureq::Agent::new_with_config(config);
 
-    debug!("最新の Release を問い合わせる: {}", LATEST_RELEASE_API_URL);
+    debug!("最新の Release を問い合わせる: {}", url);
     let mut response = agent
-        .get(LATEST_RELEASE_API_URL)
+        .get(url)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .call()
@@ -650,6 +674,48 @@ mod tests {
         );
     }
 
+    // ---- テスト用の環境変数で差し替えた確認 ----
+
+    #[test]
+    fn check_latest_release_reads_a_local_file_with_an_older_current_version() {
+        // CAPTURECARD_VIEWER_UPDATE_API_URL=file://... と
+        // CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION=1.0.0 を指定したときの流れ
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作れなければならない");
+        let path = dir.path().join("latest.json");
+        std::fs::write(
+            &path,
+            r#"{"tag_name": "v1.1.0",
+                "html_url": "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/v1.1.0",
+                "body": "概要。\n### 追加\n- a", "assets": []}"#,
+        )
+        .expect("テスト用の JSON を書けなければならない");
+        let overrides = CheckOverrides {
+            current_version: Some(v("1.0.0")),
+            source: Some(ReleaseSource::File(path)),
+        };
+
+        let Ok(CheckOutcome::Available(check)) = check_latest_release(&overrides) else {
+            panic!("差し替えた版より新しい版として扱われていない");
+        };
+        assert_eq!(check.current, v("1.0.0"));
+        assert_eq!(check.latest, v("1.1.0"));
+        assert_eq!(check.notes_summary, "概要。");
+    }
+
+    #[test]
+    fn check_latest_release_missing_local_file_is_an_error() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作れなければならない");
+        let overrides = CheckOverrides {
+            current_version: None,
+            source: Some(ReleaseSource::File(dir.path().join("missing.json"))),
+        };
+
+        assert!(matches!(
+            check_latest_release(&overrides),
+            Err(UpdateError::LocalFile(_))
+        ));
+    }
+
     // ---- ネットワーク ----
 
     #[test]
@@ -657,7 +723,8 @@ mod tests {
     fn check_latest_release_reaches_github() {
         // 実行: cargo test check_latest_release_reaches_github -- --ignored
         // 公開済みの Release があれば、少なくとも読めて比べられること
-        let outcome = check_latest_release().expect("GitHub に問い合わせられなければならない");
+        let outcome = check_latest_release(&CheckOverrides::default())
+            .expect("GitHub に問い合わせられなければならない");
         println!("{outcome:?}");
     }
 }

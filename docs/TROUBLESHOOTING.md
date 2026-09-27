@@ -192,6 +192,25 @@ Windows の「環境変数」の設定に入れた場合は、そこから削除
 
 どちらも設定ファイルには保存されない。ログ（`CAPTURECARD_VIEWER_LOG`）と同じく、起動するときだけ指定する。
 
+## 更新の通知で、いまの版が違う・知らない版が出る
+
+環境変数 `CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` か `CAPTURECARD_VIEWER_UPDATE_API_URL` が設定されたまま起動している。これは**更新の通知を試すための開発者向けの機能**で、比較に使う「いまの版」や、新しい版を問い合わせる先を差し替える。指定されているとログ（`%AppData%\capturecard_viewer\logs`）に「更新の確認のテスト用のオーバーライドが有効」と出る。
+
+フェイクデバイスと同じく、コマンドプロンプトで設定した場合はそのウィンドウを閉じるか次のように消してから起動し直す。Windows の「環境変数」の設定に入れた場合は、そこから削除する。
+
+```
+set CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION=
+set CAPTURECARD_VIEWER_UPDATE_API_URL=
+"C:\path\to\capturecard_viewer.exe"
+```
+
+意図して使う場合の指定は次のとおり。どちらも設定ファイルには保存されない。
+
+| 環境変数 | 値 | 意味 |
+|---|---|---|
+| `CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` | 版（`1.0.0` または `v1.0.0`） | 比較に使う「いまの版」をこの版にする。公開済みの最新より古い版を入れると、ビルドし直さずに通知ダイアログを出せる。版として読めない値は無視する |
+| `CAPTURECARD_VIEWER_UPDATE_API_URL` | `http://` / `https://` の URL、または `file:///C:/path/latest.json` | GitHub の Release API の代わりにこの先へ問い合わせる。`file://` なら Release の JSON（`releases/latest` の応答と同じ形）をそのまま読む。それ以外の値は無視する |
+
 ## 設定を初期化する
 
 設定画面の「その他」タブにある「設定を初期化...」を押し、確認の「初期化する」を押す。そのあと「適用」か「OK」で反映する。

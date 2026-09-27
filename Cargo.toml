@@ -33,7 +33,7 @@ ringbuf = "0.3"
 # スクリーンショットをクリップボードへコピーする。egui-winit が既に同じ版を
 # 使っているため、クレート自体は増えない（image-data フィーチャの分だけ増える）
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
-# 更新の確認（src/update.rs）。GitHub の Release API へ問い合わせるだけに使う。
+# 更新の確認（src/update/）。GitHub の Release API へ問い合わせるだけに使う。
 # TLS は Windows の schannel（native-tls）で、証明書は OS の証明書ストアで検証する
 # （`RootCerts::PlatformVerifier`）。既定の rustls と ring は入れない。
 # ureq は native-tls を有効にすると同梱のルート証明書（webpki-root-certs）も

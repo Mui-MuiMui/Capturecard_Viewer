@@ -736,6 +736,13 @@ pub fn update_invalid_tag(tag: impl Display) -> String {
     }
 }
 
+pub fn update_local_file_failed(source: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("テスト用の Release の JSON を読めない: {source}"),
+        Language::English => format!("Cannot read the test release JSON: {source}"),
+    }
+}
+
 /// 通知ダイアログの見出し。版は `v` を付けずに渡す。
 pub fn update_available_heading(latest: impl Display, current: impl Display) -> String {
     match language() {

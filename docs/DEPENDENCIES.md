@@ -66,7 +66,7 @@
 | `winapi` | 0.3 | 0.3.x | 後述 | Windows API |
 | `windows` | 0.62 | 0.62.2 | 追随 | DirectShow のバックエンド（`src/video/directshow/`） |
 | `windows-core` | 0.62 | 0.100.0 | 後述 | 同上。`#[implement]` が生成するコードの参照先 |
-| `ureq` | 3.4 | 3.4.2 | 追随 | 更新の確認で GitHub の Release API へ問い合わせる（`src/update.rs`） |
+| `ureq` | 3.4 | 3.4.2 | 追随 | 更新の確認で GitHub の Release API へ問い合わせる（`src/update/`） |
 | `serde_json` | 1.0 | 1.0.151 | 追随 | 同上。API の応答（JSON）を読む |
 | `semver` | 1.0 | 1.0.28 | 追随 | 同上。タグと実行中の版を比べる |
 | `tempfile`（dev） | 3.27 | 3.27.x | 追随 | テストで一時ディレクトリに設定ファイルを書く |
