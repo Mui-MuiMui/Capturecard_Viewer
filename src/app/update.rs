@@ -146,6 +146,11 @@ impl CaptureCardViewer {
         match spawned {
             Ok(handle) => {
                 info!("更新の確認を始める（{:?}）", origin);
+                // 起動時の通知ダイアログが開いたまま「更新を確認」を押した場合は閉じる。
+                // 結果は「更新」の欄に出るので、古い確認の内容を操作させない
+                if origin == CheckOrigin::Manual {
+                    self.update_check.dialog = None;
+                }
                 self.update_check.status = UpdateStatus::Checking;
                 drop_finished_threads(&mut self.update_check.threads);
                 self.update_check.threads.push(handle);
