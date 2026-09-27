@@ -29,6 +29,7 @@
 - 反映は `ui::commit_draft` が `video` / `audio` / `screenshot` / `hotkeys` / `presets` / `active_preset` と、ダイアログが編集する `ui` の 3 項目（`maintain_aspect_ratio` / `volume` / `language`）だけに限っている。`ui` を丸ごと入れると、ダイアログを開いている間に動かしたウィンドウの位置が巻き戻る。**ダイアログに `ui` の項目を足すときは `commit_draft` にも足すこと**
 - 逆に、**`video` / `audio` / `screenshot` にダイアログの外から変わる項目を足すときは、`commit_draft` で開いた時点の値と比べ、ドラフトで変わったときだけ反映すること。** `video.auto_reconnect`（右クリックメニューの「デバイスの自動再接続」）がその例。セクションを丸ごと入れるとダイアログを開いている間の切り替えが開いた時点のスナップショットで巻き戻り、逆に無条件で実行中の値を残すと設定の読み込みと初期化で反映されない項目になる
 - **`ui` にダイアログの外だけで変わる項目を足すときは、`commit_draft` に足さないこと。** `ui.muted`（ミュート）と `ui.borderless`（タイトルバーを隠す）がその例で、どちらも右クリックメニューからしか変わらない。`commit_draft` が触ると、ダイアログを開いている間の切り替えが「適用」で巻き戻る。**`ui.enable_drag_move` も同じ。** これは `ui.borderless` を有効にしたときのガードが書き換えるため、`commit_draft` で拾うと「タイトルバーも無く動かせないウィンドウ」が作れてしまう
+- `update` の 2 つのチェック（`check_on_startup` / `notify_on_startup`）は「その他」タブでしか変わらないので無条件に反映する。**`update.skipped_version` だけは起動時の通知ダイアログの「この版は通知しない」でも変わる**ので、`video.auto_reconnect` と同じくドラフトで変わったときだけ反映する（`docs/design/update.md`）
 - `ui.language` は「その他」タブでしか変わらないので無条件に反映する。画面の言語を切り替えるのは `commit_draft` ではなく、反映のあとに呼ぶ `apply_language`（`docs/design/i18n.md`）
 - `ui` の `maintain_aspect_ratio` / `volume` はダイアログの外（ホイールでの音量調整、コンテキストメニュー）でも変わるため、開いた時点の値（`SettingsDialogState::original`）と比べて**ダイアログで実際に編集されたときだけ**反映する。無条件に入れると、ダイアログを開いたままホイールで音量を変えて「適用」を押したときに巻き戻る
 - ホットキー入力ダイアログと効果音のテスト再生もドラフトを見る。ドラフトへ書いたホットキーはその場で登録しない（2 秒ごとの `apply_settings` が共有設定側の古い値で登録し直してしまうため）

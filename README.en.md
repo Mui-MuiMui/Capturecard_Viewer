@@ -180,6 +180,16 @@ These live in the **Other** tab of the settings window. Use them when moving to 
 - If a value cannot be understood, only that item falls back to its default and the rest is imported. If the file is not valid TOML, nothing changes and the reason is shown.
 - **Saved presets are included in the export and are imported as well.** Reset does not remove them.
 
+### Updates
+
+At startup the application asks GitHub Releases whether a newer version exists and, if so, tells you in a dialog. The check runs in the background, so startup never waits for the network (if the check fails, the reason is shown at the bottom of the screen and in the settings window).
+
+- "Update" in the dialog opens the release page of that version in your browser. **This version does not download or replace anything by itself.** Download the new exe from the page and replace the current one with it.
+- "Later" reminds you again at the next startup. "Don't notify me about this version" stays quiet for that version (a newer one will be announced again).
+- The "Updates" group in the **Other** tab of the settings window shows the current version and has "Check for updates" (a manual check) and "Open the release page".
+- Turning off "Check for updates at startup" stops the startup check entirely. Turning off "Show a dialog at startup when a new version is available" skips the dialog and only reports the new version in the "Updates" group. Both are on by default. A version you chose not to be notified about can be cleared with "Clear" in the same group.
+- The update settings are not part of presets.
+
 ### Screenshots
 
 - **Default key**: F5 (configurable; see "Hotkeys")
