@@ -179,7 +179,12 @@ impl VideoBackend for FakeVideoCapture {
         FakeVideoCapture::list_devices(self)
     }
 
-    fn capabilities(&self, device_name: Option<&str>) -> Result<DeviceCapabilities, VideoError> {
+    fn capabilities(
+        &self,
+        device_name: Option<&str>,
+        // フェイクの経路は 1 つだけなので、開き方の設定は見ない
+        _backend: VideoBackendSetting,
+    ) -> Result<DeviceCapabilities, VideoError> {
         FakeVideoCapture::capabilities(self, device_name)
     }
 

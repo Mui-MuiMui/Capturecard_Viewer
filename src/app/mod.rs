@@ -359,15 +359,20 @@ impl Default for CaptureCardViewer {
         // **要求を積むだけで、コマンドとして流すのは最初の `update()`。**
         // ワーカーはコマンドを受けた順に処理するので、ここで流すと
         // 数百 ms かかる能力取得の後ろで最初の接続が待たされる
+        // 開き方も添える。キャッシュのキーはデバイス名と開き方の組（#249）
         let saved_video_device = match app.settings.lock() {
-            Ok(s) => s.video.device_name.clone(),
+            Ok(s) => s
+                .video
+                .device_name
+                .as_deref()
+                .map(|device| ui::VideoCapabilityKey::new(Some(device), s.video.backend)),
             Err(_) => {
                 warn!("保存済みビデオデバイスの能力の先読みで settings のロックを取得できない");
                 None
             }
         };
-        if let Some(device) = saved_video_device {
-            app.settings_dialog.capabilities_mut().request(&device);
+        if let Some(key) = saved_video_device {
+            app.settings_dialog.capabilities_mut().request(&key);
         }
 
         // 音声デバイスの対応設定はワーカーが開く直前に自分で取りに行くので、

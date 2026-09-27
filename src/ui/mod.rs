@@ -43,7 +43,7 @@ mod video_mode;
 // なので、誰も使わない再輸出は `unused_imports` の警告になる。
 // `commit_draft` や `select_default_video_mode` のような項目は、使う側が
 // 子モジュールの経路（`self::draft::commit_draft`）で参照する
-pub use self::capability::AudioCapabilityCache;
+pub use self::capability::{AudioCapabilityCache, VideoCapabilityKey};
 pub use self::draft::{draft_from_defaults, draft_from_imported};
 pub use self::hotkey_capture::{show_hotkey_capture_dialog, HotkeyDialogEvent};
 pub use self::preset::PresetRowAction;
@@ -156,13 +156,13 @@ pub enum SettingsEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapabilityEvent {
     /// まだ問い合わせていなければ取得を要求する（`CapabilityCache::request`）
-    RequestVideo(String),
+    RequestVideo(VideoCapabilityKey),
     /// 取得済み・失敗済みでも問い合わせ直す（「再取得」）
-    RetryVideo(String),
-    /// デバイスを切り替えた。能力が届いたら既定値を選び直す目印を立てる
-    ExpectVideoDefaults(String),
+    RetryVideo(VideoCapabilityKey),
+    /// デバイスか開き方を切り替えた。能力が届いたら既定値を選び直す目印を立てる
+    ExpectVideoDefaults(VideoCapabilityKey),
     /// 既定値の選び直しを済ませたので目印を落とす
-    ClearVideoDefaults(String),
+    ClearVideoDefaults(VideoCapabilityKey),
     /// オーディオ側の `RequestVideo` 相当。文字列は `audio::cache_key`
     RequestAudio(AudioDirection, String),
     /// オーディオ側の `RetryVideo` 相当

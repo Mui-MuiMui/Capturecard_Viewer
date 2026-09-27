@@ -113,8 +113,9 @@ pub(super) enum DeviceCommand {
     ToggleMute,
     /// デバイス一覧を取り直す。設定ダイアログの選択肢に使う
     RefreshDeviceLists,
-    /// 映像デバイスの対応形式を問い合わせる
-    QueryVideoCapabilities(String),
+    /// 映像デバイスの対応形式を問い合わせる。開き方（`video.backend`）で
+    /// Media Foundation と DirectShow のどちらに問い合わせるかが決まる（#249）
+    QueryVideoCapabilities(String, VideoBackendSetting),
     /// 音声デバイスの対応設定を問い合わせる。キーは `audio::cache_key`
     QueryAudioCapabilities(AudioDirection, String),
     /// ストリームを閉じてスレッドを終える
@@ -135,8 +136,12 @@ pub(super) enum DeviceEvent {
     /// 映像フレームが途絶えたので、表示中のテクスチャを捨ててほしい。
     /// 開き直すかどうかはワーカーが判断済みで、UI は表示を戻すだけ
     VideoSignalLost,
-    /// 映像デバイスの対応形式が揃った
-    VideoCapabilities(String, Box<Result<DeviceCapabilities, String>>),
+    /// 映像デバイスの対応形式が揃った。デバイス名と開き方は要求と同じもの
+    VideoCapabilities(
+        String,
+        VideoBackendSetting,
+        Box<Result<DeviceCapabilities, String>>,
+    ),
     /// 音声デバイスの対応設定が揃った
     AudioCapabilities(
         AudioDirection,

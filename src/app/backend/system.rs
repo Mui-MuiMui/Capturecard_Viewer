@@ -139,12 +139,15 @@ impl VideoBackend for SystemVideo {
         )
     }
 
-    fn capabilities(&self, device_name: Option<&str>) -> Result<DeviceCapabilities, VideoError> {
-        // 設定ダイアログの選択肢は名前だけで経路を決める（開き方の設定は
-        // 見ない）。能力のキャッシュがデバイス名で引く作りのため。DirectShow
-        // で開くときに選択肢と違う形式しか無くても、`choose_candidate` が
-        // 近いものを選ぶ
-        match route_for(device_name, VideoBackendSetting::Auto) {
+    fn capabilities(
+        &self,
+        device_name: Option<&str>,
+        backend: VideoBackendSetting,
+    ) -> Result<DeviceCapabilities, VideoError> {
+        // 開くときと同じ規則で経路を決める（#249）。設定ダイアログの能力
+        // キャッシュはデバイス名と開き方の組で引くので、DirectShow で開く
+        // 設定なら選択肢も DirectShow 側の対応形式になる
+        match route_for(device_name, backend) {
             (VideoRoute::DirectShow, Some(name)) => self.direct_show.capabilities(name),
             (_, name) => VideoCapture::get_device_capabilities(name),
         }
