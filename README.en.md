@@ -182,7 +182,7 @@ These live in the **Other** tab of the settings window. Use them when moving to 
 
 ### Updates
 
-At startup the application asks GitHub Releases whether a newer version exists and, if so, tells you in a dialog. The check runs in the background, so startup never waits for the network (if the check fails, the reason is shown at the bottom of the screen and in the settings window).
+At startup the application asks GitHub Releases whether a newer version exists and, if so, tells you in a dialog. The check runs in the background, so startup never waits for the network (if the check fails, the reason is shown in the "Updates" group of the settings window; when you press "Check for updates" yourself, it is also shown at the bottom of the screen).
 
 - "Update" in the dialog opens the release page of that version in your browser. **This version does not download or replace anything by itself.** Download the new exe from the page and replace the current one with it.
 - "Later" reminds you again at the next startup. "Don't notify me about this version" stays quiet for that version (a newer one will be announced again).

@@ -5,7 +5,11 @@
 //! `update()` へ返す。効果音の読み込み（`app::screenshot_sound`）と同じ流儀
 //! （`docs/design/threads.md`、`docs/design/update.md`）。
 //!
-//! **失敗しても起動は止めない。** ログとトースト、「その他」タブの表示に出すだけ。
+//! **失敗しても起動は止めない。** ログと「その他」タブの表示に出すだけ。トーストは
+//! 「更新を確認」を押したときだけ出す（`CheckOrigin::notifies_failure`）。
+//!
+//! **終了時に確認のスレッドを待たない。** ネットワークだけを触り、ファイルも設定も
+//! 書かないので、途中で打ち切られてもプロセスの終了で消えるだけで何も壊れない。
 
 use super::screenshot::drop_finished_threads;
 use super::CaptureCardViewer;
@@ -29,6 +33,20 @@ pub(super) enum CheckOrigin {
     Manual,
 }
 
+impl CheckOrigin {
+    /// 失敗をトースト（`report_error`）でも知らせるか。
+    ///
+    /// **起動時の自動の確認は知らせない。** ネットワークの無い環境で起動のたびに
+    /// トーストが出るのは邪魔なだけで、理由は WARN のログと「更新」の欄に残る。
+    /// 「更新を確認」は人が押した操作なので、結果が失敗でも知らせる。
+    fn notifies_failure(self) -> bool {
+        match self {
+            CheckOrigin::Startup => false,
+            CheckOrigin::Manual => true,
+        }
+    }
+}
+
 /// 確認のスレッドから UI スレッドへ返す結果。
 pub(super) struct UpdateCheckResult {
     origin: CheckOrigin,
@@ -42,8 +60,10 @@ pub(super) struct UpdateCheckResult {
 pub(super) struct UpdateState {
     tx: Sender<UpdateCheckResult>,
     rx: Receiver<UpdateCheckResult>,
-    // 確認のスレッド。デバイスには触らないが、効果音の読み込みと同じく
-    // 切り離さず、終了時に join する
+    // 確認のスレッド。ハンドルは持っておくが、**終了時に join しない。**
+    // ネットワークだけを触る副作用の無いスレッドなので、確認の最中に閉じても
+    // 待たずに終わってよい（効果音・スクリーンショットの保存スレッドとは違う。
+    // docs/design/update.md）
     threads: Vec<JoinHandle<()>>,
     // 「その他」タブに出す確認の状態
     status: UpdateStatus,
@@ -132,9 +152,7 @@ impl CaptureCardViewer {
             }
             Err(e) => {
                 warn!("更新の確認のスレッドを起こせない: {}", e);
-                let reason = UpdateError::Network(e.to_string()).to_string();
-                self.update_check.status = UpdateStatus::Failed(reason.clone());
-                self.report_error(ErrorSource::Update, reason);
+                self.record_update_failure(origin, UpdateError::Network(e.to_string()));
             }
         }
     }
@@ -172,11 +190,18 @@ impl CaptureCardViewer {
                 self.update_check.status = UpdateStatus::Available(check);
             }
             Err(e) => {
-                warn!("更新を確認できない: {}", e);
-                let reason = e.to_string();
-                self.update_check.status = UpdateStatus::Failed(reason.clone());
-                self.report_error(ErrorSource::Update, reason);
+                warn!("更新を確認できない（{:?}）: {}", origin, e);
+                self.record_update_failure(origin, e);
             }
+        }
+    }
+
+    /// 確認の失敗を「更新」の欄へ出す。「更新を確認」からの失敗だけトーストにも出す。
+    fn record_update_failure(&mut self, origin: CheckOrigin, error: UpdateError) {
+        let reason = error.to_string();
+        self.update_check.status = UpdateStatus::Failed(reason.clone());
+        if origin.notifies_failure() {
+            self.report_error(ErrorSource::Update, reason);
         }
     }
 
@@ -229,23 +254,21 @@ impl CaptureCardViewer {
             }
         }
     }
+}
 
-    /// 進行中の確認が終わるまで待つ。終了時に呼ぶ。
-    ///
-    /// 問い合わせは `update::check_latest_release` の上限（5 秒）で必ず終わるので、
-    /// 起動直後に閉じたときに待たされるのも最大でその長さ。結果は取り込まない。
-    pub(super) fn join_update_threads(&mut self) {
-        let handles = std::mem::take(&mut self.update_check.threads);
-        if handles.is_empty() {
-            return;
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        debug!("更新の確認のスレッド {} 件を待つ", handles.len());
-        for handle in handles {
-            if handle.join().is_err() {
-                // release ビルドは panic = "abort" なのでここには来ない
-                warn!("更新の確認のスレッドがパニックした");
-            }
-        }
+    #[test]
+    fn check_origin_startup_failure_is_not_toasted() {
+        // 起動時の自動の確認はトーストを出さない。ログと「更新」の欄だけ
+        assert!(!CheckOrigin::Startup.notifies_failure());
+    }
+
+    #[test]
+    fn check_origin_manual_failure_is_toasted() {
+        // 「更新を確認」は人が押した操作なので、失敗も知らせる
+        assert!(CheckOrigin::Manual.notifies_failure());
     }
 }

@@ -37,8 +37,8 @@ const RELEASE_PAGE_PREFIX: &str = "https://github.com/Mui-MuiMui/Capturecard_Vie
 
 /// 問い合わせ全体（名前解決・接続・応答の読み取り）の上限。
 ///
-/// 起動を止めないよう別スレッドで行うが、終了時にはこのスレッドを join する。
-/// 長くすると、起動直後に閉じたときの待ちがそのぶん延びる。
+/// 起動を止めないよう別スレッドで行う。終了時には待たないので、ここを長くしても
+/// 閉じるのは遅れない。長くすると「確認中」が続く時間が延びる。
 /// 失敗の文言（`Text::UpdateTimedOut`）にも秒数を書いてあるので、変えたら合わせる。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 

@@ -757,8 +757,8 @@ impl eframe::App for CaptureCardViewer {
         self.join_screenshot_save_threads();
         // 効果音の読み込みも切り離さずに待つ。結果は使わない
         self.join_sound_load_threads();
-        // 更新の確認も待つ。問い合わせの上限（5 秒）で必ず終わる
-        self.join_update_threads();
+        // 更新の確認のスレッドは待たない。ネットワークだけを触り副作用が無いので、
+        // 確認の最中でもプロセスの終了で打ち切ってよい（docs/design/update.md）
 
         // 終了中に終わった保存の結果をログへ残す。**待ったあとに読むこと。**
         // 画面はもう出ないので通知はされないが、閉じる直前に撮った 1 枚が
