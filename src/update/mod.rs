@@ -56,7 +56,8 @@ pub fn current_version() -> Version {
 
 /// Release に添付された資産 1 つ。
 ///
-/// 更新の適用が `capturecard_viewer-<tag>-windows-x64.exe` と `SHA256SUMS.txt` を
+/// 更新の適用が `capturecard_viewer.exe`（無ければ 1.2.0 の旧名
+/// `capturecard_viewer-<tag>-windows-x64.exe`）と `SHA256SUMS.txt` を
 /// 名前で引く（`apply::ApplyPlan::from_check`、`docs/RELEASE.md` の「配布物」）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseAsset {
