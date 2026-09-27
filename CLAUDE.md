@@ -81,7 +81,7 @@ cargo build --release
 | `src/hotkey/manager.rs` | `HotkeyManager` の本体（リスナーの起動と停止、ウィンドウ状態の受け渡し）と `BackgroundHotkeyRunner` |
 | `src/hotkey/assignments.rs` | `HotkeyAssignmentError`、アクション別の登録（差分適用・一時停止と再開・試し登録）と押下の取り出し |
 | `src/hotkey/listener.rs` | リスナースレッドと共有状態 `ListenerState`、押下の照合とデバウンス |
-| `src/keyboard_hook.rs` | 低レベルキーボードフック（`WH_KEYBOARD_LL`）。キーを奪わずに押下を観測し、リスナースレッドのメッセージループへ渡す |
+| `src/keyboard_hook.rs` | 低レベルキーボードフック（`WH_KEYBOARD_LL`）。キーを奪わずに押下を観測し、リスナースレッドのメッセージループへ渡す。前面でもフックが呼ばれるよう、winit が登録したキーボードの Raw Input を外す（`stop_raw_keyboard_input`） |
 | `src/screenshot.rs` | rodio による効果音の読み込みと再生 |
 | `src/settings.rs` | `AppSettings` とその serde 定義、confy による読み書き、保存パスの決定、旧形式からの移行 |
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |
