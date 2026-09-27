@@ -104,7 +104,11 @@ GitHub の Release から新しい版を見つけて知らせ、人が「更新�
 
 ### 資産
 
-**資産名は `capturecard_viewer-<tag>-windows-x64.exe` と `SHA256SUMS.txt`**（`docs/RELEASE.md` の「配布物」）。`<tag>` は Release のタグそのまま（`UpdateCheck::tag`）で、`UpdateCheck::assets` から名前で引く（`ApplyPlan::from_check`）。
+**資産名は `capturecard_viewer.exe` と `SHA256SUMS.txt`**（`docs/RELEASE.md` の「配布物」）。`UpdateCheck::assets` から名前で引く（`ApplyPlan::from_check`）。
+
+- **exe の資産名にバージョンを入れない**（1.2.1 から。Issue #267）。差し替えは実行中の exe の名前を保つので（「手順」の 3）、資産名にバージョンがあると、ダウンロードした名前のまま使う人は更新のあとも古いバージョンの名前で新しいバージョンを動かすことになる。版なしなら、ダウンロードした名前と保たれる名前が一致する。名前を変えて使う人には元から影響しない
+- **`capturecard_viewer.exe` が無ければ、1.2.0 の旧名 `capturecard_viewer-<tag>-windows-x64.exe` を探す**（`legacy_exe_asset_name`。`<tag>` は Release のタグそのまま、`UpdateCheck::tag`）。1.2.0 の Release だけがこの名前なので、更新先が 1.2.0 のとき（テスト用の問い合わせ先で古い Release を指したときなど）に効く。両方あれば版なしを選ぶ。`SHA256SUMS.txt` の行は**選んだほうの名前**で引く（`ApplyPlan::exe_name`）
+- 逆向きは救えない。**1.2.0 の更新機能は旧名しか探さないので、1.2.0 → 1.2.1 は手動の更新になる**（リリースページから exe を落として置き換える）。ユーザーが 2026-09-27 に、版なしの名前の利点をこの 1 回の手間より重く見て決めた
 
 - **どちらかが無ければ `ApplyError::NoAssets`。** 1.1.0 以前の Release は zip しか無いので、ここに当たる。「この版には自動更新用のファイルがありません。リリースページから手動で更新してください」を出し、ダイアログの「リリースページを開く」に倒す
 - 資産の URL は `https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/<tag>/<資産名>` と**完全に一致する**ものしか落とさない（`UnexpectedAssetUrl`）。`release_page_url` と同じ理由で、頭の一致では `..` で別の場所を指せる。GitHub はここから別のホストへリダイレクトし、ureq がそれを辿る
