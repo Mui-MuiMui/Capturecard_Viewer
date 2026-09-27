@@ -464,6 +464,18 @@ mod tests {
     }
 
     #[test]
+    fn chord_from_egui_keys_have_non_empty_parsable_names() {
+        // 一覧に出る名前が空になるキーが無いこと（#251）
+        for &key in egui::Key::ALL {
+            if chord_from_egui(key, egui::Modifiers::NONE).is_some() {
+                assert!(!key.name().is_empty(), "{key:?}");
+                assert!(parse_key_code(key.name()).is_ok(), "{key:?}");
+            }
+        }
+        assert!(chord_from_egui(egui::Key::Escape, egui::Modifiers::NONE).is_some());
+    }
+
+    #[test]
     fn chord_from_egui_digit_returns_none() {
         // egui ではメイン列の 0 とテンキーの 0 が同じ Key::Num0 になり、区別できない。
         // フックはテンキーの 0 では `0` の割り当てに反応しないので、取り除くと
