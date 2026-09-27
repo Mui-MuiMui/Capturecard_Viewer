@@ -35,7 +35,8 @@ pub enum UpdateDialogEvent {
     /// 「更新する」。ダウンロードと差し替えを始める
     StartUpdate,
     /// 「リリースノートを見る」と、失敗したときの「リリースページを開く」。
-    /// どちらもその版のリリースページをブラウザで開く（手で更新するときの逃げ道でもある）
+    /// どちらもその版のリリースページをブラウザで開く（手で更新するときの逃げ道でもある）。
+    /// 「リリースノートを見る」ではダイアログを閉じない
     OpenReleasePage,
     /// 「後で」とタイトルバーの ×。次の起動でまた知らせる
     Later,
@@ -47,7 +48,7 @@ pub enum UpdateDialogEvent {
     Close,
 }
 
-/// ダイアログの幅。中身の長さで横に伸び縮みさせない。英語のボタン 4 つが
+/// ダイアログの幅。中身の長さで横に伸び縮みさせない。英語の下の段のボタン 3 つが
 /// 1 行に並ぶくらいにしてあり、収まらなければ折り返す。
 const DIALOG_WIDTH: f32 = 440.0;
 
@@ -137,10 +138,18 @@ fn heading(ui: &mut egui::Ui, check: &UpdateCheck) {
 ///
 /// リリースノートは本文を載せず、「リリースノートを見る」でリリースページを開く。
 /// 本文は長さがまちまちで、ダイアログの中では読みにくいため。
+///
+/// ボタンは 2 段にする。上の段は「リリースノートを見る」だけで、ダイアログを閉じない
+/// （読んでから「更新する」を押せるように）。下の段にそれ以外の 3 つを並べる。
 fn show_available(ui: &mut egui::Ui, check: &UpdateCheck, events: &mut Vec<UpdateDialogEvent>) {
     heading(ui, check);
 
     ui.add_space(8.0);
+    if ui.button(Text::UpdateViewReleaseNotes.get()).clicked() {
+        events.push(UpdateDialogEvent::OpenReleasePage);
+    }
+
+    ui.add_space(12.0);
     ui.horizontal_wrapped(|ui| {
         if ui
             .button(Text::UpdateNow.get())
@@ -148,9 +157,6 @@ fn show_available(ui: &mut egui::Ui, check: &UpdateCheck, events: &mut Vec<Updat
             .clicked()
         {
             events.push(UpdateDialogEvent::StartUpdate);
-        }
-        if ui.button(Text::UpdateViewReleaseNotes.get()).clicked() {
-            events.push(UpdateDialogEvent::OpenReleasePage);
         }
         if ui.button(Text::UpdateLater.get()).clicked() {
             events.push(UpdateDialogEvent::Later);
