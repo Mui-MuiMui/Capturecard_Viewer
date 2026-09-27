@@ -14,6 +14,7 @@ use crate::audio::{
     ActiveAudio, AudioCapabilities, AudioDirection, AudioError, FakeAudioCapture, FakeAudioOptions,
     PassthroughRequest, ResampleStatus, ResampleTelemetry,
 };
+use crate::settings::VideoBackendSetting;
 use crate::video::{
     ActiveVideo, DeviceCapabilities, FakeVideoCapture, FakeVideoOptions, VideoError, VideoLinkState,
 };
@@ -188,6 +189,8 @@ impl VideoBackend for FakeVideoCapture {
         resolution: Option<(u32, u32)>,
         format: Option<&str>,
         fps: Option<u32>,
+        // フェイクの経路は 1 つだけなので、開き方の設定は見ない
+        _backend: VideoBackendSetting,
     ) -> Result<(), VideoError> {
         FakeVideoCapture::start_capture(self, device_name, resolution, format, fps)
     }

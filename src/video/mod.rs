@@ -24,9 +24,10 @@
 // ビルドで誰も使わない `pub use` が残って `unused_imports` の警告になるので、
 // この 2 つのモジュールだけ `pub(crate)` にして子モジュールの経路
 // （`crate::video::capabilities::FormatCapability`）で参照してもらう。
-// `src/ui/` と同じ考え方
+// `src/ui/` と同じ考え方。`CaptureApi`（`capture`）も同じ理由で、外では
+// `ActiveVideo::api` の値として使うだけで名前を書くのはテストだけ
 pub(crate) mod capabilities;
-mod capture;
+pub(crate) mod capture;
 mod color;
 mod convert;
 mod directshow;

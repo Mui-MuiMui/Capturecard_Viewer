@@ -459,7 +459,13 @@ pub(super) mod testing {
         input_device: Option<&str>,
     ) -> DeviceConfig {
         DeviceConfig {
-            video: (video_device.map(str::to_string), None, None, None),
+            video: (
+                video_device.map(str::to_string),
+                None,
+                None,
+                None,
+                crate::settings::VideoBackendSetting::Auto,
+            ),
             audio: (
                 input_device.map(str::to_string),
                 None,

@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::capabilities::DeviceCapabilities;
-use super::capture::{ActiveVideo, VideoLinkState};
+use super::capture::{ActiveVideo, CaptureApi, VideoLinkState};
 use super::color::SharedColorConversion;
 use super::frame_buffer::VideoFrames;
 use super::frame_sink::FrameSink;
@@ -217,6 +217,7 @@ impl DirectShowCapture {
 
         let active = ActiveVideo {
             device_name: display.to_string(),
+            api: CaptureApi::DirectShow,
             resolution: Some((graph.format.width, graph.format.height)),
             format: Some(graph.format_name().to_string()),
             requested_fps: graph.requested_fps,

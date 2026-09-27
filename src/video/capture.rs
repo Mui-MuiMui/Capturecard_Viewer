@@ -76,12 +76,38 @@ pub struct VideoLinkState {
 pub struct ActiveVideo {
     /// 実際に開いたデバイス名
     pub device_name: String,
+    /// 実際に開いた経路。設定の「映像の開き方」が自動のときも、どちらで
+    /// 開いたかを「接続状態」タブで確かめられるように持つ（#237）
+    pub api: CaptureApi,
     /// 確定した解像度。取得できなければ `None`
     pub resolution: Option<(u32, u32)>,
     /// 確定したフレームフォーマット名。取得できなければ `None`
     pub format: Option<String>,
     /// 要求したフレームレート
     pub requested_fps: u32,
+}
+
+/// 映像ストリームを開いた経路。
+///
+/// 設定の `VideoBackendSetting` と違い「自動」を持たない。開いた結果なので
+/// 必ずどれか 1 つに決まっている。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureApi {
+    MediaFoundation,
+    DirectShow,
+    /// 実機なしで動くフェイク（`video::fake`）
+    Fake,
+}
+
+impl CaptureApi {
+    /// 「接続状態」タブに出す名前
+    pub fn label(self) -> &'static str {
+        match self {
+            CaptureApi::MediaFoundation => Text::VideoBackendMediaFoundation.get(),
+            CaptureApi::DirectShow => Text::VideoBackendDirectShow.get(),
+            CaptureApi::Fake => Text::CaptureApiFake.get(),
+        }
+    }
 }
 
 impl ActiveVideo {
@@ -376,6 +402,7 @@ impl VideoCapture {
         // 接続状態の表示用に、実際に開いた内容を控える
         self.active = Some(ActiveVideo {
             device_name: device_info.human_name().to_string(),
+            api: CaptureApi::MediaFoundation,
             resolution: actual_resolution,
             format: actual_format_name,
             requested_fps,

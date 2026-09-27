@@ -18,7 +18,7 @@
 use super::backend::{self, BackendShared};
 use crate::audio::{ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, ResampleStatus};
 use crate::repaint::RepaintWaker;
-use crate::settings::AppSettings;
+use crate::settings::{AppSettings, VideoBackendSetting};
 use crate::video::{ActiveVideo, DeviceCapabilities, SharedColorConversion, VideoFrames};
 use log::{debug, warn};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -26,12 +26,16 @@ use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 
 /// 映像の接続対象。これが変わったらバックオフを捨てて即座に開き直す。
-/// `(デバイス名, 解像度, フォーマット, fps)`
+/// `(デバイス名, 解像度, フォーマット, fps, 開き方)`
+///
+/// 開き方（`video.backend`）を含めてあるのは、同じデバイスでも経路が
+/// 変われば開き直しが要るため（#237）
 pub(super) type VideoTarget = (
     Option<String>,
     Option<(u32, u32)>,
     Option<String>,
     Option<u32>,
+    VideoBackendSetting,
 );
 
 /// 音声の接続対象。
@@ -69,6 +73,7 @@ impl DeviceConfig {
                 settings.video.resolution,
                 settings.video.format.clone(),
                 settings.video.fps,
+                settings.video.backend,
             ),
             audio: (
                 settings.audio.input_device_name.clone(),

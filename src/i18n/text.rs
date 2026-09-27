@@ -106,6 +106,13 @@ texts! {
     ColorRangeLimited { ja: "リミテッド（16〜235）", en: "Limited (16-235)" },
     ColorRangeFull { ja: "フル（0〜255）", en: "Full (0-255)" },
 
+    // ---- 映像の開き方（settings::VideoBackendSetting / video::CaptureApi の label） ----
+    // Media Foundation / DirectShow は API の名前なので訳さない
+    VideoBackendAuto { ja: "自動", en: "Auto" },
+    VideoBackendMediaFoundation { ja: "Media Foundation", en: "Media Foundation" },
+    VideoBackendDirectShow { ja: "DirectShow", en: "DirectShow" },
+    CaptureApiFake { ja: "フェイク", en: "Fake" },
+
     // ---- 言語（settings::LanguageSetting の label） ----
     // 言語名はどの言語で表示していても、その言語自身の表記で出す。
     // 読めない言語へ切り替えてしまっても、戻す先を見つけられるようにするため
@@ -138,6 +145,9 @@ texts! {
     VideoSettings { ja: "ビデオ設定", en: "Video" },
     VideoDevice { ja: "ビデオデバイス", en: "Video device" },
     SelectDevice { ja: "デバイスを選択...", en: "Select a device..." },
+    VideoBackendLabel { ja: "映像の開き方:", en: "Open video with:" },
+    VideoBackendHint { ja: "自動では、名前に「(DirectShow)」が付いたデバイスだけを DirectShow で、それ以外を Media Foundation で開きます", en: "Auto opens devices whose name ends with \"(DirectShow)\" with DirectShow, and all others with Media Foundation" },
+    VideoBackendNotice { ja: "選んだ方法の一覧に無いデバイスには接続できません。映像が出ない場合は「自動」に戻してください。", en: "Devices that the selected method does not list cannot be connected. If no picture appears, switch back to Auto." },
     VideoCapabilityPending { ja: "対応形式を取得中...", en: "Querying supported formats..." },
     VideoCapabilityFallback { ja: "下の選択肢は既定値です。", en: "The choices below are defaults." },
     FormatLabel { ja: "フォーマット:", en: "Format:" },

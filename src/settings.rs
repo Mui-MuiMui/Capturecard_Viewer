@@ -395,6 +395,12 @@ pub struct VideoSettings {
     pub resolution: Option<(u32, u32)>,
     pub format: Option<String>,
     pub fps: Option<u32>,
+    // 映像デバイスを Media Foundation と DirectShow のどちらで開くか。
+    // 既定は自動（名前に「(DirectShow)」があれば DirectShow、無ければ
+    // Media Foundation）。両方に出るデバイスを DirectShow で開きたいときの
+    // 切り替え（#237）。開き方はデバイスと一体なのでプリセットに含める
+    #[serde(deserialize_with = "deserialize_video_backend")]
+    pub backend: VideoBackendSetting,
     // 稼働中にフレームが途絶えたとき、自動でデバイスを開き直すか。
     //
     // 映像だけでなく音声のストリームエラーにも効く。右クリックメニューの
@@ -527,6 +533,76 @@ fn color_range_from_str(raw: &str) -> Option<ColorRange> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "limited" | "tv" => Some(ColorRange::Limited),
         "full" | "pc" => Some(ColorRange::Full),
+        _ => None,
+    }
+}
+
+// 映像デバイスを開く経路の設定。設定ファイルには
+// backend = "auto" / "media_foundation" / "direct_show" と書かれる。
+//
+// 実際に開いた経路（`video::CaptureApi`）とは別の型にしてある。こちらは
+// 「自動」を持ち、デバイス名と合わせて初めて 1 つに決まるため
+// （`app::backend::system` の `route_for`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VideoBackendSetting {
+    // 名前に「(DirectShow)」があれば DirectShow、無ければ Media Foundation
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    // 「(DirectShow)」付きの名前でも Media Foundation の一覧から探す
+    #[serde(rename = "media_foundation")]
+    MediaFoundation,
+    // 同じ表示名を DirectShow の一覧から探す
+    #[serde(rename = "direct_show")]
+    DirectShow,
+}
+
+impl VideoBackendSetting {
+    // 設定ダイアログのコンボボックスに出す表示名
+    pub fn label(self) -> &'static str {
+        match self {
+            VideoBackendSetting::Auto => Text::VideoBackendAuto.get(),
+            VideoBackendSetting::MediaFoundation => Text::VideoBackendMediaFoundation.get(),
+            VideoBackendSetting::DirectShow => Text::VideoBackendDirectShow.get(),
+        }
+    }
+
+    pub const ALL: [VideoBackendSetting; 3] = [
+        VideoBackendSetting::Auto,
+        VideoBackendSetting::MediaFoundation,
+        VideoBackendSetting::DirectShow,
+    ];
+}
+
+// 設定ファイルの backend に知らない値が書かれていても、設定全体を
+// 失わせない。色空間と同じ考え方で、自動として扱う
+fn deserialize_video_backend<'de, D>(deserializer: D) -> Result<VideoBackendSetting, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(video_backend_from_str(&raw).unwrap_or_else(|| {
+        warn!(
+            "設定の映像の開き方 \"{}\" を解釈できないので自動として扱う",
+            raw
+        );
+        VideoBackendSetting::default()
+    }))
+}
+
+// 設定ファイルに書かれた文字列から開き方を決める。解釈できない場合は None。
+fn video_backend_from_str(raw: &str) -> Option<VideoBackendSetting> {
+    // 手書きされることを見込んで、区切り（`_` / `-` / 空白）の有無は問わない
+    let normalized: String = raw
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-' | ' '))
+        .collect();
+    match normalized.as_str() {
+        "auto" => Some(VideoBackendSetting::Auto),
+        "mediafoundation" | "mf" => Some(VideoBackendSetting::MediaFoundation),
+        "directshow" | "dshow" => Some(VideoBackendSetting::DirectShow),
         _ => None,
     }
 }
@@ -1058,6 +1134,9 @@ impl Default for VideoSettings {
             resolution: Some((1280, 720)),    // 720pで安定性を優先
             format: Some("YUY2".to_string()), // YUY2フォーマット
             fps: Some(60),                    // 60fps目標
+            // 既存ユーザーの設定ファイルには backend が無い。自動にしておけば
+            // これまでどおり名前で経路が決まる
+            backend: VideoBackendSetting::Auto,
             // 既定は有効。USB を挿し直したときに何もしなくても復帰するほうが、
             // 「映像が止まったまま気付かない」よりも害が少ない
             auto_reconnect: true,
@@ -1529,6 +1608,7 @@ device_name = "Capture Device"
 resolution = [1920, 1080]
 format = "MJPEG"
 fps = 30
+backend = "direct_show"
 auto_reconnect = false
 color_space = "bt601"
 color_range = "full"
@@ -2684,6 +2764,111 @@ volume = 80.0
             let restored: AppSettings = toml::from_str(&serialized).expect("読み戻せること");
             assert_eq!(restored.ui.language, setting);
         }
+    }
+
+    #[test]
+    fn video_backend_is_read_from_the_full_config() {
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("全項目そろった設定は読めなければならない");
+        assert_eq!(settings.video.backend, VideoBackendSetting::DirectShow);
+    }
+
+    #[test]
+    fn video_backend_missing_defaults_to_auto_and_keeps_other_items() {
+        // 開き方の項目ができる前の設定ファイル
+        let config = without_key(FULL_CONFIG, "backend");
+        assert!(!config.contains("backend ="));
+
+        let settings: AppSettings = toml::from_str(&config).expect("読めること");
+
+        assert_eq!(settings.video.backend, VideoBackendSetting::Auto);
+        assert_eq!(
+            settings.video.device_name,
+            Some("Capture Device".to_string())
+        );
+        assert_eq!(settings.video.fps, Some(30));
+        assert!(!settings.video.auto_reconnect);
+    }
+
+    #[test]
+    fn video_backend_unknown_value_falls_back_to_auto_and_keeps_other_items() {
+        let config = FULL_CONFIG.replace(r#"backend = "direct_show""#, r#"backend = "vfw""#);
+        assert!(config.contains(r#"backend = "vfw""#));
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("知らない開き方でも読めなければならない");
+
+        assert_eq!(settings.video.backend, VideoBackendSetting::Auto);
+        // 同じセクションの他の項目が巻き添えになっていないこと
+        assert_eq!(settings.video.format, Some("MJPEG".to_string()));
+        assert_eq!(settings.video.color_space, ColorSpace::Bt601);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn video_backend_serializes_as_snake_case_and_reads_back() {
+        // 設定ファイルに書き出される綴り。ここが変わると、既に配布した版が
+        // 書いた設定ファイルを読めなくなる
+        for (setting, expected) in [
+            (VideoBackendSetting::Auto, r#"backend = "auto""#),
+            (
+                VideoBackendSetting::MediaFoundation,
+                r#"backend = "media_foundation""#,
+            ),
+            (
+                VideoBackendSetting::DirectShow,
+                r#"backend = "direct_show""#,
+            ),
+        ] {
+            let mut settings = AppSettings::default();
+            settings.video.backend = setting;
+            let serialized = toml::to_string(&settings).expect("設定を書き出せること");
+            assert!(serialized.contains(expected), "{}", serialized);
+
+            let restored: AppSettings = toml::from_str(&serialized).expect("読み戻せること");
+            assert_eq!(restored.video.backend, setting);
+        }
+    }
+
+    #[test]
+    fn video_backend_from_str_accepts_known_spellings() {
+        assert_eq!(
+            video_backend_from_str("auto"),
+            Some(VideoBackendSetting::Auto)
+        );
+        assert_eq!(
+            video_backend_from_str(" Media Foundation "),
+            Some(VideoBackendSetting::MediaFoundation)
+        );
+        assert_eq!(
+            video_backend_from_str("MF"),
+            Some(VideoBackendSetting::MediaFoundation)
+        );
+        assert_eq!(
+            video_backend_from_str("DirectShow"),
+            Some(VideoBackendSetting::DirectShow)
+        );
+        assert_eq!(
+            video_backend_from_str("direct-show"),
+            Some(VideoBackendSetting::DirectShow)
+        );
+        assert_eq!(video_backend_from_str(""), None);
+        assert_eq!(video_backend_from_str("vfw"), None);
+    }
+
+    #[test]
+    fn video_backend_is_part_of_the_preset() {
+        // 開き方はデバイスと一体なので、プリセットで適用も比較もする
+        let mut settings = AppSettings::default();
+        settings.video.backend = VideoBackendSetting::DirectShow;
+        let preset = Preset::from_settings("DS".to_string(), &settings);
+        assert_eq!(preset.video.backend, VideoBackendSetting::DirectShow);
+
+        let mut target = AppSettings::default();
+        assert!(!matches_preset(&preset, &target));
+        preset.apply_to(&mut target);
+        assert_eq!(target.video.backend, VideoBackendSetting::DirectShow);
+        assert!(matches_preset(&preset, &target));
     }
 
     #[test]

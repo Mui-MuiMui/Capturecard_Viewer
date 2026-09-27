@@ -25,7 +25,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::capabilities::{DeviceCapabilities, FormatCapability, VideoMode};
-use super::capture::{ActiveVideo, VideoLinkState};
+use super::capture::{ActiveVideo, CaptureApi, VideoLinkState};
 use super::color::SharedColorConversion;
 use super::frame_buffer::VideoFrames;
 use super::frame_sink::FrameSink;
@@ -192,6 +192,7 @@ impl FakeVideoCapture {
         });
         self.active = Some(ActiveVideo {
             device_name: name,
+            api: CaptureApi::Fake,
             resolution: Some(mode.resolution()),
             // 実機は nokhwa の列挙名（`YUYV`）が入るので揃える
             format: Some("YUYV".to_string()),
