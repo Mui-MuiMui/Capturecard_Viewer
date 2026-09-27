@@ -192,9 +192,9 @@ Windows の「環境変数」の設定に入れた場合は、そこから削除
 
 どちらも設定ファイルには保存されない。ログ（`CAPTURECARD_VIEWER_LOG`）と同じく、起動するときだけ指定する。
 
-## 更新の通知で、いまの版が違う・知らない版が出る
+## 更新の通知で、いまのバージョンが違う・知らないバージョンが出る
 
-環境変数 `CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` か `CAPTURECARD_VIEWER_UPDATE_API_URL` が設定されたまま起動している。これは**更新の通知を試すための開発者向けの機能**で、比較に使う「いまの版」や、新しい版を問い合わせる先を差し替える。指定されているとログ（`%AppData%\capturecard_viewer\logs`）に「更新の確認のテスト用のオーバーライドが有効」と出る。
+環境変数 `CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` か `CAPTURECARD_VIEWER_UPDATE_API_URL` が設定されたまま起動している。これは**更新の通知と適用を試すための開発者向けの機能**で、比較に使う「いまのバージョン」や、新しいバージョンを問い合わせる先を差し替える。指定されているとログ（`%AppData%\capturecard_viewer\logs`）に「更新の確認のテスト用のオーバーライドが有効」と出る。
 
 フェイクデバイスと同じく、コマンドプロンプトで設定した場合はそのウィンドウを閉じるか次のように消してから起動し直す。Windows の「環境変数」の設定に入れた場合は、そこから削除する。
 
@@ -208,8 +208,34 @@ set CAPTURECARD_VIEWER_UPDATE_API_URL=
 
 | 環境変数 | 値 | 意味 |
 |---|---|---|
-| `CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` | 版（`1.0.0` または `v1.0.0`） | 比較に使う「いまの版」をこの版にする。公開済みの最新より古い版を入れると、ビルドし直さずに通知ダイアログを出せる。版として読めない値は無視する |
-| `CAPTURECARD_VIEWER_UPDATE_API_URL` | `http://` / `https://` の URL、または `file:///C:/path/latest.json` | GitHub の Release API の代わりにこの先へ問い合わせる。`file://` なら Release の JSON（`releases/latest` の応答と同じ形）をそのまま読む。それ以外の値は無視する |
+| `CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` | バージョン（`1.0.0` または `v1.0.0`） | 比較に使う「いまのバージョン」をこのバージョンにする。公開済みの最新より古いバージョンを入れると、ビルドし直さずに通知ダイアログを出せる。バージョンとして読めない値は無視する |
+| `CAPTURECARD_VIEWER_UPDATE_API_URL` | `http://` / `https://` の URL、または `file:///C:/path/latest.json` | GitHub の Release API の代わりにこの先へ問い合わせる。`file://` なら Release の JSON（`releases/latest` の応答と同じ形）をそのまま読む。それ以外の値は無視する。指定している間は、「更新する」で落とす資産の URL もこのリポジトリの Release 以外（`file://` を含む）を受け付ける |
+
+## 更新に失敗したとき
+
+「更新する」で失敗しても、**元の exe はそのまま残る。** ダイアログに理由と「リリースページを開く」が出るので、そこから手で更新できる。理由はログ（`%AppData%\capturecard_viewer\logs`）にも残る。
+
+| 出た文言 | 原因 | 対処 |
+|---|---|---|
+| このフォルダには書き込めないため自動更新できません | exe を `C:\Program Files` のような書き込めないフォルダに置いている | 下の「手で更新する」。自動更新を使うなら、exe を書き込めるフォルダ（デスクトップやドキュメントの下など）へ移す |
+| このバージョンには自動更新用のファイルがありません | 新しいバージョンの Release に、自動更新用の exe と `SHA256SUMS.txt` が添付されていない（v1.1.0 以前の Release） | 下の「手で更新する」 |
+| ダウンロードした exe の SHA-256 が SHA256SUMS.txt と合わない | ダウンロードが壊れた、または Release のファイルが差し替え途中 | 少し待ってからもう一度「更新する」。続くなら手で更新する |
+| ダウンロードできない / 時間内に終わらない | ネットワークの問題、プロキシ | ネットワークを確かめてもう一度。続くなら手で更新する |
+| exe を置き換えられない（元の exe はそのまま） | ウイルス対策ソフトが exe を掴んでいる、など | 少し待ってもう一度。続くなら手で更新する |
+
+### exe の隣に `.old` / `.new` が残っている
+
+更新は、新しい exe を exe と同じフォルダへ `capturecard_viewer.exe.new` として落とし、照合が済んだら元の exe を `capturecard_viewer.exe.old` へ改名して、`.new` を元の名前へ改名する。
+
+- **`capturecard_viewer.exe.old`** — 更新する前のバージョン。次に起動したときに自動で消える。消えずに残っていても（前のバージョンのプロセスが残っていた、など）害は無く、手で消してよい
+- **`capturecard_viewer.exe.new`** — ダウンロードの途中でアプリを閉じたときの書きかけ。次に起動したときに自動で消える。**実行しないこと。** 照合が済んでいない
+- `capturecard_viewer.exe` が無く `.old` だけがある場合（通常は起きない）は、`.old` を `capturecard_viewer.exe` へ名前を変えれば元のバージョンで起動できる
+
+### 手で更新する
+
+1. 「リリースページを開く」（設定 > その他 の「更新」の欄にもある）で開いたページから、`capturecard_viewer-vX.Y.Z-windows-x64.zip` を落として展開する（exe 単体の `capturecard_viewer-vX.Y.Z-windows-x64.exe` を落としてもよい）
+2. アプリを閉じる
+3. いまの `capturecard_viewer.exe` を、落とした exe で置き換える（名前は `capturecard_viewer.exe` にする）。設定は `%AppData%` にあるので引き継がれる
 
 ## 設定を初期化する
 

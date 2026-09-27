@@ -184,9 +184,11 @@ These live in the **Other** tab of the settings window. Use them when moving to 
 
 At startup the application asks GitHub Releases whether a newer version exists and, if so, tells you in a dialog. The check runs in the background, so startup never waits for the network (if the check fails, the reason is shown in the "Updates" group of the settings window; when you press "Check for updates" yourself, it is also shown at the bottom of the screen).
 
-- "Update" in the dialog opens the release page of that version in your browser. **This version does not download or replace anything by itself.** Download the new exe from the page and replace the current one with it.
+- "Update" in the dialog downloads the new exe **into the same folder as the current exe**, verifies it against the `SHA256SUMS.txt` attached to the release, replaces the current exe, and restarts. Video and audio keep running during the download, and "Cancel" stops it. Your settings are kept.
+- If the exe is in a folder you cannot write to (such as `C:\Program Files`), or the new release has no files for automatic updates (v1.1.0 and earlier), the dialog says so; update manually via "Open the release page". A failed update always leaves the current exe in place. See "When an update fails" in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) (Japanese).
+- The replaced version stays as `capturecard_viewer.exe.old` until the next startup, which deletes it.
 - "Later" reminds you again at the next startup. "Don't notify me about this version" stays quiet for that version (a newer one will be announced again).
-- The "Updates" group in the **Other** tab of the settings window shows the current version and has "Check for updates" (a manual check) and "Open the release page".
+- The "Updates" group in the **Other** tab of the settings window shows the current version and has "Check for updates" (a manual check), "Update" when a new version was found, and "Open the release page".
 - Turning off "Check for updates at startup" stops the startup check entirely. Turning off "Show a dialog at startup when a new version is available" skips the dialog and only reports the new version in the "Updates" group. Both are on by default. A version you chose not to be notified about can be cleared with "Clear" in the same group.
 - The update settings are not part of presets.
 

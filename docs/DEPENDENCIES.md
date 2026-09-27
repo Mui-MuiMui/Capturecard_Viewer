@@ -69,6 +69,7 @@
 | `ureq` | 3.4 | 3.4.2 | 追随 | 更新の確認で GitHub の Release API へ問い合わせる（`src/update/`） |
 | `serde_json` | 1.0 | 1.0.151 | 追随 | 同上。API の応答（JSON）を読む |
 | `semver` | 1.0 | 1.0.28 | 追随 | 同上。タグと実行中の版を比べる |
+| `sha2` | 0.11 | 0.11.0 | 追随 | 更新の適用で、ダウンロードした exe を `SHA256SUMS.txt` と照合する（`src/update/apply.rs`） |
 | `tempfile`（dev） | 3.27 | 3.27.x | 追随 | テストで一時ディレクトリに設定ファイルを書く |
 | `toml`（dev） | 1.1 | 1.1.x | 追随 | テストで設定の TOML を直接組み立てて読ませる |
 
@@ -104,6 +105,13 @@
   増えたのは `ureq` / `ureq-proto` / `native-tls` / `schannel` / `serde_json` と、その下の
   `http` / `httparse` / `der` / `base64` など。`openssl` 系や `security-framework` も lock には
   載るが、Windows 以外のターゲット向けで、ビルドにも配布物にも入らない
+
+### `sha2` は照合だけに使う（2026-09-27）
+
+更新の適用（Issue #240 の第 3 段階）で、ダウンロードした exe の SHA-256 を計算するために入れた（MIT / Apache-2.0）。
+`Cargo.lock` に増えたのは `sha2` と、その下の `digest` 0.11 / `block-buffer` / `crypto-common` /
+`hybrid-array` / `const-oid` / `cpufeatures` 0.3。Windows の CNG（`BCryptHash`）でも計算できるが、
+`windows` クレートのフィーチャを増やしてまで unsafe の呼び出しを書くほどの差は無いので、純 Rust の実装を使う。
 
 ## 更新の順序
 
