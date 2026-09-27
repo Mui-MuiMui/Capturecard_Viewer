@@ -177,10 +177,10 @@ cargo build --locked --release
 ```
 
 ```powershell
-Compress-Archive -Path target/release/capturecard_viewer.exe -DestinationPath capturecard_viewer-v1.0.7-windows-x64.zip
+Compress-Archive -Path target/release/capturecard_viewer.exe -DestinationPath capturecard_viewer-v1.0.7-windows-x64.zip -Force
 ```
 
-単体の exe と `SHA256SUMS.txt` も作る（形式は「配布物」を参照）。
+単体の exe と `SHA256SUMS.txt` も作る（形式は「配布物」を参照）。以下の `v1.0.7` は例なので、`Cargo.toml` の version に対応するタグに置き換え、資産名とコマンドのすべてで同じ値を使う。
 
 ```powershell
 $tag = "v1.0.7"
