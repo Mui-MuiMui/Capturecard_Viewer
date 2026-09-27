@@ -33,7 +33,7 @@ use self::window::needs_drag_move_guard;
 use self::worker::{DeviceSnapshot, DeviceWorker};
 use crate::audio::AudioControls;
 use crate::hotkey::{HotkeyAction, HotkeyManager};
-use crate::i18n::{self, Language};
+use crate::i18n::Language;
 use crate::overlay::TransientOverlay;
 use crate::platform;
 use crate::repaint::{next_repaint_delay, should_wake_on_event, RepaintCondition, RepaintWaker};
@@ -198,10 +198,14 @@ pub struct CaptureCardViewer {
 impl Default for CaptureCardViewer {
     fn default() -> Self {
         let (loaded_settings, load_outcome) = AppSettings::load();
-        // 画面の言語は何より先に決める。ここから先で作る文言（読み込みの
-        // 失敗のトーストなど）も、設定した言語で出す
+        // OS の表示言語は起動時に 1 回だけ問い合わせて持っておく。
+        //
+        // **ここでは `i18n::set_language` を呼ばない。** 言語はプロセス全体で
+        // 共有されるので、`default()` で書き換えると、これを作るテストが
+        // 同じプロセスの他のテスト（文言を照合するもの）を巻き込む（#256）。
+        // 画面の言語を決めるのは起動経路（`main.rs` が作った直後に呼ぶ
+        // `apply_language`）
         let os_language = platform::os_ui_language();
-        i18n::set_language(loaded_settings.ui.language.resolve(os_language));
         // 表示状態はここで読み込んだ値をそのままフィールドの初期値にする。
         // apply_settings(true) も最初の update() で同じ値を書き戻すが、
         // 構築時点で確定させておけば以降の初期化順序に依存せずに済む
