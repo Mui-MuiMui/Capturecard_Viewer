@@ -205,7 +205,9 @@ pub(super) trait DeviceBackends: Send {
 ///
 /// **呼ぶのは `DeviceWorker::spawn` の 1 か所だけ。** `CAPTURECARD_VIEWER_FAKE_DEVICES`
 /// が無ければ本番（`SystemBackends`）で、今までと何も変わらない。
-pub(super) fn backends_from_env() -> Box<dyn DeviceBackends> {
+///
+/// 2 つ目の値はフェイクを選んだか。UI 側が画面へ知らせるのに使う（#252）
+pub(super) fn backends_from_env() -> (Box<dyn DeviceBackends>, bool) {
     let devices = std::env::var(FAKE_DEVICES_ENV).ok();
     let scenario = std::env::var(FAKE_SCENARIO_ENV).ok();
     match FakeBackends::from_env_values(devices.as_deref(), scenario.as_deref()) {
@@ -215,9 +217,9 @@ pub(super) fn backends_from_env() -> Box<dyn DeviceBackends> {
                 "{} が指定されているので、実機ではなくフェイクデバイスで動く（{} 台、シナリオ: {:?}）",
                 FAKE_DEVICES_ENV, fake.device_count, fake.scenario
             );
-            Box::new(fake)
+            (Box::new(fake), true)
         }
-        None => Box::new(SystemBackends),
+        None => (Box::new(SystemBackends), false),
     }
 }
 

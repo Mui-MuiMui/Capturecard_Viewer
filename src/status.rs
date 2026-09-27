@@ -311,8 +311,17 @@ pub struct LinkStatus {
 /// 映像と音声の接続状態。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConnectionStatus {
+    /// 実機ではなくテスト用のフェイクデバイスで動いているか（#252）
+    pub fake_devices: bool,
     pub video: LinkStatus,
     pub audio: LinkStatus,
+}
+
+/// フェイクデバイスで動いているときに出す知らせ。実機なら `None`。
+///
+/// 起動時のトーストと「接続状態」タブの先頭の両方がこれを使う。
+pub fn fake_devices_notice(fake_devices: bool) -> Option<&'static str> {
+    fake_devices.then(|| Text::FakeDevicesNotice.get())
 }
 
 impl LinkStatus {
@@ -329,6 +338,13 @@ impl LinkStatus {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fake_devices_notice_only_when_fake() {
+        assert_eq!(super::fake_devices_notice(false), None);
+        let notice = super::fake_devices_notice(true).expect("フェイクなら出る");
+        assert!(notice.contains("CAPTURECARD_VIEWER_FAKE_DEVICES"));
+    }
+
     use super::*;
 
     fn wall() -> DateTime<Local> {

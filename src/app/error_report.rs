@@ -17,7 +17,25 @@ use std::time::{Duration, Instant};
 /// よいが、エラーは予期していない内容を読ませるため。
 const ERROR_TOAST_DURATION: Duration = Duration::from_secs(4);
 
+/// フェイクデバイスの知らせを見せておく時間。起動直後はウィンドウが出るまでに
+/// 間があるので、エラーのトーストより長くする
+const FAKE_DEVICES_TOAST_DURATION: Duration = Duration::from_secs(8);
+
 impl CaptureCardViewer {
+    /// フェイクデバイスで動いているなら、起動直後に 1 回だけトーストで知らせる（#252）。
+    ///
+    /// **`ErrorCenter` を通さない。** 失敗ではなく、間引く対象でもないため。
+    pub(super) fn notify_fake_devices(&mut self) {
+        let Some(text) = status::fake_devices_notice(self.device.fake_devices()) else {
+            return;
+        };
+        self.transient_overlay.show(
+            OverlayContent::Text(text.to_string()),
+            FAKE_DEVICES_TOAST_DURATION,
+            Instant::now(),
+        );
+    }
+
     /// 失敗を記録し、必要ならトーストで見せる。
     ///
     /// **ログは呼び出し側が従来どおり出す。** ここは画面へ出すための記録で、
@@ -112,7 +130,11 @@ impl CaptureCardViewer {
             ));
         }
 
-        ConnectionStatus { video, audio }
+        ConnectionStatus {
+            fake_devices: self.device.fake_devices(),
+            video,
+            audio,
+        }
     }
 
     /// 「接続状態」タブに出す直近の失敗。`(整形済みの文言, 発生時刻)`。
