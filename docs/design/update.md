@@ -167,7 +167,7 @@ flowchart TD
 | 環境変数 | 値 | 意味 |
 |---|---|---|
 | `CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` | `1.0.0` / `v1.0.0` | 比較に使う「いまの版」を差し替える。公開済みの最新より古い版を入れれば、その最新が「新しい版」として知らされる。通知ダイアログの「いまは vA.B.C」と「その他」タブの「現在の版」もこの版になる |
-| `CAPTURECARD_VIEWER_UPDATE_API_URL` | `http://` / `https://` の URL、または `file://` の URL | Release API の代わりに問い合わせる先。`file://` なら Release の JSON（`releases/latest` の応答と同じ形）のファイルをそのまま読む。`file:///C:/work/latest.json` と `file://C:/work/latest.json` は同じ。URL の符号化（`%20`）は解かない |
+| `CAPTURECARD_VIEWER_UPDATE_API_URL` | `http://` / `https://` の URL、または `file://` の URL | Release API の代わりに問い合わせる先。`file://` なら Release の JSON（`releases/latest` の応答と同じ形）のファイルをそのまま読む。`file:///C:/work/latest.json` と `file://C:/work/latest.json` は同じ。URL の符号化（`%20`）は解かない。ファイルの先頭の UTF-8 の BOM は読み飛ばす（PowerShell 5.1 の `Set-Content -Encoding UTF8` が付ける） |
 
 - 読むのは起動時に 1 回だけ（`UpdateState::new`）。どちらかが効いていれば「更新の確認のテスト用のオーバーライドが有効」を WARN でログに残す
 - 解釈は純粋関数（`CheckOverrides::from_env_values`）。空や空白だけの値は指定していないのと同じ。読めない値（版として読めない、`http://` / `https://` / `file://` のどれでもない、`http://:8000/` のようにホスト名が空、`file://` の後ろが空）は WARN を残して使わず、通常の確認に倒す

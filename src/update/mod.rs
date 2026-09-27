@@ -196,7 +196,10 @@ pub fn check_latest_release(overrides: &CheckOverrides) -> Result<CheckOutcome, 
         ReleaseSource::File(path) => std::fs::read_to_string(&path)
             .map_err(|e| UpdateError::LocalFile(format!("{}: {}", path.display(), e)))?,
     };
-    let release = parse_release_json(&json)?;
+    // 手で作った JSON は先頭に UTF-8 の BOM が付いていることがある（Windows
+    // PowerShell 5.1 の `Set-Content -Encoding UTF8` など）。serde_json は BOM を
+    // 読めないので落としておく
+    let release = parse_release_json(json.trim_start_matches('\u{feff}'))?;
     evaluate_release(&overrides.current_version_or(current_version()), release)
 }
 
@@ -659,6 +662,24 @@ mod tests {
         };
         assert_eq!(check.current, v("1.0.0"));
         assert_eq!(check.latest, v("1.1.0"));
+    }
+
+    #[test]
+    fn check_latest_release_reads_a_local_file_with_a_bom() {
+        // PowerShell 5.1 の Set-Content -Encoding UTF8 で書いた JSON は BOM から始まる
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作れなければならない");
+        let path = dir.path().join("latest.json");
+        std::fs::write(&path, "\u{feff}{\"tag_name\": \"v9.9.9\", \"assets\": []}")
+            .expect("テスト用の JSON を書けなければならない");
+        let overrides = CheckOverrides {
+            current_version: Some(v("1.0.0")),
+            source: Some(ReleaseSource::File(path)),
+        };
+
+        let Ok(CheckOutcome::Available(check)) = check_latest_release(&overrides) else {
+            panic!("BOM 付きの JSON を読めていない");
+        };
+        assert_eq!(check.latest, v("9.9.9"));
     }
 
     #[test]
