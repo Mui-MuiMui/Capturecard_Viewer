@@ -4,6 +4,7 @@
 //! 持たせないため（`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
 //! ディスクへの書き出しそのものは `super::settings_store`。
 
+use super::update::CheckOrigin;
 use super::CaptureCardViewer;
 use crate::i18n::{self, Text};
 use crate::overlay::OverlayContent;
@@ -107,6 +108,10 @@ impl CaptureCardViewer {
                 }
                 ui::SettingsEvent::SetLanguage(language) => {
                     self.settings_dialog.set_draft_language(language)
+                }
+                ui::SettingsEvent::CheckForUpdates => self.start_update_check(CheckOrigin::Manual),
+                ui::SettingsEvent::SetUpdateSettings(update) => {
+                    self.settings_dialog.set_draft_update(update)
                 }
                 ui::SettingsEvent::OpenHotkeyCapture(action) => {
                     // どのアクションを編集しているかを入力ダイアログへ渡す。

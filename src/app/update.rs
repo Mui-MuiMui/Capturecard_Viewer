@@ -1,0 +1,234 @@
+//! 更新の確認を別スレッドで行い、結果を取り込む。起動時の通知ダイアログの操作もここ。
+//!
+//! 問い合わせそのものは `crate::update::check_latest_release`。ネットワークを
+//! 待つので UI スレッドでは呼ばず、確認ごとにスレッドを起こして結果をチャネルで
+//! `update()` へ返す。効果音の読み込み（`app::screenshot_sound`）と同じ流儀
+//! （`docs/design/threads.md`、`docs/design/update.md`）。
+//!
+//! **失敗しても起動は止めない。** ログとトースト、「その他」タブの表示に出すだけ。
+
+use super::screenshot::drop_finished_threads;
+use super::CaptureCardViewer;
+use crate::status::ErrorSource;
+use crate::ui::{self, UpdateDialogEvent};
+use crate::update::{self, CheckOutcome, UpdateCheck, UpdateError, UpdateStatus};
+use eframe::egui;
+use log::{debug, info, warn};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::JoinHandle;
+
+/// 誰が確認を始めたか。見つかったときにダイアログを出すかが変わる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CheckOrigin {
+    /// 起動時の自動の確認。設定によってはダイアログで知らせる
+    Startup,
+    /// 「その他」タブの「更新を確認」。結果は欄に出すだけで、ダイアログは出さない
+    Manual,
+}
+
+/// 確認のスレッドから UI スレッドへ返す結果。
+pub(super) struct UpdateCheckResult {
+    origin: CheckOrigin,
+    result: Result<CheckOutcome, UpdateError>,
+}
+
+/// 更新の確認にまつわる状態。`CaptureCardViewer::update_check` に 1 つだけ置く。
+///
+/// 設定ダイアログの `SettingsDialogState` に入れないのは、起動時の確認と
+/// 通知ダイアログが設定ダイアログを開いていなくても動くため。
+pub(super) struct UpdateState {
+    tx: Sender<UpdateCheckResult>,
+    rx: Receiver<UpdateCheckResult>,
+    // 確認のスレッド。デバイスには触らないが、効果音の読み込みと同じく
+    // 切り離さず、終了時に join する
+    threads: Vec<JoinHandle<()>>,
+    // 「その他」タブに出す確認の状態
+    status: UpdateStatus,
+    // 起動時に知らせる新しい版。`Some` の間は通知ダイアログを出す
+    dialog: Option<UpdateCheck>,
+}
+
+impl UpdateState {
+    pub(super) fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            tx,
+            rx,
+            threads: Vec::new(),
+            status: UpdateStatus::default(),
+            dialog: None,
+        }
+    }
+
+    /// 「その他」タブへ渡す確認の状態。
+    pub(super) fn status(&self) -> &UpdateStatus {
+        &self.status
+    }
+}
+
+impl CaptureCardViewer {
+    /// 起動時の確認。設定で切ってあれば何もしない。起動直後の 1 回だけ呼ぶ。
+    pub(super) fn check_for_updates_on_startup(&mut self) {
+        let enabled = match self.settings.lock() {
+            Ok(settings) => settings.update.check_on_startup,
+            Err(_) => {
+                warn!("起動時の更新の確認で settings のロックを取得できない");
+                return;
+            }
+        };
+        if enabled {
+            self.start_update_check(CheckOrigin::Startup);
+        } else {
+            debug!("起動時の更新の確認は設定で切ってある");
+        }
+    }
+
+    /// 更新の確認を別スレッドで始める。確認中なら何もしない。
+    pub(super) fn start_update_check(&mut self, origin: CheckOrigin) {
+        if matches!(self.update_check.status, UpdateStatus::Checking) {
+            debug!("更新の確認中なので、重ねて始めない");
+            return;
+        }
+
+        let tx = self.update_check.tx.clone();
+        // 映像が止まっている間は update() の間隔が広がっているので、届いたら起こす
+        let waker = self.repaint_waker.clone();
+        let spawned = std::thread::Builder::new()
+            .name("update-check".to_string())
+            .spawn(move || {
+                let result = update::check_latest_release();
+                // ログは受け取った UI スレッド側で出す（効果音の読み込みと同じ）
+                if tx.send(UpdateCheckResult { origin, result }).is_err() {
+                    // 受信側が無いのはアプリが終了したときだけ。結果は捨ててよい
+                    debug!("更新の確認結果の送り先が既に無いので捨てる");
+                    return;
+                }
+                waker.wake();
+            });
+
+        match spawned {
+            Ok(handle) => {
+                info!("更新の確認を始める（{:?}）", origin);
+                self.update_check.status = UpdateStatus::Checking;
+                drop_finished_threads(&mut self.update_check.threads);
+                self.update_check.threads.push(handle);
+            }
+            Err(e) => {
+                warn!("更新の確認のスレッドを起こせない: {}", e);
+                let reason = UpdateError::Network(e.to_string()).to_string();
+                self.update_check.status = UpdateStatus::Failed(reason.clone());
+                self.report_error(ErrorSource::Update, reason);
+            }
+        }
+    }
+
+    /// 別スレッドから届いた確認の結果を取り込む。`update()` の先頭で呼ぶ。
+    pub(super) fn drain_update_results(&mut self) {
+        while let Ok(result) = self.update_check.rx.try_recv() {
+            self.apply_update_result(result);
+        }
+    }
+
+    fn apply_update_result(&mut self, message: UpdateCheckResult) {
+        let UpdateCheckResult { origin, result } = message;
+        match result {
+            Ok(CheckOutcome::UpToDate) => {
+                info!(
+                    "更新の確認: 新しい版は無い（いまは v{}）",
+                    update::current_version()
+                );
+                self.errors.clear(ErrorSource::Update);
+                self.update_check.status = UpdateStatus::UpToDate;
+            }
+            Ok(CheckOutcome::Available(check)) => {
+                let assets: Vec<&str> = check.assets.iter().map(|a| a.name.as_str()).collect();
+                info!(
+                    "更新の確認: 新しい版 v{} がある（いまは v{}）。資産: [{}]",
+                    check.latest,
+                    check.current,
+                    assets.join(", ")
+                );
+                self.errors.clear(ErrorSource::Update);
+                if origin == CheckOrigin::Startup && self.should_notify_update(&check) {
+                    self.update_check.dialog = Some(check.clone());
+                }
+                self.update_check.status = UpdateStatus::Available(check);
+            }
+            Err(e) => {
+                warn!("更新を確認できない: {}", e);
+                let reason = e.to_string();
+                self.update_check.status = UpdateStatus::Failed(reason.clone());
+                self.report_error(ErrorSource::Update, reason);
+            }
+        }
+    }
+
+    /// 起動時の確認で見つけた版を、ダイアログで知らせるか。
+    fn should_notify_update(&self, check: &UpdateCheck) -> bool {
+        match self.settings.lock() {
+            Ok(settings) => update::should_notify_on_startup(&settings.update, &check.latest),
+            Err(_) => {
+                warn!("更新の通知の判定で settings のロックを取得できない");
+                false
+            }
+        }
+    }
+
+    /// 起動時の通知ダイアログを描き、押されたものを処理する。出すものが無ければ何もしない。
+    pub(super) fn draw_update_dialog(&mut self, ctx: &egui::Context) {
+        let Some(check) = &self.update_check.dialog else {
+            return;
+        };
+        let events = ui::show_update_dialog(ctx, check);
+        for event in events {
+            self.handle_update_dialog_event(ctx, event);
+        }
+    }
+
+    fn handle_update_dialog_event(&mut self, ctx: &egui::Context, event: UpdateDialogEvent) {
+        // どのボタンでもダイアログは閉じる
+        let Some(check) = self.update_check.dialog.take() else {
+            return;
+        };
+        match event {
+            UpdateDialogEvent::OpenReleasePage => {
+                // この段階の「更新する」はリリースページを開くところまで。
+                // ブラウザの起動は eframe に任せる
+                info!("リリースページを開く: {}", check.release_url);
+                ctx.open_url(egui::OpenUrl::new_tab(&check.release_url));
+            }
+            UpdateDialogEvent::Later => {
+                debug!("更新の通知を閉じた（次の起動でまた知らせる）");
+            }
+            UpdateDialogEvent::SkipThisVersion => {
+                info!("v{} は通知しない", check.latest);
+                if let Ok(mut settings) = self.settings.lock() {
+                    settings.update.skipped_version = Some(check.latest.to_string());
+                } else {
+                    warn!("「この版は通知しない」で settings のロックを取得できない");
+                    return;
+                }
+                self.mark_settings_dirty();
+            }
+        }
+    }
+
+    /// 進行中の確認が終わるまで待つ。終了時に呼ぶ。
+    ///
+    /// 問い合わせは `update::check_latest_release` の上限（5 秒）で必ず終わるので、
+    /// 起動直後に閉じたときに待たされるのも最大でその長さ。結果は取り込まない。
+    pub(super) fn join_update_threads(&mut self) {
+        let handles = std::mem::take(&mut self.update_check.threads);
+        if handles.is_empty() {
+            return;
+        }
+
+        debug!("更新の確認のスレッド {} 件を待つ", handles.len());
+        for handle in handles {
+            if handle.join().is_err() {
+                // release ビルドは panic = "abort" なのでここには来ない
+                warn!("更新の確認のスレッドがパニックした");
+            }
+        }
+    }
+}

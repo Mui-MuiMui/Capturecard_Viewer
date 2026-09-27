@@ -35,6 +35,9 @@ accepted = [
     "BSD-3-Clause",
     # clipboard-win / error-code
     "BSL-1.0",
+    # webpki-root-certs（ureq の native-tls が引き込む Mozilla のルート証明書の
+    # データ）。表示義務だけの寛容なデータライセンスで、MIT での配布と両立する
+    "CDLA-Permissive-2.0",
     # mozjpeg / mozjpeg-sys（libjpeg 本体）
     "IJG",
     # libloading

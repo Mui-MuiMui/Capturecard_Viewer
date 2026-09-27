@@ -37,6 +37,12 @@ use crate::settings::AppSettings;
 /// 同じく無条件に反映する。画面の言語を切り替えるのは呼び出し側
 /// （`app::settings_dialog` の `apply_language`）。
 ///
+/// `update` の 2 つのチェックも「その他」タブだけで変わるので無条件に反映する。
+/// `skipped_version` だけは起動時の通知ダイアログの「この版は通知しない」でも
+/// 変わるため、`auto_reconnect` と同じく**ドラフトで変わったときだけ**反映する。
+/// 無条件に入れると、設定ダイアログを開いたまま通知ダイアログで飛ばした版が
+/// 「適用」で消える。
+///
 /// **ダイアログに `ui` セクションの項目を足すときは、ここにも足すこと。**
 /// **逆に、ダイアログの外だけで変える項目を足すときは、ここで残すこと。**
 pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &AppSettings) {
@@ -66,6 +72,13 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
     }
     // 「その他」タブの言語。ダイアログの外からは変わらない
     target.ui.language = draft.ui.language;
+
+    // 「その他」タブの更新の節。飛ばした版だけは通知ダイアログからも変わる
+    target.update.check_on_startup = draft.update.check_on_startup;
+    target.update.notify_on_startup = draft.update.notify_on_startup;
+    if draft.update.skipped_version != original.update.skipped_version {
+        target.update.skipped_version = draft.update.skipped_version.clone();
+    }
 
     // video / audio を入れ替えたあとなので、ここで選択中のプリセットの
     // 辻褄を合わせる。**この 1 行が無いと、プリセットを読み込んでから
@@ -97,6 +110,10 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
 /// 書き出しは設定ファイル丸ごとなのでプリセットも含まれており、読み込みで
 /// 落とすと往復にならない。別の PC で作ったプリセットを持ち込むのも、
 /// 書き出し・読み込みの主な用途のひとつ。
+///
+/// 更新の設定（`update`）も読み込んだファイルのものを採る。`commit_draft` は
+/// `skipped_version` を「ドラフトで変わったときだけ」反映するので、読み込んだ
+/// 値が開いた時点と違えば反映される。
 ///
 /// **`commit_draft` が反映しない項目を増やすときは、ここでも `current` の値を
 /// 保つこと。逆に反映する項目を増やすときは、ここでも `imported` から採ること。**
@@ -684,5 +701,68 @@ mod tests {
 
         assert_eq!(target.active_preset, None);
         assert_eq!(target.video.fps, Some(24));
+    }
+
+    #[test]
+    fn commit_draft_applies_update_settings_edited_in_dialog() {
+        // 「その他」タブの更新の節で変えた 3 項目が共有の設定へ移ること
+        let mut shared = AppSettings::default();
+        let original = AppSettings::default();
+        let draft = sample_settings();
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert!(!shared.update.check_on_startup);
+        assert!(!shared.update.notify_on_startup);
+        assert_eq!(shared.update.skipped_version.as_deref(), Some("1.2.0"));
+    }
+
+    #[test]
+    fn commit_draft_keeps_skipped_version_set_outside_dialog() {
+        // 設定ダイアログを開いたまま、起動時の通知ダイアログで
+        // 「この版は通知しない」を押した場合。「適用」で消えてはいけない
+        let original = AppSettings::default();
+        let draft = original.clone();
+        let mut shared = original.clone();
+
+        shared.update.skipped_version = Some("1.3.0".to_string());
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.update.skipped_version.as_deref(), Some("1.3.0"));
+    }
+
+    #[test]
+    fn commit_draft_clears_skipped_version_released_in_dialog() {
+        // 「解除」を押して「適用」した場合
+        let original = sample_settings(); // skipped_version = 1.2.0
+        let mut draft = original.clone();
+        draft.update.skipped_version = None;
+        let mut shared = original.clone();
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.update.skipped_version, None);
+    }
+
+    #[test]
+    fn draft_from_imported_takes_update_settings() {
+        let imported = sample_settings();
+        let current = AppSettings::default();
+
+        let draft = draft_from_imported(imported.clone(), &current);
+
+        assert_eq!(draft.update, imported.update);
+    }
+
+    #[test]
+    fn draft_from_defaults_resets_update_settings() {
+        let current = sample_settings();
+
+        let draft = draft_from_defaults(&current);
+
+        assert!(draft.update.check_on_startup);
+        assert!(draft.update.notify_on_startup);
+        assert_eq!(draft.update.skipped_version, None);
     }
 }

@@ -67,6 +67,7 @@ texts! {
     HeadlineScreenshot { ja: "スクリーンショットを出力できません", en: "Cannot output the screenshot" },
     HeadlineHotkey { ja: "ホットキーを登録できません", en: "Cannot register the hotkey" },
     HeadlineSettings { ja: "設定ファイルを読み書きできません", en: "Cannot read or write the settings file" },
+    HeadlineUpdate { ja: "更新を確認できません", en: "Cannot check for updates" },
 
     // ---- エラーの文言（各エラー enum の Display） ----
     VideoNoDevices { ja: "映像デバイスが 1 台も見つからない", en: "No video devices found" },
@@ -76,6 +77,9 @@ texts! {
     KeyboardHookListenerStopped { ja: "ホットキーのリスナースレッドが起動しませんでした", en: "The hotkey listener thread did not start" },
     PresetNameEmpty { ja: "プリセット名を入力してください", en: "Enter a preset name" },
     PresetNameDuplicate { ja: "同じ名前のプリセットが既にあります", en: "A preset with the same name already exists" },
+    UpdateTimedOut { ja: "GitHub から 5 秒以内に応答がない", en: "No response from GitHub within 5 seconds" },
+    UpdateNoRelease { ja: "公開されたリリースが無い", en: "No published release was found" },
+    UpdateRateLimited { ja: "GitHub への問い合わせ回数の上限に達した。しばらくしてから確かめてください", en: "Reached the GitHub request limit. Try again later" },
 
     // ---- ホットキーのアクション名（HotkeyAction::label） ----
     ActionScreenshot { ja: "スクリーンショット", en: "Screenshot" },
@@ -282,6 +286,25 @@ texts! {
     AudioFileFilter { ja: "音声ファイル", en: "Audio files" },
     SettingsReadFailed { ja: "設定を読み取れない", en: "Cannot read the settings" },
     SettingsResetDone { ja: "初期値に戻しました。「適用」または「OK」で反映します", en: "Reset to defaults. Press Apply or OK to use them" },
+
+    // ---- 更新の確認（ui/update_dialog.rs / ui/other_tab.rs） ----
+    UpdateDialogTitle { ja: "新しい版があります", en: "Update available" },
+    UpdateReleaseNotes { ja: "リリースノート（抜粋）", en: "Release notes (excerpt)" },
+    UpdateNow { ja: "更新する", en: "Update" },
+    UpdateNowHint { ja: "リリースページを開きます。新しい版をダウンロードして、いまの exe と置き換えてください。", en: "Opens the release page. Download the new version there and replace the current exe with it." },
+    UpdateLater { ja: "後で", en: "Later" },
+    UpdateSkipVersion { ja: "この版は通知しない", en: "Don't notify me about this version" },
+    UpdateGroup { ja: "更新", en: "Updates" },
+    UpdateCheckNow { ja: "更新を確認", en: "Check for updates" },
+    UpdateNotChecked { ja: "まだ確認していません", en: "Not checked yet" },
+    UpdateChecking { ja: "確認中...", en: "Checking..." },
+    UpdateUpToDate { ja: "最新です", en: "You have the latest version" },
+    UpdateOpenReleasePage { ja: "リリースページを開く", en: "Open the release page" },
+    UpdateCheckOnStartup { ja: "起動時に更新を確認する", en: "Check for updates at startup" },
+    UpdateNotifyOnStartup { ja: "新しい版があれば起動時にダイアログで知らせる", en: "Show a dialog at startup when a new version is available" },
+    UpdateClearSkipped { ja: "解除", en: "Clear" },
+    UpdateHint { ja: "確認は GitHub の Release へ問い合わせるだけです。ダウンロードと置き換えは、リリースページから手で行います。", en: "Checking only asks GitHub Releases. Download the new version and replace the exe yourself from the release page." },
+    UpdateDraftHint { ja: "チェックと「解除」は「適用」か「OK」で反映します。", en: "The checkboxes and Clear take effect when you press Apply or OK." },
 }
 
 #[cfg(test)]

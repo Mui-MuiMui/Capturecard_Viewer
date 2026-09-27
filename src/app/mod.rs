@@ -17,6 +17,7 @@ mod screenshot;
 mod screenshot_sound;
 mod settings_dialog;
 mod settings_store;
+mod update;
 mod view;
 mod window;
 mod worker;
@@ -27,6 +28,7 @@ mod worker_timers;
 use self::menu::MenuLayout;
 use self::screenshot::ScreenshotResult;
 use self::screenshot_sound::SoundLoadResult;
+use self::update::UpdateState;
 use self::window::needs_drag_move_guard;
 use self::worker::{DeviceSnapshot, DeviceWorker};
 use crate::audio::AudioControls;
@@ -182,6 +184,9 @@ pub struct CaptureCardViewer {
     // 進行中の効果音ファイルの読み込みスレッド。デバイスには触らないが、
     // 保存スレッドと同じく切り離さず、終了時に join する
     sound_load_threads: Vec<JoinHandle<()>>,
+    // 更新の確認。結果のチャネル、確認のスレッド、「その他」タブに出す状態、
+    // 起動時の通知ダイアログをまとめて持つ（`app::update`）
+    update_check: UpdateState,
 
     // OS の表示言語から推定した言語。設定の言語が「自動」のときに使う。
     //
@@ -284,6 +289,7 @@ impl Default for CaptureCardViewer {
 
             screenshot_save_threads: Vec::new(),
             sound_load_threads: Vec::new(),
+            update_check: UpdateState::new(),
 
             os_language,
         };
@@ -398,6 +404,8 @@ impl eframe::App for CaptureCardViewer {
         self.drain_screenshot_results();
         // 別スレッドで読み込んだ効果音を取り込む。テスト再生はここで鳴る
         self.drain_sound_load_results();
+        // 別スレッドで行った更新の確認の結果を取り込む
+        self.drain_update_results();
 
         // 起動直後に 1 度だけ行う処理。
         //
@@ -417,6 +425,9 @@ impl eframe::App for CaptureCardViewer {
             } else {
                 egui::WindowLevel::Normal
             }));
+
+            // 更新の確認は別スレッドで行うので、ネットワークが無くても起動は待たない
+            self.check_for_updates_on_startup();
         }
 
         // ビデオフレームを更新。新着の時刻は末尾の再描画の予約で使う
@@ -536,6 +547,7 @@ impl eframe::App for CaptureCardViewer {
                     &devices,
                     &connection,
                     &hotkey_errors,
+                    self.update_check.status(),
                 ),
                 None => Vec::new(),
             };
@@ -669,6 +681,9 @@ impl eframe::App for CaptureCardViewer {
             self.resume_hotkeys_after_capture();
         }
 
+        // 起動時の確認で見つけた新しい版を知らせるダイアログ
+        self.draw_update_dialog(ctx);
+
         // コンテキストメニュー
         if self.show_context_menu {
             self.show_context_menu(ctx);
@@ -742,6 +757,8 @@ impl eframe::App for CaptureCardViewer {
         self.join_screenshot_save_threads();
         // 効果音の読み込みも切り離さずに待つ。結果は使わない
         self.join_sound_load_threads();
+        // 更新の確認も待つ。問い合わせの上限（5 秒）で必ず終わる
+        self.join_update_threads();
 
         // 終了中に終わった保存の結果をログへ残す。**待ったあとに読むこと。**
         // 画面はもう出ないので通知はされないが、閉じる直前に撮った 1 枚が

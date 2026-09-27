@@ -706,6 +706,72 @@ pub fn hotkey_error_summary_item(
     }
 }
 
+// ---- 更新の確認（update::UpdateError / ui/update_dialog.rs / ui/other_tab.rs） ----
+
+pub fn update_network_failed(source: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("GitHub に接続できない: {source}"),
+        Language::English => format!("Cannot connect to GitHub: {source}"),
+    }
+}
+
+pub fn update_http_status(code: u16) -> String {
+    match language() {
+        Language::Japanese => format!("GitHub が HTTP {code} を返した"),
+        Language::English => format!("GitHub returned HTTP {code}"),
+    }
+}
+
+pub fn update_invalid_response(source: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("GitHub の応答を読めない: {source}"),
+        Language::English => format!("Cannot read the response from GitHub: {source}"),
+    }
+}
+
+pub fn update_invalid_tag(tag: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("最新のリリースのタグ '{tag}' を版として読めない"),
+        Language::English => format!("Cannot read the latest release tag '{tag}' as a version"),
+    }
+}
+
+/// 通知ダイアログの見出し。版は `v` を付けずに渡す。
+pub fn update_available_heading(latest: impl Display, current: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("新しい版 v{latest} があります（いまは v{current}）"),
+        Language::English => format!("Version v{latest} is available (you have v{current})"),
+    }
+}
+
+pub fn update_current_version(version: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("現在の版: v{version}"),
+        Language::English => format!("Current version: v{version}"),
+    }
+}
+
+pub fn update_status_available(latest: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("新しい版 v{latest} があります"),
+        Language::English => format!("Version v{latest} is available"),
+    }
+}
+
+pub fn update_status_failed(reason: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("確認できない: {reason}"),
+        Language::English => format!("Could not check: {reason}"),
+    }
+}
+
+pub fn update_skipped_version(version: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("通知しない版: v{version}"),
+        Language::English => format!("Not notifying about: v{version}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
