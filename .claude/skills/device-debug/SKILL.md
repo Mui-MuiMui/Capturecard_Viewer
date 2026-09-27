@@ -264,7 +264,7 @@ flowchart TD
 ## 実機テスト
 
 ```bash
-cargo test --locked -- --ignored
+cargo test --locked -- --ignored --test-threads=1
 ```
 
 `#[ignore]` が付いているのは、計測用でデバイスを使わない `src/video/convert.rs` の `yuy2_to_rgb_naive_1080p_conversion_time` と、DirectShow のデバイスを列挙・能力取得・キャプチャ・喪失の検出をする `src/video/directshow/mod.rs` の 4 つ。**Media Foundation のデバイスを開くテストはまだ無い**ので、Media Foundation 側の不具合はこのコマンドでは捕まらない。DirectShow のテストは同じデバイスを並列に開くと対応形式が空で返ることがあるので、`--test-threads=1` を付ける。
