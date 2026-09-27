@@ -113,23 +113,36 @@ git push origin :refs/tags/v1.0.7 && git tag -d v1.0.7
 2. `CHANGELOG.md` から該当する版の節を抜き出す（無ければここで失敗）
 3. `cargo build --locked --release`
 4. `target/release/capturecard_viewer.exe` を `capturecard_viewer-v1.0.7-windows-x64.zip` に固める
-5. `gh release create` で Release を作り、zip を添付して CHANGELOG の節を説明にする
+5. 同じ exe を `capturecard_viewer-v1.0.7-windows-x64.exe` の名前で写し、zip と exe の SHA-256 を `SHA256SUMS.txt` に書く
+6. `gh release create` で Release を作り、3 つの資産を添付して CHANGELOG の節を説明にする
 
 ```bash
 gh run list --workflow release.yml --limit 1
 gh release view v1.0.7
 ```
 
-**zip を実際に落として展開し、exe が起動することを確認する。** ビルドが通ったことと、配った物が動くことは別。
+**Release に資産が 3 つ（zip・exe・`SHA256SUMS.txt`）付いていることを確認する。** そのうえで **zip を実際に落として展開し、exe が起動することを確認する。** ビルドが通ったことと、配った物が動くことは別。
 
 ## 配布物
 
 **実行ファイル単体。** `icon.ico` と既定の効果音 `sound/SS.mp3` は exe に埋め込んであるため同梱しない（`docs/BUILD.md` の「配布時に同梱するもの」）。
 
+Release には次の 3 つを添付する。
+
 ```
-capturecard_viewer-v1.0.7-windows-x64.zip
-└── capturecard_viewer.exe
+capturecard_viewer-v1.0.7-windows-x64.zip   人向け。中身は capturecard_viewer.exe だけ
+capturecard_viewer-v1.0.7-windows-x64.exe   zip の中身と同じ exe（自動アップデートが落とす）
+SHA256SUMS.txt                              zip と exe の SHA-256
 ```
+
+`SHA256SUMS.txt` は `sha256sum` と同じ形式で、1 行 1 ファイル（BOM なしの UTF-8、改行は LF）。
+
+```
+<64 桁の小文字の 16 進>  capturecard_viewer-v1.0.7-windows-x64.zip
+<64 桁の小文字の 16 進>  capturecard_viewer-v1.0.7-windows-x64.exe
+```
+
+**資産名（`capturecard_viewer-<tag>-windows-x64.{zip,exe}` と `SHA256SUMS.txt`）と `SHA256SUMS.txt` の形式は変えない。** 自動アップデート（Issue #240）が既に出た版からこの名前で読みにいくため、変えると古い版が更新できなくなる。
 
 ## 6. リリース後に main を dev へ戻す
 
@@ -167,16 +180,27 @@ cargo build --locked --release
 Compress-Archive -Path target/release/capturecard_viewer.exe -DestinationPath capturecard_viewer-v1.0.7-windows-x64.zip
 ```
 
+単体の exe と `SHA256SUMS.txt` も作る（形式は「配布物」を参照）。
+
+```powershell
+$tag = "v1.0.7"
+$zip = "capturecard_viewer-$tag-windows-x64.zip"
+$exe = "capturecard_viewer-$tag-windows-x64.exe"
+Copy-Item target/release/capturecard_viewer.exe $exe
+$lines = foreach ($f in @($zip, $exe)) { "$((Get-FileHash $f -Algorithm SHA256).Hash.ToLowerInvariant())  $f" }
+[System.IO.File]::WriteAllText("$PWD\SHA256SUMS.txt", (($lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding $false))
+```
+
 `CHANGELOG.md` の該当する節を `release-notes.md` に書き出してから Release を作る。
 
 ```bash
-gh release create v1.0.7 capturecard_viewer-v1.0.7-windows-x64.zip --title v1.0.7 --notes-file release-notes.md --verify-tag
+gh release create v1.0.7 capturecard_viewer-v1.0.7-windows-x64.zip capturecard_viewer-v1.0.7-windows-x64.exe SHA256SUMS.txt --title v1.0.7 --notes-file release-notes.md --verify-tag
 ```
 
-既に Release がある状態で zip だけ差し替える場合は以下。
+既に Release がある状態で資産を差し替える場合は以下。zip か exe を差し替えたら `SHA256SUMS.txt` も作り直して一緒に上げる。
 
 ```bash
-gh release upload v1.0.7 capturecard_viewer-v1.0.7-windows-x64.zip --clobber
+gh release upload v1.0.7 capturecard_viewer-v1.0.7-windows-x64.zip capturecard_viewer-v1.0.7-windows-x64.exe SHA256SUMS.txt --clobber
 ```
 
 手動で出したあとは `release-notes.md` と zip を消して、作業ディレクトリに残さない。
