@@ -54,7 +54,6 @@
 | `nokhwa` | 0.10 | 0.10.11 | パッチのみ | 映像キャプチャ |
 | `cpal` | 0.15 | 0.18.2 | マイナー 3 | 音声入出力 |
 | `confy` | 0.6 | 2.0.0 | メジャー | 設定の永続化 |
-| `global-hotkey` | 0.4 | 0.8.0 | マイナー 4 | グローバルホットキー |
 | `image` | 0.24 | 0.25.10 | マイナー 1 | スクリーンショットの保存 |
 | `rodio` | 0.17 | 0.22.2 | マイナー 5 | 効果音の再生 |
 | `dirs` | 5.0 | 7.0.0 | メジャー 2 | デスクトップ等のパス取得 |
@@ -65,6 +64,12 @@
 | `serde` | 1.0 | 1.x | 追随 | 設定のシリアライズ |
 | `chrono` | 0.4 | 0.4.x | 追随 | スクリーンショットのタイムスタンプ |
 | `winapi` | 0.3 | 0.3.x | 後述 | Windows API |
+| `windows` | 0.62 | 0.62.2 | 追随 | DirectShow のバックエンド（`src/video/directshow/`） |
+| `windows-core` | 0.62 | 0.100.0 | 後述 | 同上。`#[implement]` が生成するコードの参照先 |
+| `ureq` | 3.4 | 3.4.2 | 追随 | 更新の確認で GitHub の Release API へ問い合わせる（`src/update/`） |
+| `serde_json` | 1.0 | 1.0.151 | 追随 | 同上。API の応答（JSON）を読む |
+| `semver` | 1.0 | 1.0.28 | 追随 | 同上。タグと実行中の版を比べる |
+| `sha2` | 0.11 | 0.11.0 | 追随 | 更新の適用で、ダウンロードした exe を `SHA256SUMS.txt` と照合する（`src/update/apply.rs`） |
 | `tempfile`（dev） | 3.27 | 3.27.x | 追随 | テストで一時ディレクトリに設定ファイルを書く |
 | `toml`（dev） | 1.1 | 1.1.x | 追随 | テストで設定の TOML を直接組み立てて読ませる |
 
@@ -82,6 +87,31 @@
 
 `default-features = false` にしてあるのは、既定に含まれる Linux 向けの
 `wayland-data-control` を持ち込まないため。
+
+### `ureq` は native-tls で使う（2026-09-27）
+
+更新の確認（Issue #240）のために入れた。**TLS は Windows の schannel（`native-tls`）で、
+既定の rustls と ring は入れない。** 証明書は `RootCerts::PlatformVerifier` で OS の証明書ストアを使う。
+社内のプロキシのように OS 側で信頼している証明書にも従えるようにするため。
+
+- フィーチャは `native-tls` にする。`native-tls-no-default` だけでは ureq が native-tls を
+  無効とみなし、問い合わせの時点でパニックする（release ビルドは `panic = "abort"` なので
+  アプリごと落ちる）
+- `native-tls` は同梱のルート証明書 `webpki-root-certs`（CDLA-Permissive-2.0）を必ず引き込む。
+  使わないが外せないので、`about.toml` の `accepted` に CDLA-Permissive-2.0 を足した。
+  表示義務だけの寛容なデータライセンスで、MIT での配布と両立する
+- 既定の `gzip` も切ってある。応答は 1 回きりの小さな JSON で、圧縮の恩恵が無い
+- `semver` は他の依存が元から使っていたので、クレートは増えていない。`Cargo.lock` に
+  増えたのは `ureq` / `ureq-proto` / `native-tls` / `schannel` / `serde_json` と、その下の
+  `http` / `httparse` / `der` / `base64` など。`openssl` 系や `security-framework` も lock には
+  載るが、Windows 以外のターゲット向けで、ビルドにも配布物にも入らない
+
+### `sha2` は照合だけに使う（2026-09-27）
+
+更新の適用（Issue #240 の第 3 段階）で、ダウンロードした exe の SHA-256 を計算するために入れた（MIT / Apache-2.0）。
+`Cargo.lock` に増えたのは `sha2` と、その下の `digest` 0.11 / `block-buffer` / `crypto-common` /
+`hybrid-array` / `const-oid` / `cpufeatures` 0.3。Windows の CNG（`BCryptHash`）でも計算できるが、
+`windows` クレートのフィーチャを増やしてまで unsafe の呼び出しを書くほどの差は無いので、純 Rust の実装を使う。
 
 ## 更新の順序
 
@@ -118,7 +148,7 @@ flowchart TD
 
 `ringbuf` → `cpal` → `rodio` の順。
 
-- `ringbuf` 0.3 → 0.5 は `Producer` / `Consumer` の型と分割の API が変わっている。`src/audio.rs` の中心部分に触れる
+- `ringbuf` 0.3 → 0.5 は `Producer` / `Consumer` の型と分割の API が変わっている。`src/audio/stream.rs` の中心部分に触れる
 - `cpal` 0.15 → 0.18 はストリーム構築とサンプル型の扱いに影響しうる
 - `rodio` 0.17 → 0.22 は `OutputStream` と `Sink` の API。効果音再生のみに影響
 
@@ -162,13 +192,24 @@ flowchart TD
 
 ただし **Media Foundation まわりの挙動が変わる可能性があるため、実機確認が必須。** 現在「MJPEG / RGB24 を選んでも YUYV に差し替わる」という回避策が入っているが、これが必要だった理由は記録されていない。更新後に改めて検証する価値がある。
 
+### `windows` / `windows-core` は nokhwa と同じ版にそろえる
+
+DirectShow のバックエンド（#143）は、`winapi` に無い DirectShow のインターフェース（`IBaseFilter` / `IPin` / `IMemInputPin` / `ICaptureGraphBuilder2` / `IAMStreamConfig` など）と、自前のレンダラーフィルターを書くための `#[implement]` マクロが要るので `windows` を使う。**`nokhwa-bindings-windows` が `windows` 0.62 を既に使っているので、クレートは増えない**（増えるのは `Win32_Graphics_Gdi` / `Win32_System_Com_StructuredStorage` / `Win32_System_Ole` / `Win32_System_Variant` のフィーチャの分だけ）。`THIRD-PARTY-LICENSES.txt` も変わらない。
+
+`windows-core` を別に書いているのは、`#[implement]` が展開するコードが `::windows_core` を直接参照するため。**`windows-core` は `windows` と同じ 0.62 に固定する。** crates.io の最新（0.100 系）へ上げると、`windows` 0.62 が使う `windows-core` 0.62 と別のクレートになり、`#[implement]` で書いた型が `windows` のインターフェースの trait を満たさなくなる。上げるときは `windows` と `nokhwa` の側がそろって上がるのを待つ。
+
 ### 別軸 — `winapi` の扱い
 
 `winapi` 0.3 は長く更新が止まっており、Microsoft 公式の `windows-sys` / `windows` クレートへ移行するのが現在の主流。
 
-`winapi` は `src/platform.rs` の `monitor_work_areas` で使っている。ウィンドウ位置の復元時に、保存された位置が画面内かを判定するためモニタの作業領域を列挙する用途（`EnumDisplayMonitors` / `GetMonitorInfoW`）。feature は `minwindef` / `winuser` / `windef` の 3 つ。
+`winapi` は 2 か所で使っている。
 
-使用箇所がこの 1 関数だけなので、`windows-sys` へ移す場合の影響は小さい。移行するなら、この関数の中だけを書き換えれば済む。
+- `src/platform.rs` の `monitor_work_areas`。ウィンドウ位置の復元時に、保存された位置が画面内かを判定するためモニタの作業領域を列挙する用途（`EnumDisplayMonitors` / `GetMonitorInfoW`）
+- `src/keyboard_hook.rs` の `imp` モジュール。ホットキーの押下を低レベルキーボードフックで観測する用途（`SetWindowsHookExW` / `CallNextHookEx` / `MsgWaitForMultipleObjects` / `PeekMessageW` / `PostThreadMessageW` / `GetAsyncKeyState` など）。global-hotkey を外したときに、既に直接の依存だったこのクレートへ寄せた（#202）
+
+feature は `minwindef` / `winuser` / `windef` / `libloaderapi` / `processthreadsapi` / `winbase` / `winnls` の 7 つ。
+
+使用箇所はどちらも Windows 専用の小さな関数群に閉じているので、`windows-sys` へ移す場合の影響は小さい。移行するなら、この 2 か所の中だけを書き換えれば済む。
 
 ## 調査の再実行
 

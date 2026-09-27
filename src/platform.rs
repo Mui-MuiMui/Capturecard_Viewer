@@ -5,6 +5,7 @@
 //! いずれも `main()` が `eframe::run_native` より前に呼ぶ（`monitor_work_areas`
 //! のコメントを参照）。
 
+use crate::i18n::Language;
 use eframe::egui;
 use image::GenericImageView;
 use log::{info, warn};
@@ -134,6 +135,44 @@ pub(crate) fn monitor_work_areas() -> Vec<egui::Rect> {
 #[cfg(not(windows))]
 pub(crate) fn monitor_work_areas() -> Vec<egui::Rect> {
     Vec::new()
+}
+
+/// OS の表示言語から、画面に出す言語を推定する。設定の言語が「自動」のときに使う。
+///
+/// 見るのは**表示言語**（`GetUserDefaultUILanguage`）で、地域の書式
+/// （`GetUserDefaultLocaleName`）ではない。英語の Windows で日付や通貨の書式だけ
+/// 日本にしている人に、日本語の画面を出さないため。
+#[cfg(windows)]
+pub(crate) fn os_ui_language() -> Language {
+    use winapi::um::winnls::GetUserDefaultUILanguage;
+
+    // 失敗を返さない API。取れなかった場合も何かしらの LANGID が返る
+    let langid = unsafe { GetUserDefaultUILanguage() };
+    let language = language_from_langid(langid);
+    info!(
+        "OS の表示言語は LANGID 0x{:04x}、自動のときの言語は {:?}",
+        langid, language
+    );
+    language
+}
+
+/// Windows 以外では OS の言語を問い合わせない。英語として扱う
+#[cfg(not(windows))]
+pub(crate) fn os_ui_language() -> Language {
+    Language::English
+}
+
+/// LANGID から画面の言語を決める。主言語が日本語なら日本語、それ以外は英語。
+///
+/// 下位 10 ビットが主言語（`PRIMARYLANGID`）で、上位 6 ビットの副言語（地域）は見ない。
+fn language_from_langid(langid: u16) -> Language {
+    // winnt.h の LANG_JAPANESE
+    const LANG_JAPANESE: u16 = 0x11;
+    if langid & 0x3ff == LANG_JAPANESE {
+        Language::Japanese
+    } else {
+        Language::English
+    }
 }
 
 /// 日本語フォントの候補。優先度順（先頭ほど優先）。
@@ -271,6 +310,22 @@ pub(crate) fn load_icon() -> egui::IconData {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn language_from_langid_japanese_only_for_japanese() {
+        // ja-JP（0x0411）
+        assert_eq!(language_from_langid(0x0411), Language::Japanese);
+        // 副言語（上位ビット）が違っても主言語が日本語なら日本語
+        assert_eq!(language_from_langid(0x0011), Language::Japanese);
+        // en-US（0x0409）、en-GB（0x0809）、zh-CN（0x0804）、ko-KR（0x0412）
+        for langid in [0x0409, 0x0809, 0x0804, 0x0412] {
+            assert_eq!(
+                language_from_langid(langid),
+                Language::English,
+                "{langid:#06x}"
+            );
+        }
+    }
 
     #[test]
     fn window_size_or_default_valid_size_is_kept() {

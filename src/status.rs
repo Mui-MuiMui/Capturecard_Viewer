@@ -11,11 +11,13 @@
 //! **ログは従来どおり出す。** ここに記録するのは画面へ出すためのもので、
 //! `error!` / `warn!` の置き換えではない。
 //!
-//! 日本語の文言をこのモジュールで組み立てているのは、下位のモジュールが
-//! 返す `Result<_, String>` の中身が英語の技術的なメッセージだからで、
-//! 「どこで何に失敗したか」はそれを受け取る側しか知らないため。
-//! エラー型の整理（`thiserror` 化）は別タスクなので、`String` のまま扱う。
+//! このモジュールが持つ文言は、発生源ごとの定型文（`ErrorSource::headline`）と
+//! 「接続状態」タブの表示用の組み立てだけ。失敗の理由そのものは下位のエラー型の
+//! `Display` が持つ（`docs/design/error-reporting.md`）。どちらも文字列の実体は
+//! `crate::i18n` にある。
 
+use crate::audio::ResampleStatus;
+use crate::i18n::{self, Text};
 use chrono::{DateTime, Local};
 use std::time::{Duration, Instant};
 
@@ -64,18 +66,25 @@ pub enum ErrorSource {
     /// ユーザーが場所を選ぶものではなく、失敗してもログに残す扱いのまま。
     /// ここで扱うのはユーザーが選んだファイルに対する操作だけ
     Settings,
+    /// 更新の確認（GitHub の Release への問い合わせ）。
+    ///
+    /// 起動時の確認と「その他」タブの「更新を確認」の両方。確認できたら
+    /// `ErrorCenter::clear` で取り下げる
+    Update,
 }
 
 impl ErrorSource {
     /// 発生源ごとの定型文。元のエラー文の前に付ける。
     pub fn headline(self) -> &'static str {
-        match self {
-            ErrorSource::Video => "映像デバイスに接続できません",
-            ErrorSource::Audio => "音声デバイスに接続できません",
-            ErrorSource::Screenshot => "スクリーンショットを出力できません",
-            ErrorSource::Hotkey => "ホットキーを登録できません",
-            ErrorSource::Settings => "設定ファイルを読み書きできません",
-        }
+        let text = match self {
+            ErrorSource::Video => Text::HeadlineVideo,
+            ErrorSource::Audio => Text::HeadlineAudio,
+            ErrorSource::Screenshot => Text::HeadlineScreenshot,
+            ErrorSource::Hotkey => Text::HeadlineHotkey,
+            ErrorSource::Settings => Text::HeadlineSettings,
+            ErrorSource::Update => Text::HeadlineUpdate,
+        };
+        text.get()
     }
 
     /// `ErrorCenter` の格納位置。
@@ -86,12 +95,13 @@ impl ErrorSource {
             ErrorSource::Screenshot => 2,
             ErrorSource::Hotkey => 3,
             ErrorSource::Settings => 4,
+            ErrorSource::Update => 5,
         }
     }
 }
 
 /// `ErrorSource` の種類数。`ErrorCenter` の配列長。
-const SOURCE_COUNT: usize = 5;
+const SOURCE_COUNT: usize = 6;
 
 /// 記録した失敗 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,6 +248,48 @@ pub fn truncate(text: &str, limit: usize) -> String {
     }
 }
 
+/// 音声のリサンプル状態を「接続状態」タブに出す行に組み立てる。
+///
+/// `DeviceSnapshot.audio_resample` をそのまま渡す。変換が要らない
+/// （identity）、またはまだ音声を開いていない `None` のときは「変換なし」の
+/// 1 行、補正が掛かっているときは比率と水位の 2 行を返す。
+///
+/// **目標水位が 0 のときは水位の割合を出さない。** `ResampleTelemetry` を
+/// 作った時点で 0 になることは無いはずだが、割ってしまうと `NaN` になり
+/// 表示が崩れるため、そのまま「バッファ水位: 不明」で逃がす。
+pub fn format_resample_status(status: Option<ResampleStatus>) -> Vec<String> {
+    let Some(status) = status else {
+        return vec![Text::ResampleIdentity.get().to_string()];
+    };
+
+    let water_level_text = if status.target_level == 0 {
+        Text::WaterLevelUnknown.get().to_string()
+    } else {
+        let percent = status.water_level as f64 / status.target_level as f64 * 100.0;
+        format!("{:.0}%", percent)
+    };
+
+    vec![
+        i18n::resample_ratio(status.ratio),
+        i18n::buffer_water_level(water_level_text),
+    ]
+}
+
+/// 音声のアンダーランの回数を 1 行に組み立てる。
+///
+/// **統計 OSD（`app::view`）と「接続状態」タブの両方がこれを呼ぶ。**
+/// 同じ数を別の文言で出すと、どちらを見ているのか分からなくなるため。
+///
+/// `DeviceSnapshot.audio_underruns` をそのまま渡す。音声を開いていない
+/// `None` のときは数を出さずに「-」にする。**0 と書かない。** 開いていて
+/// 一度も途切れていない状態と区別が付かなくなるため。
+pub fn format_underrun_count(count: Option<u32>) -> String {
+    match count {
+        Some(count) => i18n::underrun_count(count),
+        None => Text::UnderrunUnknown.get().to_string(),
+    }
+}
+
 /// 映像か音声、片方の接続状態。設定ダイアログの「接続状態」タブへ渡す。
 ///
 /// **デバイスワーカーが書き出した観測値（`DeviceSnapshot`）から作る。**
@@ -266,11 +318,12 @@ pub struct ConnectionStatus {
 impl LinkStatus {
     /// 状態を 1 行で表す見出し。
     pub fn headline(&self) -> &'static str {
-        match (self.connected, self.reconnecting) {
-            (true, _) => "接続中",
-            (false, true) => "未接続（再接続を試しています）",
-            (false, false) => "未接続",
-        }
+        let text = match (self.connected, self.reconnecting) {
+            (true, _) => Text::LinkConnected,
+            (false, true) => Text::LinkReconnecting,
+            (false, false) => Text::LinkDisconnected,
+        };
+        text.get()
     }
 }
 
@@ -524,6 +577,74 @@ mod tests {
         assert_eq!(connected.headline(), "接続中");
         assert_eq!(reconnecting.headline(), "未接続（再接続を試しています）");
         assert_eq!(idle.headline(), "未接続");
+    }
+
+    #[test]
+    fn format_resample_status_with_none_returns_no_conversion() {
+        assert_eq!(format_resample_status(None), vec!["変換なし".to_string()]);
+    }
+
+    #[test]
+    fn format_resample_status_with_a_correction_returns_ratio_and_water_level() {
+        let status = ResampleStatus {
+            ratio: 1.0003,
+            water_level: 52,
+            target_level: 100,
+        };
+        assert_eq!(
+            format_resample_status(Some(status)),
+            vec![
+                "リサンプル比: 1.0003".to_string(),
+                "バッファ水位: 52%".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_resample_status_rounds_the_water_level_percentage() {
+        let status = ResampleStatus {
+            ratio: 0.9998,
+            water_level: 1,
+            target_level: 3,
+        };
+        assert_eq!(
+            format_resample_status(Some(status)),
+            vec![
+                "リサンプル比: 0.9998".to_string(),
+                "バッファ水位: 33%".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_resample_status_with_a_zero_target_level_shows_unknown() {
+        // ResampleTelemetry を作った時点で 0 になることは無いはずだが、
+        // 割り算で NaN になるのを避けて安全に倒す
+        let status = ResampleStatus {
+            ratio: 1.0,
+            water_level: 0,
+            target_level: 0,
+        };
+        assert_eq!(
+            format_resample_status(Some(status)),
+            vec![
+                "リサンプル比: 1.0000".to_string(),
+                "バッファ水位: 不明".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_underrun_count_with_a_count_shows_the_number() {
+        assert_eq!(format_underrun_count(Some(0)), "アンダーラン: 0 回");
+        assert_eq!(format_underrun_count(Some(12)), "アンダーラン: 12 回");
+    }
+
+    #[test]
+    fn format_underrun_count_without_audio_shows_a_dash() {
+        // 音声を開いていない間に 0 と出すと、開いていて一度も途切れて
+        // いない状態と読み分けられない
+        assert_eq!(format_underrun_count(None), "アンダーラン: -");
     }
 
     #[test]

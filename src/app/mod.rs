@@ -5,6 +5,7 @@
 //! `impl CaptureCardViewer` を足す形で、状態そのものは増やさない。
 
 mod audio_control;
+mod backend;
 mod capabilities;
 mod device;
 mod error_report;
@@ -13,21 +14,28 @@ mod menu;
 mod monitor;
 mod retry;
 mod screenshot;
+mod screenshot_sound;
 mod settings_dialog;
 mod settings_store;
+mod update;
 mod view;
 mod window;
 mod worker;
 mod worker_connect;
 mod worker_loop;
+mod worker_timers;
 
 use self::menu::MenuLayout;
 use self::screenshot::ScreenshotResult;
+use self::screenshot_sound::SoundLoadResult;
+use self::update::UpdateState;
 use self::window::needs_drag_move_guard;
 use self::worker::{DeviceSnapshot, DeviceWorker};
 use crate::audio::AudioControls;
 use crate::hotkey::{HotkeyAction, HotkeyManager};
+use crate::i18n::{self, Language};
 use crate::overlay::TransientOverlay;
+use crate::platform;
 use crate::repaint::{next_repaint_delay, should_wake_on_event, RepaintCondition, RepaintWaker};
 use crate::screenshot::ScreenshotManager;
 use crate::settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace};
@@ -79,6 +87,10 @@ pub struct CaptureCardViewer {
     // 能力取得と同じく、UI スレッドが update() で try_recv するだけにする
     screenshot_tx: Sender<ScreenshotResult>,
     screenshot_rx: Receiver<ScreenshotResult>,
+    // 効果音ファイルの読み込み結果を受け取るチャネル。適用とテスト再生の両方。
+    // 読み込みも別スレッドで行うため、保存結果と同じ形で受け取る
+    sound_load_tx: Sender<SoundLoadResult>,
+    sound_load_rx: Receiver<SoundLoadResult>,
 
     // 発生源ごとの直近の失敗。トーストの間引きもここが判断する
     errors: ErrorCenter,
@@ -169,11 +181,27 @@ pub struct CaptureCardViewer {
     // このスレッドが行う。
     // 終了時に join して、書き出し途中の画像ファイルが残らないようにする
     screenshot_save_threads: Vec<JoinHandle<()>>,
+    // 進行中の効果音ファイルの読み込みスレッド。デバイスには触らないが、
+    // 保存スレッドと同じく切り離さず、終了時に join する
+    sound_load_threads: Vec<JoinHandle<()>>,
+    // 更新の確認。結果のチャネル、確認のスレッド、「その他」タブに出す状態、
+    // 起動時の通知ダイアログをまとめて持つ（`app::update`）
+    update_check: UpdateState,
+
+    // OS の表示言語から推定した言語。設定の言語が「自動」のときに使う。
+    //
+    // **起動時に 1 回だけ決める。** 実行中に Windows の表示言語を変えても
+    // サインアウトするまで反映されないので、問い合わせ直す意味が無い
+    os_language: Language,
 }
 
 impl Default for CaptureCardViewer {
     fn default() -> Self {
         let (loaded_settings, load_outcome) = AppSettings::load();
+        // 画面の言語は何より先に決める。ここから先で作る文言（読み込みの
+        // 失敗のトーストなど）も、設定した言語で出す
+        let os_language = platform::os_ui_language();
+        i18n::set_language(loaded_settings.ui.language.resolve(os_language));
         // 表示状態はここで読み込んだ値をそのままフィールドの初期値にする。
         // apply_settings(true) も最初の update() で同じ値を書き戻すが、
         // 構築時点で確定させておけば以降の初期化順序に依存せずに済む
@@ -190,6 +218,7 @@ impl Default for CaptureCardViewer {
 
         let screenshot_manager = Arc::new(Mutex::new(ScreenshotManager::new()));
         let (screenshot_tx, screenshot_rx) = std::sync::mpsc::channel();
+        let (sound_load_tx, sound_load_rx) = std::sync::mpsc::channel();
 
         // デバイスに触るものは、すべてワーカースレッドの中で作る。
         // ここから渡すのは UI スレッドとも共有する 3 つだけ
@@ -217,6 +246,8 @@ impl Default for CaptureCardViewer {
             repaint_waker,
             screenshot_tx,
             screenshot_rx,
+            sound_load_tx,
+            sound_load_rx,
             errors: ErrorCenter::default(),
             last_screenshot_outcome_at: None,
             show_settings: false,
@@ -257,7 +288,19 @@ impl Default for CaptureCardViewer {
             borderless: false,
 
             screenshot_save_threads: Vec::new(),
+            sound_load_threads: Vec::new(),
+            update_check: UpdateState::new(),
+
+            os_language,
         };
+
+        // 最小化中のホットキーは UI スレッドを通せないので、リスナーから
+        // 直接デバイスワーカーへコマンドを積ませる（#133）。
+        // **ワーカーを起動したあとでしか渡せない**ので、ここで渡す
+        app.hotkey_manager
+            .set_background_runner(hotkeys::background_hotkey_runner(
+                app.device.command_sender(),
+            ));
 
         // **未設定のデバイス名はここで埋めない。** 列挙は映像で 1〜3ms、
         // 音声で 300ms 前後かかり、ウィンドウが出る前にその分だけ待たせる
@@ -342,6 +385,10 @@ impl eframe::App for CaptureCardViewer {
         // 最初のフレームの到着を知らせる先が無い
         self.repaint_waker.bind(ctx);
 
+        // ホットキーに割り当てたキーの押下を egui へ渡さない（#217）。
+        // **描画より前に済ませること**（`remove_hotkey_key_events`）
+        self.remove_hotkey_key_events(ctx);
+
         // ワーカーから届いた結果（接続の成否、デバイス能力、デバイス一覧）を
         // 取り込む。設定ダイアログを開いていなくても受け取る
         self.drain_device_events();
@@ -355,6 +402,13 @@ impl eframe::App for CaptureCardViewer {
         // 別スレッドで行ったスクリーンショットの保存結果を取り込む。
         // 失敗はここでトーストになる
         self.drain_screenshot_results();
+        // 別スレッドで読み込んだ効果音を取り込む。テスト再生はここで鳴る
+        self.drain_sound_load_results();
+        // 別スレッドで行った更新の確認の結果を取り込む
+        self.drain_update_results();
+        // 別スレッドで行っている更新（ダウンロードと差し替え）の進み具合を取り込む。
+        // 差し替えが済んでいればここでウィンドウを閉じる
+        self.drain_update_apply_results(ctx);
 
         // 起動直後に 1 度だけ行う処理。
         //
@@ -374,6 +428,11 @@ impl eframe::App for CaptureCardViewer {
             } else {
                 egui::WindowLevel::Normal
             }));
+
+            // 前回の更新で残った `.old` / `.new` を消す（別スレッド）
+            self.clean_up_update_leftovers();
+            // 更新の確認は別スレッドで行うので、ネットワークが無くても起動は待たない
+            self.check_for_updates_on_startup();
         }
 
         // ビデオフレームを更新。新着の時刻は末尾の再描画の予約で使う
@@ -493,6 +552,7 @@ impl eframe::App for CaptureCardViewer {
                     &devices,
                     &connection,
                     &hotkey_errors,
+                    &self.update_check.view(),
                 ),
                 None => Vec::new(),
             };
@@ -568,9 +628,10 @@ impl eframe::App for CaptureCardViewer {
             }
 
             if let Some(candidate) = captured {
-                // 一時停止で自分自身の登録は解除済みなので、ここでの試し登録が
-                // 自分の他のアクションと衝突することはない。他のアプリが既に
-                // 使っているキー（F12 など）だけを弾ける
+                // 解釈できるかと、押下を観測するフックが使えているかを確かめる。
+                // キーは奪わないので、他のアプリが同じキーを使っていても弾かない
+                // （#202）。自分の他のアクションとの重複は、ダイアログが
+                // 確定の前に弾いている
                 match self.hotkey_manager.try_register(&candidate) {
                     Ok(()) => {
                         debug!("{} に {} を割り当てた", action.label(), candidate);
@@ -613,7 +674,7 @@ impl eframe::App for CaptureCardViewer {
                         self.show_hotkey_dialog = true;
                         self.settings_dialog
                             .hotkey_capture_mut()
-                            .set_rejection(reason);
+                            .set_rejection(reason.to_string());
                     }
                 }
             }
@@ -624,6 +685,9 @@ impl eframe::App for CaptureCardViewer {
         if !self.show_hotkey_dialog && hotkey_dialog_was_open {
             self.resume_hotkeys_after_capture();
         }
+
+        // 起動時の確認で見つけた新しい版を知らせるダイアログ
+        self.draw_update_dialog(ctx);
 
         // コンテキストメニュー
         if self.show_context_menu {
@@ -649,10 +713,38 @@ impl eframe::App for CaptureCardViewer {
         // 間隔を広げている間だけ、別スレッドからの通知で起こしてもらう
         self.repaint_waker
             .set_enabled(should_wake_on_event(condition));
+
+        // 最小化しているかをホットキーのリスナーへ伝える。最小化すると
+        // ここが呼ばれなくなるので、**最後に書いた値がそのまま残る**のが狙い。
+        // リスナーは真の間だけ、画面の要らないアクションをワーカーへ回す（#133）。
+        // フォーカスは「フォーカスがあるときだけ反応する」の判定に使う（#202）。
+        // 出入りのたびに egui-winit が再描画を要求するので、ここで拾える。
+        // 取れない環境では「フォーカスあり」に倒す（反応しなくなる側に倒さない）
+        let focused = viewport.focused.unwrap_or(true);
+        // テキスト欄に入力中かも伝える。キーを奪わないので、プリセット名などへ
+        // 打った文字がホットキーとしても実行されてしまう（#206）。
+        // 見るのはテキスト欄のフォーカスだけで、ボタンなどのフォーカスは数えない（#238）。
+        // **描画を全て終えたここで読む。** このフレームでフォーカスが移った分まで
+        // 反映される。フックの中から egui へは問い合わせない
+        let typing = hotkeys::is_typing_in_text_field(ctx);
+        self.hotkey_manager
+            .set_window_state(minimized, focused, typing);
         ctx.request_repaint_after(next_repaint_delay(condition));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // デバイスワーカーにストリームを閉じさせ、終わるまで待つ。
+        // 待たないと、閉じる途中でプロセスごと落ちる
+        self.device.shutdown();
+
+        // **止めたあとに、残っているイベントを取り込む。** 最小化中の
+        // ホットキーで変えた音量・ミュートはワーカーが先に効かせ、UI 側の
+        // 設定への反映は `DeviceEvent` を受け取ったときに行う（#133）。
+        // 最小化したまま終了すると `update()` を通らないので、ここで
+        // 取り込まないと操作が設定ファイルに残らない。
+        // 止めてから読めば、この後に新しいイベントが積まれることもない
+        self.drain_device_events();
+
         // 終了時は書き出す。デバウンスの待ち時間中に終了しても、
         // ウィンドウのサイズ・位置や音量の変更を取りこぼさないようにする。
         //
@@ -664,18 +756,22 @@ impl eframe::App for CaptureCardViewer {
             warn!("読めなかった設定ファイルを残しているため、終了時の保存を行わない");
         }
 
-        // デバイスワーカーにストリームを閉じさせ、終わるまで待つ。
-        // 待たないと、閉じる途中でプロセスごと落ちる
-        self.device.shutdown();
-
         // 撮った直後に閉じても最後の 1 枚が残るように、保存の完了を待ってから抜ける。
         // ここで待たないと、main が返った時点でプロセスごと落ちて
         // 書きかけの画像ファイルがディスクに残る
         self.join_screenshot_save_threads();
+        // 効果音の読み込みも切り離さずに待つ。結果は使わない
+        self.join_sound_load_threads();
+        // 更新の確認と適用のスレッドは待たない。確認は副作用が無く、適用は
+        // 書きかけの `.new` を次の起動で消す（docs/design/update.md）
 
         // 終了中に終わった保存の結果をログへ残す。**待ったあとに読むこと。**
         // 画面はもう出ないので通知はされないが、閉じる直前に撮った 1 枚が
         // 保存できなかったことは、ログにだけは残しておかないと追えない
         self.drain_screenshot_results();
+
+        // 更新で差し替えた exe を起動する。**最後に置くこと。** 設定の保存と
+        // デバイスの解放が済んでから、新しい版が起動するようにする
+        self.relaunch_updated_exe();
     }
 }

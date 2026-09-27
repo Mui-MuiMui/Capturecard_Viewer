@@ -109,7 +109,7 @@ capturecard_viewer.exe
 | `opt-level` | `3` | 速度優先 |
 | `lto` | `true` | リンク時最適化。ビルドは遅くなるがバイナリが小さく速くなる |
 | `codegen-units` | `1` | 最適化の質を上げる。ビルドは遅くなる |
-| `panic` | `"abort"` | 巻き戻しコードを省く。**`catch_unwind` が機能しなくなるため使わない**（`CLAUDE.md` の「catch_unwind は使わない」） |
+| `panic` | `"abort"` | 巻き戻しコードを省く。**`catch_unwind` が機能しなくなるため使わない**（`docs/design/logging.md` の「catch_unwind は使わない」） |
 
 release ビルドは `lto` と `codegen-units = 1` の影響で時間がかかる。反復作業には dev ビルドを使う。
 
@@ -125,18 +125,30 @@ release ビルドは `lto` と `codegen-units = 1` の影響で時間がかか�
 
 1 回の起動につき 1 ファイル作られ、起動時に新しいものから 10 個だけ残して削除される。
 
-既定のレベルは `info`。詳細を見たいときは環境変数で上げる。
+### 開発者向けの環境変数
+
+どれも release ビルドに入っているが、**指定しなければ無効**で、設定ファイルには保存されない。起動するときだけ指定する。
+
+| 変数 | 値 | 効果 | 詳しい説明の場所 |
+|---|---|---|---|
+| `CAPTURECARD_VIEWER_LOG` | `error` / `warn` / `info` / `debug` / `trace`（既定 `info`） | ログのレベルを変える。解釈できない値は `info` に戻る | `docs/design/logging.md`、`docs/TROUBLESHOOTING.md` の「不具合を報告するとき」 |
+| `CAPTURECARD_VIEWER_FAKE_DEVICES` | 台数（1〜8） | 実機の代わりにフェイクの映像・音声デバイスで動く。0・空・数字でなければ無効 | `docs/design/device-worker.md` の「フェイクデバイス（#142）」、`docs/TROUBLESHOOTING.md` の「映像がカラーバーや青一色になる…」 |
+| `CAPTURECARD_VIEWER_FAKE_SCENARIO` | `disconnect:<秒>` / `fail:<回数>` / `audio-error:<秒>`（カンマ区切り） | フェイクデバイスで映像の途絶・接続の失敗・音声ストリームのエラーを起こす。`CAPTURECARD_VIEWER_FAKE_DEVICES` と一緒に使う | 同上 |
+| `CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` | 版（`1.0.0` / `v1.0.0`） | 更新の確認で比べる「いまの版」を差し替える。公開済みの最新より古くすれば通知ダイアログが出る | `docs/design/update.md` の「試すための環境変数」、`docs/TROUBLESHOOTING.md` の「更新の通知で、いまの版が違う…」 |
+| `CAPTURECARD_VIEWER_UPDATE_API_URL` | `http://` / `https://` の URL、または `file:///C:/path/latest.json` | 更新の確認の問い合わせ先（GitHub の Release API）を差し替える。`file://` なら Release の JSON をそのまま読む | 同上 |
+
+**環境変数を新しく足したら、この表に必ず行を足すこと。**
 
 ```
 set CAPTURECARD_VIEWER_LOG=trace
+set CAPTURECARD_VIEWER_FAKE_DEVICES=2
+set CAPTURECARD_VIEWER_FAKE_SCENARIO=fail:3,disconnect:10
 capturecard_viewer.exe
 ```
 
-受け付ける値は `error` / `warn` / `info` / `debug` / `trace`。解釈できない値を渡した場合は `info` に戻る。
-
 **`println!` / `eprintln!` を足すと CI で落ちる。** `Cargo.toml` の `[lints.clippy]` で `print_stdout` / `print_stderr` を `warn` にしてあり、clippy を `-D warnings` で回しているため。
 
-テストコードの中は例外で、テストバイナリの標準出力は `cargo test -- --nocapture` で読めるため `println!` を使ってよい（`src/video.rs` の計測用テストがその例）。`src/main.rs` 冒頭の `#![cfg_attr(test, allow(clippy::print_stdout))]` が許している。
+テストコードの中は例外で、テストバイナリの標準出力は `cargo test -- --nocapture` で読めるため `println!` を使ってよい（`src/video/convert.rs` の計測用テストがその例）。`src/main.rs` 冒頭の `#![cfg_attr(test, allow(clippy::print_stdout))]` が許している。
 
 ## Cargo.lock
 

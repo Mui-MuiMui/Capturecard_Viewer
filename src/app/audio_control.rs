@@ -4,6 +4,7 @@
 //! いずれもここを通す。経路ごとに設定の保存や OSD の有無が変わらないようにする。
 
 use super::CaptureCardViewer;
+use crate::i18n::{self, Text};
 use crate::overlay::OverlayContent;
 use crate::settings::{MAX_VOLUME, MIN_VOLUME};
 use eframe::egui;
@@ -33,9 +34,9 @@ pub(super) const VOLUME_SCROLL_STEP: f32 = 10.0;
 /// 予想しやすいため。
 fn volume_overlay_content(volume: f32, muted: bool) -> OverlayContent {
     let text = if muted {
-        format!("音量: {}%（ミュート中）", volume as i32)
+        i18n::volume_percent_muted(volume as i32)
     } else {
-        format!("音量: {}%", volume as i32)
+        i18n::volume_percent(volume as i32)
     };
     OverlayContent::Bar {
         text,
@@ -51,9 +52,9 @@ fn volume_overlay_content(volume: f32, muted: bool) -> OverlayContent {
 /// ことがあるため、「解除したら何%で鳴るのか」が分かるようにしている。
 fn mute_overlay_content(muted: bool, volume: f32) -> OverlayContent {
     if muted {
-        OverlayContent::Text("ミュート".to_string())
+        OverlayContent::Text(Text::Mute.get().to_string())
     } else {
-        OverlayContent::Text(format!("ミュート解除（音量: {}%）", volume as i32))
+        OverlayContent::Text(i18n::unmuted(volume as i32))
     }
 }
 
@@ -64,7 +65,10 @@ fn mute_overlay_content(muted: bool, volume: f32) -> OverlayContent {
 /// 解除しないと「音量を上げたのに鳴らない」状態になって原因が分からない。
 /// 右クリックメニューのスライダーはすぐ下にミュートのチェックが見えているので、
 /// そちらは解除せず、灰色のバーで「効いていない」ことだけを示す。
-fn volume_change_result(current: f32, delta: f32) -> (f32, bool) {
+///
+/// **最小化中のホットキーを代わりに実行するデバイスワーカーもここを通る**
+/// （`super::worker_loop`）。上下限とミュートの扱いを経路で変えないため。
+pub(super) fn volume_change_result(current: f32, delta: f32) -> (f32, bool) {
     ((current + delta).clamp(MIN_VOLUME, MAX_VOLUME), false)
 }
 

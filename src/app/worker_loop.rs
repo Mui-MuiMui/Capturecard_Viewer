@@ -9,21 +9,28 @@
 //! 最小化している間 eframe が再描画要求を捨てるために自動再接続も切断監視も
 //! 止まっていた（#133）。このスレッドはウィンドウの状態に関係なく動く。
 //!
+//! そのタイマーで動く監視の中身は `super::worker_timers`、デバイスを開く・
+//! 閉じる・列挙する処理は `super::worker_connect` にある。どちらも
+//! `WorkerState` へ `impl` を足す形で、状態はこのファイルが 1 つだけ持つ。
+//!
 //! 判定そのもの（途絶したか、開き直してよいか）は `super::monitor` の
 //! 純粋関数に切り出してある。ここはデバイスを触る側だけを持つ。
+//!
+//! **デバイスそのものは `super::backend` の trait 越しにしか触らない。**
+//! 実装を選ぶのは `super::worker::DeviceWorker::spawn` だけで、ここから先は
+//! `VideoCapture` / `AudioCapture` という具体型を知らない。おかげでモックを
+//! 差し替えれば、実機も実時間の経過もなしに再試行と切断検出を回せる。
 
-use super::monitor::{
-    decide_audio_reconnect, decide_video_link, default_audio_device_changed,
-    should_poll_default_audio_device, AudioErrorAction, VideoLinkAction, VIDEO_SIGNAL_TIMEOUT,
-};
+use super::audio_control::volume_change_result;
+use super::backend::{AudioBackend, BackendShared, DeviceBackends, VideoBackend};
+use super::monitor::{DeviceNotVisible, VideoLinkAction};
 use super::retry::ConnectRetry;
 use super::worker::{
     AudioTarget, DeviceCommand, DeviceConfig, DeviceEvent, DeviceSnapshot, RetryStatus,
     SharedSnapshot, VideoTarget,
 };
-use crate::audio::{self, AudioCapabilities, AudioCapture, AudioControls, AudioDirection};
+use crate::audio::{AudioCapabilities, AudioControls, AudioDirection};
 use crate::repaint::RepaintWaker;
-use crate::video::{SharedColorConversion, VideoCapture, VideoFrames};
 use log::{debug, info, trace, warn};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -43,25 +50,6 @@ const RETRY_TICK: Duration = Duration::from_millis(100);
 /// **短くしても得るものが無く、待機中の消費電力だけが増える。**
 const IDLE_TICK: Duration = Duration::from_millis(500);
 
-/// 音声のクロックドリフト補正（レート比の微調整）を行う間隔。
-///
-/// `tick` 自体は 100〜500ms ごとに回るが、補正はもっと粗くてよい。
-/// クロックのずれは秒単位でしか積もらないので、毎 tick 動かしても
-/// 得るものが無く、ログだけ増える。
-const RESAMPLE_CORRECTION_INTERVAL: Duration = Duration::from_secs(3);
-
-/// 水位が目標から大きく外れ続けているときの `warn` を間引く間隔。
-///
-/// 補正が追いつかない状態は一過性のこともあるため、連打せず数十秒に 1 回に留める。
-const RESAMPLE_WARN_INTERVAL: Duration = Duration::from_secs(30);
-
-/// この相対誤差（目標水位に対する比率）を超えたら「大きく外れている」とみなす。
-///
-/// 補正の上限は ±0.1% なので、通常のクロックドリフト（数十〜数百 ppm）は
-/// 吸収できる。それでもここまで外れるのは、デバイス側の極端なドリフトや
-/// バッファ長そのものが実情に合っていない可能性がある
-const RESAMPLE_WARN_RELATIVE_ERROR: f64 = 0.5;
-
 /// 次にコマンドを待つ時間を決める。
 ///
 /// 接続を追いかけている間だけ細かく起きる。判定を関数にしてあるのは、
@@ -80,18 +68,23 @@ pub(super) fn run(
     commands: Receiver<DeviceCommand>,
     events: Sender<DeviceEvent>,
     snapshot: SharedSnapshot,
-    frames: VideoFrames,
-    color_conversion: Arc<SharedColorConversion>,
-    audio_controls: Arc<AudioControls>,
-    repaint_waker: RepaintWaker,
+    shared: BackendShared,
+    backends: Box<dyn DeviceBackends>,
 ) {
     debug!("デバイスワーカーを開始する");
+    // 音量とミュートはバックエンドへ渡したあともワーカー自身が使う
+    // （最小化中のホットキーの代役）。再描画の窓口も `emit` で使う
+    let audio_controls = Arc::clone(&shared.audio_controls);
+    let repaint_waker = shared.repaint_waker.clone();
+    // **バックエンドを組み立てるのはこのスレッドの中。** `cpal::Stream` は
+    // `!Send` なので、材料だけを送ってここで作る
+    let (video, audio) = backends.create(shared);
     let mut state = WorkerState::new(
+        video,
+        audio,
+        audio_controls,
         events,
         snapshot,
-        frames,
-        color_conversion,
-        audio_controls,
         repaint_waker,
     );
 
@@ -125,10 +118,19 @@ pub(super) fn run(
 /// ワーカースレッドだけが触る状態。
 ///
 /// **`pub(super)` にしてあるのは、デバイスを開く処理を
-/// `super::worker_connect` へ分けているため。** `app` の外からは見えない。
+/// `super::worker_connect` へ、タイマーで動く監視を `super::worker_timers`
+/// へ分けているため。** `app` の外からは見えない。
 pub(super) struct WorkerState {
-    pub(super) video: VideoCapture,
-    pub(super) audio: AudioCapture,
+    /// 映像デバイスの入口。本番は `VideoCapture`、テストはモック
+    pub(super) video: Box<dyn VideoBackend>,
+    /// 音声デバイスの入口。本番は `AudioCapture`、テストはモック
+    pub(super) audio: Box<dyn AudioBackend>,
+    /// 音量・ミュート・パススルーの共有 Atomic。
+    ///
+    /// 普段は UI スレッドが書き、出力コールバックが読むだけで、ワーカーは
+    /// `AudioCapture` へ渡すためだけに触っていた。**最小化中のホットキーを
+    /// 代わりに実行するために、ここでも複製を持つ**（#133）
+    audio_controls: Arc<AudioControls>,
     pub(super) events: Sender<DeviceEvent>,
     pub(super) snapshot: SharedSnapshot,
     /// イベントを積んだときに UI スレッドを起こす窓口。
@@ -178,20 +180,35 @@ pub(super) struct WorkerState {
     /// 水位が目標から大きく外れている旨の `warn` を最後に出した時刻。
     /// 連打を防ぐための記録
     pub(super) last_resample_warn: Option<Instant>,
+
+    /// 起動時の列挙をまだログへ出していないか。起動直後の `ApplyConfig` で立つ
+    pub(super) startup_enumeration_pending: bool,
+    /// 列挙をログへ出したときの失敗回数 `(映像, 音声)`。同じ回数のまま
+    /// 何度も出さないための記録（`monitor::should_log_enumeration`）
+    pub(super) enumeration_logged_failures: (u32, u32),
+    /// 設定のデバイスが Windows 側にも見えていないか（#236）。列挙のたびに
+    /// 判定し直し、接続できたら消す。失敗の理由に案内として添える
+    pub(super) video_not_visible: Option<DeviceNotVisible>,
+    pub(super) audio_not_visible: Option<DeviceNotVisible>,
+    /// 直近の接続の失敗の理由。案内が付いたときに、次の失敗を待たずに
+    /// 出し直すために持つ。接続できたら消す
+    pub(super) last_video_failure: Option<String>,
+    pub(super) last_audio_failure: Option<String>,
 }
 
 impl WorkerState {
     fn new(
+        video: Box<dyn VideoBackend>,
+        audio: Box<dyn AudioBackend>,
+        audio_controls: Arc<AudioControls>,
         events: Sender<DeviceEvent>,
         snapshot: SharedSnapshot,
-        frames: VideoFrames,
-        color_conversion: Arc<SharedColorConversion>,
-        audio_controls: Arc<AudioControls>,
         repaint_waker: RepaintWaker,
     ) -> Self {
         Self {
-            video: VideoCapture::new(frames, color_conversion, repaint_waker.clone()),
-            audio: AudioCapture::new(audio_controls),
+            video,
+            audio,
+            audio_controls,
             events,
             snapshot,
             repaint_waker,
@@ -208,6 +225,12 @@ impl WorkerState {
             audio_capabilities: HashMap::new(),
             last_resample_correction: None,
             last_resample_warn: None,
+            startup_enumeration_pending: false,
+            enumeration_logged_failures: (0, 0),
+            video_not_visible: None,
+            audio_not_visible: None,
+            last_video_failure: None,
+            last_audio_failure: None,
         }
     }
 
@@ -250,6 +273,7 @@ impl WorkerState {
                 attempts: self.audio_retry.attempts(),
             },
             audio_resample: self.audio.resample_status(),
+            audio_underruns: self.audio.underrun_count(),
         };
         match self.snapshot.write() {
             Ok(mut slot) => *slot = next,
@@ -266,6 +290,8 @@ impl WorkerState {
             DeviceCommand::QueryAudioCapabilities(direction, key) => {
                 self.query_audio_capabilities(direction, &key);
             }
+            DeviceCommand::AdjustVolume(delta) => self.adjust_volume(delta),
+            DeviceCommand::ToggleMute => self.toggle_mute(),
             // 呼び出し側（`run`）がループを抜けるので、ここへは来ない
             DeviceCommand::Shutdown => {}
         }
@@ -281,6 +307,21 @@ impl WorkerState {
 
         if initial {
             self.resolve_default_devices(&mut config);
+            // 列挙そのものは最初の接続を試したあとの `tick` で行う。ここで
+            // 列挙すると、その分だけ最初の接続が遅れる
+            self.startup_enumeration_pending = true;
+        }
+
+        // 繋ぐ相手が変わったら「見えていない」の判定は前の相手のもの。
+        // **直前に受け取った設定と比べる。** 繋がっていない間は
+        // `last_video_target` が `None` のままなので、そちらと比べると
+        // 2 秒ごとの `apply_settings` のたびに消えてしまう
+        let previous = self.config.as_ref();
+        if previous.map(|config| &config.video) != Some(&config.video) {
+            self.video_not_visible = None;
+        }
+        if previous.map(|config| &config.audio) != Some(&config.audio) {
+            self.audio_not_visible = None;
         }
 
         let need_video_restart = Some(&config.video) != self.last_video_target.as_ref();
@@ -294,6 +335,34 @@ impl WorkerState {
         }
 
         self.config = Some(config);
+    }
+
+    /// 最小化中のホットキーで音量を変える。**UI スレッドの代役。**
+    ///
+    /// 基準にするのは `AudioControls` に入っている値で、UI スレッドが持つ
+    /// `CaptureCardViewer::volume` とは最大 0.5% ずれうる（UI 側は変化が
+    /// その幅を超えたときだけ Atomic へ書く）。ずれは復帰したときの
+    /// `adjust_volume` で UI 側の値へ揃うので、聞こえ方の差にはならない。
+    ///
+    /// 上下限とミュートの扱いは UI と同じ `volume_change_result` に任せる。
+    /// ここで独自に計算すると、経路によって上限や解除の有無が変わる
+    fn adjust_volume(&self, delta: f32) {
+        let (volume, muted) = volume_change_result(self.audio_controls.volume_percent(), delta);
+        self.audio_controls.set_volume(volume);
+        self.audio_controls.set_muted(muted);
+        info!("最小化中のホットキーで音量を {}% にした", volume as i32);
+        self.emit(DeviceEvent::VolumeAdjusted(delta));
+    }
+
+    /// 最小化中のホットキーでミュートを切り替える。**UI スレッドの代役。**
+    fn toggle_mute(&self) {
+        let muted = !self.audio_controls.muted();
+        self.audio_controls.set_muted(muted);
+        info!(
+            "最小化中のホットキーでミュートを{}にした",
+            if muted { "オン" } else { "オフ" }
+        );
+        self.emit(DeviceEvent::MuteToggled);
     }
 
     /// バックオフを飛ばして映像・音声とも開き直す。
@@ -313,273 +382,6 @@ impl WorkerState {
         self.audio_retry.request_now(config.audio);
     }
 
-    /// 期限が来ている接続を試し、稼働中のデバイスが生きているかを見る。
-    fn tick(&mut self, now: Instant) {
-        self.poll_connection(now);
-        self.monitor_video_link();
-        self.monitor_audio_stream();
-        self.poll_default_audio_device();
-        self.adjust_resample_correction(now);
-    }
-
-    /// 音声のクロックドリフト補正。水位を見て、レート比の補正係数を
-    /// `RESAMPLE_CORRECTION_INTERVAL` ごとに動かす。
-    ///
-    /// **揃っている組み合わせ（identity）では何もしない。** `resample_telemetry`
-    /// は変換が要る場合しか作らないので、まだ音声を開いていない場合も含めて
-    /// ここで早期に諦める。
-    fn adjust_resample_correction(&mut self, now: Instant) {
-        let Some(telemetry) = self.audio.resample_telemetry().cloned() else {
-            return;
-        };
-
-        let due = self
-            .last_resample_correction
-            .map(|last| now.duration_since(last) >= RESAMPLE_CORRECTION_INTERVAL)
-            .unwrap_or(true);
-        if !due {
-            return;
-        }
-        self.last_resample_correction = Some(now);
-
-        let water_level = telemetry.water_level();
-        let target_level = telemetry.target_level();
-        // ここへ来る時点で identity ではないと分かっているので false 固定。
-        // 純粋関数側の identity 判定は主にテストのための引数
-        let ratio = audio::decide_resample_correction(false, water_level, target_level);
-        telemetry.set_correction(ratio);
-        if (ratio - 1.0).abs() > f32::EPSILON {
-            debug!(
-                "音声のリサンプル比を補正した: {:.5}（水位 {} / 目標 {}）",
-                ratio, water_level, target_level
-            );
-        }
-
-        if target_level == 0 {
-            return;
-        }
-        let relative_error = (water_level as f64 - target_level as f64).abs() / target_level as f64;
-        if relative_error < RESAMPLE_WARN_RELATIVE_ERROR {
-            return;
-        }
-        let should_warn = self
-            .last_resample_warn
-            .map(|last| now.duration_since(last) >= RESAMPLE_WARN_INTERVAL)
-            .unwrap_or(true);
-        if should_warn {
-            self.last_resample_warn = Some(now);
-            warn!(
-                "音声リングバッファの水位が目標から大きく外れている（水位 {}、目標 {}）。補正の上限（±0.1%）で追いつかない可能性がある",
-                water_level, target_level
-            );
-        }
-    }
-
-    /// 期限が来ているデバイスの接続を 1 回だけ試す。
-    fn poll_connection(&mut self, now: Instant) {
-        let video_due = self.video_retry.is_due(now);
-        let audio_due = self.audio_retry.is_due(now);
-        if !video_due && !audio_due {
-            return;
-        }
-        let Some(config) = self.config.clone() else {
-            return;
-        };
-
-        if video_due {
-            self.try_connect_video(&config, now);
-        }
-        if audio_due {
-            self.try_connect_audio(&config, now);
-        }
-    }
-
-    /// フレームの途絶を見て、表示を落とし、必要なら映像を開き直す。
-    fn monitor_video_link(&mut self) {
-        let auto_reconnect = self
-            .config
-            .as_ref()
-            .map(|config| config.auto_reconnect)
-            .unwrap_or(true);
-        let state = self.video.link_state();
-        let action = decide_video_link(state, auto_reconnect, VIDEO_SIGNAL_TIMEOUT);
-
-        if action == VideoLinkAction::Keep {
-            // 途絶が解消した（開き直した、ストリームを閉じた、フレームが戻った）。
-            // **記録は必ず戻す。** 戻さないと、開き直したあとの途絶が
-            // 「同じ処置が続いている」と見なされて検出されなくなる。
-            //
-            // ログを出すのはフレームが実際に戻ったときだけ。ストリームを
-            // 閉じた直後も判定は `Keep` になるので、そこで「届き始めた」と
-            // 書くと嘘になる
-            if self.last_video_link_action != VideoLinkAction::Keep
-                && state.capturing
-                && state.since_last_frame.is_some()
-            {
-                info!("映像フレームが再び届き始めたので表示を再開する");
-            }
-            self.last_video_link_action = action;
-            return;
-        }
-        // 途絶は毎回同じ判定に当たる。同じ扱いが続く間は 1 度だけ動く
-        if action == self.last_video_link_action {
-            return;
-        }
-        self.last_video_link_action = action;
-
-        let elapsed_ms = state
-            .since_last_frame
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or_default();
-        info!(
-            "映像フレームが {} ms 途絶えたので、表示を落として切断として扱う",
-            elapsed_ms
-        );
-        // 最後のフレームが残り続けると、止まっているのか映っているのか判らない。
-        // テクスチャを捨てて「映像信号がありません」の表示へ戻すのは UI の仕事
-        self.emit(DeviceEvent::VideoSignalLost);
-
-        if action != VideoLinkAction::ClearTextureAndReconnect {
-            debug!("自動再接続が無効なので映像は開き直さない");
-            return;
-        }
-
-        let Some(config) = self.config.clone() else {
-            return;
-        };
-
-        // ストリームを閉じてから要求する。閉じておくと表示が
-        // 「デバイスが接続されていません」へ変わり、信号だけが無い状態と区別できる
-        self.video.stop_capture();
-
-        // 既存のバックオフへ乗せる。**ここでデバイスを列挙しない。**
-        // 対象が戻っているかは `start_capture` の中の列挙（実測 1〜3ms）が
-        // 確かめる。再試行の間隔は最大 5 秒で頭打ちなので、
-        // MediaFoundation への問い合わせもその頻度を超えない
-        self.last_video_target = None;
-        // 次に繋がったときは、同じ USB 機器の音声も戻っているとみなして
-        // 音声の再接続も要求する。起動時の接続と区別するためにここで立てる
-        self.video_reconnect_after_loss = true;
-        self.video_retry.request_now(config.video);
-        info!("映像デバイスの再接続を要求した");
-    }
-
-    /// 音声ストリームのエラーを拾って、必要なら開き直す。
-    fn monitor_audio_stream(&mut self) {
-        let auto_reconnect = self
-            .config
-            .as_ref()
-            .map(|config| config.auto_reconnect)
-            .unwrap_or(true);
-
-        if self.audio.take_stream_error() {
-            // エラーの内容自体は audio.rs が error! で残している
-            warn!("音声ストリームのエラーを検出したので切断として扱う");
-            // **旗は読んだ時点で下りている。** ここへ移しておかないと、
-            // 自動再接続が無効な間や下限に達していない間のエラーが消え、
-            // 誰も開き直さないまま音が戻らなくなる
-            self.audio_stream_error_pending = true;
-        }
-
-        let since_last = self
-            .last_audio_error_reconnect
-            .map(|reconnected_at| reconnected_at.elapsed());
-        match decide_audio_reconnect(self.audio_stream_error_pending, auto_reconnect, since_last) {
-            // 保留しているエラーが無い / 保留したまま待つ。
-            // 毎回通るのでログは出さない
-            AudioErrorAction::Idle | AudioErrorAction::Wait => return,
-            AudioErrorAction::Reconnect => {}
-        }
-
-        let Some(config) = self.config.clone() else {
-            return;
-        };
-
-        self.audio.stop_capture();
-        self.audio_stream_error_pending = false;
-        self.last_audio_error_reconnect = Some(Instant::now());
-        self.last_audio_target = None;
-        self.audio_retry.request_now(config.audio);
-        info!("音声デバイスの再接続を要求した");
-    }
-
-    /// 「既定のデバイス」設定が、Windows 側の既定切り替えに追従しているかを
-    /// 確認する。内部でタイマーを見て `DEFAULT_AUDIO_DEVICE_POLL_INTERVAL`
-    /// おきにしか動かない（#135）。
-    ///
-    /// cpal は WASAPI の `IMMNotificationClient` を公開しておらず、既定
-    /// デバイスの切り替えを通知では受け取れない。`default_input_device()` /
-    /// `default_output_device()` を都度問い合わせて名前を突き合わせるしかない。
-    fn poll_default_audio_device(&mut self) {
-        let elapsed = self.last_default_audio_check.map(|last| last.elapsed());
-        if !should_poll_default_audio_device(elapsed) {
-            return;
-        }
-        self.last_default_audio_check = Some(Instant::now());
-
-        // 既に音声の再接続を追いかけている最中なら何もしない。ストリームの
-        // エラーや映像復帰による再接続と要求が重なるのを防ぐ
-        if self.audio_retry.is_active() {
-            return;
-        }
-
-        let Some(config) = self.config.clone() else {
-            return;
-        };
-        let (configured_input, configured_output, _, _) = config.audio.clone();
-        let track_input = configured_input.is_none();
-        let track_output = configured_output.is_none();
-        if !track_input && !track_output {
-            // 入出力とも明示的にデバイスを選んでいるので、追いかける対象が無い
-            return;
-        }
-
-        // まだ何も開けていない（起動直後・再接続中）なら、開いた時点の名前が
-        // 無いので比べようがない
-        let Some(active) = self.audio.active() else {
-            return;
-        };
-
-        let input_switched = track_input
-            && default_audio_device_changed(
-                configured_input.as_deref(),
-                &active.input_device,
-                self.audio.default_input_device_name().as_deref(),
-            );
-        let output_switched = track_output
-            && default_audio_device_changed(
-                configured_output.as_deref(),
-                &active.output_device,
-                self.audio.default_output_device_name().as_deref(),
-            );
-        if !input_switched && !output_switched {
-            return;
-        }
-
-        info!(
-            "Windows 側の既定音声デバイスが切り替わったので再接続する（入力: {}, 出力: {}）",
-            input_switched, output_switched
-        );
-
-        // 「既定のデバイス」のキャッシュキーは切り替わっても同じ文字列
-        // （`DEFAULT_DEVICE_KEY`）のままなので、古い物理デバイスの対応設定が
-        // 残ってしまう。取り直さないと、新しい既定デバイスが対応しない
-        // サンプリングレートやチャンネル数のまま開こうとしうる
-        let default_key = audio::cache_key(None);
-        if input_switched {
-            self.audio_capabilities
-                .remove(&(AudioDirection::Input, default_key.clone()));
-        }
-        if output_switched {
-            self.audio_capabilities
-                .remove(&(AudioDirection::Output, default_key));
-        }
-
-        self.audio.stop_capture();
-        self.last_audio_target = None;
-        self.audio_retry.request_now(config.audio);
-    }
-
     /// ストリームを閉じる。スレッドを抜ける直前に呼ぶ。
     fn shutdown(&mut self) {
         self.video.stop_capture();
@@ -587,11 +389,103 @@ impl WorkerState {
     }
 }
 
+/// テストの組み立てを 1 か所に置く。**`super::worker_timers` のテストからも使う。**
+///
+/// `WorkerState` の中身はこのファイルが持つので、モックを載せた状態を作る役も
+/// ここに置く。`tick` を駆動するテストは監視の本体と同じ `worker_timers.rs` に
+/// あり、そちらからこれらを呼ぶ。
+#[cfg(test)]
+pub(super) mod testing {
+    use super::super::backend::mock::{MockAudioBackend, MockVideoBackend};
+    use super::*;
+    use crate::settings::DEFAULT_BUFFER_MS;
+    use std::sync::mpsc::channel;
+    use std::sync::RwLock;
+
+    /// モックのバックエンドを載せた `WorkerState` を、スレッドを起こさずに作る。
+    ///
+    /// **実時間を進めずに `tick` を回すためのもの。** 本物のループ
+    /// （`run`）は `Instant::now()` で駆動するが、こちらはテストが渡した
+    /// 時刻をそのまま使えるので、バックオフの待ち時間だけ「進めた」ことに
+    /// できる。
+    pub(in crate::app) fn mock_state(
+        video: &MockVideoBackend,
+        audio: &MockAudioBackend,
+    ) -> (WorkerState, std::sync::mpsc::Receiver<DeviceEvent>) {
+        state_with(Box::new(video.clone()), Box::new(audio.clone()))
+    }
+
+    /// 任意のバックエンド（フェイクなど）を載せた `WorkerState` を作る。
+    /// 使い方は `mock_state` と同じ
+    pub(in crate::app) fn state_with(
+        video: Box<dyn VideoBackend>,
+        audio: Box<dyn AudioBackend>,
+    ) -> (WorkerState, std::sync::mpsc::Receiver<DeviceEvent>) {
+        let (event_tx, event_rx) = channel();
+        let state = WorkerState::new(
+            video,
+            audio,
+            Arc::new(AudioControls::default()),
+            event_tx,
+            Arc::new(RwLock::new(DeviceSnapshot::default())),
+            RepaintWaker::new(),
+        );
+        (state, event_rx)
+    }
+
+    /// 届いているイベントを全て取り出す。
+    pub(in crate::app) fn drain(
+        events: &std::sync::mpsc::Receiver<DeviceEvent>,
+    ) -> Vec<DeviceEvent> {
+        events.try_iter().collect()
+    }
+
+    /// 設定を適用する。`WorkerState::handle` はこのファイルの私有なので、
+    /// 他のファイルのテストからはここを通す。
+    pub(in crate::app) fn apply_config(
+        state: &mut WorkerState,
+        config: DeviceConfig,
+        initial: bool,
+    ) {
+        state.handle(DeviceCommand::ApplyConfig {
+            config: Box::new(config),
+            initial,
+        });
+    }
+
+    /// デバイス名だけを指定した `DeviceConfig` を作る。
+    pub(in crate::app) fn config_for(
+        video_device: Option<&str>,
+        input_device: Option<&str>,
+    ) -> DeviceConfig {
+        DeviceConfig {
+            video: (
+                video_device.map(str::to_string),
+                None,
+                None,
+                None,
+                crate::settings::VideoBackendSetting::Auto,
+            ),
+            audio: (
+                input_device.map(str::to_string),
+                None,
+                None,
+                None,
+                DEFAULT_BUFFER_MS,
+            ),
+            auto_reconnect: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::backend::mock::{MockAudioBackend, MockBackends, MockVideoBackend};
+    use super::super::backend::SystemBackends;
+    use super::testing::{config_for, drain, mock_state};
     use super::*;
     use crate::audio::AudioControls;
-    use crate::video::VideoFrames;
+    use crate::video::{SharedColorConversion, VideoFrames};
     use std::sync::mpsc::channel;
     use std::sync::RwLock;
 
@@ -615,6 +509,8 @@ mod tests {
         commands: std::sync::mpsc::Sender<DeviceCommand>,
         events: std::sync::mpsc::Receiver<DeviceEvent>,
         snapshot: SharedSnapshot,
+        /// ワーカーと共有している音量・ミュート。最小化中のホットキーの確認に使う
+        audio_controls: Arc<AudioControls>,
         handle: std::thread::JoinHandle<()>,
     }
 
@@ -635,35 +531,37 @@ mod tests {
     /// `ApplyConfig` を送ってからなので、存在しないデバイス名を渡せば
     /// CI でも失敗経路をなぞれる。
     fn spawn_worker() -> Harness {
+        spawn_worker_with(Box::new(SystemBackends))
+    }
+
+    /// バックエンドを指定してワーカーを起動する。
+    fn spawn_worker_with(backends: Box<dyn DeviceBackends>) -> Harness {
         let (command_tx, command_rx) = channel();
         let (event_tx, event_rx) = channel();
         let snapshot: SharedSnapshot = Arc::new(RwLock::new(DeviceSnapshot::default()));
         let thread_snapshot = Arc::clone(&snapshot);
+        let audio_controls = Arc::new(AudioControls::default());
+        let thread_controls = Arc::clone(&audio_controls);
         let handle = std::thread::spawn(move || {
             run(
                 command_rx,
                 event_tx,
                 thread_snapshot,
-                VideoFrames::new(),
-                Arc::new(SharedColorConversion::new()),
-                Arc::new(AudioControls::default()),
-                RepaintWaker::new(),
+                BackendShared {
+                    frames: VideoFrames::new(),
+                    color_conversion: Arc::new(SharedColorConversion::new()),
+                    audio_controls: thread_controls,
+                    repaint_waker: RepaintWaker::new(),
+                },
+                backends,
             );
         });
         Harness {
             commands: command_tx,
             events: event_rx,
             snapshot,
+            audio_controls,
             handle,
-        }
-    }
-
-    /// デバイス名だけを指定した `DeviceConfig` を作る。
-    fn config_for(video_device: Option<&str>, input_device: Option<&str>) -> DeviceConfig {
-        DeviceConfig {
-            video: (video_device.map(str::to_string), None, None, None),
-            audio: (input_device.map(str::to_string), None, None, None),
-            auto_reconnect: false,
         }
     }
 
@@ -671,6 +569,73 @@ mod tests {
     fn worker_shutdown_command_stops_the_thread() {
         // `on_exit` が待てること。止まらないとアプリが終わらない
         spawn_worker().shutdown();
+    }
+
+    /// イベントが 1 つ届くまで待つ。CI の遅さを見込んで長めに待つ
+    fn wait_for_event(worker: &Harness) -> DeviceEvent {
+        worker
+            .events
+            .recv_timeout(Duration::from_secs(5))
+            .expect("イベントが届くこと")
+    }
+
+    #[test]
+    fn worker_adjust_volume_changes_the_shared_value_and_reports_the_delta() {
+        // 最小化中のホットキーの経路。デバイスを開いていなくても効くこと
+        let worker = spawn_worker();
+        worker.audio_controls.set_volume(100.0);
+
+        worker
+            .commands
+            .send(DeviceCommand::AdjustVolume(10.0))
+            .expect("コマンドを送れる");
+
+        match wait_for_event(&worker) {
+            DeviceEvent::VolumeAdjusted(delta) => assert_eq!(delta, 10.0),
+            other => panic!("音量の変更が返らない: {:?}", other),
+        }
+        // 出力コールバックが読む値が既に変わっていること（聞こえ方が先に変わる）
+        assert!(
+            (worker.audio_controls.volume_percent() - 110.0).abs() < 0.01,
+            "音量が変わっていない: {}",
+            worker.audio_controls.volume_percent()
+        );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn worker_adjust_volume_releases_mute() {
+        // UI 側の `adjust_volume` と同じ扱い。解除しないと
+        // 「上げたのに鳴らない」状態になる
+        let worker = spawn_worker();
+        worker.audio_controls.set_muted(true);
+
+        worker
+            .commands
+            .send(DeviceCommand::AdjustVolume(-10.0))
+            .expect("コマンドを送れる");
+        wait_for_event(&worker);
+
+        assert!(!worker.audio_controls.muted());
+        worker.shutdown();
+    }
+
+    #[test]
+    fn worker_toggle_mute_flips_the_shared_value() {
+        let worker = spawn_worker();
+        assert!(!worker.audio_controls.muted());
+
+        worker
+            .commands
+            .send(DeviceCommand::ToggleMute)
+            .expect("コマンドを送れる");
+
+        match wait_for_event(&worker) {
+            DeviceEvent::MuteToggled => {}
+            other => panic!("ミュートの切替が返らない: {:?}", other),
+        }
+        assert!(worker.audio_controls.muted());
+        worker.shutdown();
     }
 
     #[test]
@@ -728,5 +693,104 @@ mod tests {
             .send(DeviceCommand::ReconnectNow)
             .expect("送信できる");
         worker.shutdown();
+    }
+
+    #[test]
+    fn worker_thread_opens_the_injected_backend() {
+        // バックエンドの差し替えがスレッド越しにも効くこと。
+        // **ここだけは本物のループ（`run`）を回す。** 以降のテストは
+        // `WorkerState` を直接触るので、`DeviceBackends` を経由する道筋は
+        // ここで押さえておく
+        let backends = MockBackends::default();
+        backends.video.with(|state| {
+            state.devices = vec![("モックカメラ".to_string(), "説明".to_string())];
+        });
+        let worker = spawn_worker_with(Box::new(backends.clone()));
+
+        worker
+            .commands
+            .send(DeviceCommand::ApplyConfig {
+                config: Box::new(config_for(Some("モックカメラ"), Some("モック入力"))),
+                initial: false,
+            })
+            .expect("送信できる");
+
+        loop {
+            if matches!(wait_for_event(&worker), DeviceEvent::VideoConnected) {
+                break;
+            }
+        }
+        assert!(
+            backends.video.with(|state| state.capturing),
+            "実機ではなくモックを開いていること"
+        );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn worker_refresh_device_lists_returns_the_backend_lists() {
+        // 列挙結果をモックで差し替えて、そのまま UI へ返ることを見る
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| {
+            state.devices = vec![("モックカメラ".to_string(), "説明".to_string())];
+        });
+        audio.with(|state| {
+            state.input_devices = vec!["モック入力".to_string()];
+            state.output_devices = vec!["モック出力".to_string()];
+        });
+        let (mut state, events) = mock_state(&video, &audio);
+
+        state.handle(DeviceCommand::RefreshDeviceLists);
+
+        match drain(&events).into_iter().next() {
+            Some(DeviceEvent::DeviceLists {
+                video,
+                input,
+                output,
+            }) => {
+                assert_eq!(
+                    video,
+                    vec![("モックカメラ".to_string(), "説明".to_string())]
+                );
+                assert_eq!(input, vec!["モック入力".to_string()]);
+                assert_eq!(output, vec!["モック出力".to_string()]);
+            }
+            other => panic!("デバイス一覧が返らない: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn worker_initial_config_fills_in_the_first_enumerated_devices() {
+        // 起動直後の 1 回だけ、未設定のデバイス名を列挙結果の先頭で埋める。
+        // **出力だけは埋めない**（既定のスピーカーへ任せる）
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| {
+            state.devices = vec![("モックカメラ".to_string(), "説明".to_string())];
+        });
+        audio.with(|state| {
+            state.input_devices = vec!["モック入力".to_string()];
+            state.output_devices = vec!["モック出力".to_string()];
+        });
+        let (mut state, events) = mock_state(&video, &audio);
+
+        state.handle(DeviceCommand::ApplyConfig {
+            config: Box::new(config_for(None, None)),
+            initial: true,
+        });
+
+        match drain(&events).into_iter().next() {
+            Some(DeviceEvent::DefaultDevicesResolved { video, input }) => {
+                assert_eq!(video.as_deref(), Some("モックカメラ"));
+                assert_eq!(input.as_deref(), Some("モック入力"));
+            }
+            other => panic!("埋めた名前が返らない: {:?}", other),
+        }
+        // 往復を待たずに、その場の設定も書き換わっていること
+        let config = state.config.as_ref().expect("設定を覚えていること");
+        assert_eq!(config.video.0.as_deref(), Some("モックカメラ"));
+        assert_eq!(config.audio.0.as_deref(), Some("モック入力"));
+        assert_eq!(config.audio.1, None, "出力は既定のままにすること");
     }
 }

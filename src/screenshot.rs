@@ -1,9 +1,74 @@
+use crate::i18n;
 use crate::video::VideoFrame;
 use log::info;
 use rodio::{Decoder, OutputStream, Sink};
 use std::borrow::Cow;
+use std::fmt;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+
+/// スクリーンショットまわりの処理が失敗した理由。
+///
+/// クリップボードへのコピーと効果音の読み込みを 1 つの enum にまとめてある。
+/// どちらも `ErrorSource::Screenshot` として同じ経路で表示され、呼び出し側は
+/// 出力先の種類で処理を分けないため（`app::screenshot` の
+/// `summarize_screenshot_delivery`）。
+///
+/// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
+/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScreenshotError {
+    /// 幅か高さが 0 のフレームを渡された
+    EmptyFrame { width: usize, height: usize },
+    /// 幅 × 高さ × 3 が `usize` に収まらない
+    FrameTooLarge { width: usize, height: usize },
+    /// 幅と高さから決まる長さに対して画素が足りない
+    FrameTooShort {
+        width: usize,
+        height: usize,
+        len: usize,
+    },
+    /// クリップボードを開けない（他のアプリが掴んでいる場合など）
+    ClipboardOpenFailed(String),
+    /// クリップボードを開けたが画像を書き込めない
+    ClipboardWriteFailed(String),
+    /// 効果音ファイルが見つかったのに読めない。既定の効果音へ倒してある
+    SoundFileUnreadable { path: PathBuf, source: String },
+    /// 効果音ファイルは読めたが音声としてデコードできない（拡張子だけ mp3 など）。
+    /// 既定音へは倒さず、撮影時は無音になる（`docs/design/assets.md`）
+    SoundFileUndecodable { path: PathBuf, source: String },
+}
+
+impl fmt::Display for ScreenshotError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            ScreenshotError::EmptyFrame { width, height } => {
+                i18n::screenshot_empty_frame(*width, *height)
+            }
+            ScreenshotError::FrameTooLarge { width, height } => {
+                i18n::screenshot_frame_too_large(width, height)
+            }
+            ScreenshotError::FrameTooShort { width, height, len } => {
+                i18n::screenshot_frame_too_short(*width, *height, *len)
+            }
+            ScreenshotError::ClipboardOpenFailed(source) => {
+                i18n::screenshot_clipboard_open_failed(source)
+            }
+            ScreenshotError::ClipboardWriteFailed(source) => {
+                i18n::screenshot_clipboard_write_failed(source)
+            }
+            ScreenshotError::SoundFileUnreadable { path, source } => {
+                i18n::sound_file_unreadable(path.display(), source)
+            }
+            ScreenshotError::SoundFileUndecodable { path, source } => {
+                i18n::sound_file_undecodable(path.display(), source)
+            }
+        };
+        f.write_str(&text)
+    }
+}
+
+impl std::error::Error for ScreenshotError {}
 
 // 既定の効果音。実行ファイルに埋め込む。
 // 既定値が "sound/SS.mp3" というカレントディレクトリ基準の相対パスだったため、
@@ -28,7 +93,9 @@ pub enum SoundSource {
 // 見つからない場合は無音ではなく埋め込みの既定音へ倒す。ログの出口が無い現状では、
 // 無音にするとユーザーに原因を伝える手段が無く、故障と区別が付かないため。
 // 効果音そのものを止めたい場合は、設定の sound_file を None にする（設定画面の
-// 「クリア」）。その場合はこの関数が呼ばれない。
+// 「効果音を鳴らさない」）。その場合はこの関数が呼ばれない。
+// 既定値 settings::DEFAULT_SOUND_FILE はファイルとして配布していないので、
+// ここで埋め込みの既定音へ倒れることが「既定（内蔵）」の効果音になる。
 //
 // exists を引数で受けるのはテストのため。実行時は |path| path.exists() を渡す。
 pub fn resolve_sound_path(
@@ -89,13 +156,13 @@ fn exe_dir() -> Option<PathBuf> {
 ///
 /// 画は圧縮せずそのまま渡す。保存形式と JPEG 品質はファイルへ出すときだけの
 /// 設定で、クリップボードには効かない。
-pub fn copy_frame_to_clipboard(frame: &VideoFrame) -> Result<(), String> {
+pub fn copy_frame_to_clipboard(frame: &VideoFrame) -> Result<(), ScreenshotError> {
     let bytes = rgb_to_rgba(&frame.data, frame.width, frame.height)?;
 
     // Clipboard はスレッドごとに作る。Windows では OpenClipboard が呼んだ
     // スレッドに紐づくため、他スレッドで作ったものを持ち回せない
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|e| format!("クリップボードを開けない: {}", e))?;
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|e| ScreenshotError::ClipboardOpenFailed(e.to_string()))?;
 
     clipboard
         .set_image(arboard::ImageData {
@@ -103,19 +170,16 @@ pub fn copy_frame_to_clipboard(frame: &VideoFrame) -> Result<(), String> {
             height: frame.height,
             bytes: Cow::Owned(bytes),
         })
-        .map_err(|e| format!("クリップボードへ画像を書き込めない: {}", e))
+        .map_err(|e| ScreenshotError::ClipboardWriteFailed(e.to_string()))
 }
 
 /// RGB の画素列を、`arboard` が要求する RGBA へ広げる。
 ///
 /// 不透明として扱うのでアルファは常に 255。キャプチャーした映像に透過は無く、
 /// 0 を入れると貼り付け先によっては全面が透明になる。
-fn rgb_to_rgba(rgb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, String> {
+fn rgb_to_rgba(rgb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, ScreenshotError> {
     if width == 0 || height == 0 {
-        return Err(format!(
-            "大きさのない映像フレームはクリップボードへコピーできない: {}x{}",
-            width, height
-        ));
+        return Err(ScreenshotError::EmptyFrame { width, height });
     }
 
     // 1080p でも 1920*1080*3 で usize には十分収まるが、壊れた値が来たときに
@@ -123,15 +187,14 @@ fn rgb_to_rgba(rgb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, Strin
     let needed = width
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(3))
-        .ok_or_else(|| format!("画像として扱えない大きさのフレーム: {}x{}", width, height))?;
+        .ok_or(ScreenshotError::FrameTooLarge { width, height })?;
 
     if rgb.len() < needed {
-        return Err(format!(
-            "映像フレームの画素が足りない: {}x{} に対して {} バイト",
+        return Err(ScreenshotError::FrameTooShort {
             width,
             height,
-            rgb.len()
-        ));
+            len: rgb.len(),
+        });
     }
 
     let mut rgba = Vec::with_capacity(needed / 3 * 4);
@@ -147,24 +210,41 @@ fn rgb_to_rgba(rgb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, Strin
 /// スクリーンショットの効果音を持つ。
 ///
 /// **ホットキーの登録と押下の検出は持たない。** グローバルホットキーは
-/// スクリーンショット以外のアクションにも割り当てられるため、`hotkey.rs` の
+/// スクリーンショット以外のアクションにも割り当てられるため、`hotkey/` の
 /// `HotkeyManager` が一手に扱う。
+///
+/// **ファイルの読み込みはしない。** 読み込みは `app::screenshot_sound` が
+/// 別スレッドで行い、ここには番号の払い出し（`begin_load`）と結果の反映
+/// （`finish_load`）だけを置く。大きなファイルや遅いドライブで UI スレッドが
+/// 止まらないようにするため（Issue #214）。
 pub struct ScreenshotManager {
     sound_data: Option<Vec<u8>>,
+    // 適用の読み込み要求。テスト再生の要求とは別に数える
+    loads: SoundLoadRequests,
+    // 設定画面の「テスト再生」の要求。適用済みの音には触れない
+    test_plays: SoundLoadRequests,
 }
 
 impl ScreenshotManager {
     pub fn new() -> Self {
-        Self { sound_data: None }
+        Self {
+            sound_data: None,
+            loads: SoundLoadRequests::default(),
+            test_plays: SoundLoadRequests::default(),
+        }
     }
 
     /// 効果音を捨て、以降スクリーンショットを無音にする。
     ///
-    /// 設定画面で効果音を「クリア」したときに呼ぶ。`set_sound_file` は
-    /// ファイルが見つからなければ埋め込みの既定音へ倒すため、「鳴らさない」は
-    /// 設定を `None` にすることでしか表せない。その `None` をここで実行時へ
-    /// 反映する。
+    /// 設定画面で「効果音を鳴らさない」を選んだときに呼ぶ。読み込み
+    /// （`load_sound_data`）はファイルが見つからなければ埋め込みの既定音へ
+    /// 倒すため、「鳴らさない」は設定を `None` にすることでしか表せない。
+    /// その `None` をここで実行時へ反映する。
+    ///
+    /// **読み込み中の要求も取り消す。** 取り消さないと、ファイルを選んだ直後に
+    /// 「鳴らさない」へ切り替えたとき、後から届いた読み込みで音が戻る。
     pub fn clear_sound(&mut self) {
+        self.loads.cancel();
         if self.sound_data.is_none() {
             return;
         }
@@ -172,53 +252,180 @@ impl ScreenshotManager {
         self.sound_data = None;
     }
 
-    // 効果音を読み込む。
-    //
-    // 相対パスは exe の置き場所を基準に解決し、見つからなければ埋め込みの
-    // 既定音を使う。そのため呼び出し後は必ず鳴らせる状態になっている。
-    // Err を返すのは、解決したファイルが存在したのに読めなかった場合だけ。
-    // このときも既定音を入れてあるので、鳴らないという結果にはならない。
-    pub fn set_sound_file(&mut self, sound_path: &Path) -> Result<(), String> {
-        match resolve_sound_path(sound_path, exe_dir().as_deref(), |path| path.exists()) {
-            SoundSource::Embedded => {
-                self.sound_data = Some(EMBEDDED_SOUND.to_vec());
-                Ok(())
-            }
-            SoundSource::File(path) => match std::fs::read(&path) {
-                Ok(data) => {
-                    self.sound_data = Some(data);
-                    Ok(())
-                }
-                Err(e) => {
-                    self.sound_data = Some(EMBEDDED_SOUND.to_vec());
-                    Err(format!(
-                        "効果音ファイル {} を読み込めないため既定の効果音を使う: {}",
-                        path.display(),
-                        e
-                    ))
-                }
-            },
+    /// 適用する効果音の読み込みを始める。返した番号を読み込みの結果に添えて
+    /// `finish_load` へ渡す。これより前に始めた読み込みの結果は以降捨てられる。
+    ///
+    /// 結果が届くまでは直前の音（無ければ内蔵音）で鳴らす（`select_shot_sound`）。
+    pub fn begin_load(&mut self) -> u64 {
+        self.loads.issue()
+    }
+
+    /// 読み込んだ効果音を反映する。最新の要求の結果でなければ何もせず
+    /// `false` を返す。
+    pub fn finish_load(&mut self, id: u64, data: Vec<u8>) -> bool {
+        if !self.loads.complete(id) {
+            return false;
         }
+        self.sound_data = Some(data);
+        true
+    }
+
+    /// テスト再生の読み込みを始める。適用済みの音には触れない。
+    pub fn begin_test_play(&mut self) -> u64 {
+        self.test_plays.issue()
+    }
+
+    /// テスト再生の読み込み結果を鳴らしてよいかを判定する。
+    ///
+    /// 「テスト再生」を続けて押した場合、鳴らすのは最後の 1 回だけ。
+    /// 古い結果まで鳴らすと、ファイルを選び直す前の音が重なって聞こえる。
+    pub fn finish_test_play(&mut self, id: u64) -> bool {
+        self.test_plays.complete(id)
     }
 
     pub fn play_screenshot_sound(&self, volume: f32) {
-        if let Some(sound_data) = &self.sound_data {
-            let sound_data = sound_data.clone();
-            let volume = (volume / 100.0).clamp(0.0, 2.0); // パーセンテージを0.0-2.0範囲に変換
-            std::thread::spawn(move || {
-                if let Ok((_stream, stream_handle)) = OutputStream::try_default() {
-                    if let Ok(sink) = Sink::try_new(&stream_handle) {
-                        sink.set_volume(volume);
-                        let cursor = Cursor::new(sound_data);
-                        if let Ok(decoder) = Decoder::new(cursor) {
-                            sink.append(decoder);
-                            sink.sleep_until_end();
-                        }
-                    }
-                }
-            });
+        if let Some(sound_data) =
+            select_shot_sound(self.sound_data.as_deref(), self.loads.is_pending())
+        {
+            play_sound_data(sound_data.to_vec(), volume);
         }
     }
+}
+
+/// 効果音の読み込み要求に振る番号と、結果を受け入れてよいかの判定。
+///
+/// 読み込みは要求ごとに別スレッドで行うので、先に出した要求の結果が後から
+/// 届くことがある（大きいファイルから小さいファイルへ選び直した場合など）。
+/// **受け入れるのは最後に出した要求の結果だけ。** 古い結果を反映すると、
+/// ユーザーが最後に選んだものと違う音に戻ってしまう。
+#[derive(Debug, Default)]
+struct SoundLoadRequests {
+    // 次に振る番号。巻き戻さない
+    next: u64,
+    // 結果を待っている要求。None は待っていないか、取り消したことを表す
+    pending: Option<u64>,
+}
+
+impl SoundLoadRequests {
+    /// 新しい要求に番号を振る。これより前の要求の結果は以降すべて捨てられる。
+    fn issue(&mut self) -> u64 {
+        let id = self.next;
+        self.next = self.next.wrapping_add(1);
+        self.pending = Some(id);
+        id
+    }
+
+    /// 届いた結果を受け入れてよいかを判定し、受け入れるなら待ちを終える。
+    fn complete(&mut self, id: u64) -> bool {
+        if !is_latest_sound_load(self.pending, id) {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
+
+    /// 待っている要求を取り消す。以降に届いた結果はどれも受け入れない。
+    fn cancel(&mut self) {
+        self.pending = None;
+    }
+
+    /// 結果を待っている要求があるか。
+    fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+}
+
+/// 届いた読み込み結果 `id` が、待っている最新の要求 `pending` のものかを判定する。
+///
+/// 待っていない（`None`）ときは何も受け入れない。取り消し（「効果音を鳴らさない」
+/// への切り替え）のあとに古い読み込みが届いても、音を復活させないため。
+fn is_latest_sound_load(pending: Option<u64>, id: u64) -> bool {
+    pending == Some(id)
+}
+
+/// 撮影時に鳴らす音を選ぶ。`None` なら鳴らさない。
+///
+/// `applied` は適用済みの音（`None` は「鳴らさない」か、まだ何も読み込めて
+/// いない）、`loading` は適用の読み込みが終わっていないか。
+///
+/// **読み込み中は直前の音で鳴らし、直前の音が無ければ内蔵音で鳴らす。**
+/// 読み込みは別スレッドなので、起動直後や適用の直後に撮ると結果がまだ
+/// 届いていないことがある。そこで無音にすると、撮れたのかが分からない。
+/// 読み込み中でなく音も無いのは「鳴らさない」を選んだときだけ。
+fn select_shot_sound(applied: Option<&[u8]>, loading: bool) -> Option<&[u8]> {
+    match (applied, loading) {
+        (Some(data), _) => Some(data),
+        (None, true) => Some(EMBEDDED_SOUND),
+        (None, false) => None,
+    }
+}
+
+/// 設定の効果音パスから、鳴らす音のデータを読み込む。
+///
+/// **`ScreenshotManager` の状態には触れない。** 適用（`apply_settings`）と
+/// 設定画面の「テスト再生」の両方がこれを通すので、テスト再生と撮影時で
+/// 音の選び方が揃う。
+///
+/// **UI スレッドから呼ばない。** ファイル全体を読んでデコードを試すので、
+/// 大きなファイルや遅いドライブでは描画が止まる。`app::screenshot_sound` が
+/// 別スレッドから呼ぶ（Issue #214）。
+///
+/// 解決の仕方は `resolve_sound_path` と同じで、見つからなければ埋め込みの
+/// 既定音を返す。ファイルがあるのに読めなかった場合も既定音を返し、
+/// その理由を 2 つ目の値で添える。どの場合もデータは必ず返るので、
+/// 呼び出し側は失敗を報告したうえでそのまま鳴らしてよい。
+pub fn load_sound_data(sound_path: &Path) -> (Vec<u8>, Option<ScreenshotError>) {
+    match resolve_sound_path(sound_path, exe_dir().as_deref(), |path| path.exists()) {
+        SoundSource::Embedded => (EMBEDDED_SOUND.to_vec(), None),
+        SoundSource::File(path) => match std::fs::read(&path) {
+            Ok(data) => {
+                // デコードできるかは選んだ時点（テスト再生と適用）で確かめる。
+                // 撮影時の再生スレッドは失敗を黙って捨てるため、ここで見ないと
+                // 無音の理由がどこにも出ない。データは差し替えない（撮影時は無音のまま）
+                let error = check_decodable(&data).err().map(|source| {
+                    ScreenshotError::SoundFileUndecodable {
+                        path: path.clone(),
+                        source,
+                    }
+                });
+                (data, error)
+            }
+            Err(e) => (
+                EMBEDDED_SOUND.to_vec(),
+                Some(ScreenshotError::SoundFileUnreadable {
+                    path,
+                    source: e.to_string(),
+                }),
+            ),
+        },
+    }
+}
+
+/// 効果音のデータを rodio がデコードできるかを確かめる。失敗時は理由を返す。
+fn check_decodable(data: &[u8]) -> Result<(), String> {
+    Decoder::new(Cursor::new(data.to_vec()))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// 効果音のデータを、別スレッドで 1 回鳴らす。
+///
+/// `volume` は設定画面と同じパーセント表記（100 で等倍、上限 200）。
+/// 再生の終わりを待たずに戻る。
+pub fn play_sound_data(sound_data: Vec<u8>, volume: f32) {
+    let volume = (volume / 100.0).clamp(0.0, 2.0); // パーセンテージを0.0-2.0範囲に変換
+    std::thread::spawn(move || {
+        if let Ok((_stream, stream_handle)) = OutputStream::try_default() {
+            if let Ok(sink) = Sink::try_new(&stream_handle) {
+                sink.set_volume(volume);
+                let cursor = Cursor::new(sound_data);
+                if let Ok(decoder) = Decoder::new(cursor) {
+                    sink.append(decoder);
+                    sink.sleep_until_end();
+                }
+            }
+        }
+    });
 }
 
 impl Default for ScreenshotManager {
@@ -368,7 +575,14 @@ mod tests {
 
         let err = rgb_to_rgba(&rgb, 2, 2).expect_err("エラーになること");
 
-        assert!(err.contains("画素が足りない"), "実際のメッセージ: {}", err);
+        assert_eq!(
+            err,
+            ScreenshotError::FrameTooShort {
+                width: 2,
+                height: 2,
+                len: 11,
+            }
+        );
     }
 
     #[test]
@@ -382,21 +596,239 @@ mod tests {
         // 壊れた値が来ても掛け算が一周して短い長さを通さないこと
         let err = rgb_to_rgba(&[0; 8], usize::MAX, 2).expect_err("エラーになること");
 
-        assert!(err.contains("扱えない大きさ"), "実際のメッセージ: {}", err);
+        assert_eq!(
+            err,
+            ScreenshotError::FrameTooLarge {
+                width: usize::MAX,
+                height: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn screenshot_error_display_keeps_the_numbers_and_the_underlying_reason() {
+        // 文言はそのままトーストに出る。大きさや下位のエラー文が落ちると
+        // 何が起きたのか分からなくなる
+        let too_short = ScreenshotError::FrameTooShort {
+            width: 2,
+            height: 2,
+            len: 11,
+        };
+        assert_eq!(
+            too_short.to_string(),
+            "映像フレームの画素が足りない: 2x2 に対して 11 バイト"
+        );
+
+        let clipboard = ScreenshotError::ClipboardOpenFailed("access denied".to_string());
+        assert_eq!(
+            clipboard.to_string(),
+            "クリップボードを開けない: access denied"
+        );
+
+        let sound = ScreenshotError::SoundFileUnreadable {
+            path: PathBuf::from("C:/sounds/SS.mp3"),
+            source: "permission denied".to_string(),
+        };
+        assert_eq!(
+            sound.to_string(),
+            "効果音ファイル C:/sounds/SS.mp3 を読み込めないため既定の効果音を使う: permission denied"
+        );
+    }
+
+    #[test]
+    fn screenshot_error_display_is_japanese_for_every_variant() {
+        // 英語の文言が混ざると、定型文と繋げたときに日本語と英語が並ぶ
+        let all = [
+            ScreenshotError::EmptyFrame {
+                width: 0,
+                height: 10,
+            },
+            ScreenshotError::FrameTooLarge {
+                width: usize::MAX,
+                height: 2,
+            },
+            ScreenshotError::FrameTooShort {
+                width: 2,
+                height: 2,
+                len: 11,
+            },
+            ScreenshotError::ClipboardOpenFailed("busy".to_string()),
+            ScreenshotError::ClipboardWriteFailed("busy".to_string()),
+            ScreenshotError::SoundFileUnreadable {
+                path: PathBuf::from("C:/sounds/SS.mp3"),
+                source: "missing".to_string(),
+            },
+            ScreenshotError::SoundFileUndecodable {
+                path: PathBuf::from("C:/sounds/SS.mp3"),
+                source: "unrecognized format".to_string(),
+            },
+        ];
+
+        for error in all {
+            let text = error.to_string();
+            assert!(!text.is_ascii(), "日本語が含まれていない: {text}");
+        }
+    }
+
+    #[test]
+    fn load_sound_data_readable_file_returns_its_bytes() {
+        // テスト再生でドラフトのファイルを選んだ場合。適用済みの音ではなく、
+        // 渡したファイルの中身そのものが返ること（Issue #204）
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("custom.mp3");
+        std::fs::write(&path, EMBEDDED_SOUND).expect("書き込めること");
+
+        let (data, error) = load_sound_data(&path);
+
+        assert_eq!(data, EMBEDDED_SOUND);
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn load_sound_data_undecodable_file_keeps_bytes_with_reason() {
+        // 拡張子だけ mp3 のファイルを選んだ場合（Issue #213）。
+        // 既定音へは倒さず中身をそのまま返し、トーストへ出す理由を添えること
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("fake.mp3");
+        std::fs::write(&path, b"not really mp3").expect("書き込めること");
+
+        let (data, error) = load_sound_data(&path);
+
+        assert_eq!(data, b"not really mp3");
+        assert!(
+            matches!(error, Some(ScreenshotError::SoundFileUndecodable { path: ref p, .. }) if *p == path),
+            "デコードできない理由が返ること: {error:?}"
+        );
+    }
+
+    #[test]
+    fn load_sound_data_default_path_returns_embedded_sound() {
+        // 「既定に戻す」が書く値。既定値のファイルは配布していないので、
+        // テスト再生でも撮影時と同じく内蔵音が鳴ること
+        let (data, error) = load_sound_data(Path::new(crate::settings::DEFAULT_SOUND_FILE));
+
+        assert_eq!(data, EMBEDDED_SOUND);
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn load_sound_data_unreadable_file_falls_back_with_reason() {
+        // 存在するのに読めないもの（ここではディレクトリ）を渡した場合。
+        // 内蔵音で鳴らせるデータと、トーストへ出す理由の両方が返ること
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+
+        let (data, error) = load_sound_data(dir.path());
+
+        assert_eq!(data, EMBEDDED_SOUND);
+        assert!(
+            matches!(error, Some(ScreenshotError::SoundFileUnreadable { ref path, .. }) if path == dir.path()),
+            "読めなかった理由が返ること: {error:?}"
+        );
     }
 
     #[test]
     fn clear_sound_discards_loaded_sound() {
         // 設定の効果音を「クリア」したセッションで鳴り続けていた不具合の再現。
-        // 空パスは埋め込みの既定音へ倒れるので、実ファイルは要らない
         let mut manager = ScreenshotManager::new();
-        manager
-            .set_sound_file(Path::new(""))
-            .expect("埋め込みの既定音は必ず読める");
+        let id = manager.begin_load();
+        assert!(manager.finish_load(id, EMBEDDED_SOUND.to_vec()));
         assert!(manager.sound_data.is_some());
 
         manager.clear_sound();
 
         assert!(manager.sound_data.is_none());
+    }
+
+    #[test]
+    fn is_latest_sound_load_matching_pending_returns_true() {
+        assert!(is_latest_sound_load(Some(3), 3));
+    }
+
+    #[test]
+    fn is_latest_sound_load_older_request_returns_false() {
+        // 先に出した要求の結果が後から届いた場合。最後の要求を上書きさせない
+        assert!(!is_latest_sound_load(Some(3), 2));
+    }
+
+    #[test]
+    fn is_latest_sound_load_nothing_pending_returns_false() {
+        // 取り消し後や、受け入れ済みの要求の結果がもう一度来た場合
+        assert!(!is_latest_sound_load(None, 0));
+    }
+
+    #[test]
+    fn finish_load_overlapping_requests_keeps_only_the_latest() {
+        // 同じファイルの読み込みが重なり、先の要求が後から終わった場合（Issue #214）。
+        // 後の要求の結果だけが反映され、遅れて届いた先の結果は捨てられること
+        let mut manager = ScreenshotManager::new();
+        let first = manager.begin_load();
+        let second = manager.begin_load();
+
+        assert!(manager.finish_load(second, b"second".to_vec()));
+        assert!(!manager.finish_load(first, b"first".to_vec()));
+
+        assert_eq!(manager.sound_data.as_deref(), Some(&b"second"[..]));
+    }
+
+    #[test]
+    fn finish_load_after_clear_sound_is_discarded() {
+        // ファイルを選んだ直後に「効果音を鳴らさない」へ切り替えた場合。
+        // 後から届いた読み込みで音が戻らないこと
+        let mut manager = ScreenshotManager::new();
+        let id = manager.begin_load();
+
+        manager.clear_sound();
+
+        assert!(!manager.finish_load(id, EMBEDDED_SOUND.to_vec()));
+        assert!(manager.sound_data.is_none());
+    }
+
+    #[test]
+    fn finish_test_play_repeated_clicks_play_only_the_last() {
+        // 「テスト再生」を続けて押した場合、鳴らすのは最後の 1 回だけ
+        let mut manager = ScreenshotManager::new();
+        let first = manager.begin_test_play();
+        let second = manager.begin_test_play();
+
+        assert!(!manager.finish_test_play(first));
+        assert!(manager.finish_test_play(second));
+        // 同じ結果が 2 度来ても 2 度は鳴らさない
+        assert!(!manager.finish_test_play(second));
+    }
+
+    #[test]
+    fn begin_test_play_does_not_disturb_applied_load() {
+        // テスト再生と適用は番号を別に数える。テスト再生を押しても
+        // 読み込み中の適用の結果が捨てられないこと
+        let mut manager = ScreenshotManager::new();
+        let load = manager.begin_load();
+        let _ = manager.begin_test_play();
+
+        assert!(manager.finish_load(load, b"applied".to_vec()));
+    }
+
+    #[test]
+    fn select_shot_sound_applied_sound_is_used_even_while_loading() {
+        // 読み込み中は直前の音で鳴らす
+        assert_eq!(
+            select_shot_sound(Some(b"previous"), true),
+            Some(&b"previous"[..])
+        );
+        assert_eq!(
+            select_shot_sound(Some(b"previous"), false),
+            Some(&b"previous"[..])
+        );
+    }
+
+    #[test]
+    fn select_shot_sound_loading_without_previous_uses_embedded() {
+        // 起動直後や「鳴らさない」から切り替えた直後。無音にせず内蔵音で鳴らす
+        assert_eq!(select_shot_sound(None, true), Some(EMBEDDED_SOUND));
+    }
+
+    #[test]
+    fn select_shot_sound_nothing_loaded_and_idle_is_silent() {
+        // 「効果音を鳴らさない」を選んでいる場合
+        assert_eq!(select_shot_sound(None, false), None);
     }
 }

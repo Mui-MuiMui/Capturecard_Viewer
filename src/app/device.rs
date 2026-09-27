@@ -75,6 +75,13 @@ impl CaptureCardViewer {
                 self.cached_input_devices = input;
                 self.cached_output_devices = output;
             }
+            DeviceEvent::VolumeAdjusted(delta) => {
+                // 最小化中にワーカーが代わりに実行した分を、UI 側にも同じ
+                // 経路で効かせる。音は既に変わっているので、ここで行うのは
+                // 設定への反映と OSD。**復帰したフレームで初めて届く**
+                self.adjust_volume(delta);
+            }
+            DeviceEvent::MuteToggled => self.toggle_mute(),
             DeviceEvent::DefaultDevicesResolved { video, input } => {
                 self.store_resolved_devices(video, input);
             }
@@ -183,40 +190,46 @@ impl CaptureCardViewer {
             // 2 秒ごとに unregister → register が走ってその瞬間のキー入力を
             // 取りこぼす
             self.apply_hotkey_assignments(&settings.hotkeys);
+            // フォーカスがあるときだけ反応するか。値を書くだけなので毎回渡す
+            self.hotkey_manager
+                .set_only_when_focused(settings.hotkey_settings.only_when_focused);
 
             // スクリーンショットの効果音
             //
-            // **`None`（クリア）も差分として扱う。** 以前は `if let Some(..)` で
-            // 包んでいたため、設定画面で「クリア」してもそのセッション中は
+            // **`None`（効果音を鳴らさない）も差分として扱う。** 以前は `if let Some(..)` で
+            // 包んでいたため、設定画面で効果音を外してもそのセッション中は
             // 効果音が鳴り続けていた
-            if let Ok(mut ss) = self.screenshot_manager.lock() {
-                // 無条件に呼ぶと 2 秒ごとに効果音ファイル全体を読み直すことになる
-                if Self::needs_reapply(
-                    initial,
-                    &settings.screenshot.sound_file,
-                    &self.last_sound_file,
-                ) {
-                    match &settings.screenshot.sound_file {
-                        Some(sf) => match ss.set_sound_file(sf) {
-                            Ok(()) => self.last_sound_file = Some(Some(sf.clone())),
-                            // 見つからない場合は埋め込みの既定音へ倒して Ok になる。
-                            // ここへ来るのはファイルがあるのに読めなかった場合なので、
-                            // last を空にして次の適用タイミングで読み直す
-                            Err(_) => self.last_sound_file = None,
-                        },
-                        None => {
-                            // 未選択は「鳴らさない」の意味。set_sound_file は
-                            // 見つからないファイルを既定音へ倒すので、無音は
-                            // ここでしか表せない
+            //
+            // 無条件に読むと 2 秒ごとに効果音ファイル全体を読み直すことになる
+            if Self::needs_reapply(
+                initial,
+                &settings.screenshot.sound_file,
+                &self.last_sound_file,
+            ) {
+                match &settings.screenshot.sound_file {
+                    Some(sf) => {
+                        // 読み込みは別スレッドで行い、結果は drain_sound_load_results が
+                        // 受け取る（app::screenshot_sound）。**要求した時点で適用済みに
+                        // する。** 結果を待ってからにすると、読み終わるまで 2 秒ごとに
+                        // 同じファイルの読み込みを積み増してしまう。
+                        // 読めなかった場合は受け取った側が last を空にして読み直させる
+                        self.request_sound_apply(sf);
+                        self.last_sound_file = Some(Some(sf.clone()));
+                    }
+                    None => {
+                        // 未選択は「鳴らさない」の意味。読み込みは見つからない
+                        // ファイルを既定音へ倒すので、無音はここでしか表せない。
+                        // 読み込み中の要求もここで取り消される
+                        if let Ok(mut ss) = self.screenshot_manager.lock() {
                             ss.clear_sound();
                             self.last_sound_file = Some(None);
+                        } else {
+                            warn!(
+                                "スクリーンショットの効果音の反映で screenshot_manager のロックを取得できない"
+                            );
                         }
                     }
                 }
-            } else {
-                warn!(
-                    "スクリーンショットの効果音の反映で screenshot_manager のロックを取得できない"
-                );
             }
         }
 

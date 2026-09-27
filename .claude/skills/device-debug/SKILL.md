@@ -5,13 +5,13 @@ description: キャプチャーデバイス / オーディオデバイス起因�
 
 # デバイス不具合の切り分け
 
-Capturecard_Viewer の不具合の大半は、映像（nokhwa / MediaFoundation）か音声（cpal / WASAPI）のどちらかでデバイスを開けていないことに帰着する。**推測で直さず、まずログで「どこまで進んだか」を確定させる。**
+Capturecard_Viewer の不具合の大半は、映像（nokhwa / MediaFoundation、名前に「(DirectShow)」が付くデバイスは DirectShow）か音声（cpal / WASAPI）のどちらかでデバイスを開けていないことに帰着する。**推測で直さず、まずログで「どこまで進んだか」を確定させる。**
 
 `docs/TROUBLESHOOTING.md` は利用者向けで、手元で試せる回避策を並べたもの。**このファイルは Claude が原因を特定するための手順**で、読者が違う。利用者に案内する内容は `docs/TROUBLESHOOTING.md` にだけ書き、ここには書かない。
 
 ## 前提
 
-ログの場所・レベル・世代管理は `CLAUDE.md` の「標準出力は届かない。ログは log クレートを使う」にある。ここでは繰り返さない。
+ログの場所・レベル・世代管理は `docs/design/logging.md` にある。ここでは繰り返さない。
 
 ## 手順 1: ログを取る
 
@@ -36,12 +36,21 @@ grep -E '\] capturecard_viewer(::| )' "$APPDATA/capturecard_viewer/logs/<ファ�
 | ターゲット | 何を出すか |
 |---|---|
 | `app::worker` | ワーカースレッドの起動と終了（`debug`） |
-| `app::worker_loop` | ワーカーの開始・停止、切断の検出、再接続の要求、既定デバイスの切り替え |
+| `app::worker_loop` | ワーカーの開始・停止、「デバイス再接続」の要求、最小化中のホットキー（音量・ミュート） |
+| `app::worker_timers` | 切断の検出、再接続の要求、既定デバイスの切り替え、音声のリサンプル比の補正 |
 | `app::worker_connect` | 接続の試行と成否、デバイス能力・対応設定の取得、既定デバイス名の確定 |
 | `app::device` | 起動直後の設定適用（`app` 側）。接続そのものは出さない |
 | `video` / `audio` | デバイスを開く処理の中身（列挙、`Camera::new`、選んだ設定、ストリームのエラー） |
 
-**`app::monitor` はログを出さない。** 切断や既定切り替えの「判定」だけを持つ純粋関数の置き場所で、ログは呼び出し側の `app::worker_loop` が出す。
+**まず列挙のログで台数を見る。** 起動時と、接続の失敗が 5 回目・10 回目・以後 10 回ごとに、`app::worker_connect` が `デバイスの列挙（起動時）: Media Foundation: N 台 [..]` の形で Media Foundation / DirectShow / 音声入力 / 音声出力を 1 行ずつ出す（列挙そのものに失敗した経路は `デバイスを列挙できない` の WARN）。設定の名前が一覧に無ければアプリの問題ではない。**0 台なら OS 側を確認する。**
+
+```powershell
+Get-PnpDevice -PresentOnly | Where-Object Class -in 'Camera','MEDIA'
+```
+
+ここに出ない（またはデバイスマネージャーで問題コード 45 = 未接続）なら、ケーブル・USB ポート・ドライバーの問題で、アプリ側を直しても戻らない。設定の名前が 5 回続けて一覧に無いときは `設定の映像デバイスが Windows 側にも見えていない` の WARN も出る（画面にも同じ案内が出る。`docs/design/reconnect.md` の「列挙の結果をログへ出し、Windows 側にも無ければ知らせる」）。
+
+**`app::monitor` はログを出さない。** 切断や既定切り替えの「判定」だけを持つ純粋関数の置き場所で、ログは呼び出し側の `app::worker_timers` が出す。
 
 ## 手順 2: 正常時の目安と突き合わせる
 
@@ -84,7 +93,7 @@ AVerMedia Live Gamer EXTREME 3 + Windows 11 での実測（2026-09、release ビ
 
 ## 手順 3: 待ちとリトライの実装を思い出す
 
-`src/app/worker_loop.rs` の `poll_connection()`、`src/app/worker_connect.rs` の `try_connect_video` / `try_connect_audio`、`src/app/retry.rs` の `ConnectRetry`。**`sleep` は使っていないので、リトライで秒単位止まることはない。** 「数秒〜ずっと応答しない」という報告が来たらリトライ以外を疑う。
+`src/app/worker_timers.rs` の `poll_connection()`、`src/app/worker_connect.rs` の `try_connect_video` / `try_connect_audio`、`src/app/retry.rs` の `ConnectRetry`。**`sleep` は使っていないので、リトライで秒単位止まることはない。** 「数秒〜ずっと応答しない」という報告が来たらリトライ以外を疑う。
 
 **デバイスを開く処理は専用のワーカースレッドにある。** UI スレッドは止まらないので、**「接続を試している間だけウィンドウが固まる」という症状はもう出ない。** 出るなら UI スレッド側に別の原因がある（`rfd` のファイルダイアログ、フォントの読み込みなど）。1 回の試行にかかる時間は次のとおりで、**この間はワーカーが次のコマンドを処理できない**（設定ダイアログでのデバイス切り替えがその分だけ遅れる）。
 
@@ -138,7 +147,7 @@ flowchart TD
 
 ### 映像が出ない
 
-`映像デバイスへの接続に失敗した（N 回目）: <理由>` の `<理由>` で分岐する。文字列は `src/video.rs` の `start_capture` が組み立てている。
+`映像デバイスへの接続に失敗した（N 回目）: <理由>` の `<理由>` で分岐する。文字列は `src/video/capture.rs` の `start_capture` が組み立てている。
 
 | 理由 | 起きていること | 次に見る |
 |---|---|---|
@@ -175,11 +184,27 @@ flowchart TD
 
 **`映像ストリームを開いた` の「実際の設定」に fps は載っていない。** `nokhwa-bindings-windows 0.4.6` の `format_refreshed` が `MF_MT_FRAME_RATE`（上位 32 ビットが分子、下位 32 ビットが分母）を `fps as u32` で読んでおり、整数フレームレートでは分母の 1 しか取れない。解像度とピクセルフォーマットは正しいので、その 2 つだけを載せている。**おおよそのフレームレートを知りたい場合は `trace` の `フレームが届いた` の行数を数える**（実測では 5.5 秒で 293 行 ≒ 53 枚/秒）。**これは処理できた枚数であって、デバイスが出した枚数ではない。** 捨てた枚数は数えていないので、入力の fps そのものを測る用途には使えない。
 
-**毎フレーム出るログを `info` 以上で足さないこと。** 1 行ごとにフラッシュしているため、1080p60 では毎秒 60 回のディスク書き込みになる。初回だけ出す判定は `video.rs` の `FirstTimeOnly` にまとめてある。
+#### 「(DirectShow)」のデバイスの場合
+
+名前に「(DirectShow)」が付くデバイスは Media Foundation を通らず、`src/video/directshow/` が開く（経路の説明は `docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」）。上の表の理由の文言は nokhwa のものなので当てはまらない。ログは次の順に出る（`debug` で見る）。
+
+| ログ | 意味 | 出ないときに疑うこと |
+|---|---|---|
+| `DirectShow の映像デバイスの一覧を取得した（N 件、…）: [...]` | `ICreateDevEnum` の列挙。表示名（「(DirectShow)」なし）がそのまま並ぶ | 一覧に無ければ DirectShow にも登録されていない。OBS の仮想カメラなら OBS 側で一度「仮想カメラ開始」を押したか（押すまで登録されない版がある） |
+| `DirectShow の形式を YUY2 1920x1080 60fps にした` | `IAMStreamConfig::SetFormat` が通った | 代わりに `受け取れる形式が無い` が出ていれば、デバイスが受け取れる 6 形式（YUY2 / NV12 / I420 / YV12 / MJPEG / RGB24）のどれも出さない（UYVY だけなど）。フィルターの既定の形式で繋ぎにいくが、変換フィルターが見つからなければ次の段で失敗する |
+| `DirectShow の上流と接続した: SampleFormat { … }` | 自前のレンダラーが接続を受けた。実際に流れてくる形式 | `RenderStream` が失敗している。`映像デバイスへの接続に失敗した` の理由に HRESULT の文言が出る |
+| `DirectShow のグラフを動かした（デバイスを開く …ms、接続 …ms、Run …ms）` | 動き出した。OBS の仮想カメラでは接続が 600ms 前後かかる | — |
+| `最初のフレームが届いた` | ここから先は Media Foundation と同じ `FrameSink` | 出なければ上流がサンプルを出していない |
+
+- 破棄の `warn` に `RGB24 のフレームが短いので破棄した` と `MJPEG のフレームを展開できないので破棄した` が加わる（どちらも初回だけ）
+- 列挙は実測 3ms 前後、能力の取得は 4ms 前後（OBS の仮想カメラ）
+- 実機テストは `cargo test directshow -- --ignored --nocapture --test-threads=1`（`src/video/directshow/mod.rs` の 4 つ。DirectShow のデバイスが 1 台要る。うち `link_state_reports_device_lost_when_the_source_goes_away` は 30 秒以内に OBS 側で「仮想カメラ停止」を押す手動操作が要り、押さなければ失敗する。それを除くなら `cargo test directshow -- --ignored --nocapture --test-threads=1 --skip device_lost`）
+
+**毎フレーム出るログを `info` 以上で足さないこと。** 1 行ごとにフラッシュしているため、1080p60 では毎秒 60 回のディスク書き込みになる。初回だけ出す判定は `video/frame_sink.rs` の `FirstTimeOnly` にまとめてある。
 
 ### 音が出ない
 
-映像と違い、`src/audio.rs` はデバイス選択から設定確定まで残している。上から順に追う。
+映像と違い、`src/audio/` はデバイス選択から設定確定まで残している。上から順に追う。
 
 1. `利用できる入力デバイス: [...]` — 設定の `input_device_name` がこの一覧に含まれているか。含まれていなければ `find_device_by_name` が失敗する
 2. `使用するデバイス - 入力: X、出力: Y` — 出力の設定が `None` のとき `Y` は Windows の既定の再生デバイス。**ユーザーが思っている出力先と違うことが多い**
@@ -194,7 +219,7 @@ flowchart TD
 `VideoCapture::get_device_capabilities` はデバイスワーカースレッドで走り、結果はチャネルで UI スレッドへ返る（`src/app/capabilities.rs` の `dispatch_capability_requests` → `src/app/worker_connect.rs` の `query_video_capabilities` → `src/app/device.rs` の `drain_device_events`）。
 
 - 成否は呼び出し側が残す。成功なら `info` の `デバイス能力を取得した: <デバイス名>（N フォーマット, N ms）`、失敗なら `warn` の `デバイス能力を取得できない: <デバイス名>: <理由>`。**失敗は設定ダイアログにも「⚠ 対応形式を取得できませんでした」として出る**ので、ユーザーの報告と突き合わせられる
-- フォーマットごとの件数は `video.rs` が `debug` の `デバイス能力の内訳（<デバイス名>、N ms）: YUY2: n 件、…` に残す。`Camera::new` の所要時間は `能力取得のためにデバイスを開いた（N ms）`
+- フォーマットごとの件数は `video/capabilities.rs` が `debug` の `デバイス能力の内訳（<デバイス名>、N ms）: YUY2: n 件、…` に残す。`Camera::new` の所要時間は `能力取得のためにデバイスを開いた（N ms）`
 - `get_device_capabilities` は `Camera::new` で**キャプチャ中のデバイスをもう一度開く**。ワーカースレッドなので UI は止まらないが、ここが伸びると「対応形式を取得中...」が長く出たままになり、その間ワーカーは次のコマンドを処理できない
 - 全フォーマットで `compatible_list_by_resolution` が失敗したときは、コード内にベタ書きされた既定の解像度リストが返る。**画面に出ている選択肢がデバイスの実際の能力とは限らない。** この差し替えは `warn` の `… の対応する組み合わせを取得できないので既定値を使う` で分かる
 
@@ -239,10 +264,10 @@ flowchart TD
 ## 実機テスト
 
 ```bash
-cargo test --locked -- --ignored
+cargo test --locked -- --ignored --test-threads=1
 ```
 
-**現時点で `#[ignore]` が付いているのは `src/video.rs` の `yuy2_to_rgb_naive_1080p_conversion_time` だけで、これは計測用でデバイスを使わない。** デバイスを開くテストはまだ 1 つもないので、このコマンドでデバイス起因の不具合は捕まらない。
+`#[ignore]` が付いているのは、計測用でデバイスを使わない `src/video/convert.rs` の `yuy2_to_rgb_naive_1080p_conversion_time` と、DirectShow のデバイスを列挙・能力取得・キャプチャ・喪失の検出をする `src/video/directshow/mod.rs` の 4 つ。**Media Foundation のデバイスを開くテストはまだ無い**ので、Media Foundation 側の不具合はこのコマンドでは捕まらない。DirectShow のテストは同じデバイスを並列に開くと対応形式が空で返ることがあるので、`--test-threads=1` を付ける。
 
 デバイスを開くテストを足すときの書き方は `.claude/skills/testing-conventions/SKILL.md` の「結合テスト（実機必須）」に従う。
 
@@ -281,11 +306,40 @@ diff /tmp/ccv-config-backup.toml "$APPDATA/capturecard_viewer/config/default-con
 
 ログは直近 10 回分しか残らない。**再現のために何度も起動すると、目的の回のログが押し出される。** 先に対象のログを別の場所へコピーする。
 
+## 実機が無いときの確認手順
+
+キャプチャーボードもオーディオ入力も無い環境（CI、手元に機器が無いとき）では、**フェイクデバイスで起動して、デバイス以外の部分を確かめる。** 仕組みと名乗るデバイスの一覧は `docs/design/device-worker.md` の「フェイクデバイス（#142）」にある。
+
+```bash
+CAPTURECARD_VIEWER_FAKE_DEVICES=2 CAPTURECARD_VIEWER_LOG=debug ./target/release/capturecard_viewer.exe
+```
+
+設定ファイルは「実機で再現を試すとき」と同じく**先に退避する。** 退避して空の状態で起動すると、「Fake Camera 1」「Fake Audio Input 1」が既定のデバイスとして選ばれ、設定へ書き戻される。**実機のデバイス名が書かれた設定のまま起動すると、フェイクはその名前を「見つからない」として再試行し続ける**（実機と同じ振る舞いで、別のデバイスへは倒さない）。その場合は設定画面でフェイクのデバイスを選ぶ。
+
+フェイクで起動できていれば、ログの先頭近くに `warn` で次の行が出る。**これが無ければ環境変数が効いていない**（値が 0・空・数字でない場合はフェイクを使わず実機で起動する）。
+
+```
+[WARN ] capturecard_viewer::app::backend - CAPTURECARD_VIEWER_FAKE_DEVICES が指定されているので、実機ではなくフェイクデバイスで動く（2 台、シナリオ: ...）
+```
+
+切断と再試行は `CAPTURECARD_VIEWER_FAKE_SCENARIO` で起こせる。
+
+| 確かめたいこと | 指定 | ログで見る行 |
+|---|---|---|
+| 接続失敗からの再試行（バックオフ） | `fail:3` | `フェイクの映像デバイスを開くのに失敗させた（シナリオ fail、残り N 回）` → `映像デバイスへの接続に失敗した（N 回目）` が 3 回 → `映像デバイスに接続した` |
+| 途絶の検出と自動復帰 | `disconnect:5` | `フェイクの映像を止めた（シナリオ disconnect、N 枚目まで）` → 約 3 秒後に `映像フレームが N ms 途絶えたので、…切断として扱う` → `フェイクの映像デバイスを開いた` |
+| 音声ストリームのエラーからの再接続 | `audio-error:5` | `フェイクの音声ストリームのエラーを立てた（シナリオ audio-error）` → `音声ストリームのエラーを検出したので切断として扱う` → `音声デバイスの再接続を要求した` → `フェイクの音声デバイスを開いた`（自動再接続が有効なとき） |
+| 両方 | `fail:2,disconnect:10` | 上の 2 つが順に出る |
+
+フェイクで確かめられるのは、ワーカーの再試行と切断監視、デバイス切替 UI（2 台を切り替えると カラーバー ⇄ 青のベタ塗り で見分けられる）、色空間・色レンジ・映像調整、統計 OSD、スクリーンショット、音量・ミュートと「接続状態」タブの音声の欄（出力に「Fake Audio Output 2」を選ぶとリサンプル比と水位が動く）。**Media Foundation / WASAPI そのものの挙動（列挙の遅さ、`Camera::new` の所要時間、MJPEG、デバイスが消えたときの cpal のエラー、手順 2 の実測値）はフェイクでは再現できない。** そこが疑わしいときは実機で確かめる。
+
+`cargo test` にもフェイクを使うテストが入っている（`src/video/test_pattern.rs` の色の期待値、`src/app/backend/fake.rs` のワーカーを通したテスト）。どれも `#[ignore]` なしで CI で走る。
+
 ## 調査で分かったことの置き場所
 
 - **利用者が自分で試せる回避策** → `docs/TROUBLESHOOTING.md`
 - **実測値・失敗パターン・ログの読み方** → このファイル
-- **設計判断（なぜその待ち時間なのか等）** → `CLAUDE.md` か `docs/ARCHITECTURE.md`
+- **設計判断（なぜその待ち時間なのか等）** → `docs/design/` か `docs/ARCHITECTURE.md`
 
 `git log` には書かない。新しいセッションで読まれない。
 

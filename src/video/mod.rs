@@ -1,0 +1,158 @@
+//! 映像のキャプチャと変換。
+//!
+//! 2,451 行あった `src/video.rs` を役割ごとに分けたもの。**分割は移動だけで、
+//! 挙動は変えていない。** 外から見える経路は下の `pub use` で分割前と同じに
+//! してある（`crate::video::VideoCapture` など）。
+//!
+//! | ファイル | 役割 |
+//! |---|---|
+//! | `capture.rs` | nokhwa の開閉、フレームコールバック、途絶の観測 |
+//! | `directshow/` | DirectShow の映像デバイス（Media Foundation に出ない仮想カメラや古いキャプチャーボード）。列挙・対応形式・フィルターグラフ・自前のレンダラーフィルター |
+//! | `fake.rs` | 実機なしで動くフェイクの映像デバイス（テストパターンを吐く）。環境変数で有効にしたときだけ使う |
+//! | `test_pattern.rs` | フェイクが吐くテストパターン（カラーバー、ベタ塗り、フレーム番号の焼き込み）の描画 |
+//! | `frame_sink.rs` | フレームコールバックの本体（YUY2 → RGB、`FrameBuffer` へ積む、UI を起こす）。実機とフェイクで共有する |
+//! | `capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の問い合わせ |
+//! | `color.rs` | 係数表とその選択、映像調整の畳み込み、設定の共有 |
+//! | `convert.rs` | YUY2 → RGB24 の画素変換と、DirectShow の RGB24 / MJPEG の展開 |
+//! | `frame_buffer.rs` | `FrameBuffer` と世代番号、観測値（`FrameStats`） |
+//!
+//! ここに置いてあるのは、どのファイルからも使う `VideoError` と
+//! ログの書式を揃えるための `elapsed_ms` だけ。
+
+// `FormatCapability`（`capabilities`）と `IntervalStats`（`frame_buffer`）は
+// 呼び出し側のテストからしか参照されない。再輸出すると、テストを含まない
+// ビルドで誰も使わない `pub use` が残って `unused_imports` の警告になるので、
+// この 2 つのモジュールだけ `pub(crate)` にして子モジュールの経路
+// （`crate::video::capabilities::FormatCapability`）で参照してもらう。
+// `src/ui/` と同じ考え方。`CaptureApi`（`capture`）も同じ理由で、外では
+// `ActiveVideo::api` の値として使うだけで名前を書くのはテストだけ
+pub(crate) mod capabilities;
+pub(crate) mod capture;
+mod color;
+mod convert;
+mod directshow;
+mod fake;
+pub(crate) mod frame_buffer;
+mod frame_sink;
+mod test_pattern;
+mod yuv420;
+
+pub use capabilities::{DeviceCapabilities, VideoMode};
+pub use capture::{ActiveVideo, VideoCapture, VideoLinkState};
+pub use color::{SharedColorConversion, VideoAdjustments};
+pub use directshow::{
+    display_name as directshow_display_name, friendly_name as directshow_friendly_name,
+    DirectShowCapture,
+};
+pub use fake::{FakeVideoCapture, FakeVideoOptions};
+pub use frame_buffer::{FrameStats, VideoFrame, VideoFrames};
+
+use std::fmt;
+use std::time::Instant;
+
+use crate::i18n::{self, Text};
+
+/// 映像デバイスの操作が失敗した理由。
+///
+/// **文字列ではなく種別で返す。** 呼び出し側（`app::worker_connect`）が
+/// 「デバイスが見つからない」と「ストリームを開けない」を区別できるようにする
+/// ため。下位のエラーは `nokhwa` の型をそのまま持ち回すと公開 API に
+/// nokhwa が漏れるので、文字列に落として持たせる。
+///
+/// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
+/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoError {
+    /// デバイスの列挙に失敗した
+    DeviceQueryFailed(String),
+    /// 設定に書かれた名前のデバイスが列挙結果に無い
+    DeviceNotFound(String),
+    /// デバイスが 1 台も見つからない（名前が未指定のとき）
+    NoDevices,
+    /// デバイスは見つかったが開けなかった
+    CameraOpenFailed { device: String, source: String },
+    /// デバイスは開けたがストリームを開始できなかった
+    StreamOpenFailed { device: String, source: String },
+}
+
+impl fmt::Display for VideoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            VideoError::DeviceQueryFailed(source) => i18n::video_device_query_failed(source),
+            VideoError::DeviceNotFound(name) => i18n::video_device_not_found(name),
+            VideoError::NoDevices => Text::VideoNoDevices.get().to_string(),
+            VideoError::CameraOpenFailed { device, source } => {
+                i18n::video_camera_open_failed(device, source)
+            }
+            VideoError::StreamOpenFailed { device, source } => {
+                i18n::video_stream_open_failed(device, source)
+            }
+        };
+        f.write_str(&text)
+    }
+}
+
+impl std::error::Error for VideoError {}
+
+/// 経過時間をミリ秒で返す。ログの書式を揃えるための補助。
+fn elapsed_ms(start: Instant) -> f32 {
+    start.elapsed().as_secs_f32() * 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_error_display_keeps_the_device_name_and_the_underlying_reason() {
+        // 文言はそのままトーストと「接続状態」タブに出る。デバイス名と
+        // 下位のエラー文が落ちると、どの機器の何が起きたのか分からなくなる
+        let not_found = VideoError::DeviceNotFound("Game Capture HD60".to_string());
+        assert_eq!(
+            not_found.to_string(),
+            "映像デバイス 'Game Capture HD60' が見つからない"
+        );
+
+        let open_failed = VideoError::CameraOpenFailed {
+            device: "Game Capture HD60".to_string(),
+            source: "device in use".to_string(),
+        };
+        assert_eq!(
+            open_failed.to_string(),
+            "映像デバイス 'Game Capture HD60' を開けない: device in use"
+        );
+
+        let stream_failed = VideoError::StreamOpenFailed {
+            device: "Game Capture HD60".to_string(),
+            source: "MF_E_INVALIDMEDIATYPE".to_string(),
+        };
+        assert_eq!(
+            stream_failed.to_string(),
+            "映像デバイス 'Game Capture HD60' のストリームを開けない: MF_E_INVALIDMEDIATYPE"
+        );
+    }
+
+    #[test]
+    fn video_error_display_is_japanese_for_every_variant() {
+        // 英語の文言が混ざると、定型文と繋げたときに日本語と英語が並ぶ。
+        // ASCII だけの文言が残っていないことで確かめる
+        let all = [
+            VideoError::DeviceQueryFailed("backend failure".to_string()),
+            VideoError::DeviceNotFound("Capture".to_string()),
+            VideoError::NoDevices,
+            VideoError::CameraOpenFailed {
+                device: "Capture".to_string(),
+                source: "busy".to_string(),
+            },
+            VideoError::StreamOpenFailed {
+                device: "Capture".to_string(),
+                source: "busy".to_string(),
+            },
+        ];
+
+        for error in all {
+            let text = error.to_string();
+            assert!(!text.is_ascii(), "日本語が含まれていない: {text}");
+        }
+    }
+}

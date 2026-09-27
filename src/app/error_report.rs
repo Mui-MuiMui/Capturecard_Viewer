@@ -5,6 +5,7 @@
 //! 「接続状態」タブへ渡す形に整える側をまとめてある。
 
 use super::CaptureCardViewer;
+use crate::i18n;
 use crate::overlay::OverlayContent;
 use crate::status::{self, ConnectionStatus, ErrorSource, LinkStatus};
 use chrono::Local;
@@ -75,14 +76,16 @@ impl CaptureCardViewer {
             error: self.status_error(ErrorSource::Video),
         };
         if let Some(active) = active_video {
+            video.details.push(i18n::link_device(&active.device_name));
+            // 開き方が自動でも、どちらで開いたかを確かめられるように出す（#237）
             video
                 .details
-                .push(format!("デバイス: {}", active.device_name));
-            video.details.push(format!("映像: {}", active.summary()));
+                .push(i18n::link_capture_api(active.api.label()));
+            video.details.push(i18n::link_video(active.summary()));
             // 実際の fps はデバイスから取れない（video.rs の start_capture を参照）
             video
                 .details
-                .push(format!("要求フレームレート: {} fps", active.requested_fps));
+                .push(i18n::link_requested_fps(active.requested_fps));
         }
 
         let mut audio = LinkStatus {
@@ -93,15 +96,19 @@ impl CaptureCardViewer {
             error: self.status_error(ErrorSource::Audio),
         };
         if let Some(active) = active_audio {
-            audio.details.push(format!(
-                "入力: {}（{}）",
-                active.input_device,
-                active.input_summary()
+            audio.details.push(i18n::link_audio_input(
+                &active.input_device,
+                active.input_summary(),
             ));
-            audio.details.push(format!(
-                "出力: {}（{}）",
-                active.output_device,
-                active.output_summary()
+            audio.details.push(i18n::link_audio_output(
+                &active.output_device,
+                active.output_summary(),
+            ));
+            audio.details.extend(status::format_resample_status(
+                self.device_snapshot.audio_resample,
+            ));
+            audio.details.push(status::format_underrun_count(
+                self.device_snapshot.audio_underruns,
             ));
         }
 

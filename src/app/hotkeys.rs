@@ -1,15 +1,67 @@
-//! グローバルホットキーの適用と、押されたときの実行。
+//! ホットキーの適用と、押されたときの実行。
 //!
 //! **実処理は右クリックメニューや映像上の操作と同じ経路を通す。**
 //! 登録そのものは `crate::hotkey::HotkeyManager` が持つ。
 
 use super::audio_control::VOLUME_SCROLL_STEP;
+use super::worker::DeviceCommand;
 use super::CaptureCardViewer;
-use crate::hotkey::{HotkeyAction, HotkeyError};
+use crate::hotkey::{BackgroundHotkeyRunner, HotkeyAction, HotkeyAssignmentError};
+use crate::i18n;
 use crate::status::ErrorSource;
 use eframe::egui;
 use log::{debug, trace, warn};
 use std::collections::BTreeMap;
+use std::sync::mpsc::Sender;
+
+/// このアプリのテキスト欄に入力中か。ホットキーを止める「入力中」の判定に使う（#206、#238）。
+///
+/// **`Context::wants_keyboard_input()` は使わない。** あちらはテキスト欄に限らず、
+/// 何かのウィジェットにキーボードフォーカスがあるだけで真になる。Tab キーで
+/// 映像エリアやボタンへフォーカスが移ると、以後ずっと入力中と判定されて
+/// ホットキーが効かなくなっていた。
+///
+/// フォーカスのあるウィジェットが `TextEdit` かは、その Id に `TextEdit` の状態が
+/// 保存されているかで見る。`TextEdit` は描画のたびに自分の Id へ状態を書くので、
+/// 設定ダイアログのプリセット名・保存先や、`DragValue` の数値入力（中身は
+/// `TextEdit`）のどれでも、個別に `has_focus()` を集めずに拾える。
+pub(super) fn is_typing_in_text_field(ctx: &egui::Context) -> bool {
+    // memory のロックを握ったまま data を読まない（同じ Context の中のロック）
+    let focused = ctx.memory(|memory| memory.focus());
+    focused.is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some())
+}
+
+/// 最小化中のアクションを、UI スレッドを介さずに実行する窓口を組み立てる。
+///
+/// ホットキーのリスナースレッドから呼ばれる。**やってよいのはデバイス
+/// ワーカーへコマンドを積むところまで。** `CaptureCardViewer` の状態は
+/// UI スレッドのものなので、ここからは触れない。
+///
+/// 音量とミュートをワーカーへ回しているのは、ワーカーがウィンドウの状態に
+/// 関係なく動く唯一のスレッドだから。**結果は `DeviceEvent` で UI へ戻り、
+/// 復帰したフレームで `adjust_volume` / `toggle_mute` を通る**ので、
+/// 設定への反映と OSD は右クリックメニューから操作したときと同じになる。
+///
+/// `HotkeyAction::runs_while_minimized` が偽のものはここへ届かない。
+/// 届いても何もしないので、分類を増やしたときに勝手に実行されることはない。
+pub(super) fn background_hotkey_runner(commands: Sender<DeviceCommand>) -> BackgroundHotkeyRunner {
+    BackgroundHotkeyRunner::new(move |action| {
+        let command = match action {
+            HotkeyAction::ReconnectDevices => DeviceCommand::ReconnectNow,
+            HotkeyAction::VolumeUp => DeviceCommand::AdjustVolume(VOLUME_SCROLL_STEP),
+            HotkeyAction::VolumeDown => DeviceCommand::AdjustVolume(-VOLUME_SCROLL_STEP),
+            HotkeyAction::ToggleMute => DeviceCommand::ToggleMute,
+            HotkeyAction::Screenshot
+            | HotkeyAction::ToggleFullscreen
+            | HotkeyAction::ToggleAlwaysOnTop => return,
+        };
+        if let Err(e) = commands.send(command) {
+            // ワーカーが終わっているときだけ。復帰後に UI 側で実行される
+            // わけでもないので、押下が 1 回落ちる
+            warn!("最小化中のホットキーをデバイスワーカーへ送れない: {}", e);
+        }
+    })
+}
 
 /// 登録できなかったホットキーを、通知 1 件ぶんの文字列にまとめる。
 /// すべて登録できていれば `None`。
@@ -17,14 +69,16 @@ use std::collections::BTreeMap;
 /// 定型文（「ホットキーを登録できません」）は `status::format_message` が
 /// 前に付けるので、ここでは付けない。どのアクションのどのキーが駄目だったかを
 /// 並べるところまでを受け持つ。
-fn hotkey_error_summary(errors: &BTreeMap<HotkeyAction, HotkeyError>) -> Option<String> {
+fn hotkey_error_summary(errors: &BTreeMap<HotkeyAction, HotkeyAssignmentError>) -> Option<String> {
     if errors.is_empty() {
         return None;
     }
 
     let detail = errors
         .iter()
-        .map(|(action, error)| format!("{}（{}）: {}", action.label(), error.hotkey, error.message))
+        .map(|(action, error)| {
+            i18n::hotkey_error_summary_item(action.label(), &error.hotkey, &error.reason)
+        })
         .collect::<Vec<_>>()
         .join(" / ");
     Some(detail)
@@ -39,6 +93,27 @@ impl CaptureCardViewer {
         for action in self.hotkey_manager.take_pressed() {
             trace!("ホットキーの押下を受け取った: {}", action.label());
             self.run_hotkey_action(ctx, action);
+        }
+    }
+
+    /// このフレームで egui へ渡るキー入力から、ホットキーに割り当てたキーの
+    /// 押下を取り除く（#217）。
+    ///
+    /// キーを奪わないフックにしたので、前面にいる間は割り当てたキーが egui にも
+    /// 届き、Escape を割り当てると右クリックメニューも同時に閉じていた。
+    /// **描画より前に呼ぶこと。** 描画の中で `key_pressed` を見る処理
+    /// （右クリックメニューの Escape など）より後だと取り除いても間に合わない。
+    ///
+    /// 入力中かはフレームの先頭の値で見る。リスナーへ渡している旗（`update()` の
+    /// 末尾で書く）と同じく、前のフレームの描画を終えた時点の状態になる。
+    pub(super) fn remove_hotkey_key_events(&self, ctx: &egui::Context) {
+        let typing = is_typing_in_text_field(ctx);
+        let removed = ctx.input_mut(|input| {
+            self.hotkey_manager
+                .remove_hotkey_key_events(&mut input.events, typing)
+        });
+        if removed > 0 {
+            trace!("ホットキーのキー入力 {removed} 件を egui へ渡さずに捨てた");
         }
     }
 
@@ -114,6 +189,64 @@ impl CaptureCardViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hotkey::HotkeyError;
+    use crate::keyboard_hook::KeyboardHookError;
+
+    /// 何もしない入力で 1 フレーム回す。描画の中身は `add_contents` が決める
+    fn run_frame(ctx: &egui::Context, add_contents: impl FnMut(&mut egui::Ui)) {
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, add_contents);
+        });
+    }
+
+    #[test]
+    fn is_typing_in_text_field_is_false_without_focus() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        run_frame(&ctx, |ui| {
+            ui.text_edit_singleline(&mut text);
+        });
+
+        assert!(!is_typing_in_text_field(&ctx));
+    }
+
+    #[test]
+    fn is_typing_in_text_field_is_true_while_a_text_edit_has_focus() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        let mut focus_requested = false;
+        for _ in 0..2 {
+            run_frame(&ctx, |ui| {
+                let response = ui.text_edit_singleline(&mut text);
+                if !focus_requested {
+                    response.request_focus();
+                    focus_requested = true;
+                }
+            });
+        }
+
+        assert!(is_typing_in_text_field(&ctx));
+    }
+
+    #[test]
+    fn is_typing_in_text_field_ignores_focus_on_other_widgets() {
+        // Tab キーで映像エリアやボタンへフォーカスが移った状態（#238）。
+        // wants_keyboard_input() は真になるが、テキスト欄ではないので入力中ではない
+        let ctx = egui::Context::default();
+        let mut focus_requested = false;
+        for _ in 0..2 {
+            run_frame(&ctx, |ui| {
+                let response = ui.allocate_response(egui::vec2(100.0, 100.0), egui::Sense::click());
+                if !focus_requested {
+                    response.request_focus();
+                    focus_requested = true;
+                }
+            });
+        }
+
+        assert!(ctx.wants_keyboard_input());
+        assert!(!is_typing_in_text_field(&ctx));
+    }
 
     #[test]
     fn hotkey_error_summary_without_errors_is_none() {
@@ -126,15 +259,15 @@ mod tests {
     fn hotkey_error_summary_one_error_names_the_action_and_key() {
         let errors = BTreeMap::from([(
             HotkeyAction::Screenshot,
-            HotkeyError {
+            HotkeyAssignmentError {
                 hotkey: "F12".to_string(),
-                message: "他のアプリと競合しています".to_string(),
+                reason: HotkeyError::UnsupportedKey("F13".to_string()),
             },
         )]);
 
         assert_eq!(
             hotkey_error_summary(&errors),
-            Some("スクリーンショット（F12）: 他のアプリと競合しています".to_string())
+            Some("スクリーンショット（F12）: 未対応のキー: F13".to_string())
         );
     }
 
@@ -145,23 +278,26 @@ mod tests {
         let errors = BTreeMap::from([
             (
                 HotkeyAction::VolumeUp,
-                HotkeyError {
+                HotkeyAssignmentError {
                     hotkey: "F8".to_string(),
-                    message: "理由 B".to_string(),
+                    reason: HotkeyError::MissingKey,
                 },
             ),
             (
                 HotkeyAction::Screenshot,
-                HotkeyError {
+                HotkeyAssignmentError {
                     hotkey: "F5".to_string(),
-                    message: "理由 A".to_string(),
+                    reason: HotkeyError::MultipleKeys,
                 },
             ),
         ]);
 
         assert_eq!(
             hotkey_error_summary(&errors),
-            Some("スクリーンショット（F5）: 理由 A / 音量を上げる（F8）: 理由 B".to_string())
+            Some(
+                "スクリーンショット（F5）: 通常キーを 2 つ以上は指定できません / 音量を上げる（F8）: 通常キーが指定されていません"
+                    .to_string()
+            )
         );
     }
 
@@ -171,9 +307,9 @@ mod tests {
         // 「ホットキーを登録できません: ホットキーを登録できません: ...」になる
         let errors = BTreeMap::from([(
             HotkeyAction::Screenshot,
-            HotkeyError {
+            HotkeyAssignmentError {
                 hotkey: "F5".to_string(),
-                message: "理由".to_string(),
+                reason: HotkeyError::HookUnavailable(KeyboardHookError::Unsupported),
             },
         )]);
 

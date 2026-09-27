@@ -5,6 +5,7 @@
 //! 大きさの判定は `crate::platform`。
 
 use super::CaptureCardViewer;
+use crate::i18n::Text;
 use crate::overlay::OverlayContent;
 use crate::platform::DEFAULT_WINDOW_SIZE;
 use eframe::egui;
@@ -18,9 +19,6 @@ const FULLSCREEN_OSD_DURATION: Duration = Duration::from_secs(1);
 /// フルスクリーンの表示より長いのは、こちらが「設定を勝手に変えた」報告で、
 /// 読ませる必要があるため
 const DRAG_MOVE_GUARD_OSD_DURATION: Duration = Duration::from_secs(2);
-
-/// 上記の OSD に出す文言
-const DRAG_MOVE_GUARD_MESSAGE: &str = "ウィンドウを動かすため、画面ドラッグ移動を有効にしました";
 
 /// 装飾なしのとき、ウィンドウの端を「リサイズを始める場所」と見なす幅。
 /// 掴みやすさと、映像のドラッグ移動を邪魔しないことの兼ね合いで決めている
@@ -164,7 +162,7 @@ impl CaptureCardViewer {
         if enabled_drag_move {
             info!("ウィンドウを動かせなくなるため、画面ドラッグ移動を自動で有効にした");
             self.transient_overlay.show(
-                OverlayContent::Text(DRAG_MOVE_GUARD_MESSAGE.to_string()),
+                OverlayContent::Text(Text::DragMoveEnabledNotice.get().to_string()),
                 DRAG_MOVE_GUARD_OSD_DURATION,
                 Instant::now(),
             );
@@ -233,12 +231,12 @@ impl CaptureCardViewer {
         }
 
         let text = if self.is_fullscreen {
-            "フルスクリーン ON"
+            Text::FullscreenOn
         } else {
-            "フルスクリーン OFF"
+            Text::FullscreenOff
         };
         self.transient_overlay.show(
-            OverlayContent::Text(text.to_string()),
+            OverlayContent::Text(text.get().to_string()),
             FULLSCREEN_OSD_DURATION,
             Instant::now(),
         );

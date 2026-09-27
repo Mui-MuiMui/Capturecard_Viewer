@@ -1,6 +1,7 @@
 //! デバイスの接続・切断まわりの**判定**。
 //!
-//! 「途絶したか」「開き直してよいか」「既定デバイスが切り替わったか」を
+//! 「途絶したか」「開き直してよいか」「既定デバイスが切り替わったか」
+//! 「列挙をログへ出す回か」「設定のデバイスが Windows 側にも見えていないか」を
 //! 決める純粋関数だけを置く。実際にデバイスを開く・閉じるのは
 //! `super::worker_loop`（デバイスワーカースレッド）で、そこから呼ばれる。
 //!
@@ -8,7 +9,9 @@
 //! 入力信号を落とす、Windows の既定デバイスを切り替える）をテストで
 //! 代替するため。時計もデバイスも触らない。
 
+use crate::i18n::{self, Text};
 use crate::video;
+use std::fmt;
 use std::time::Duration;
 
 /// フレームが途絶えてから「映像が切れた」と判断するまでの時間。
@@ -53,6 +56,12 @@ pub(super) enum VideoLinkAction {
 ///   0.8 秒かかるうえ、入力信号が無いデバイスは開けても永久にフレームを
 ///   出さない。ここで切断と見なすと、開き直しを延々と繰り返すことになる
 /// - 期限ちょうどは切断とみなす側に倒す。1 フレーム待って得るものが無いため
+/// - **デバイス側が喪失を知らせてきた（`device_lost`）なら、途絶時間を待たずに
+///   切断とみなす。** DirectShow のグラフの `EC_DEVICE_LOST` などで、抜いた
+///   瞬間に分かる。1 枚も届いていなくても切断とみなすのは、これが時間からの
+///   推測ではなくデバイスそのものが消えたという知らせだから。入力信号が無い
+///   だけのデバイスはこの知らせを出さないので、開き直しが止まらなくなる心配は
+///   上の「1 枚も届いていない」の場合と違って無い
 pub(super) fn decide_video_link(
     state: video::VideoLinkState,
     auto_reconnect: bool,
@@ -61,10 +70,11 @@ pub(super) fn decide_video_link(
     if !state.capturing {
         return VideoLinkAction::Keep;
     }
-    let Some(elapsed) = state.since_last_frame else {
-        return VideoLinkAction::Keep;
-    };
-    if elapsed < timeout {
+    let lost = state.device_lost
+        || state
+            .since_last_frame
+            .is_some_and(|elapsed| elapsed >= timeout);
+    if !lost {
         return VideoLinkAction::Keep;
     }
     if auto_reconnect {
@@ -215,16 +225,251 @@ pub(super) fn should_resync_audio_after_video(
     !audio_connected || audio_retry_active
 }
 
+/// 接続の失敗がこの回数続いたら、列挙の結果を見て「Windows 側にも見えていない」
+/// を知らせる（#236）。
+///
+/// 列挙をログへ出す回（`is_enumeration_milestone`）の最初と揃えてある。
+/// 判定に使う一覧はその回の列挙で取るため。バックオフが 200ms から伸びるので、
+/// 抜いてから 5 回目の失敗までは 3 秒ほど（途絶の検出を含めて 6 秒ほど）。
+/// 挿し直しの USB の再列挙（10 秒以上）より先に知らせる必要は無いが、
+/// 抜けたままなら 15 秒以内には出したい。
+pub(super) const DEVICE_NOT_VISIBLE_AFTER: u32 = 5;
+
+/// 接続の失敗が続いたときに、列挙の結果をログへ出す回か。
+///
+/// 5 回目・10 回目・以後 10 回ごと。**毎回は出さない。** 再試行は最大 5 秒
+/// 間隔で無限に続くので、毎回だとログが列挙で埋まる。一方で 1 度きりだと、
+/// 長く抜けていたあとに挿し直したとき OS 側に戻ったかがログから読めない。
+/// 10 回ごとなら 5 秒間隔で 50 秒に 1 度になる。
+///
+/// 0（失敗していない）は対象外。起動時の列挙は回数と関係なく 1 度だけ出す
+/// （`WorkerState::log_device_enumeration`）。
+pub(super) fn is_enumeration_milestone(failures: u32) -> bool {
+    failures == DEVICE_NOT_VISIBLE_AFTER || (failures >= 10 && failures.is_multiple_of(10))
+}
+
+/// 前回列挙を出したときの失敗回数 `logged` から見て、いま列挙を出すか。
+///
+/// ワーカーの `tick` は 100ms ごとに回るが、失敗回数は接続を試したときしか
+/// 動かない。**同じ回数のまま何度も出さない**ために、出した回数を覚えておき
+/// それと違うときだけ出す。接続に成功して回数が 0 へ戻ったあと、また 5 回
+/// 失敗したら出す（`logged` は 5 のままでも、その間に 0 を経ているので
+/// 呼び出し側が記録を 0 へ戻す）。
+pub(super) fn should_log_enumeration(failures: u32, logged: u32) -> bool {
+    failures != logged && is_enumeration_milestone(failures)
+}
+
+/// 設定に書かれたデバイスが、Windows 側の列挙にも出てこない状態。
+///
+/// 接続の失敗の理由（`VideoError::DeviceNotFound` など）は「アプリが開けない」
+/// ことしか言わない。こちらは「OS がそもそも見ていない」ことを伝え、
+/// 確かめる場所（デバイスマネージャー）を案内する。**文言はこの型の
+/// `Display` が `crate::i18n` から引く。**
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DeviceNotVisible {
+    /// 列挙に 1 台も出てこない。ケーブルか、OS 側の認識そのものを疑う
+    NoDevices,
+    /// ほかのデバイスは出ているが、設定の名前が無い
+    NotListed(String),
+}
+
+impl fmt::Display for DeviceNotVisible {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            DeviceNotVisible::NoDevices => Text::DeviceNotVisibleNoDevices.get().to_string(),
+            DeviceNotVisible::NotListed(name) => i18n::device_not_visible_not_listed(name),
+        };
+        f.write_str(&text)
+    }
+}
+
+/// 設定のデバイスが Windows 側にも見えていないかを判定する。
+///
+/// - `failures` — 連続して接続に失敗した回数。`DEVICE_NOT_VISIBLE_AFTER` に
+///   届くまでは知らせない。抜いた直後や挿し直しの途中は、見えていなくて当然
+/// - `configured` — 設定に書かれた名前。`None`（Windows の既定デバイス）は
+///   比べる相手が無いので知らせない
+/// - `listed` — 列挙に出てきた名前（設定と同じ表記）。**`None` は列挙そのものに
+///   失敗した場合で、知らせない。** 見えていないのか列挙が壊れたのか区別できない
+///   ので、理由はログ（WARN）にだけ残す
+pub(super) fn decide_device_not_visible(
+    failures: u32,
+    configured: Option<&str>,
+    listed: Option<&[String]>,
+) -> Option<DeviceNotVisible> {
+    if failures < DEVICE_NOT_VISIBLE_AFTER {
+        return None;
+    }
+    let name = configured?;
+    let listed = listed?;
+    if listed.iter().any(|listed_name| listed_name == name) {
+        return None;
+    }
+    if listed.is_empty() {
+        Some(DeviceNotVisible::NoDevices)
+    } else {
+        Some(DeviceNotVisible::NotListed(name.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- 列挙のログと「Windows 側にも見えていない」の判定（#236） ----
+
+    #[test]
+    fn is_enumeration_milestone_at_5_10_and_every_10_after() {
+        let milestones: Vec<u32> = (0..=45).filter(|n| is_enumeration_milestone(*n)).collect();
+        assert_eq!(milestones, vec![5, 10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn should_log_enumeration_only_once_per_milestone() {
+        // tick は同じ回数のまま何度も回るので、出した回数とは比べる
+        assert!(should_log_enumeration(5, 0));
+        assert!(!should_log_enumeration(5, 5), "同じ回数で出し直さない");
+        assert!(!should_log_enumeration(6, 5), "節目でない回は出さない");
+        assert!(should_log_enumeration(10, 5));
+    }
+
+    #[test]
+    fn should_log_enumeration_without_failures_is_false() {
+        // 繋がっている間（0 回）は出さない。起動時の 1 回は別の経路
+        assert!(!should_log_enumeration(0, 5));
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn decide_device_not_visible_before_threshold_is_none() {
+        let listed = names(&[]);
+        assert_eq!(
+            decide_device_not_visible(4, Some("Capture"), Some(&listed)),
+            None,
+            "抜いた直後は見えていなくて当然なので知らせない"
+        );
+    }
+
+    #[test]
+    fn decide_device_not_visible_with_no_devices_at_threshold() {
+        let listed = names(&[]);
+        assert_eq!(
+            decide_device_not_visible(5, Some("Capture"), Some(&listed)),
+            Some(DeviceNotVisible::NoDevices)
+        );
+    }
+
+    #[test]
+    fn decide_device_not_visible_with_other_devices_names_the_missing_one() {
+        let listed = names(&["Web カメラ"]);
+        assert_eq!(
+            decide_device_not_visible(12, Some("Capture"), Some(&listed)),
+            Some(DeviceNotVisible::NotListed("Capture".to_string()))
+        );
+    }
+
+    #[test]
+    fn decide_device_not_visible_when_the_device_is_listed_is_none() {
+        // OS には見えているのに開けない。デバイスマネージャーを案内しても的外れ
+        let listed = names(&["Web カメラ", "Capture"]);
+        assert_eq!(
+            decide_device_not_visible(20, Some("Capture"), Some(&listed)),
+            None
+        );
+    }
+
+    #[test]
+    fn decide_device_not_visible_without_configured_name_is_none() {
+        // Windows の既定デバイスは比べる相手が無い
+        let listed = names(&[]);
+        assert_eq!(decide_device_not_visible(20, None, Some(&listed)), None);
+    }
+
+    #[test]
+    fn decide_device_not_visible_when_enumeration_failed_is_none() {
+        // 見えていないのか列挙が壊れたのか区別できない
+        assert_eq!(decide_device_not_visible(20, Some("Capture"), None), None);
+    }
+
+    #[test]
+    fn device_not_visible_display_points_to_the_device_manager() {
+        let no_devices = DeviceNotVisible::NoDevices.to_string();
+        assert!(no_devices.contains("Windows 側にも"), "{no_devices}");
+        assert!(no_devices.contains("デバイスマネージャー"), "{no_devices}");
+
+        let not_listed = DeviceNotVisible::NotListed("Capture".to_string()).to_string();
+        assert!(not_listed.contains("'Capture'"), "{not_listed}");
+        assert!(not_listed.contains("デバイスマネージャー"), "{not_listed}");
+
+        let english = i18n::with_language(i18n::Language::English, || {
+            DeviceNotVisible::NoDevices.to_string()
+        });
+        assert!(english.contains("Device Manager"), "{english}");
+    }
 
     /// 映像リンクの観測値を組み立てる補助。
     fn link_state(capturing: bool, since_last_frame: Option<Duration>) -> video::VideoLinkState {
         video::VideoLinkState {
             capturing,
             since_last_frame,
+            device_lost: false,
         }
+    }
+
+    /// デバイス側が喪失を知らせてきた観測値を組み立てる補助。
+    fn lost_link_state(
+        capturing: bool,
+        since_last_frame: Option<Duration>,
+    ) -> video::VideoLinkState {
+        video::VideoLinkState {
+            device_lost: true,
+            ..link_state(capturing, since_last_frame)
+        }
+    }
+
+    #[test]
+    fn decide_video_link_device_lost_reconnects_without_waiting_for_timeout() {
+        // DirectShow の EC_DEVICE_LOST。フレームが直前まで届いていても、
+        // 3 秒待たずにその場で切断として扱う
+        let state = lost_link_state(true, Some(Duration::ZERO));
+        assert_eq!(
+            decide_video_link(state, true, VIDEO_SIGNAL_TIMEOUT),
+            VideoLinkAction::ClearTextureAndReconnect
+        );
+    }
+
+    #[test]
+    fn decide_video_link_device_lost_before_first_frame_reconnects() {
+        // 1 枚目が届く前に抜かれた場合。途絶の検出はここでは働かないので、
+        // 知らせを受けたら切断とみなす
+        let state = lost_link_state(true, None);
+        assert_eq!(
+            decide_video_link(state, true, VIDEO_SIGNAL_TIMEOUT),
+            VideoLinkAction::ClearTextureAndReconnect
+        );
+    }
+
+    #[test]
+    fn decide_video_link_device_lost_without_auto_reconnect_only_clears_texture() {
+        let state = lost_link_state(true, Some(Duration::ZERO));
+        assert_eq!(
+            decide_video_link(state, false, VIDEO_SIGNAL_TIMEOUT),
+            VideoLinkAction::ClearTexture
+        );
+    }
+
+    #[test]
+    fn decide_video_link_device_lost_while_not_capturing_keeps_current_state() {
+        // 閉じたあとの面倒は ConnectRetry が見る。閉じたグラフの知らせで
+        // 二重に動かない
+        let state = lost_link_state(false, None);
+        assert_eq!(
+            decide_video_link(state, true, VIDEO_SIGNAL_TIMEOUT),
+            VideoLinkAction::Keep
+        );
     }
 
     #[test]

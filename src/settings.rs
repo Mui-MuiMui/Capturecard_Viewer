@@ -1,9 +1,51 @@
 use crate::hotkey::HotkeyAction;
+use crate::i18n::{self, Text};
 use chrono::Datelike;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
+
+/// 設定ファイルの書き出し・読み込みが失敗した理由。
+///
+/// 対象は「設定を書き出す」「設定を読み込む」の 2 つだけ。`%AppData%` 側の
+/// 読み書き（`AppSettings::load` / `save`）は成否を `bool` で扱い、理由は
+/// ログにしか出していないのでここを通らない。
+///
+/// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
+/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事
+/// （`docs/design/error-reporting.md`）。文言に「設定ファイル」を付けないのは、
+/// 定型文が既に「設定ファイルを読み書きできません」で始まるため。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsError {
+    /// 読み込もうとした場所にファイルが無い
+    FileNotFound(PathBuf),
+    /// 読み込もうとした場所はあるが、ファイルではない（ディレクトリなど）
+    NotAFile(PathBuf),
+    /// TOML として書き出せない（書き込み権限が無い、ディスクが一杯など）
+    ExportFailed { path: PathBuf, source: String },
+    /// ファイルは読めたが TOML として解釈できない
+    ImportFailed { path: PathBuf, source: String },
+}
+
+impl fmt::Display for SettingsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            SettingsError::FileNotFound(path) => i18n::settings_file_not_found(path.display()),
+            SettingsError::NotAFile(path) => i18n::settings_not_a_file(path.display()),
+            SettingsError::ExportFailed { path, source } => {
+                i18n::file_write_failed(path.display(), source)
+            }
+            SettingsError::ImportFailed { path, source } => {
+                i18n::settings_import_failed(path.display(), source)
+            }
+        };
+        f.write_str(&text)
+    }
+}
+
+impl std::error::Error for SettingsError {}
 
 // confy が設定ファイルの置き場所を決めるのに使う名前。
 // ここがずれると既存の設定ファイルを見失うため、1 箇所にまとめてある。
@@ -39,10 +81,18 @@ pub struct AppSettings {
     // 旧版が書いた設定ファイル（既定の F5 を入れる）、後者はすべての
     // 割り当てを外した状態（何も入れない）。
     pub hotkeys: BTreeMap<HotkeyAction, String>,
+    // ホットキーの割り当て以外の設定。設定ファイルでは [hotkey_settings] になる。
+    //
+    // **[hotkeys] に混ぜないこと。** あちらは値が全て文字列である前提で
+    // 読んでおり（`RawAppSettings::hotkeys`）、真偽値が混ざると旧版では
+    // [hotkeys] ごと読めなくなる。
+    pub hotkey_settings: HotkeySettings,
     // 名前付きのプリセット。設定ファイルでは [[presets]] の並びになる。
     //
     // 中身は `video` と `audio` だけ。線引きの理由は `Preset` のコメントを見ること。
     pub presets: Vec<Preset>,
+    // 更新の確認。設定ファイルでは [update] になる。プリセットには入れない
+    pub update: UpdateSettings,
 }
 
 // 設定ファイルから読んだままの形。
@@ -65,7 +115,9 @@ struct RawAppSettings {
     screenshot: ScreenshotSettings,
     ui: UiSettings,
     hotkeys: Option<BTreeMap<String, String>>,
+    hotkey_settings: HotkeySettings,
     presets: Vec<Preset>,
+    update: UpdateSettings,
 }
 
 impl From<RawAppSettings> for AppSettings {
@@ -77,7 +129,9 @@ impl From<RawAppSettings> for AppSettings {
             mut screenshot,
             ui,
             hotkeys,
+            hotkey_settings,
             presets,
+            update,
         } = raw;
 
         // 旧版の項目はここで読み切って捨てる。保存では書き出さない
@@ -97,7 +151,9 @@ impl From<RawAppSettings> for AppSettings {
             screenshot,
             ui,
             hotkeys,
+            hotkey_settings,
             presets,
+            update,
         };
         // 設定ファイルを手で書き換えて、選択中のプリセットと実際の値を
         // 食い違わせることができる。読んだ時点で辻褄を合わせておく
@@ -141,9 +197,10 @@ fn sanitize_presets(presets: Vec<Preset>) -> Vec<Preset> {
 
 // 既定のホットキー割り当て。
 //
-// **スクリーンショット以外は既定で未割り当てにしてある。** グローバル
-// ホットキーは他のアプリより先にキーを奪うため、こちらから勝手に
-// F11 や Ctrl+↑ のような一般的なキーを押さえるべきではない。
+// **スクリーンショット以外は既定で未割り当てにしてある。** ホットキーは
+// 既定で他のアプリを操作している間も反応するため、こちらから勝手に
+// F11 や Ctrl+↑ のような一般的なキーを割り当てると、他のアプリでそのキーを
+// 押すたびにこちらも動いてしまう。
 fn default_hotkeys() -> BTreeMap<HotkeyAction, String> {
     BTreeMap::from([(HotkeyAction::Screenshot, "F5".to_string())])
 }
@@ -200,7 +257,9 @@ impl Default for AppSettings {
             screenshot: ScreenshotSettings::default(),
             ui: UiSettings::default(),
             hotkeys: default_hotkeys(),
+            hotkey_settings: HotkeySettings::default(),
             presets: Vec::new(),
+            update: UpdateSettings::default(),
         }
     }
 }
@@ -269,8 +328,8 @@ impl PresetNameError {
     // 設定ダイアログに出す文言。
     pub fn message(self) -> &'static str {
         match self {
-            PresetNameError::Empty => "プリセット名を入力してください",
-            PresetNameError::Duplicate => "同じ名前のプリセットが既にあります",
+            PresetNameError::Empty => Text::PresetNameEmpty.get(),
+            PresetNameError::Duplicate => Text::PresetNameDuplicate.get(),
         }
     }
 }
@@ -336,6 +395,12 @@ pub struct VideoSettings {
     pub resolution: Option<(u32, u32)>,
     pub format: Option<String>,
     pub fps: Option<u32>,
+    // 映像デバイスを Media Foundation と DirectShow のどちらで開くか。
+    // 既定は自動（名前に「(DirectShow)」があれば DirectShow、無ければ
+    // Media Foundation）。両方に出るデバイスを DirectShow で開きたいときの
+    // 切り替え（#237）。開き方はデバイスと一体なのでプリセットに含める
+    #[serde(deserialize_with = "deserialize_video_backend")]
+    pub backend: VideoBackendSetting,
     // 稼働中にフレームが途絶えたとき、自動でデバイスを開き直すか。
     //
     // 映像だけでなく音声のストリームエラーにも効く。右クリックメニューの
@@ -389,9 +454,9 @@ impl ColorSpace {
     // 設定ダイアログのコンボボックスに出す表示名
     pub fn label(self) -> &'static str {
         match self {
-            ColorSpace::Auto => "自動（解像度から判断）",
-            ColorSpace::Bt601 => "BT.601（SD）",
-            ColorSpace::Bt709 => "BT.709（HD）",
+            ColorSpace::Auto => Text::ColorSpaceAuto.get(),
+            ColorSpace::Bt601 => Text::ColorSpaceBt601.get(),
+            ColorSpace::Bt709 => Text::ColorSpaceBt709.get(),
         }
     }
 
@@ -415,8 +480,8 @@ impl ColorRange {
     // 設定ダイアログのコンボボックスに出す表示名
     pub fn label(self) -> &'static str {
         match self {
-            ColorRange::Limited => "リミテッド（16〜235）",
-            ColorRange::Full => "フル（0〜255）",
+            ColorRange::Limited => Text::ColorRangeLimited.get(),
+            ColorRange::Full => Text::ColorRangeFull.get(),
         }
     }
 
@@ -472,6 +537,143 @@ fn color_range_from_str(raw: &str) -> Option<ColorRange> {
     }
 }
 
+// 映像デバイスを開く経路の設定。設定ファイルには
+// backend = "auto" / "media_foundation" / "direct_show" と書かれる。
+//
+// 実際に開いた経路（`video::CaptureApi`）とは別の型にしてある。こちらは
+// 「自動」を持ち、デバイス名と合わせて初めて 1 つに決まるため
+// （`app::backend::system` の `route_for`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VideoBackendSetting {
+    // 名前に「(DirectShow)」があれば DirectShow、無ければ Media Foundation
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    // 「(DirectShow)」付きの名前でも Media Foundation の一覧から探す
+    #[serde(rename = "media_foundation")]
+    MediaFoundation,
+    // 同じ表示名を DirectShow の一覧から探す
+    #[serde(rename = "direct_show")]
+    DirectShow,
+}
+
+impl VideoBackendSetting {
+    // 設定ダイアログのコンボボックスに出す表示名
+    pub fn label(self) -> &'static str {
+        match self {
+            VideoBackendSetting::Auto => Text::VideoBackendAuto.get(),
+            VideoBackendSetting::MediaFoundation => Text::VideoBackendMediaFoundation.get(),
+            VideoBackendSetting::DirectShow => Text::VideoBackendDirectShow.get(),
+        }
+    }
+
+    pub const ALL: [VideoBackendSetting; 3] = [
+        VideoBackendSetting::Auto,
+        VideoBackendSetting::MediaFoundation,
+        VideoBackendSetting::DirectShow,
+    ];
+}
+
+// 設定ファイルの backend に知らない値が書かれていても、設定全体を
+// 失わせない。色空間と同じ考え方で、自動として扱う
+fn deserialize_video_backend<'de, D>(deserializer: D) -> Result<VideoBackendSetting, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(video_backend_from_str(&raw).unwrap_or_else(|| {
+        warn!(
+            "設定の映像の開き方 \"{}\" を解釈できないので自動として扱う",
+            raw
+        );
+        VideoBackendSetting::default()
+    }))
+}
+
+// 設定ファイルに書かれた文字列から開き方を決める。解釈できない場合は None。
+fn video_backend_from_str(raw: &str) -> Option<VideoBackendSetting> {
+    // 手書きされることを見込んで、区切り（`_` / `-` / 空白）の有無は問わない
+    let normalized: String = raw
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-' | ' '))
+        .collect();
+    match normalized.as_str() {
+        "auto" => Some(VideoBackendSetting::Auto),
+        "mediafoundation" | "mf" => Some(VideoBackendSetting::MediaFoundation),
+        "directshow" | "dshow" => Some(VideoBackendSetting::DirectShow),
+        _ => None,
+    }
+}
+
+// 画面に出す言語の設定。設定ファイルには language = "auto" / "ja" / "en" と書かれる。
+//
+// 実際に使う言語（`i18n::Language`）とは別の型にしてある。こちらは
+// 「自動」を持ち、OS の言語と合わせて初めて 1 つに決まるため
+// （`resolve`、`docs/design/i18n.md`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LanguageSetting {
+    // 既存ユーザーの設定ファイルには language が無い。自動にしておけば、
+    // 日本語の Windows ではこれまでどおり日本語で出る
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "ja")]
+    Japanese,
+    #[serde(rename = "en")]
+    English,
+}
+
+impl LanguageSetting {
+    // 設定ダイアログのコンボボックスに出す表示名
+    pub fn label(self) -> &'static str {
+        match self {
+            LanguageSetting::Auto => Text::LanguageAuto.get(),
+            LanguageSetting::Japanese => Text::LanguageJapanese.get(),
+            LanguageSetting::English => Text::LanguageEnglish.get(),
+        }
+    }
+
+    pub const ALL: [LanguageSetting; 3] = [
+        LanguageSetting::Auto,
+        LanguageSetting::Japanese,
+        LanguageSetting::English,
+    ];
+
+    // 実際に使う言語を決める。`os_language` は起動時に 1 回だけ OS から
+    // 推定したもの（`platform::os_ui_language`）
+    pub fn resolve(self, os_language: i18n::Language) -> i18n::Language {
+        match self {
+            LanguageSetting::Auto => os_language,
+            LanguageSetting::Japanese => i18n::Language::Japanese,
+            LanguageSetting::English => i18n::Language::English,
+        }
+    }
+}
+
+// 設定ファイルの language に知らない値が書かれていても、設定全体を
+// 失わせない。色空間と同じ考え方で、自動として扱う
+fn deserialize_language<'de, D>(deserializer: D) -> Result<LanguageSetting, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(language_setting_from_str(&raw).unwrap_or_else(|| {
+        warn!("設定の言語 \"{}\" を解釈できないので自動として扱う", raw);
+        LanguageSetting::default()
+    }))
+}
+
+fn language_setting_from_str(raw: &str) -> Option<LanguageSetting> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(LanguageSetting::Auto),
+        "ja" | "japanese" => Some(LanguageSetting::Japanese),
+        "en" | "english" => Some(LanguageSetting::English),
+        _ => None,
+    }
+}
+
 // PartialEq は VideoSettings と同じくプリセットとの一致判定で使う。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -483,6 +685,19 @@ pub struct AudioSettings {
     pub sample_rate: Option<u32>,
     pub channels: Option<u16>,
     pub passthrough_enabled: bool,
+    // 入力から出力へ受け渡すリングバッファの長さ（ミリ秒）。
+    //
+    // 小さいほど遅延が減るが、出力コールバックが間に合わずプチプチという
+    // 音（アンダーラン）が出やすくなる。最適な値は環境ごとに違うので
+    // 設定ダイアログのスライダーで選ばせる。
+    //
+    // **同じ [audio] の sample_rate / channels と違い `Option` にしない。**
+    // あちらは「希望値」で、デバイスの能力に合わせて寄せられる余地があるが、
+    // バッファ長はこちらで好きに決められるので寄せ先が無い。
+    //
+    // 範囲外の値が書かれていても設定全体を失わせない（deserialize_buffer_ms）
+    #[serde(deserialize_with = "deserialize_buffer_ms")]
+    pub buffer_ms: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -602,9 +817,32 @@ pub enum ScreenshotEncoding {
 pub const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 pub const DEFAULT_CHANNELS: u16 = 2;
 
+// 音声のリングバッファの長さ（ミリ秒）の下限・上限と既定値。
+//
+// 下限を 20ms にしてあるのは、WASAPI 共有モードの出力コールバックが
+// 10ms 前後の周期で呼ばれるため。それを下回る長さにすると、1 回の
+// コールバックで使い切ってしまい常に音が途切れる。
+//
+// 上限の 200ms は、遅延として体感できる上限の目安。これ以上を選べても
+// 「映像より音が遅れている」状態を積むだけで、低遅延という目的から外れる。
+//
+// 既定の 50ms は設定項目になる前にハードコードされていた長さ。
+// 更新しても既存ユーザーの音の出かたが変わらないようにしてある
+pub const MIN_BUFFER_MS: u32 = 20;
+pub const MAX_BUFFER_MS: u32 = 200;
+pub const DEFAULT_BUFFER_MS: u32 = 50;
+
 // JPEG 品質の下限と上限。image クレートの JpegEncoder が受け付ける範囲に合わせてある
 pub const MIN_JPEG_QUALITY: u8 = 1;
 pub const MAX_JPEG_QUALITY: u8 = 100;
+
+// 効果音の既定値。実行ファイルに埋め込んだ既定音（内蔵の SS.mp3）を指す。
+//
+// ファイルとしては配布していないので、exe の隣を探しても見つからず、
+// screenshot::resolve_sound_path が埋め込みの既定音へ倒すことで鳴る。
+// 設定画面の「既定に戻す」もこの値を書き、「既定（内蔵）」の表示もこの値との
+// 一致で判定する（docs/design/assets.md）
+pub const DEFAULT_SOUND_FILE: &str = "sound/SS.mp3";
 
 // 映像調整（明るさ・コントラスト・彩度）の下限と上限。0 が無調整。
 //
@@ -681,6 +919,26 @@ where
     }
     // clamp 済みなので u8 に収まる
     Ok(clamped as u8)
+}
+
+// 範囲外の音声バッファ長が書かれていても、設定全体を失わせない。
+// 考え方は deserialize_jpeg_quality と同じで、TOML の整数である i64 で
+// 受けてから 20〜200ms へ丸める。u32 のまま読むと、手で書き換えられた
+// 負の値でパースがファイル単位で失敗し、無関係な項目まで既定値へ戻る。
+fn deserialize_buffer_ms<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = i64::deserialize(deserializer)?;
+    let clamped = raw.clamp(i64::from(MIN_BUFFER_MS), i64::from(MAX_BUFFER_MS));
+    if clamped != raw {
+        warn!(
+            "設定の音声バッファ長 {} ms は範囲外なので {} ms として扱う",
+            raw, clamped
+        );
+    }
+    // clamp 済みなので u32 に収まる
+    Ok(clamped as u32)
 }
 
 // 範囲外の映像調整の値が書かれていても、設定全体を失わせない。
@@ -863,6 +1121,10 @@ pub struct UiSettings {
     // 切り替える。**有効にすると × が無くなる** ので、右クリックメニューの
     // 「終了」と Alt+F4 が閉じる手段になる
     pub borderless: bool,
+    // 画面に出す言語。設定ダイアログの「その他」タブで選び、「適用」で
+    // 再起動せずに切り替わる。プリセットには入れない（`docs/design/presets.md`）
+    #[serde(deserialize_with = "deserialize_language")]
+    pub language: LanguageSetting,
 }
 
 impl Default for VideoSettings {
@@ -872,6 +1134,9 @@ impl Default for VideoSettings {
             resolution: Some((1280, 720)),    // 720pで安定性を優先
             format: Some("YUY2".to_string()), // YUY2フォーマット
             fps: Some(60),                    // 60fps目標
+            // 既存ユーザーの設定ファイルには backend が無い。自動にしておけば
+            // これまでどおり名前で経路が決まる
+            backend: VideoBackendSetting::Auto,
             // 既定は有効。USB を挿し直したときに何もしなくても復帰するほうが、
             // 「映像が止まったまま気付かない」よりも害が少ない
             auto_reconnect: true,
@@ -896,6 +1161,9 @@ impl Default for AudioSettings {
             sample_rate: Some(DEFAULT_SAMPLE_RATE),
             channels: Some(DEFAULT_CHANNELS),
             passthrough_enabled: true,
+            // 既定は 50ms。この値が設定項目になる前にハードコードされていた
+            // 長さと同じで、更新しても音の出かたが変わらない
+            buffer_ms: DEFAULT_BUFFER_MS,
         }
     }
 }
@@ -920,7 +1188,7 @@ impl Default for ScreenshotSettings {
             // 解決は screenshot::resolve_sound_path が exe の置き場所を基準に行い、
             // 見つからなければ埋め込みの既定音へ倒す。
             // None は「効果音を鳴らさない」の意味なので、既定値には使えない
-            sound_file: Some(PathBuf::from("sound/SS.mp3")),
+            sound_file: Some(PathBuf::from(DEFAULT_SOUND_FILE)),
             sound_volume: 100.0,
             // 既定は「旧版の項目が無い」。既定のホットキーは
             // default_hotkeys() が持つ
@@ -945,6 +1213,49 @@ impl Default for UiSettings {
             // 既定はタイトルバーありにする。装飾なしは閉じ方・動かし方が
             // 通常のウィンドウと変わるので、知らずにその状態で起動させない
             borderless: false,
+            language: LanguageSetting::Auto,
+        }
+    }
+}
+
+// ホットキーの割り当て以外の設定（「ホットキー」タブの下の段）。
+//
+// プリセットには入れない（`Preset` のコメント）。既定値は全て偽なので
+// `Default` は導出で足りる。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HotkeySettings {
+    // このアプリにキーボードフォーカスがあるときだけ反応するか。
+    //
+    // 既定はオフ。他のアプリを操作している間も、最小化している間も
+    // 反応する（#133）。オンにすると、他のアプリで同じキーを使っていても
+    // こちらは動かない（#202）。どちらの場合もキーは奪わず、他のアプリにも届く
+    pub only_when_focused: bool,
+}
+
+// 更新の確認（「その他」タブの「更新」の欄）。`docs/design/update.md`。
+//
+// プリセットには入れない（`Preset` のコメント）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    // 起動時に GitHub へ新しい版を問い合わせるか。切っていても、
+    // 「その他」タブの「更新を確認」からは確認できる
+    pub check_on_startup: bool,
+    // 起動時の確認で新しい版が見つかったとき、ダイアログで知らせるか。
+    // 切っていると「その他」タブの「更新」の欄に出るだけ
+    pub notify_on_startup: bool,
+    // 「この版は通知しない」を選んだ版（`1.2.0` の形。`v` は付けない）。
+    // この版のあいだは起動時のダイアログを出さない。もっと新しい版が出たら出す
+    pub skipped_version: Option<String>,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            check_on_startup: true,
+            notify_on_startup: true,
+            skipped_version: None,
         }
     }
 }
@@ -1241,8 +1552,11 @@ pub fn export_file_name(date: &impl Datelike) -> String {
 // **confy の `store_path` をそのまま使う。** 書式を `%AppData%` の設定ファイルと
 // 揃えたいためで、ここだけ別の toml 実装で書くと、confy が書式を変えたときに
 // 書き出したファイルを読み戻せない組み合わせが生まれる。
-pub fn export_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
-    confy::store_path(path, settings).map_err(|e| e.to_string())
+pub fn export_to(path: &Path, settings: &AppSettings) -> Result<(), SettingsError> {
+    confy::store_path(path, settings).map_err(|e| SettingsError::ExportFailed {
+        path: path.to_path_buf(),
+        source: e.to_string(),
+    })
 }
 
 // 書き出した設定ファイルを読む。
@@ -1253,11 +1567,30 @@ pub fn export_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
 // **`confy::load_path` はファイルが無いと既定値で新しく作る。** 読み込みの
 // つもりで呼んだ結果、選んだ場所に既定値のファイルが増えるのは意図と違うので、
 // 先に存在を確かめてから渡す。
-pub fn import_from(path: &Path) -> Result<AppSettings, String> {
-    if !path.is_file() {
-        return Err(format!("{} が見つからない", path.display()));
+//
+// 確かめ方に `Path::is_file()` を使わないのは、**実在するのにメタデータを
+// 取れない場合も `false` を返す**ため。権限の無いファイルを選んだときに
+// 「見つからない」と出すと、置き場所を疑って直しようがなくなる。
+pub fn import_from(path: &Path) -> Result<AppSettings, SettingsError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        // ディレクトリやデバイスファイル。confy へ渡しても読めない
+        Ok(_) => return Err(SettingsError::NotAFile(path.to_path_buf())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SettingsError::FileNotFound(path.to_path_buf()))
+        }
+        Err(e) => {
+            return Err(SettingsError::ImportFailed {
+                path: path.to_path_buf(),
+                source: e.to_string(),
+            })
+        }
     }
-    confy::load_path(path).map_err(|e| e.to_string())
+
+    confy::load_path(path).map_err(|e| SettingsError::ImportFailed {
+        path: path.to_path_buf(),
+        source: e.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -1275,6 +1608,7 @@ device_name = "Capture Device"
 resolution = [1920, 1080]
 format = "MJPEG"
 fps = 30
+backend = "direct_show"
 auto_reconnect = false
 color_space = "bt601"
 color_range = "full"
@@ -1288,6 +1622,7 @@ output_device_name = "Speakers"
 sample_rate = 44100
 channels = 1
 passthrough_enabled = false
+buffer_ms = 120
 
 [screenshot]
 destination = "both"
@@ -2188,6 +2523,65 @@ volume = 80.0
     }
 
     #[test]
+    fn app_settings_missing_audio_buffer_key_uses_the_previous_hardcoded_length() {
+        // 音声バッファを設定項目にする前の版が書いた設定ファイル。
+        // 既定は当時ハードコードされていた 50ms で、音の出かたが変わらない
+        let config = without_key(FULL_CONFIG, "buffer_ms");
+        assert!(
+            !config.contains("buffer_ms ="),
+            "テスト用の設定から buffer_ms が消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("buffer_ms が欠けていても読めなければならない");
+
+        assert_eq!(settings.audio.buffer_ms, DEFAULT_BUFFER_MS);
+        assert_eq!(settings.audio.sample_rate, Some(44100));
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_out_of_range_audio_buffer_is_clamped_without_losing_settings() {
+        // 手で書き換えて桁を間違えた場合。バッファ長だけが範囲に収まり、
+        // 無関係な項目は保持されなければならない
+        let config = FULL_CONFIG.replace("buffer_ms = 120", "buffer_ms = 5000");
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("範囲外のバッファ長でも読めなければならない");
+
+        assert_eq!(settings.audio.buffer_ms, MAX_BUFFER_MS);
+        assert_eq!(settings.audio.channels, Some(1));
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_negative_audio_buffer_is_clamped_to_minimum() {
+        // u32 のまま読むと負の値でファイル単位のパースが落ちる。
+        // i64 で受けてから丸めているので、他の項目まで失わない
+        let config = FULL_CONFIG.replace("buffer_ms = 120", "buffer_ms = -1");
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("負のバッファ長でも読めなければならない");
+
+        assert_eq!(settings.audio.buffer_ms, MIN_BUFFER_MS);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_audio_buffer_survives_a_save_and_load_roundtrip() {
+        // 既定値と違う値が TOML を往復しても保たれること。
+        // [audio] へ書き出されなければ、次の起動で 50ms へ戻ってしまう
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("テスト用の設定を読めること");
+        assert_eq!(settings.audio.buffer_ms, 120);
+
+        let written = toml::to_string(&settings).expect("設定を書き出せること");
+        let restored: AppSettings = toml::from_str(&written).expect("書き出した設定を読めること");
+
+        assert_eq!(restored.audio.buffer_ms, 120);
+    }
+
+    #[test]
     fn app_settings_negative_jpeg_quality_is_clamped_to_minimum() {
         let config = FULL_CONFIG.replace("jpeg_quality = 60", "jpeg_quality = -5");
 
@@ -2354,6 +2748,182 @@ volume = 80.0
     }
 
     #[test]
+    fn language_setting_serializes_as_short_codes() {
+        // 設定ファイルに書き出される綴り。ここが変わると、既に配布した版が
+        // 書いた設定ファイルを読めなくなる
+        for (setting, expected) in [
+            (LanguageSetting::Auto, r#"language = "auto""#),
+            (LanguageSetting::Japanese, r#"language = "ja""#),
+            (LanguageSetting::English, r#"language = "en""#),
+        ] {
+            let mut settings = AppSettings::default();
+            settings.ui.language = setting;
+            let serialized = toml::to_string(&settings).expect("設定を書き出せること");
+            assert!(serialized.contains(expected), "{}", serialized);
+
+            let restored: AppSettings = toml::from_str(&serialized).expect("読み戻せること");
+            assert_eq!(restored.ui.language, setting);
+        }
+    }
+
+    #[test]
+    fn video_backend_is_read_from_the_full_config() {
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("全項目そろった設定は読めなければならない");
+        assert_eq!(settings.video.backend, VideoBackendSetting::DirectShow);
+    }
+
+    #[test]
+    fn video_backend_missing_defaults_to_auto_and_keeps_other_items() {
+        // 開き方の項目ができる前の設定ファイル
+        let config = without_key(FULL_CONFIG, "backend");
+        assert!(!config.contains("backend ="));
+
+        let settings: AppSettings = toml::from_str(&config).expect("読めること");
+
+        assert_eq!(settings.video.backend, VideoBackendSetting::Auto);
+        assert_eq!(
+            settings.video.device_name,
+            Some("Capture Device".to_string())
+        );
+        assert_eq!(settings.video.fps, Some(30));
+        assert!(!settings.video.auto_reconnect);
+    }
+
+    #[test]
+    fn video_backend_unknown_value_falls_back_to_auto_and_keeps_other_items() {
+        let config = FULL_CONFIG.replace(r#"backend = "direct_show""#, r#"backend = "vfw""#);
+        assert!(config.contains(r#"backend = "vfw""#));
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("知らない開き方でも読めなければならない");
+
+        assert_eq!(settings.video.backend, VideoBackendSetting::Auto);
+        // 同じセクションの他の項目が巻き添えになっていないこと
+        assert_eq!(settings.video.format, Some("MJPEG".to_string()));
+        assert_eq!(settings.video.color_space, ColorSpace::Bt601);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn video_backend_serializes_as_snake_case_and_reads_back() {
+        // 設定ファイルに書き出される綴り。ここが変わると、既に配布した版が
+        // 書いた設定ファイルを読めなくなる
+        for (setting, expected) in [
+            (VideoBackendSetting::Auto, r#"backend = "auto""#),
+            (
+                VideoBackendSetting::MediaFoundation,
+                r#"backend = "media_foundation""#,
+            ),
+            (
+                VideoBackendSetting::DirectShow,
+                r#"backend = "direct_show""#,
+            ),
+        ] {
+            let mut settings = AppSettings::default();
+            settings.video.backend = setting;
+            let serialized = toml::to_string(&settings).expect("設定を書き出せること");
+            assert!(serialized.contains(expected), "{}", serialized);
+
+            let restored: AppSettings = toml::from_str(&serialized).expect("読み戻せること");
+            assert_eq!(restored.video.backend, setting);
+        }
+    }
+
+    #[test]
+    fn video_backend_from_str_accepts_known_spellings() {
+        assert_eq!(
+            video_backend_from_str("auto"),
+            Some(VideoBackendSetting::Auto)
+        );
+        assert_eq!(
+            video_backend_from_str(" Media Foundation "),
+            Some(VideoBackendSetting::MediaFoundation)
+        );
+        assert_eq!(
+            video_backend_from_str("MF"),
+            Some(VideoBackendSetting::MediaFoundation)
+        );
+        assert_eq!(
+            video_backend_from_str("DirectShow"),
+            Some(VideoBackendSetting::DirectShow)
+        );
+        assert_eq!(
+            video_backend_from_str("direct-show"),
+            Some(VideoBackendSetting::DirectShow)
+        );
+        assert_eq!(video_backend_from_str(""), None);
+        assert_eq!(video_backend_from_str("vfw"), None);
+    }
+
+    #[test]
+    fn video_backend_is_part_of_the_preset() {
+        // 開き方はデバイスと一体なので、プリセットで適用も比較もする
+        let mut settings = AppSettings::default();
+        settings.video.backend = VideoBackendSetting::DirectShow;
+        let preset = Preset::from_settings("DS".to_string(), &settings);
+        assert_eq!(preset.video.backend, VideoBackendSetting::DirectShow);
+
+        let mut target = AppSettings::default();
+        assert!(!matches_preset(&preset, &target));
+        preset.apply_to(&mut target);
+        assert_eq!(target.video.backend, VideoBackendSetting::DirectShow);
+        assert!(matches_preset(&preset, &target));
+    }
+
+    #[test]
+    fn language_setting_missing_defaults_to_auto() {
+        // 言語の項目ができる前の設定ファイル
+        let settings: AppSettings = toml::from_str("[ui]\nvolume = 40.0\n").expect("読めること");
+        assert_eq!(settings.ui.language, LanguageSetting::Auto);
+        assert_eq!(settings.ui.volume, 40.0);
+    }
+
+    #[test]
+    fn language_setting_unknown_value_falls_back_to_auto_and_keeps_other_items() {
+        let settings: AppSettings =
+            toml::from_str("[ui]\nvolume = 40.0\nlanguage = \"fr\"\n").expect("読めること");
+        assert_eq!(settings.ui.language, LanguageSetting::Auto);
+        assert_eq!(settings.ui.volume, 40.0);
+    }
+
+    #[test]
+    fn language_setting_from_str_accepts_known_spellings() {
+        assert_eq!(
+            language_setting_from_str("auto"),
+            Some(LanguageSetting::Auto)
+        );
+        assert_eq!(
+            language_setting_from_str(" JA "),
+            Some(LanguageSetting::Japanese)
+        );
+        assert_eq!(
+            language_setting_from_str("japanese"),
+            Some(LanguageSetting::Japanese)
+        );
+        assert_eq!(
+            language_setting_from_str("en"),
+            Some(LanguageSetting::English)
+        );
+        assert_eq!(
+            language_setting_from_str("English"),
+            Some(LanguageSetting::English)
+        );
+        assert_eq!(language_setting_from_str(""), None);
+        assert_eq!(language_setting_from_str("fr"), None);
+    }
+
+    #[test]
+    fn language_setting_resolve_uses_os_language_only_for_auto() {
+        use crate::i18n::Language;
+        for os in [Language::Japanese, Language::English] {
+            assert_eq!(LanguageSetting::Auto.resolve(os), os);
+            assert_eq!(LanguageSetting::Japanese.resolve(os), Language::Japanese);
+            assert_eq!(LanguageSetting::English.resolve(os), Language::English);
+        }
+    }
+
+    #[test]
     fn screenshot_format_from_str_accepts_known_spellings() {
         assert_eq!(
             screenshot_format_from_str("jpeg"),
@@ -2450,6 +3020,79 @@ volume = 80.0
     }
 
     #[test]
+    fn update_settings_missing_section_uses_defaults() {
+        // [update] が無い（更新の確認を足す前の版が書いた）設定ファイル。
+        // 確認も通知もする側に倒し、他の項目は残る
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("[update] が無くても読めなければならない");
+
+        assert!(settings.update.check_on_startup);
+        assert!(settings.update.notify_on_startup);
+        assert_eq!(settings.update.skipped_version, None);
+        assert_eq!(settings.video.fps, Some(30));
+    }
+
+    #[test]
+    fn update_settings_missing_one_key_keeps_the_others() {
+        // 構造体レベルの #[serde(default)] なので、欠けた bool は false ではなく
+        // 構造体の既定値（true）になる
+        let settings: AppSettings =
+            toml::from_str("[update]\nnotify_on_startup = false\nskipped_version = \"1.2.0\"\n")
+                .expect("[update] の一部が欠けていても読めなければならない");
+
+        assert!(settings.update.check_on_startup);
+        assert!(!settings.update.notify_on_startup);
+        assert_eq!(settings.update.skipped_version.as_deref(), Some("1.2.0"));
+    }
+
+    #[test]
+    fn update_settings_survive_a_save_and_load_roundtrip() {
+        let mut original = AppSettings::default();
+        original.update.check_on_startup = false;
+        original.update.skipped_version = Some("1.2.0".to_string());
+
+        let serialized = toml::to_string(&original).expect("設定を書き出せなければならない");
+        let restored: AppSettings =
+            toml::from_str(&serialized).expect("書き出した設定を読み直せなければならない");
+
+        assert_eq!(restored.update, original.update);
+        assert!(
+            serialized.contains("[update]"),
+            "[update] セクションに書き出されること: {}",
+            serialized
+        );
+    }
+
+    #[test]
+    fn hotkey_settings_missing_section_reacts_without_focus() {
+        // [hotkey_settings] が無い（この項目より前の版が書いた）設定ファイル。
+        // 従来どおり、他のアプリを操作している間も反応する側に倒す
+        let settings: AppSettings =
+            toml::from_str(LEGACY_CONFIG).expect("旧版の設定を読めなければならない");
+
+        assert!(!settings.hotkey_settings.only_when_focused);
+    }
+
+    #[test]
+    fn hotkey_settings_survive_a_save_and_load_roundtrip() {
+        let mut original = AppSettings::default();
+        original.hotkey_settings.only_when_focused = true;
+
+        let serialized = toml::to_string(&original).expect("設定を書き出せなければならない");
+        let restored: AppSettings =
+            toml::from_str(&serialized).expect("書き出した設定を読み直せなければならない");
+
+        assert!(restored.hotkey_settings.only_when_focused);
+        // [hotkeys] は値が文字列である前提で読んでいる。真偽値を混ぜると
+        // 旧版では [hotkeys] ごと読めなくなるので、別のセクションに書く
+        assert!(
+            serialized.contains("[hotkey_settings]"),
+            "別のセクションに書き出されること: {}",
+            serialized
+        );
+    }
+
+    #[test]
     fn saved_config_does_not_keep_the_legacy_hotkey_key() {
         // 移行したあとは旧版の項目を書き戻さない。残すと 2 つの置き場所が
         // 食い違ったときにどちらが正か決まらなくなる
@@ -2536,8 +3179,8 @@ volume = 80.0
 
     #[test]
     fn default_hotkeys_assign_only_the_screenshot() {
-        // 他のアクションを既定で割り当てない。グローバルホットキーは
-        // 他のアプリより先にキーを奪うため、こちらから押さえない
+        // 他のアクションを既定で割り当てない。ホットキーは既定で
+        // 他のアプリを操作している間も反応するため、こちらから押さえない
         let settings = AppSettings::default();
 
         assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("F5"));
@@ -2606,7 +3249,9 @@ volume = 80.0
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("missing.toml");
 
-        assert!(import_from(&path).is_err());
+        let err = import_from(&path).expect_err("エラーになること");
+
+        assert_eq!(err, SettingsError::FileNotFound(path.clone()));
         assert!(!path.exists());
     }
 
@@ -2616,7 +3261,78 @@ volume = 80.0
         let path = dir.path().join("broken.toml");
         fs::write(&path, "これは TOML ではない [[[").expect("書けること");
 
-        assert!(import_from(&path).is_err());
+        let err = import_from(&path).expect_err("エラーになること");
+
+        // ファイルはあるので「見つからない」ではなく解釈の失敗として返ること。
+        // 区別が付かないと、ユーザーは置き場所を疑って直しようがなくなる
+        assert!(
+            matches!(err, SettingsError::ImportFailed { .. }),
+            "解釈の失敗として返ること: {err:?}"
+        );
+    }
+
+    #[test]
+    fn import_from_a_directory_is_not_reported_as_missing() {
+        // 実在するのに「見つからない」と出すと、置き場所を疑って直しようがない。
+        // is_file() だけで判定していたころはここが FileNotFound になっていた
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("not-a-file");
+        fs::create_dir(&path).expect("ディレクトリを作れること");
+
+        let err = import_from(&path).expect_err("エラーになること");
+
+        assert_eq!(err, SettingsError::NotAFile(path));
+    }
+
+    #[test]
+    fn settings_error_display_keeps_the_path_and_the_underlying_reason() {
+        // 文言はそのままトーストに出る。場所と下位のエラー文が落ちると
+        // どのファイルで何が起きたのか分からなくなる
+        let missing = SettingsError::FileNotFound(PathBuf::from("C:/tmp/settings.toml"));
+        assert_eq!(missing.to_string(), "C:/tmp/settings.toml が見つからない");
+
+        let not_a_file = SettingsError::NotAFile(PathBuf::from("C:/tmp/settings"));
+        assert_eq!(not_a_file.to_string(), "C:/tmp/settings はファイルではない");
+
+        let export = SettingsError::ExportFailed {
+            path: PathBuf::from("C:/tmp/settings.toml"),
+            source: "permission denied".to_string(),
+        };
+        assert_eq!(
+            export.to_string(),
+            "C:/tmp/settings.toml へ書き出せない: permission denied"
+        );
+
+        let import = SettingsError::ImportFailed {
+            path: PathBuf::from("C:/tmp/settings.toml"),
+            source: "expected a table".to_string(),
+        };
+        assert_eq!(
+            import.to_string(),
+            "C:/tmp/settings.toml を読み込めない: expected a table"
+        );
+    }
+
+    #[test]
+    fn settings_error_display_is_japanese_for_every_variant() {
+        // 英語の文言が混ざると、定型文と繋げたときに日本語と英語が並ぶ
+        let all = [
+            SettingsError::FileNotFound(PathBuf::from("C:/tmp/settings.toml")),
+            SettingsError::NotAFile(PathBuf::from("C:/tmp/settings")),
+            SettingsError::ExportFailed {
+                path: PathBuf::from("C:/tmp/settings.toml"),
+                source: "denied".to_string(),
+            },
+            SettingsError::ImportFailed {
+                path: PathBuf::from("C:/tmp/settings.toml"),
+                source: "broken".to_string(),
+            },
+        ];
+
+        for error in all {
+            let text = error.to_string();
+            assert!(!text.is_ascii(), "日本語が含まれていない: {text}");
+        }
     }
 
     #[test]

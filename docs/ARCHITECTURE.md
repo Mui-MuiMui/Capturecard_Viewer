@@ -4,7 +4,7 @@
 
 - 差分は「現状との差分」節にまとめ、すべて `area:refactor` の Issue に対応させている
 - 実装を変更するときは、この構造へ近づく方向を選ぶ
-- 現在のコードの具体的な注意点は `CLAUDE.md`、ビルド手順は `docs/BUILD.md` を参照
+- 現在のコードの具体的な注意点は `GUARDRAIL.md` と `docs/design/`、ビルド手順は `docs/BUILD.md` を参照
 
 ## 設計の前提
 
@@ -25,7 +25,7 @@ flowchart TD
     app["app<br/>AppState / eframe::App / イベント処理"]
     ui["ui<br/>描画のみ"]
     settings["settings<br/>永続化"]
-    hotkey["hotkey<br/>グローバルホットキー"]
+    hotkey["hotkey<br/>ホットキー"]
     device["device<br/>ワーカー層"]
     video["video"]
     audio["audio"]
@@ -56,11 +56,11 @@ flowchart TD
 | `device` | デバイス操作をワーカースレッドへ隔離し、チャネルで橋渡しする | UI の知識 |
 | `video` / `audio` | デバイス固有の処理 | アプリ状態の知識 |
 | `settings` | 設定の型と永続化 | 実行時状態 |
-| `hotkey` | 割り当てられる操作の定義、グローバルホットキーの登録と押下の検出 | 操作そのものの実行（`app` が行う） |
+| `hotkey` | 割り当てられる操作の定義、ホットキーの登録と押下の検出（押下は `keyboard_hook` の低レベルキーボードフックでキーを奪わずに観測する） | 操作そのものの実行（`app` が行う） |
 | `platform` | Windows 固有処理（フォント、アイコン、モニタ情報） | 汎用ロジック |
 | `logging` | ログの初期化と出力先 | — |
 
-`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_connect.rs` で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
+`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_connect.rs` / `worker_timers.rs`（再試行・切断監視・既定デバイスの追従などタイマー駆動の監視）で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
 
 ## 状態管理
 
@@ -81,7 +81,7 @@ pub fn show_settings_dialog(
     view: &SettingsDialogView<'_>,
     devices: &DeviceLists<'_>,
     connection: &ConnectionStatus,
-    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyError>,
+    hotkey_errors: &BTreeMap<HotkeyAction, HotkeyAssignmentError>,
 ) -> Vec<SettingsEvent>;
 ```
 
@@ -160,6 +160,8 @@ sequenceDiagram
 flowchart LR
     dev["キャプチャーデバイス<br/>(Media Foundation)"]
     cb["フレームコールバック<br/>(nokhwa スレッド)"]
+    dsdev["DirectShow のデバイス<br/>(仮想カメラ・古いキャプチャーボード)"]
+    dscb["自前のレンダラーの Receive<br/>(グラフのストリーミングスレッド)"]
     conv["色変換<br/>YUY2 → RGB<br/>BT.601 / BT.709<br/>リミテッド / フル<br/>明るさ / コントラスト / 彩度"]
     buf["フレーム受け渡し<br/>複製しない<br/>新着の有無を判別できる"]
     tex["egui テクスチャ"]
@@ -167,11 +169,21 @@ flowchart LR
     stats["統計<br/>間隔 / デコード時間 / 経路"]
 
     dev --> cb --> conv --> buf
+    dsdev --> dscb --> conv
     buf -->|UI スレッドが取り出す| tex --> draw
     conv -.-> stats
     buf -.-> stats
     stats -.->|OSD| draw
 ```
+
+映像デバイスへの経路は 2 本ある。**Media Foundation（nokhwa）が既定で、DirectShow は Media Foundation に出ないデバイスのためだけにある**（#143）。どちらの経路も受け取った画素を同じ `FrameSink`（`src/video/frame_sink.rs`）へ渡すので、変換から先（色変換・フレームの受け渡し・統計）は共通になる。
+
+| 経路 | 実装 | 列挙 | 対応形式 | サンプルの受け口 |
+|---|---|---|---|---|
+| Media Foundation | `video::VideoCapture`（`capture.rs`） | `nokhwa::query` | `Camera::compatible_list_by_resolution` | nokhwa のフレームコールバック |
+| DirectShow | `video::DirectShowCapture`（`directshow/`） | `ICreateDevEnum`（`CLSID_VideoInputDeviceCategory`） | `IAMStreamConfig::GetStreamCaps` | 自前のレンダラーフィルターの `IMemInputPin::Receive` |
+
+2 本を束ねるのは `app::backend::system` の `SystemVideo` で、ワーカーから見れば `VideoBackend` 1 つのまま。一覧は Media Foundation を優先し、DirectShow にしか無いデバイスだけを名前に「(DirectShow)」を添えて足す。どちらで開くかはこの印で決まる。詳しくは `docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」。
 
 ### 要求どおりのフォーマットで開く
 
@@ -312,11 +324,13 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 ### エラー型
 
-`Result<_, String>` をやめ、モジュールごとにエラー型を定義する。呼び出し側が種別で分岐できる状態にする。
+モジュールごとにエラー型を定義し、呼び出し側が種別で分岐できる状態にする。**ここは `VideoError` / `AudioError` / `ScreenshotError` / `HotkeyError` / `SettingsError` として実装済み**（それぞれ `src/video/mod.rs` / `src/audio/mod.rs` / `src/screenshot.rs` / `src/hotkey/parse.rs` / `src/settings.rs`）。
 
-これができると、たとえば「デバイスが見つからない」ならリトライせずユーザーへ通知、「一時的にビジー」ならリトライ、といった判断が書けるようになる。
+`src/logging.rs` だけは `Result<_, String>` のまま残してある。ロガーを初期化する前の失敗なので `report_error` も `log` も使えず、`main.rs` が `let _ = logging::init();` と捨てるだけになる。種別で分岐する読み手がいない。
 
-表示用の文字列は UI 層で組み立てる。エラー型の中に日本語のメッセージを埋め込まない。
+種別で分けてあると、たとえば「デバイスが見つからない」ならリトライせずユーザーへ通知、「一時的にビジー」ならリトライ、といった判断が書けるようになる。バリアントにはデバイス名・向き・下位のエラー文を持たせ、分岐したあとで文言を組み立て直さずに済むようにする。
+
+**表示用の文言は、その型の `Display` として各モジュールで出す。** 以前はここを「UI 層で組み立てる」としていたが、エラーの中身と文言が離れているとバリアントを増やすたびに `status.rs` 側の `match` を足す必要があり、片方の更新漏れで英語の文言が残っていた。バリアントから文言への対応は中身のすぐ隣に置き、`status.rs` は定型文（`ErrorSource::headline`）との連結と表示用の組み立てだけを持つ。文字列の実体は、多言語対応のために他の画面の文字列と一緒に `src/i18n/` へ集めてある（`docs/design/i18n.md`）。
 
 ### ログ
 
@@ -341,7 +355,7 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 ホットキーの登録失敗も `ErrorSource::Hotkey` としてここを通る。加えて `HotkeyManager::errors()` が「いま登録できていないもの」をアクションごとに持ち、設定画面のホットキー一覧の下に理由を並べる。**トーストは気付かせるためのもので、どのアクションが失敗しているかは一覧で見る**という役割分担。同じキーを 2 つのアクションへ割り当てた場合も、一覧の上で警告する。
 
-表示用の文字列は `status.rs` が組み立てる。下位のモジュールは `Result<_, String>` を返すだけで、日本語の文言を持たない。エラー型を定義したあとも、この境界は動かさない。
+下位のモジュールは自分のエラー型を返し、その `Display` が日本語の 1 行を持つ。`status.rs` が持つのは定型文（`ErrorSource::headline`）との連結、間引き、長さの切り詰めで、**発生源ごとの文言をここで `match` しない。**
 
 映像が出ていない理由のように**見続ける必要があるもの**は、一時表示ではなく映像プレースホルダーの 2 行目と設定ダイアログの「接続状態」タブに置く。通知は気付かせるためだけのものと割り切る。
 
@@ -359,19 +373,19 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 | 目指す姿 | 現状 | 対応するタスク |
 |---|---|---|
-| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_connect` / `monitor` / `retry` / `capabilities` / `screenshot` / `settings_dialog` / `settings_store` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
+| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_connect` / `worker_timers` / `monitor` / `retry` / `capabilities` / `screenshot` / `settings_dialog` / `settings_store` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
 | イベント駆動 | 2 秒ごとに設定を再適用するポーリング | apply_settings の 2 秒ごとの再登録 |
 | チャネルでの隔離 | UI と `device` ワーカーの間はコマンドとイベントを mpsc でやり取りする。**この境界で**チャネルを通さず共有するのは 3 つ（映像フレーム、コールバックが読む Atomic、観測値の `Arc<RwLock<DeviceSnapshot>>`）。`settings` や `screenshot_manager` のようにデバイスを跨がない共有はこの話の外 | 完了 |
 | UI をブロックしない | デバイスを開く・閉じる・列挙する処理も含めてワーカースレッドへ移した。スクリーンショットのエンコードは撮影ごとのスレッド。`update()` に残るブロッキングは `rfd` のファイルダイアログだけ | 完了 |
-| 要求どおりに開く | MJPEG / RGB24 を選んでも YUYV に差し替わる（差し替えたことは `warn` でログに残る） | MJPEG/RGB24 が YUYV で開かれる不具合 |
-| 新フレームの判別 | 世代番号で新着は判別できるが、無信号・切断の検出には使っていない。接続できていない間の再接続はバックオフで自動化済み | デバイス切断検出と自動再接続 |
-| 統計の公開 | 映像側は `VideoFrames::stats()` で読み出せ、右クリックの「情報表示」で OSD に出る。初回フレームの解像度・経路・変換時間はログにも出る。音声のアンダーラン回数はまだ収集していない | 映像側は完了。音声側はタスク未登録 |
+| 要求どおりに開く | Media Foundation の経路では MJPEG / RGB24 を選んでも YUYV に差し替わる（差し替えたことは `warn` でログに残る）。DirectShow の経路（#143）は選んだ形式で開き、デバイスに無ければ近いものへ倒したことを `warn` で残す | MJPEG/RGB24 が YUYV で開かれる不具合 |
+| 新フレームの判別 | 一定時間フレームが来ないことを検出して「映像信号がありません」を出す。`video.auto_reconnect`（既定 有効、右クリックメニューで切替）が有効なら、対象デバイスが戻ってきたときバックオフで自動再接続する。最小化中や無信号の間は再描画の頻度も落とす | 完了 |
+| 統計の公開 | 映像側は `VideoFrames::stats()` で読み出せ、右クリックの「情報表示」で OSD に出る。初回フレームの解像度・経路・変換時間はログにも出る。音声のアンダーラン回数も `DeviceSnapshot.audio_underruns` として収集し、OSD と「接続状態」タブの両方に出す | 完了 |
 | 音声設定を効かせる | サンプルレート・チャンネル数は反映され、UI の選択肢も入出力の対応設定から生成している。列挙は別スレッドで行い UI を止めない | 完了 |
 | 入出力差の吸収 | 揃えられる場合は揃え、揃えられない場合は線形補間でリサンプルし、チャンネル数はアップ／ダウンミックスする。クロックドリフトはリングバッファの水位から数秒ごとに補正する（`ResampleTelemetry`）。「接続状態」タブへの表示は未実装（`DeviceSnapshot` には値がある） | 「接続状態」タブへのリサンプル比・バッファ水位の表示はタスク未登録 |
-| バッファ長の調整 | 50ms 固定 | 音声バッファの調整 UI |
-| エラー型 | すべて `Result<_, String>` | エラー型を整理する |
-| ユーザー通知 | 接続失敗が画面に出ない | エラー通知 UI |
-| trait による抽象化 | デバイス型を直接利用 | デバイス層を trait で抽象化する |
+| バッファ長の調整 | 設定ダイアログのデバイス設定タブでスライダーから調整できる（20〜200ms、既定 50ms） | 完了 |
+| エラー型 | 下位モジュールの公開 API は自分のエラー enum（`VideoError` / `AudioError` / `ScreenshotError` / `HotkeyError` / `SettingsError`）を返す。文言はその型の `Display` が `crate::i18n` から引いて出す。`logging` だけはロガー初期化前の失敗で読み手がいないため `Result<_, String>` のまま | 完了 |
+| ユーザー通知 | 接続失敗・ホットキー登録失敗・スクリーンショット保存失敗はトースト（`TransientOverlay`）で数秒表示し、同じ発生源の同じ文言は間引く。映像・音声の接続先は設定ダイアログの「接続状態」タブに、ホットキーの登録失敗は理由も添えてホットキー一覧に出す | 完了 |
+| trait による抽象化 | デバイスワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。本番の実装は映像が `VideoCapture` と `DirectShowCapture` を束ねた `SystemVideo`、音声が `AudioCapture`、テストはモック、環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` で起動したときはフェイク（`FakeVideoCapture` / `FakeAudioCapture`）。**コールバックの経路には挟んでいない**（映像フレームと音量は共有ハンドルを直に流れる） | 完了 |
 
 バックログはこちら。
 

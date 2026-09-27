@@ -1,6 +1,6 @@
 [package]
 name = "capturecard_viewer"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 # 配布するアプリであってライブラリではない。crates.io へ公開しないことを明示する。
 # cargo-about の private.ignore がこの指定を見て、本体を
@@ -23,7 +23,6 @@ cpal = "0.15"
 confy = "0.6"
 # ログのファサード。出力先の実装は src/logging.rs にある
 log = "0.4.34"
-global-hotkey = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 image = "0.24"
 chrono = { version = "0.4", features = ["serde"] }
@@ -34,6 +33,20 @@ ringbuf = "0.3"
 # スクリーンショットをクリップボードへコピーする。egui-winit が既に同じ版を
 # 使っているため、クレート自体は増えない（image-data フィーチャの分だけ増える）
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+# 更新の確認（src/update/）。GitHub の Release API へ問い合わせるだけに使う。
+# TLS は Windows の schannel（native-tls）で、証明書は OS の証明書ストアで検証する
+# （`RootCerts::PlatformVerifier`）。既定の rustls と ring は入れない。
+# ureq は native-tls を有効にすると同梱のルート証明書（webpki-root-certs）も
+# 必ず引き込むが、使うのは OS の証明書ストアのほう。OS 側で信頼している証明書
+# （社内のプロキシなど）にも従うため。
+# **フィーチャは `native-tls` にすること。** `native-tls-no-default` だけでは
+# ureq が native-tls を無効とみなし、問い合わせの時点でパニックする
+ureq = { version = "3.4", default-features = false, features = ["native-tls"] }
+serde_json = "1.0"
+# 版の比較。クレート自体は他の依存が既に使っている
+semver = "1.0"
+# 更新の適用（src/update/apply.rs）。ダウンロードした exe を SHA256SUMS.txt と照合する
+sha2 = "0.11"
 
 # テスト専用。設定の TOML を直接読み書きして検証するため
 [dev-dependencies]
@@ -44,8 +57,27 @@ toml = "1.1"
 embed-resource = "2.4"
 
 [target.'cfg(windows)'.dependencies]
-# ウィンドウ位置の復元時にモニタの作業領域を列挙する（src/main.rs の monitor_work_areas）
-winapi = { version = "0.3", features = ["minwindef", "winuser", "windef"] }
+# ウィンドウ位置の復元時にモニタの作業領域を列挙する（src/platform.rs の monitor_work_areas）。
+# ホットキーの押下を低レベルキーボードフックで観測する（src/keyboard_hook.rs）。
+# libloaderapi / processthreadsapi / winbase はフックの登録とメッセージの待ち受けに使う
+winapi = { version = "0.3", features = ["minwindef", "winuser", "windef", "libloaderapi", "processthreadsapi", "winbase", "winnls"] }
+# DirectShow のバックエンド（src/video/directshow/）。winapi には DirectShow の
+# インターフェースが無いため使う。nokhwa（nokhwa-bindings-windows）が同じ版を
+# 既に使っているので、クレートは増えない。増えるのは下のフィーチャの分だけ
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media",
+    "Win32_Media_DirectShow",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
+# 自前のレンダラーフィルターを `#[implement]` で書く。マクロが生成するコードは
+# `windows_core` を直接参照するので、`windows` とは別に依存へ入れる
+windows-core = "0.62"
 
 [[bin]]
 name = "capturecard_viewer"

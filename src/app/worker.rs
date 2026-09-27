@@ -15,9 +15,10 @@
 //! 越しに読む。イベントを取りこぼしても表示が食い違わないよう、状態は
 //! 必ずこちらを正とする。
 
+use super::backend::{self, BackendShared};
 use crate::audio::{ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, ResampleStatus};
 use crate::repaint::RepaintWaker;
-use crate::settings::AppSettings;
+use crate::settings::{AppSettings, VideoBackendSetting};
 use crate::video::{ActiveVideo, DeviceCapabilities, SharedColorConversion, VideoFrames};
 use log::{debug, warn};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -25,16 +26,30 @@ use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 
 /// 映像の接続対象。これが変わったらバックオフを捨てて即座に開き直す。
-/// `(デバイス名, 解像度, フォーマット, fps)`
+/// `(デバイス名, 解像度, フォーマット, fps, 開き方)`
+///
+/// 開き方（`video.backend`）を含めてあるのは、同じデバイスでも経路が
+/// 変われば開き直しが要るため（#237）
 pub(super) type VideoTarget = (
     Option<String>,
     Option<(u32, u32)>,
     Option<String>,
     Option<u32>,
+    VideoBackendSetting,
 );
 
-/// 音声の接続対象。`(入力デバイス名, 出力デバイス名, サンプリングレート, チャンネル数)`
-pub(super) type AudioTarget = (Option<String>, Option<String>, Option<u32>, Option<u16>);
+/// 音声の接続対象。
+/// `(入力デバイス名, 出力デバイス名, サンプリングレート, チャンネル数, バッファ長 ms)`
+///
+/// バッファ長を含めてあるのは、リングバッファの長さがストリームを開くときに
+/// しか決まらないため。設定ダイアログで変えたら音声だけを開き直す
+pub(super) type AudioTarget = (
+    Option<String>,
+    Option<String>,
+    Option<u32>,
+    Option<u16>,
+    u32,
+);
 
 /// ワーカーがデバイスを開くために要る設定。
 ///
@@ -58,12 +73,14 @@ impl DeviceConfig {
                 settings.video.resolution,
                 settings.video.format.clone(),
                 settings.video.fps,
+                settings.video.backend,
             ),
             audio: (
                 settings.audio.input_device_name.clone(),
                 settings.audio.output_device_name.clone(),
                 settings.audio.sample_rate,
                 settings.audio.channels,
+                settings.audio.buffer_ms,
             ),
             auto_reconnect: settings.video.auto_reconnect,
         }
@@ -84,6 +101,16 @@ pub(super) enum DeviceCommand {
     },
     /// バックオフを飛ばして映像・音声とも開き直す（右クリックの「デバイス再接続」）
     ReconnectNow,
+    /// 音量を `delta`%（負なら下げる）変える。**最小化中のホットキー専用。**
+    ///
+    /// 普段この 2 つは UI スレッドが `AudioControls` の Atomic を直接
+    /// 書き換える。最小化中は `update()` が呼ばれずその経路が止まるので、
+    /// 常に動いているこのスレッドへ代わりに実行させる（#133）。
+    /// 実行したことは `DeviceEvent::VolumeAdjusted` で UI へ返し、
+    /// 復帰したときに設定と OSD を追従させる
+    AdjustVolume(f32),
+    /// ミュートを切り替える。**最小化中のホットキー専用**（`AdjustVolume` と同じ理由）
+    ToggleMute,
     /// デバイス一覧を取り直す。設定ダイアログの選択肢に使う
     RefreshDeviceLists,
     /// 映像デバイスの対応形式を問い合わせる
@@ -122,6 +149,16 @@ pub(super) enum DeviceEvent {
         input: Vec<String>,
         output: Vec<String>,
     },
+    /// 最小化中のホットキーで音量を `delta`% 変えた。
+    ///
+    /// **UI スレッドは復帰したときに同じ `delta` を自分にも適用する**
+    /// （`adjust_volume`）。絶対値ではなく差分を返すのは、`AudioControls` が
+    /// 持つのは 0.0〜2.0 の倍率で、パーセントへ戻すと端数が動くため。
+    /// 差分なら右クリックメニューやホイールと同じ経路をそのまま通せる
+    VolumeAdjusted(f32),
+    /// 最小化中のホットキーでミュートを切り替えた。UI は復帰したときに
+    /// 自分の状態も切り替える（`toggle_mute`）
+    MuteToggled,
     /// 未設定だったデバイス名を、列挙結果の先頭で埋めた（起動直後の 1 回だけ）。
     /// UI スレッドが設定へ書き戻す
     DefaultDevicesResolved {
@@ -154,11 +191,14 @@ pub(super) struct DeviceSnapshot {
     pub(super) active_audio: Option<ActiveAudio>,
     pub(super) video_retry: RetryStatus,
     pub(super) audio_retry: RetryStatus,
-    /// 音声のクロックドリフト補正の現在値。「接続状態」タブへ出す想定だが、
-    /// 表示側（`ui.rs`）はまだ実装していないので読まれていない（Issue #132）。
-    /// 表示を足すまでの間、警告を黙らせる
-    #[allow(dead_code)]
+    /// 音声のクロックドリフト補正の現在値。「接続状態」タブへ出す
+    /// （`app::error_report::connection_status` が `status::format_resample_status`
+    /// で文言に組み立てる）
     pub(super) audio_resample: Option<ResampleStatus>,
+    /// 音声のアンダーラン（出力コールバックがリングバッファから取り出せなかった）
+    /// の累計回数。音声を開いていなければ `None`。開き直すと 0 から数え直す。
+    /// 統計 OSD（`app::view`）と「接続状態」タブの両方がこれを読む
+    pub(super) audio_underruns: Option<u32>,
 }
 
 /// ワーカースレッドと、UI スレッドが共有する読み取り専用のスナップショット。
@@ -183,6 +223,12 @@ impl DeviceWorker {
     /// 先に作って複製を渡す。**`VideoCapture` と `AudioCapture` はワーカー
     /// スレッドの中で作る。** `cpal::Stream` は `!Send` で、作ったスレッド以外へ
     /// 持ち出せないため。
+    ///
+    /// デバイスに触る実装を選ぶのはここ 1 か所だけ（`backend::backends_from_env`。
+    /// 通常は `SystemBackends`、環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` が
+    /// あればフェイク）。
+    /// ワーカー本体（`super::worker_loop::run`）は `super::backend` の trait
+    /// しか知らないので、テストはモックを渡して同じループを回せる。
     pub(super) fn spawn(
         frames: VideoFrames,
         color_conversion: Arc<SharedColorConversion>,
@@ -194,18 +240,18 @@ impl DeviceWorker {
         let snapshot: SharedSnapshot = Arc::new(RwLock::new(DeviceSnapshot::default()));
 
         let thread_snapshot = Arc::clone(&snapshot);
+        let shared = BackendShared {
+            frames,
+            color_conversion,
+            audio_controls,
+            repaint_waker,
+        };
+        // 本番かフェイクか。環境変数を読むだけなので UI スレッドで決めてよい
+        let backends = backend::backends_from_env();
         let handle = std::thread::Builder::new()
             .name("device-worker".to_string())
             .spawn(move || {
-                super::worker_loop::run(
-                    command_rx,
-                    event_tx,
-                    thread_snapshot,
-                    frames,
-                    color_conversion,
-                    audio_controls,
-                    repaint_waker,
-                );
+                super::worker_loop::run(command_rx, event_tx, thread_snapshot, shared, backends);
             });
 
         let handle = match handle {
@@ -234,6 +280,15 @@ impl DeviceWorker {
         if let Err(e) = self.commands.send(command) {
             warn!("デバイスワーカーへコマンドを送れない: {}", e);
         }
+    }
+
+    /// コマンドの送り口を複製して渡す。
+    ///
+    /// **ホットキーのリスナースレッドへ渡すために用意してある**
+    /// （`app::hotkeys::background_hotkey_runner`）。最小化中は UI スレッドが
+    /// 動かないので、リスナーから直接コマンドを積めるようにする。
+    pub(super) fn command_sender(&self) -> Sender<DeviceCommand> {
+        self.commands.clone()
     }
 
     /// 届いているイベントを 1 つ取り出す。無ければ `None`。

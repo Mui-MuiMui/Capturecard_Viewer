@@ -4,13 +4,16 @@
 //! 持たせないため（`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
 //! ディスクへの書き出しそのものは `super::settings_store`。
 
+use super::update::CheckOrigin;
 use super::CaptureCardViewer;
+use crate::i18n::{self, Text};
 use crate::overlay::OverlayContent;
 use crate::settings;
 use crate::status::{self, ErrorSource};
 use crate::ui;
 use chrono::Local;
 use log::{debug, error, info, warn};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// プリセットを切り替えたときに OSD を出しておく時間。
@@ -46,10 +49,34 @@ impl CaptureCardViewer {
         self.mark_settings_dirty();
         self.apply_settings(false);
         self.transient_overlay.show(
-            OverlayContent::Text(format!("プリセット: {}", name)),
+            OverlayContent::Text(i18n::preset_switched(name)),
             PRESET_OSD_DURATION,
             Instant::now(),
         );
+    }
+
+    /// 実行中の設定の言語を画面へ反映する。
+    ///
+    /// `src/i18n/` の現在の言語を書き換えるだけで、再起動は要らない。
+    /// 次に文字列を引いたところから切り替わる。ウィンドウとコンボボックスの
+    /// Id は表示文字列から作らないようにしてあるので、切り替えても位置や
+    /// 開閉の状態は保たれる（`docs/design/i18n.md`）。
+    fn apply_language(&self) {
+        let setting = match self.settings.lock() {
+            Ok(settings) => settings.ui.language,
+            Err(_) => {
+                warn!("言語の反映で settings のロックを取得できない");
+                return;
+            }
+        };
+        let language = setting.resolve(self.os_language);
+        if language != i18n::language() {
+            info!(
+                "画面の言語を {:?} へ切り替えた（設定: {:?}）",
+                language, setting
+            );
+        }
+        i18n::set_language(language);
     }
 
     /// 設定ダイアログの 1 フレームのイベントを処理する。
@@ -65,7 +92,7 @@ impl CaptureCardViewer {
             match event {
                 ui::SettingsEvent::Dialog(action) => self.apply_dialog_action(action),
                 ui::SettingsEvent::SelectTab(tab) => self.settings_dialog.select_tab(tab),
-                ui::SettingsEvent::TestSound => self.play_test_sound(),
+                ui::SettingsEvent::TestSound(sound_file) => self.play_test_sound(&sound_file),
                 ui::SettingsEvent::ExportSettings => self.export_settings_to_file(),
                 ui::SettingsEvent::ImportSettings => self.import_settings_into_draft(),
                 ui::SettingsEvent::ResetDraft => self.reset_draft_to_defaults(),
@@ -78,6 +105,14 @@ impl CaptureCardViewer {
                 ui::SettingsEvent::SaveNewPreset => self.settings_dialog.save_new_preset(),
                 ui::SettingsEvent::PresetRow(action) => {
                     self.settings_dialog.apply_preset_row(action)
+                }
+                ui::SettingsEvent::SetLanguage(language) => {
+                    self.settings_dialog.set_draft_language(language)
+                }
+                ui::SettingsEvent::CheckForUpdates => self.start_update_check(CheckOrigin::Manual),
+                ui::SettingsEvent::StartUpdate => self.start_update_from_settings(),
+                ui::SettingsEvent::SetUpdateSettings(update) => {
+                    self.settings_dialog.set_draft_update(update)
                 }
                 ui::SettingsEvent::OpenHotkeyCapture(action) => {
                     // どのアクションを編集しているかを入力ダイアログへ渡す。
@@ -148,7 +183,7 @@ impl CaptureCardViewer {
     /// スクリーンショットの効果音をファイルダイアログで選ぶ。
     fn pick_sound_file(&mut self) {
         let Some(file) = rfd::FileDialog::new()
-            .add_filter("音声ファイル", &["mp3", "wav", "ogg"])
+            .add_filter(Text::AudioFileFilter.get(), &["mp3", "wav", "ogg"])
             .pick_file()
         else {
             debug!("効果音ファイルの選択がキャンセルされた");
@@ -174,6 +209,9 @@ impl CaptureCardViewer {
             } else {
                 warn!("設定ダイアログの反映に失敗した: settings のロックを取れない");
             }
+            // 画面の言語を切り替える。このフレームの残り（トーストや OSD）から
+            // 新しい言語で出る
+            self.apply_language();
             // 反映した内容でデバイスを開き直す
             self.apply_settings(false);
             // 「読み込みました。適用してください」の類の案内は役目を終えている。
@@ -199,10 +237,16 @@ impl CaptureCardViewer {
 
     /// 設定ダイアログの「テスト再生」で効果音を鳴らす。
     ///
-    /// ダイアログを開いている間はドラフトの音量で鳴らす。スライダーを
-    /// 動かした結果をその場で確かめられるようにするため。
-    /// 効果音のファイル自体は「適用」か「OK」まで差し替わらない。
-    fn play_test_sound(&self) {
+    /// 音もドラフトの `sound_file`（イベントに載ってくる）、音量もドラフトの
+    /// 値で鳴らす。ファイルを選び直したりスライダーを動かしたりした結果を、
+    /// 「適用」の前にその場で確かめられるようにするため（Issue #204）。
+    ///
+    /// **適用済みの効果音は差し替えない。** 読み込みは別スレッドで
+    /// `screenshot::load_sound_data` を通して行い（`request_test_sound`）、
+    /// 撮影時に鳴る音は「適用」か「OK」まで差し替わらない。解決の仕方は撮影時と
+    /// 同じで、既定値のパスは内蔵音へ倒れる。ファイルが読めなければ内蔵音で
+    /// 鳴らし、理由をトーストへ出す
+    fn play_test_sound(&mut self, sound_file: &Path) {
         // この操作が返るのはダイアログを描画しているときだけなので、ドラフトは必ずある
         let Some(volume) = self
             .settings_dialog
@@ -212,11 +256,8 @@ impl CaptureCardViewer {
             return;
         };
 
-        if let Ok(ss) = self.screenshot_manager.lock() {
-            ss.play_screenshot_sound(volume);
-        } else {
-            warn!("テスト再生で screenshot_manager のロックを取得できない");
-        }
+        // 読み込みは別スレッドで行い、届いたら鳴らす（app::screenshot_sound）
+        self.request_test_sound(sound_file, volume);
     }
 
     /// 設定ダイアログの「設定を書き出す」。
@@ -235,13 +276,13 @@ impl CaptureCardViewer {
         let settings = self.settings.lock().ok().map(|settings| settings.clone());
         let Some(settings) = settings else {
             warn!("設定の書き出しで settings のロックを取得できない");
-            self.report_settings_error("設定を読み取れない".to_string());
+            self.report_settings_error(Text::SettingsReadFailed.get().to_string());
             return;
         };
 
         let Some(path) = rfd::FileDialog::new()
             .set_file_name(&settings::export_file_name(&Local::now()))
-            .add_filter("設定ファイル", &["toml"])
+            .add_filter(Text::SettingsFile.get(), &["toml"])
             .save_file()
         else {
             debug!("設定の書き出しがキャンセルされた");
@@ -252,11 +293,12 @@ impl CaptureCardViewer {
             Ok(()) => {
                 info!("設定を {} へ書き出した", path.display());
                 self.settings_dialog
-                    .set_management_message(format!("{} へ書き出しました", path.display()), false);
+                    .set_management_message(i18n::settings_exported(path.display()), false);
             }
             Err(e) => {
-                error!("設定を {} へ書き出せない: {}", path.display(), e);
-                self.report_settings_error(e);
+                // 書き出し先は SettingsError が持っているので、ここでは足さない
+                error!("{e}");
+                self.report_settings_error(e.to_string());
             }
         }
     }
@@ -271,7 +313,7 @@ impl CaptureCardViewer {
     /// 作ると、どこまでが元の値か分からなくなる。
     fn import_settings_into_draft(&mut self) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("設定ファイル", &["toml"])
+            .add_filter(Text::SettingsFile.get(), &["toml"])
             .pick_file()
         else {
             debug!("設定の読み込みがキャンセルされた");
@@ -281,8 +323,9 @@ impl CaptureCardViewer {
         let imported = match settings::import_from(&path) {
             Ok(imported) => imported,
             Err(e) => {
-                error!("設定ファイル {} を読み込めない: {}", path.display(), e);
-                self.report_settings_error(e);
+                // 読み込み元は SettingsError が持っているので、ここでは足さない
+                error!("{e}");
+                self.report_settings_error(e.to_string());
                 return;
             }
         };
@@ -296,13 +339,8 @@ impl CaptureCardViewer {
         *draft = merged;
 
         info!("設定ファイル {} を編集中の設定へ読み込んだ", path.display());
-        self.settings_dialog.set_management_message(
-            format!(
-                "{} を読み込みました。「適用」または「OK」で反映します",
-                path.display()
-            ),
-            false,
-        );
+        self.settings_dialog
+            .set_management_message(i18n::settings_imported(path.display()), false);
     }
 
     /// 設定ダイアログの「設定を初期化」。
@@ -319,10 +357,8 @@ impl CaptureCardViewer {
         *draft = defaults;
 
         info!("編集中の設定を初期値へ戻した");
-        self.settings_dialog.set_management_message(
-            "初期値に戻しました。「適用」または「OK」で反映します".to_string(),
-            false,
-        );
+        self.settings_dialog
+            .set_management_message(Text::SettingsResetDone.get().to_string(), false);
     }
 
     /// 設定ファイルの読み書きの失敗を、トーストとダイアログの両方へ出す。
