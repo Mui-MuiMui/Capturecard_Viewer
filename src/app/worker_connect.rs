@@ -325,19 +325,23 @@ impl WorkerState {
             config.video.0.as_deref(),
             video.selectable.as_deref(),
         );
-        // 入力を先に見る。キャプチャーボードの音声は入力側に出る
-        let audio_notice = decide_device_not_visible(
-            audio_failures,
-            config.audio.0.as_deref(),
-            input.as_deref().ok(),
-        )
-        .or_else(|| {
-            decide_device_not_visible(
-                audio_failures,
-                config.audio.1.as_deref(),
-                output.as_deref().ok(),
-            )
-        });
+        // 入力を先に見る。キャプチャーボードの音声は入力側に出る。
+        // **入出力のどちらかの列挙に失敗したら、音声は判定しない。** 映像で
+        // 失敗した経路があれば判定しないのと同じで、開けない理由が失敗した側に
+        // あったかもしれない
+        let audio_notice = match (input.as_deref(), output.as_deref()) {
+            (Ok(input), Ok(output)) => {
+                decide_device_not_visible(audio_failures, config.audio.0.as_deref(), Some(input))
+                    .or_else(|| {
+                        decide_device_not_visible(
+                            audio_failures,
+                            config.audio.1.as_deref(),
+                            Some(output),
+                        )
+                    })
+            }
+            _ => None,
+        };
         self.set_video_not_visible(video_notice);
         self.set_audio_not_visible(audio_notice);
     }
