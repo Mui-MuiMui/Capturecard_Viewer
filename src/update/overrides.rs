@@ -119,16 +119,44 @@ fn parse_release_source(value: &str) -> Option<ReleaseSource> {
             }
         };
     }
-    if strip_prefix_ignore_case(value, "https://").is_some()
-        || strip_prefix_ignore_case(value, "http://").is_some()
-    {
-        return Some(ReleaseSource::Http(value.to_string()));
+    let after_scheme = strip_prefix_ignore_case(value, "https://")
+        .or_else(|| strip_prefix_ignore_case(value, "http://"));
+    if let Some(rest) = after_scheme {
+        if has_host(rest) {
+            return Some(ReleaseSource::Http(value.to_string()));
+        }
+        warn!(
+            "{} の値 '{}' にホスト名が無いので使わない",
+            API_URL_ENV, value
+        );
+        return None;
     }
     warn!(
         "{} の値 '{}' は http:// / https:// / file:// のどれでもないので使わない",
         API_URL_ENV, value
     );
     None
+}
+
+/// `http://` / `https://` の後ろにホスト名があるか。
+///
+/// `http://:8000/x` や `http:///x` のようにホスト名が空のものを、問い合わせる前に
+/// 弾くためのもの。URL として正しいかまでは見ない（おかしければ問い合わせの
+/// 失敗として出る）。
+fn has_host(after_scheme: &str) -> bool {
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    // `user:pass@host:port` の `host` を取り出す
+    let host_and_port = authority.rsplit('@').next().unwrap_or_default();
+    let host = if host_and_port.starts_with('[') {
+        // IPv6 の `[::1]:8000`
+        host_and_port.split(']').next().unwrap_or_default()
+    } else {
+        host_and_port.split(':').next().unwrap_or_default()
+    };
+    !host.trim_start_matches('[').is_empty()
 }
 
 fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
@@ -267,6 +295,38 @@ mod tests {
             CheckOverrides::from_env_values(None, Some("C:/work/release.json")).source,
             None
         );
+    }
+
+    #[test]
+    fn from_env_values_http_url_without_host_is_ignored() {
+        for value in [
+            "http://",
+            "http:///latest.json",
+            "http://:8000/latest.json",
+            "https://@/x",
+        ] {
+            assert_eq!(
+                CheckOverrides::from_env_values(None, Some(value)).source,
+                None,
+                "{value} は弾かれなければならない"
+            );
+        }
+    }
+
+    #[test]
+    fn from_env_values_http_url_with_port_user_or_ipv6_is_kept() {
+        for value in [
+            "http://localhost:8000/latest.json",
+            "http://user@127.0.0.1/latest.json",
+            "http://[::1]:8000/latest.json",
+            "https://example.invalid?x=1",
+        ] {
+            assert_eq!(
+                CheckOverrides::from_env_values(None, Some(value)).source,
+                Some(ReleaseSource::Http(value.to_string())),
+                "{value} は使われなければならない"
+            );
+        }
     }
 
     #[test]

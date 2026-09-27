@@ -18,7 +18,7 @@ GitHub の Release から新しい版を見つけて知らせる仕組み。Issu
 - 使うのは `tag_name` / `html_url` / `body` / `draft` / `prerelease` / `assets[].name` / `assets[].browser_download_url` だけ。知らない項目は読み飛ばす
 - タグ（`v1.2.0`）から先頭の `v` を外して `semver` で読み、`CARGO_PKG_VERSION` と比べる。**新しい正式版のときだけ「更新あり」。** 同じ版・古い版（ダウングレード）・`1.2.0-rc.1` のような pre-release のタグは「最新」として扱う（`update::is_newer_stable`）。`/latest` は draft と pre-release の印を付けた Release を元から除くが、印を付け忘れたものまで勧めないよう、タグの形と `draft` / `prerelease` の値でも弾く
 - タグが版として読めなければ失敗として扱う（`UpdateError::InvalidTag`）
-- **`html_url` はそのままブラウザへ渡さない。** `https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/` で始まるときだけ使い、それ以外は最新のリリースページにする（`release_page_url`）
+- **`html_url` はそのままブラウザへ渡さない。** `https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/<タグ>` の形（タグは英数字と `.` `-` `_` だけで、`.` / `..` ではない）のときだけ使い、それ以外は最新のリリースページにする（`release_page_url`）。頭の一致だけで許すと、`.../releases/../../../他人/リポジトリ/...` をブラウザが畳んで別のリポジトリを開く
 - 失敗の理由は `UpdateError` の変種で分ける。404 は「公開されたリリースが無い」、403 / 429 は認証なしの問い合わせ回数の上限（1 時間 60 回）、タイムアウト、その他の HTTP、接続の失敗、JSON を読めない、の 7 つ。文言は `Display` から `crate::i18n` を呼んで出す（`docs/design/error-reporting.md`）
 
 ### HTTP と TLS
@@ -110,7 +110,7 @@ GitHub の Release から新しい版を見つけて知らせる仕組み。Issu
 | `CAPTURECARD_VIEWER_UPDATE_API_URL` | `http://` / `https://` の URL、または `file://` の URL | Release API の代わりに問い合わせる先。`file://` なら Release の JSON（`releases/latest` の応答と同じ形）のファイルをそのまま読む。`file:///C:/work/latest.json` と `file://C:/work/latest.json` は同じ。URL の符号化（`%20`）は解かない |
 
 - 読むのは起動時に 1 回だけ（`UpdateState::new`）。どちらかが効いていれば「更新の確認のテスト用のオーバーライドが有効」を WARN でログに残す
-- 解釈は純粋関数（`CheckOverrides::from_env_values`）。空や空白だけの値は指定していないのと同じ。読めない値（版として読めない、`http://` / `https://` / `file://` のどれでもない）は WARN を残して使わず、通常の確認に倒す
+- 解釈は純粋関数（`CheckOverrides::from_env_values`）。空や空白だけの値は指定していないのと同じ。読めない値（版として読めない、`http://` / `https://` / `file://` のどれでもない、`http://:8000/` のようにホスト名が空、`file://` の後ろが空）は WARN を残して使わず、通常の確認に倒す
 - 問い合わせ先を差し替えても、判断（版の比較、pre-release の扱い、`html_url` の確認）は通常と同じ関数を通る。**よそのリポジトリの Release を指したときは `html_url` が弾かれ、「リリースページを開く」は本物の最新のリリースページになる**
 - 次の段階では、ローカルの HTTP サーバーやテスト用のリポジトリの Release に向けて、ダウンロードと照合を試すのに使う
 

@@ -297,8 +297,22 @@ pub fn is_newer_stable(current: &Version, latest: &Version) -> bool {
 /// API が返したリリースページの URL を、開いてよい形のときだけ使う。
 ///
 /// ブラウザへ渡す文字列なので、このリポジトリの Release 以外は開かない。
+/// **頭が一致するだけでは許さない。** `.../releases/../../../他人/リポジトリ/...` は
+/// ブラウザが `..` を畳んで別のリポジトリを開くため、`releases/` の後ろは
+/// `tag/<タグ>` の形（タグは英数字と `.` `-` `_` だけで、`.` / `..` ではない）に限る。
 fn release_page_url(html_url: &str) -> &str {
-    if html_url.starts_with(RELEASE_PAGE_PREFIX) {
+    let is_release_tag_page = html_url
+        .strip_prefix(RELEASE_PAGE_PREFIX)
+        .and_then(|rest| rest.strip_prefix("tag/"))
+        .is_some_and(|tag| {
+            !tag.is_empty()
+                && tag != "."
+                && tag != ".."
+                && tag
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        });
+    if is_release_tag_page {
         html_url
     } else {
         LATEST_RELEASE_PAGE_URL
@@ -507,6 +521,30 @@ mod tests {
             panic!("新しい版として扱われていない");
         };
         assert_eq!(check.release_url, LATEST_RELEASE_PAGE_URL);
+    }
+
+    #[test]
+    fn release_page_url_accepts_only_this_repository_tag_pages() {
+        let ok = "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/v1.2.0-rc_1";
+        assert_eq!(release_page_url(ok), ok);
+
+        for rejected in [
+            // `..` をブラウザが畳むと別のリポジトリになる
+            "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/../../../attacker/evil/releases/tag/v1.2.0",
+            "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/..",
+            "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/v1.2.0/../../x",
+            "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/%2e%2e",
+            "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/",
+            "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.0/a.exe",
+            "https://github.com/Mui-MuiMui/Capturecard_Viewer_evil/releases/tag/v1.2.0",
+            "",
+        ] {
+            assert_eq!(
+                release_page_url(rejected),
+                LATEST_RELEASE_PAGE_URL,
+                "{rejected} は弾かれなければならない"
+            );
+        }
     }
 
     #[test]
