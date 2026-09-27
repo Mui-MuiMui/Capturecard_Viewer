@@ -406,6 +406,9 @@ impl eframe::App for CaptureCardViewer {
         self.drain_sound_load_results();
         // 別スレッドで行った更新の確認の結果を取り込む
         self.drain_update_results();
+        // 別スレッドで行っている更新（ダウンロードと差し替え）の進み具合を取り込む。
+        // 差し替えが済んでいればここでウィンドウを閉じる
+        self.drain_update_apply_results(ctx);
 
         // 起動直後に 1 度だけ行う処理。
         //
@@ -426,6 +429,8 @@ impl eframe::App for CaptureCardViewer {
                 egui::WindowLevel::Normal
             }));
 
+            // 前回の更新で残った `.old` / `.new` を消す（別スレッド）
+            self.clean_up_update_leftovers();
             // 更新の確認は別スレッドで行うので、ネットワークが無くても起動は待たない
             self.check_for_updates_on_startup();
         }
@@ -757,12 +762,16 @@ impl eframe::App for CaptureCardViewer {
         self.join_screenshot_save_threads();
         // 効果音の読み込みも切り離さずに待つ。結果は使わない
         self.join_sound_load_threads();
-        // 更新の確認のスレッドは待たない。ネットワークだけを触り副作用が無いので、
-        // 確認の最中でもプロセスの終了で打ち切ってよい（docs/design/update.md）
+        // 更新の確認と適用のスレッドは待たない。確認は副作用が無く、適用は
+        // 書きかけの `.new` を次の起動で消す（docs/design/update.md）
 
         // 終了中に終わった保存の結果をログへ残す。**待ったあとに読むこと。**
         // 画面はもう出ないので通知はされないが、閉じる直前に撮った 1 枚が
         // 保存できなかったことは、ログにだけは残しておかないと追えない
         self.drain_screenshot_results();
+
+        // 更新で差し替えた exe を起動する。**最後に置くこと。** 設定の保存と
+        // デバイスの解放が済んでから、新しい版が起動するようにする
+        self.relaunch_updated_exe();
     }
 }

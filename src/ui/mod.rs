@@ -21,7 +21,7 @@
 //! | `hotkey_capture.rs` | ホットキー入力ダイアログ |
 //! | `other_tab.rs` | 「その他」タブ |
 //! | `status_tab.rs` | 「接続状態」タブ |
-//! | `update_dialog.rs` | 起動時に新しい版を知らせるダイアログ |
+//! | `update_dialog.rs` | 新しい版を知らせ、更新の進み具合を出すダイアログ |
 
 mod capability;
 mod device_tab;
@@ -48,7 +48,7 @@ pub use self::draft::{draft_from_defaults, draft_from_imported};
 pub use self::hotkey_capture::{show_hotkey_capture_dialog, HotkeyDialogEvent};
 pub use self::preset::PresetRowAction;
 pub use self::state::{resolve_action, SettingsDialogState, SettingsDialogView};
-pub use self::update_dialog::{show_update_dialog, UpdateDialogEvent};
+pub use self::update_dialog::{show_update_dialog, UpdateDialogEvent, UpdateDialogView};
 
 use self::device_tab::show_device_settings_tab;
 use self::hotkeys_tab::show_hotkey_settings_tab;
@@ -133,6 +133,9 @@ pub enum SettingsEvent {
     /// 「その他」タブの「更新を確認」。問い合わせは `app` が別スレッドで行う。
     /// ドラフトも設定も動かさない
     CheckForUpdates,
+    /// 「その他」タブの「更新する」。見つかった版のダウンロードと差し替えを
+    /// `app` が別スレッドで始める。ドラフトも設定も動かさない
+    StartUpdate,
     /// 「その他」タブの更新の節で、2 つのチェックか「解除」を操作した。
     /// 載せるのは差し替えたあとのドラフトの `update` で、反映は「適用」「OK」
     SetUpdateSettings(UpdateSettings),
