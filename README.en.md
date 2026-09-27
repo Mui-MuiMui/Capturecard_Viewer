@@ -295,8 +295,8 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 
 - Devices whose name ends with "(DirectShow)" are ones that Media Foundation does not list (the OBS Virtual Camera, older capture cards and so on). A device that appears in both Media Foundation and DirectShow is listed only once, as the Media Foundation device.
 - To open such a device with DirectShow instead, set "Open video with" on the Devices tab of the settings window to "DirectShow" (the default is "Auto"). The Connection status tab shows which one was actually used. A device that the selected method does not list cannot be connected, so switch back to "Auto" if no picture appears.
-- The accepted formats are YUY2, MJPEG and RGB24. A device that only outputs other formats, such as NV12, shows no video.
-- Colour space, colour range and brightness / contrast / saturation only take effect with YUY2 (not with MJPEG or RGB24).
+- The accepted formats are YUY2, NV12, I420, YV12, MJPEG and RGB24. A device that only outputs other formats, such as UYVY, shows no video.
+- Colour space, colour range and brightness / contrast / saturation only take effect with YUY2, NV12, I420 and YV12 (not with MJPEG or RGB24).
 
 **Settings that are not yet implemented**
 
