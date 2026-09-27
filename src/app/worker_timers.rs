@@ -43,6 +43,9 @@ impl WorkerState {
     /// 期限が来ている接続を試し、稼働中のデバイスが生きているかを見る。
     pub(super) fn tick(&mut self, now: Instant) {
         self.poll_connection(now);
+        // 接続を試した直後に置く。起動時は最初の接続を待たせずに列挙し、
+        // 失敗が節目に届いた回もその場で判定できる
+        self.log_device_enumeration();
         self.monitor_video_link();
         self.monitor_audio_stream();
         self.poll_default_audio_device();

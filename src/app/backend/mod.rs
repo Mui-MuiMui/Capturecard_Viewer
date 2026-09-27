@@ -74,6 +74,43 @@ pub(super) trait VideoBackend {
 
     /// 実際に開いたストリームの内容。開いていなければ `None`
     fn active(&self) -> Option<ActiveVideo>;
+
+    /// 経路ごとの列挙結果。**ログと「Windows 側にも見えていない」の判定専用**
+    /// （`super::worker_connect::log_device_enumeration`）。
+    ///
+    /// `list_devices` と違い、列挙に失敗した経路の理由を捨てない。既定は
+    /// `list_devices` を 1 つの経路として返すだけで、失敗を区別できない
+    /// フェイクとモックはこれで足りる。本番（`system`）は Media Foundation と
+    /// DirectShow を分けて返す
+    fn enumerate(&self) -> VideoEnumeration {
+        let names = self
+            .list_devices()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        VideoEnumeration::single("list_devices", names)
+    }
+}
+
+/// 映像デバイスの列挙結果。経路（Media Foundation / DirectShow）ごとに分けて持つ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct VideoEnumeration {
+    /// `(経路名, 列挙結果)`。経路名はログにだけ出す
+    pub(super) sources: Vec<(&'static str, Result<Vec<String>, VideoError>)>,
+    /// 設定に書ける名前（`list_devices` と同じ表記）の一覧。
+    /// **どれか 1 つの経路でも列挙に失敗したら `None`。** 失敗した経路に
+    /// 目当てのデバイスが居たかもしれないので、「見えていない」とは言えない
+    pub(super) selectable: Option<Vec<String>>,
+}
+
+impl VideoEnumeration {
+    /// 経路が 1 つで、失敗しない実装（フェイク・モック）の列挙結果。
+    pub(super) fn single(source: &'static str, names: Vec<String>) -> Self {
+        Self {
+            sources: vec![(source, Ok(names.clone()))],
+            selectable: Some(names),
+        }
+    }
 }
 
 /// 音声デバイスの開閉・列挙・観測。
@@ -116,6 +153,18 @@ pub(super) trait AudioBackend {
     /// ストリームのエラー旗を読んで落とす。**読んだ時点で下りる**ので、
     /// 見送る場合は呼び出し側が保持する（`super::worker_timers`）
     fn take_stream_error(&self) -> bool;
+
+    /// 向きごとの列挙結果。**ログと「Windows 側にも見えていない」の判定専用。**
+    ///
+    /// `list_*_devices` と違い、列挙に失敗した理由を捨てない。既定は
+    /// `list_*_devices` をそのまま成功として返すだけで、失敗を区別できない
+    /// フェイクとモックはこれで足りる
+    fn enumerate_devices(&self, direction: AudioDirection) -> Result<Vec<String>, AudioError> {
+        Ok(match direction {
+            AudioDirection::Input => self.list_input_devices(),
+            AudioDirection::Output => self.list_output_devices(),
+        })
+    }
 }
 
 /// バックエンドが UI スレッドと共有するハンドル一式。

@@ -144,6 +144,30 @@ pub fn audio_stream_play_failed(direction: &str, source: impl Display) -> String
     }
 }
 
+// ---- Windows 側にも見えていない（app::monitor::DeviceNotVisible） ----
+
+pub fn device_not_visible_not_listed(name: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "'{name}' が Windows 側にも見えていない可能性があります（ほかのデバイスは見えています）。デバイスマネージャーで接続を確認してください"
+        ),
+        Language::English => format!(
+            "Windows may not see '{name}' either (other devices are visible). Check the connection in Device Manager"
+        ),
+    }
+}
+
+/// 接続の失敗の理由に「Windows 側にも見えていない」を添える。
+///
+/// **案内を前に置く。** トーストは 60 文字で切り詰めるので、後ろに置くと
+/// 失敗の理由（デバイス名を含んで長い）に押し出されて読めなくなる。
+pub fn failure_with_device_not_visible(notice: impl Display, reason: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("{notice}（{reason}）"),
+        Language::English => format!("{notice} ({reason})"),
+    }
+}
+
 // ---- スクリーンショットと効果音（screenshot::ScreenshotError） ----
 
 pub fn screenshot_empty_frame(width: usize, height: usize) -> String {

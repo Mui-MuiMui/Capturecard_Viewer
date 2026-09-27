@@ -9,7 +9,7 @@
 //! ここはそれを trait に包むのと、環境変数の解釈だけを持つ。置き場所の理由は
 //! `docs/design/device-worker.md` の「フェイクデバイス（#142）」。
 
-use super::{AudioBackend, BackendShared, DeviceBackends, VideoBackend};
+use super::{AudioBackend, BackendShared, DeviceBackends, VideoBackend, VideoEnumeration};
 use crate::audio::{
     ActiveAudio, AudioCapabilities, AudioDirection, AudioError, FakeAudioCapture, FakeAudioOptions,
     PassthroughRequest, ResampleStatus, ResampleTelemetry,
@@ -202,6 +202,15 @@ impl VideoBackend for FakeVideoCapture {
 
     fn active(&self) -> Option<ActiveVideo> {
         FakeVideoCapture::active(self)
+    }
+
+    fn enumerate(&self) -> VideoEnumeration {
+        // フェイクの列挙は失敗しない。ログで実機と見分けられるよう経路名だけ変える
+        let names = FakeVideoCapture::list_devices(self)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        VideoEnumeration::single("フェイク", names)
     }
 }
 

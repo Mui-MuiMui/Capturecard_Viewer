@@ -97,6 +97,18 @@ impl DirectShowCapture {
     /// デバイスの表示名（`FriendlyName`、「(DirectShow)」なし）の一覧。
     /// 失敗しても空の一覧を返す。
     pub fn list_friendly_names(&self) -> Vec<String> {
+        match self.try_list_friendly_names() {
+            Ok(names) => names,
+            Err(e) => {
+                warn!("DirectShow: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// デバイスの表示名の一覧。`list_friendly_names` と違い、列挙に失敗した
+    /// 理由を返す（ワーカーが列挙の結果をログへ残すため）。
+    pub fn try_list_friendly_names(&self) -> Result<Vec<String>, VideoError> {
         let start = Instant::now();
         match devices::enumerate() {
             Ok(devices) => {
@@ -110,15 +122,14 @@ impl DirectShowCapture {
                     elapsed_ms(start),
                     names
                 );
-                names
+                Ok(names)
             }
             Err(e) => {
-                warn!(
-                    "DirectShow の映像デバイスの列挙に失敗した（{:.1}ms）: {}",
-                    elapsed_ms(start),
-                    e
+                debug!(
+                    "DirectShow の映像デバイスの列挙に失敗した（{:.1}ms）",
+                    elapsed_ms(start)
                 );
-                Vec::new()
+                Err(VideoError::DeviceQueryFailed(e.to_string()))
             }
         }
     }

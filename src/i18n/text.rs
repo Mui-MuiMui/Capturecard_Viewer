@@ -71,6 +71,7 @@ texts! {
 
     // ---- エラーの文言（各エラー enum の Display） ----
     VideoNoDevices { ja: "映像デバイスが 1 台も見つからない", en: "No video devices found" },
+    DeviceNotVisibleNoDevices { ja: "Windows 側にもデバイスが見えていない可能性があります（1 台も見えていません）。デバイスマネージャーで接続を確認してください", en: "Windows may not see the device either (no devices are visible). Check the connection in Device Manager" },
     HotkeyMultipleKeys { ja: "通常キーを 2 つ以上は指定できません", en: "Only one non-modifier key can be specified" },
     HotkeyMissingKey { ja: "通常キーが指定されていません", en: "No non-modifier key is specified" },
     KeyboardHookUnsupported { ja: "この OS には対応していません", en: "This OS is not supported" },

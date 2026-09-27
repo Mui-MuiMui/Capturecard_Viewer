@@ -131,7 +131,22 @@ impl VideoCapture {
         }
     }
 
+    /// 映像デバイスの一覧。`(名前, 説明)`。失敗しても空の一覧を返す。
     pub fn list_devices() -> Vec<(String, String)> {
+        match Self::try_list_devices() {
+            Ok(devices) => devices,
+            Err(e) => {
+                warn!("{}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// 映像デバイスの一覧。`list_devices` と違い、列挙に失敗した理由を返す。
+    ///
+    /// **ワーカーが列挙の結果をログへ残すため**（`app::worker_connect`）。
+    /// 0 台と「列挙そのものが失敗した」を区別したい。
+    pub fn try_list_devices() -> Result<Vec<(String, String)>, VideoError> {
         let start = Instant::now();
         match nokhwa::query(ApiBackend::MediaFoundation) {
             Ok(devices) => {
@@ -152,15 +167,11 @@ impl VideoCapture {
                     elapsed_ms(start),
                     devices.iter().map(|(name, _)| name).collect::<Vec<_>>()
                 );
-                devices
+                Ok(devices)
             }
             Err(e) => {
-                warn!(
-                    "映像デバイスの列挙に失敗した（{:.1}ms）: {}",
-                    elapsed_ms(start),
-                    e
-                );
-                Vec::new()
+                debug!("映像デバイスの列挙に失敗した（{:.1}ms）", elapsed_ms(start));
+                Err(VideoError::DeviceQueryFailed(e.to_string()))
             }
         }
     }

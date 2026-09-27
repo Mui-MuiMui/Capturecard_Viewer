@@ -122,16 +122,30 @@ impl AudioCapture {
     }
 
     pub fn list_input_devices(&self) -> Vec<String> {
-        match self.host.input_devices() {
-            Ok(devices) => devices.filter_map(|d| d.name().ok()).collect(),
-            Err(_) => Vec::new(),
-        }
+        self.try_list_devices(AudioDirection::Input)
+            .unwrap_or_default()
     }
 
     pub fn list_output_devices(&self) -> Vec<String> {
-        match self.host.output_devices() {
-            Ok(devices) => devices.filter_map(|d| d.name().ok()).collect(),
-            Err(_) => Vec::new(),
+        self.try_list_devices(AudioDirection::Output)
+            .unwrap_or_default()
+    }
+
+    /// デバイス名の一覧。`list_*_devices` と違い、列挙に失敗した理由を返す。
+    ///
+    /// **ワーカーが列挙の結果をログへ残すため**（`app::worker_connect`）。
+    /// 0 台と「列挙そのものが失敗した」を区別したい。
+    pub fn try_list_devices(&self, direction: AudioDirection) -> Result<Vec<String>, AudioError> {
+        let devices = match direction {
+            AudioDirection::Input => self.host.input_devices(),
+            AudioDirection::Output => self.host.output_devices(),
+        };
+        match devices {
+            Ok(devices) => Ok(devices.filter_map(|d| d.name().ok()).collect()),
+            Err(e) => Err(AudioError::DeviceEnumerationFailed {
+                direction,
+                source: e.to_string(),
+            }),
         }
     }
 
