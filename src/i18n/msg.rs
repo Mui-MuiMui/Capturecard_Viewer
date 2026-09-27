@@ -533,6 +533,14 @@ pub fn link_device(name: impl Display) -> String {
     }
 }
 
+/// 実際に開いた経路（Media Foundation / DirectShow）。`api` は `CaptureApi::label`
+pub fn link_capture_api(api: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("開き方: {api}"),
+        Language::English => format!("Opened with: {api}"),
+    }
+}
+
 pub fn link_video(summary: impl Display) -> String {
     match language() {
         Language::Japanese => format!("映像: {summary}"),

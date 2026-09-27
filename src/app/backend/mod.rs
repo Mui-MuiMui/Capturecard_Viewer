@@ -29,6 +29,7 @@ use crate::audio::{
     ResampleStatus, ResampleTelemetry,
 };
 use crate::repaint::RepaintWaker;
+use crate::settings::VideoBackendSetting;
 use crate::video::{
     ActiveVideo, DeviceCapabilities, SharedColorConversion, VideoError, VideoFrames, VideoLinkState,
 };
@@ -57,13 +58,17 @@ pub(super) trait VideoBackend {
     /// デバイスが対応する形式の一覧。`None` なら先頭のデバイス
     fn capabilities(&self, device_name: Option<&str>) -> Result<DeviceCapabilities, VideoError>;
 
-    /// ストリームを開く。既に開いていれば閉じてから開き直す
+    /// ストリームを開く。既に開いていれば閉じてから開き直す。
+    ///
+    /// `backend` は設定の「映像の開き方」（`video.backend`）。経路が 1 つしか
+    /// ない実装（フェイク・モック）は見ない
     fn start_capture(
         &mut self,
         device_name: Option<&str>,
         resolution: Option<(u32, u32)>,
         format: Option<&str>,
         fps: Option<u32>,
+        backend: VideoBackendSetting,
     ) -> Result<(), VideoError>;
 
     /// ストリームを閉じる。開いていなければ何もしない
@@ -252,6 +257,8 @@ pub(super) mod mock {
         pub(in crate::app) device_lost: bool,
         /// 最後に開こうとしたデバイス名
         pub(in crate::app) last_device_name: Option<String>,
+        /// 最後に開こうとしたときの「映像の開き方」
+        pub(in crate::app) last_backend: Option<VideoBackendSetting>,
     }
 
     /// 映像バックエンドのモック。複製しても同じ中身を指す。
@@ -285,10 +292,12 @@ pub(super) mod mock {
             _resolution: Option<(u32, u32)>,
             _format: Option<&str>,
             _fps: Option<u32>,
+            backend: VideoBackendSetting,
         ) -> Result<(), VideoError> {
             self.with(|state| {
                 state.start_calls += 1;
                 state.last_device_name = device_name.map(str::to_string);
+                state.last_backend = Some(backend);
                 if state.failures_before_success > 0 {
                     state.failures_before_success -= 1;
                     state.capturing = false;
@@ -325,6 +334,7 @@ pub(super) mod mock {
             self.with(|state| {
                 state.capturing.then(|| ActiveVideo {
                     device_name: state.last_device_name.clone().unwrap_or_default(),
+                    api: crate::video::capture::CaptureApi::Fake,
                     resolution: None,
                     format: None,
                     requested_fps: 0,

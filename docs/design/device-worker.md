@@ -111,7 +111,24 @@ flowchart LR
 #### 一覧と名前
 
 - **一覧は Media Foundation を優先する。** DirectShow の列挙には Media Foundation に出るデバイス（WDM のキャプチャーボードや Web カメラ）も並ぶので、表示名が Media Foundation の一覧と同じものは捨て、DirectShow にしか無いものだけを「(DirectShow)」を添えて足す（`merge_video_devices`）。同じデバイスを 2 経路で並べても選び間違えるだけで、実績があるのは Media Foundation のほう
-- **どちらで開くかは名前の印だけで決まる**（`route_for`）。設定に保存されるのも「(DirectShow)」付きの名前。**この印は翻訳しない。** 設定に残る識別子なので、画面の言語を切り替えると別のデバイス扱いになってしまう
+- **どちらで開くかは、名前の印と設定の「映像の開き方」（`video.backend`、#237）で決まる**（`route_for`）。設定に保存されるのも「(DirectShow)」付きの名前。**この印は翻訳しない。** 設定に残る識別子なので、画面の言語を切り替えると別のデバイス扱いになってしまう
+
+#### 映像の開き方（#237）
+
+一覧は Media Foundation を優先するので、両方に出るデバイスを DirectShow で開く手段が名前の印だけでは無い。MF 側の挙動が怪しいときの切り分けや、MJPEG / RGB24 を選んだ形式で開きたいとき（`docs/design/video-pipeline.md` の「UI にあるが動作していない設定がある」）のために、設定で経路を固定できるようにしてある。
+
+| `video.backend` | 経路 | 経路へ渡す名前 |
+|---|---|---|
+| `auto`（既定） | 名前に「(DirectShow)」があれば DirectShow、無ければ Media Foundation（#143 のまま） | そのまま |
+| `direct_show` | DirectShow | そのまま。`DirectShowCapture` は印の有無を問わず `FriendlyName` で探す |
+| `media_foundation` | Media Foundation | 「(DirectShow)」を外した名前 |
+
+- **一覧（`merge_video_devices`）は変えない。** 開き方ごとに一覧を作り分けると、設定に残る名前が開き方によって変わり、開き方を戻したときに別のデバイス扱いになる。そのかわり、選んだ経路の一覧に無いデバイスは「見つからない」になる。設定ダイアログでは「自動」以外のときに注意書きを出す
+- デバイスが未指定（`None`）なら開き方によらず Media Foundation の先頭を開く。DirectShow の経路は名前が無いと開けない
+- **開き方は `VideoTarget` に含めてある。** 同じデバイスでも経路が変われば開き直しが要るので、`DeviceConfig` の差分判定に載せ、「適用」で映像だけが開き直る。trait には `start_capture` の引数として渡し、経路が 1 つしか無いフェイクとモックは見ない
+- **能力の問い合わせ（`capabilities`）は開き方を見ず、名前だけで経路を決める。** 設定ダイアログの能力キャッシュがデバイス名で引く作りで、ドラフトの開き方を反映するにはキーを組み替える必要があるため。DirectShow で開くときに選択肢と違う形式しか無くても、`choose_candidate` が近いものを選ぶ
+- 実際に開いた経路は `ActiveVideo::api`（`CaptureApi`）に持たせ、「接続状態」タブの映像の欄に「開き方」として出す
+- **プリセットに含める**（`video` の中にあるので `Preset::apply_to` と `matches_preset` の両方に自然に入る）。開き方はデバイスと一体の設定で、キャプチャーボードの使い分けというプリセットの用途に合う（`docs/design/presets.md`）
 - 名前の照合は表示名（`FriendlyName`）で行う。同じ名前のデバイスが 2 台あれば先に列挙されたほうを開く（Media Foundation の経路と同じ）
 
 #### スレッドと COM

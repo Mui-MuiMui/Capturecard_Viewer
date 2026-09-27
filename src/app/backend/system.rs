@@ -2,18 +2,21 @@
 //! （`DirectShowCapture`）を `SystemVideo` で束ね、音声は `AudioCapture` を
 //! trait に包むだけ。どれも中身には手を入れない。
 //!
-//! **Media Foundation と DirectShow のどちらで開くかは、デバイス名だけで
-//! 決まる**（`route_for`）。DirectShow のデバイスは名前に「(DirectShow)」が
+//! **Media Foundation と DirectShow のどちらで開くかは、デバイス名と設定の
+//! 「映像の開き方」（`video.backend`）で決まる**（`route_for`）。自動なら
+//! 名前だけで決まり、DirectShow のデバイスは名前に「(DirectShow)」が
 //! 付いていて、設定にもその名前で残る。一覧は Media Foundation を優先し、
 //! DirectShow にしか無いものだけを足す（`merge_video_devices`）。
 //! Web カメラやキャプチャーボードの多くは両方に出るが、同じデバイスを
 //! 2 つ並べても選び間違えるだけなので、実績のある Media Foundation を使う。
+//! それを DirectShow で開きたいときは開き方を DirectShow にする（#237）。
 
 use super::{AudioBackend, BackendShared, DeviceBackends, VideoBackend, VideoEnumeration};
 use crate::audio::{
     self, ActiveAudio, AudioCapabilities, AudioCapture, AudioDirection, AudioError,
     PassthroughRequest, ResampleStatus, ResampleTelemetry,
 };
+use crate::settings::VideoBackendSetting;
 use crate::video::{
     directshow_display_name, directshow_friendly_name, ActiveVideo, DeviceCapabilities,
     DirectShowCapture, VideoCapture, VideoError, VideoLinkState,
@@ -56,12 +59,37 @@ enum VideoRoute {
     DirectShow,
 }
 
-/// デバイス名から経路を決める。「(DirectShow)」が付いていれば DirectShow、
-/// それ以外（未指定を含む）は Media Foundation。
-fn route_for(device_name: Option<&str>) -> VideoRoute {
-    match device_name.and_then(directshow_friendly_name) {
-        Some(_) => VideoRoute::DirectShow,
-        None => VideoRoute::MediaFoundation,
+/// デバイス名と設定の「映像の開き方」から、経路とその経路へ渡す名前を決める。
+///
+/// | 開き方 | 経路 | 渡す名前 |
+/// |---|---|---|
+/// | 自動 | 「(DirectShow)」付きなら DirectShow、それ以外は Media Foundation | そのまま |
+/// | Media Foundation | Media Foundation | 「(DirectShow)」を外した名前 |
+/// | DirectShow | DirectShow | そのまま（`DirectShowCapture` が印の有無を問わず探す） |
+///
+/// **デバイスが未指定なら開き方によらず Media Foundation**（先頭のデバイス）。
+/// DirectShow の経路は名前が無いと開けない。
+///
+/// Media Foundation で「(DirectShow)」を外すのは、印は「DirectShow にしか
+/// 無い」という一覧の上の目印で、デバイスの本来の名前ではないため。多くは
+/// Media Foundation に居ないので「見つからない」になる（それが正しい結果）。
+fn route_for(
+    device_name: Option<&str>,
+    backend: VideoBackendSetting,
+) -> (VideoRoute, Option<&str>) {
+    let Some(name) = device_name else {
+        return (VideoRoute::MediaFoundation, None);
+    };
+    let friendly = directshow_friendly_name(name);
+    match backend {
+        VideoBackendSetting::Auto => match friendly {
+            Some(_) => (VideoRoute::DirectShow, Some(name)),
+            None => (VideoRoute::MediaFoundation, Some(name)),
+        },
+        VideoBackendSetting::MediaFoundation => {
+            (VideoRoute::MediaFoundation, Some(friendly.unwrap_or(name)))
+        }
+        VideoBackendSetting::DirectShow => (VideoRoute::DirectShow, Some(name)),
     }
 }
 
@@ -112,9 +140,13 @@ impl VideoBackend for SystemVideo {
     }
 
     fn capabilities(&self, device_name: Option<&str>) -> Result<DeviceCapabilities, VideoError> {
-        match (route_for(device_name), device_name) {
+        // 設定ダイアログの選択肢は名前だけで経路を決める（開き方の設定は
+        // 見ない）。能力のキャッシュがデバイス名で引く作りのため。DirectShow
+        // で開くときに選択肢と違う形式しか無くても、`choose_candidate` が
+        // 近いものを選ぶ
+        match route_for(device_name, VideoBackendSetting::Auto) {
             (VideoRoute::DirectShow, Some(name)) => self.direct_show.capabilities(name),
-            _ => VideoCapture::get_device_capabilities(device_name),
+            (_, name) => VideoCapture::get_device_capabilities(name),
         }
     }
 
@@ -124,16 +156,17 @@ impl VideoBackend for SystemVideo {
         resolution: Option<(u32, u32)>,
         format: Option<&str>,
         fps: Option<u32>,
+        backend: VideoBackendSetting,
     ) -> Result<(), VideoError> {
         self.stop_capture();
-        let route = route_for(device_name);
-        let result = match (route, device_name) {
+        let (route, name) = route_for(device_name, backend);
+        let result = match (route, name) {
             (VideoRoute::DirectShow, Some(name)) => self
                 .direct_show
                 .start_capture(name, resolution, format, fps),
-            _ => self
+            (_, name) => self
                 .media_foundation
-                .start_capture(device_name, resolution, format, fps),
+                .start_capture(name, resolution, format, fps),
         };
         if result.is_ok() {
             self.open = Some(route);
@@ -345,14 +378,77 @@ mod tests {
         assert_eq!(enumeration.sources[0].1, Ok(Vec::new()));
     }
 
+    const DS_ONLY: &str = "OBS Virtual Camera (DirectShow)";
+    const BOTH: &str = "USB Video";
+
     #[test]
-    fn route_for_uses_the_directshow_suffix() {
+    fn route_for_auto_uses_the_directshow_suffix() {
+        let auto = VideoBackendSetting::Auto;
         assert_eq!(
-            route_for(Some("OBS Virtual Camera (DirectShow)")),
-            VideoRoute::DirectShow
+            route_for(Some(DS_ONLY), auto),
+            (VideoRoute::DirectShow, Some(DS_ONLY))
         );
-        assert_eq!(route_for(Some("USB Video")), VideoRoute::MediaFoundation);
+        assert_eq!(
+            route_for(Some(BOTH), auto),
+            (VideoRoute::MediaFoundation, Some(BOTH))
+        );
         // 未指定は今までどおり Media Foundation の先頭
-        assert_eq!(route_for(None), VideoRoute::MediaFoundation);
+        assert_eq!(route_for(None, auto), (VideoRoute::MediaFoundation, None));
+    }
+
+    #[test]
+    fn route_for_direct_show_opens_even_a_media_foundation_name_with_directshow() {
+        let ds = VideoBackendSetting::DirectShow;
+        // 両方に出るデバイス。同じ表示名を DirectShow の一覧から探す
+        assert_eq!(
+            route_for(Some(BOTH), ds),
+            (VideoRoute::DirectShow, Some(BOTH))
+        );
+        // もともと DirectShow のデバイスは自動と同じ
+        assert_eq!(
+            route_for(Some(DS_ONLY), ds),
+            (VideoRoute::DirectShow, Some(DS_ONLY))
+        );
+    }
+
+    #[test]
+    fn route_for_media_foundation_strips_the_directshow_suffix() {
+        let mf = VideoBackendSetting::MediaFoundation;
+        // 印を外した本来の名前で Media Foundation の一覧を探す
+        assert_eq!(
+            route_for(Some(DS_ONLY), mf),
+            (VideoRoute::MediaFoundation, Some("OBS Virtual Camera"))
+        );
+        assert_eq!(
+            route_for(Some(BOTH), mf),
+            (VideoRoute::MediaFoundation, Some(BOTH))
+        );
+    }
+
+    #[test]
+    fn route_for_without_a_device_is_media_foundation_for_every_setting() {
+        // DirectShow の経路は名前が無いと開けないので、開き方によらず先頭へ
+        for backend in VideoBackendSetting::ALL {
+            assert_eq!(
+                route_for(None, backend),
+                (VideoRoute::MediaFoundation, None),
+                "{backend:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn route_for_treats_a_bare_suffix_as_a_plain_name() {
+        // 「(DirectShow)」だけの名前は印ではなく名前そのものとして扱う
+        // （`directshow_friendly_name` が空の名前を返さない）
+        let bare = " (DirectShow)";
+        assert_eq!(
+            route_for(Some(bare), VideoBackendSetting::Auto),
+            (VideoRoute::MediaFoundation, Some(bare))
+        );
+        assert_eq!(
+            route_for(Some(bare), VideoBackendSetting::MediaFoundation),
+            (VideoRoute::MediaFoundation, Some(bare))
+        );
     }
 }

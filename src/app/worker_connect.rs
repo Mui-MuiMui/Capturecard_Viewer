@@ -95,7 +95,7 @@ impl WorkerState {
 
     /// 映像デバイスへの接続を 1 回だけ試す。
     pub(super) fn try_connect_video(&mut self, config: &DeviceConfig, now: Instant) {
-        let (device_name, resolution, format, fps) = config.video.clone();
+        let (device_name, resolution, format, fps, backend) = config.video.clone();
         let Some(device_name) = device_name else {
             // 繋ぐ相手が無い。要求を取り下げて、デバイスが選ばれるまで待つ
             debug!("映像デバイスが未設定なので接続の要求を取り下げる");
@@ -105,13 +105,17 @@ impl WorkerState {
 
         let attempt = self.video_retry.attempts() + 1;
         info!(
-            "映像デバイスへの接続を試す（{} 回目）: {}",
-            attempt, device_name
+            "映像デバイスへの接続を試す（{} 回目）: {}（開き方: {:?}）",
+            attempt, device_name, backend
         );
 
-        let result =
-            self.video
-                .start_capture(Some(&device_name), resolution, format.as_deref(), fps);
+        let result = self.video.start_capture(
+            Some(&device_name),
+            resolution,
+            format.as_deref(),
+            fps,
+            backend,
+        );
 
         match result {
             Ok(()) => {
@@ -589,6 +593,42 @@ mod tests {
         // 同じ 5 回のまま tick だけ進んでも、記録は変わらない
         state.tick(base + Duration::from_secs(24) + Duration::from_millis(100));
         assert_eq!(state.enumeration_logged_failures.0, 5);
+    }
+
+    #[test]
+    fn worker_reopens_the_video_when_only_the_backend_changes() {
+        // 同じデバイスでも開き方を変えたら開き直す（#237）。変えなければ
+        // 2 秒ごとの `apply_settings` で開き直さない
+        use crate::settings::VideoBackendSetting;
+
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        let (mut state, _events) = mock_state(&video, &audio);
+        let config = config_for(Some("キャプチャーボード"), None);
+        apply_config(&mut state, config.clone(), true);
+        let base = Instant::now();
+        state.tick(base);
+        assert_eq!(video.with(|state| state.start_calls), 1);
+        assert_eq!(
+            video.with(|state| state.last_backend),
+            Some(VideoBackendSetting::Auto)
+        );
+
+        // 同じ設定をもう一度受け取っても開き直さない
+        apply_config(&mut state, config.clone(), false);
+        state.tick(base + Duration::from_millis(100));
+        assert_eq!(video.with(|state| state.start_calls), 1);
+
+        let mut direct_show = config;
+        direct_show.video.4 = VideoBackendSetting::DirectShow;
+        apply_config(&mut state, direct_show, false);
+        // 接続に成功してからの下限（1 秒）が過ぎてから開き直す
+        state.tick(base + Duration::from_secs(2));
+        assert_eq!(video.with(|state| state.start_calls), 2);
+        assert_eq!(
+            video.with(|state| state.last_backend),
+            Some(VideoBackendSetting::DirectShow)
+        );
     }
 
     #[test]

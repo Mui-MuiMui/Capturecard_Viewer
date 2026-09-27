@@ -7,8 +7,8 @@
 use crate::audio::{self, AudioDirection, ChoiceSource};
 use crate::i18n::{self, Text};
 use crate::settings::{
-    AppSettings, ColorRange, ColorSpace, DEFAULT_CHANNELS, DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS,
-    MAX_VIDEO_ADJUSTMENT, MIN_BUFFER_MS, MIN_VIDEO_ADJUSTMENT,
+    AppSettings, ColorRange, ColorSpace, VideoBackendSetting, DEFAULT_CHANNELS,
+    DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS, MAX_VIDEO_ADJUSTMENT, MIN_BUFFER_MS, MIN_VIDEO_ADJUSTMENT,
 };
 use eframe::egui;
 use log::debug;
@@ -82,6 +82,25 @@ pub(super) fn show_device_settings_tab(
                     }
                 }
             });
+
+        // 映像の開き方（#237）。両方に出るデバイスを DirectShow で開くための
+        // 切り替え。変えたら他の映像設定と同じく「適用」で開き直す
+        // （`DeviceConfig` の差分判定に載っている）
+        ui.horizontal(|ui| {
+            ui.label(Text::VideoBackendLabel.get());
+            egui::ComboBox::from_id_source("video_backend_combo")
+                .selected_text(settings.video.backend.label())
+                .show_ui(ui, |ui| {
+                    for backend in VideoBackendSetting::ALL {
+                        ui.selectable_value(&mut settings.video.backend, backend, backend.label());
+                    }
+                })
+                .response
+                .on_hover_text(Text::VideoBackendHint.get());
+        });
+        if settings.video.backend != VideoBackendSetting::Auto {
+            warning_label(ui, Text::VideoBackendNotice.get());
+        }
 
         // 選択後のデバイス名。この下の能力参照はすべてこちらを使う。
         // 切り替えたフレームで切り替え前の名前を見ると、1 フレームだけ前の

@@ -77,6 +77,10 @@ impl CaptureCardViewer {
         };
         if let Some(active) = active_video {
             video.details.push(i18n::link_device(&active.device_name));
+            // 開き方が自動でも、どちらで開いたかを確かめられるように出す（#237）
+            video
+                .details
+                .push(i18n::link_capture_api(active.api.label()));
             video.details.push(i18n::link_video(active.summary()));
             // 実際の fps はデバイスから取れない（video.rs の start_capture を参照）
             video
