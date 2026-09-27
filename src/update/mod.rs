@@ -4,12 +4,14 @@
 //! 純粋関数だけ。スレッドを起こして結果を画面へ渡すのは `app::update`、
 //! 通知ダイアログの描画は `ui::update_dialog`（`docs/design/update.md`）。
 //!
-//! **この段階では何もダウンロードしない。** 「更新する」はリリースページを
-//! 開くところまで。資産の取得・照合・差し替えは次の段階で足す。
-//!
+//! 新しい版の exe のダウンロード・照合・差し替えは `apply.rs`（部品は `swap.rs` と
+//! `checksum.rs`）。
 //! 試すための環境変数（比較に使う版と問い合わせ先の差し替え）は `overrides.rs`。
 
+pub mod apply;
+mod checksum;
 mod overrides;
+mod swap;
 
 pub use self::overrides::CheckOverrides;
 
@@ -45,10 +47,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// GitHub の API は `User-Agent` の無い要求を拒否する。
 const USER_AGENT: &str = concat!("capturecard_viewer/", env!("CARGO_PKG_VERSION"));
 
-/// Release の本文を要約するときに、`### ` の見出しが無い（または見出しより
-/// 前が空の）場合に使う行数。
-const NOTES_FALLBACK_LINES: usize = 5;
-
 /// 実行中の版。`Cargo.toml` の `version` から取る（`docs/BUILD.md` の「バージョン番号」）。
 pub fn current_version() -> Version {
     // Cargo は semver として読める版しか受け付けないので、ここで失敗することは無い。
@@ -58,9 +56,8 @@ pub fn current_version() -> Version {
 
 /// Release に添付された資産 1 つ。
 ///
-/// この段階では使わず、ログに出すだけ。次の段階（ダウンロードと差し替え）で
-/// `capturecard_viewer-<tag>-windows-x64.exe` と `SHA256SUMS.txt` を
-/// ここから引く（`docs/RELEASE.md` の「配布物」）。
+/// 更新の適用が `capturecard_viewer-<tag>-windows-x64.exe` と `SHA256SUMS.txt` を
+/// 名前で引く（`apply::ApplyPlan::from_check`、`docs/RELEASE.md` の「配布物」）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseAsset {
     pub name: String,
@@ -74,8 +71,8 @@ pub struct UpdateCheck {
     pub current: Version,
     /// 見つかった新しい版
     pub latest: Version,
-    /// リリースノートの要約（`summarize_notes`）。空のこともある
-    pub notes_summary: String,
+    /// Release のタグそのまま（`v1.2.0`）。資産名に入っている
+    pub tag: String,
     /// 開くリリースページ
     pub release_url: String,
     /// 添付された資産
@@ -97,6 +94,8 @@ pub struct UpdateView<'a> {
     pub current: &'a Version,
     /// 確認の状態
     pub status: &'a UpdateStatus,
+    /// 更新（ダウンロードと差し替え）の最中か。最中は「更新する」を押せなくする
+    pub applying: bool,
 }
 
 /// 「その他」タブに出す確認の状態。
@@ -171,9 +170,6 @@ struct ReleaseJson {
     tag_name: String,
     #[serde(default)]
     html_url: String,
-    // 本文の無い Release では null が来る
-    #[serde(default)]
-    body: Option<String>,
     #[serde(default)]
     draft: bool,
     #[serde(default)]
@@ -200,23 +196,18 @@ pub fn check_latest_release(overrides: &CheckOverrides) -> Result<CheckOutcome, 
         ReleaseSource::File(path) => std::fs::read_to_string(&path)
             .map_err(|e| UpdateError::LocalFile(format!("{}: {}", path.display(), e)))?,
     };
-    let release = parse_release_json(&json)?;
+    // 手で作った JSON は先頭に UTF-8 の BOM が付いていることがある（Windows
+    // PowerShell 5.1 の `Set-Content -Encoding UTF8` など）。serde_json は BOM を
+    // 読めないので落としておく
+    let release = parse_release_json(json.trim_start_matches('\u{feff}'))?;
     evaluate_release(&overrides.current_version_or(current_version()), release)
 }
 
 /// Release の JSON を HTTP で取る。`url` は通常 `LATEST_RELEASE_API_URL`。
 fn fetch_release_json(url: &str) -> Result<String, UpdateError> {
-    use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
-
-    // TLS は Windows の schannel。証明書は OS の証明書ストアで確かめる
-    // （`PlatformVerifier` は native-tls では OS の既定のルートを使う指定）
-    let tls = TlsConfig::builder()
-        .provider(TlsProvider::NativeTls)
-        .root_certs(RootCerts::PlatformVerifier)
-        .build();
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(REQUEST_TIMEOUT))
-        .tls_config(tls)
+        .tls_config(tls_config())
         .user_agent(USER_AGENT)
         .build();
     let agent = ureq::Agent::new_with_config(config);
@@ -232,6 +223,19 @@ fn fetch_release_json(url: &str) -> Result<String, UpdateError> {
         .body_mut()
         .read_to_string()
         .map_err(update_error_from)
+}
+
+/// HTTP の TLS の設定。問い合わせと資産のダウンロード（`apply`）で共有する。
+///
+/// TLS は Windows の schannel。証明書は OS の証明書ストアで確かめる
+/// （`PlatformVerifier` は native-tls では OS の既定のルートを使う指定）。
+fn tls_config() -> ureq::tls::TlsConfig {
+    use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+
+    TlsConfig::builder()
+        .provider(TlsProvider::NativeTls)
+        .root_certs(RootCerts::PlatformVerifier)
+        .build()
 }
 
 fn update_error_from(error: ureq::Error) -> UpdateError {
@@ -260,7 +264,7 @@ fn evaluate_release(current: &Version, release: ReleaseJson) -> Result<CheckOutc
     Ok(CheckOutcome::Available(UpdateCheck {
         current: current.clone(),
         latest,
-        notes_summary: summarize_notes(release.body.as_deref().unwrap_or("")),
+        tag: release.tag_name.trim().to_string(),
         release_url: release_page_url(&release.html_url).to_string(),
         assets: release
             .assets
@@ -319,42 +323,6 @@ fn release_page_url(html_url: &str) -> &str {
     }
 }
 
-/// リリースノートの本文から、通知ダイアログに出す要約を作る。
-///
-/// 最初の `### ` の見出しより前を採る。このリポジトリの Release の本文は
-/// 「概要の段落 → `### 追加` などの見出しごとの一覧」の順（`docs/RELEASE.md`）。
-/// 見出しが無い、または見出しより前が空なら、先頭の `NOTES_FALLBACK_LINES` 行。
-///
-/// HTML のタグだけの行（折りたたみの `<details>` など）と空行は落とす。
-pub fn summarize_notes(body: &str) -> String {
-    let lines: Vec<&str> = body
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.trim().is_empty() && !is_html_tag_line(line))
-        .collect();
-
-    let before_heading: Vec<&str> = lines
-        .iter()
-        .take_while(|line| !line.trim_start().starts_with("### "))
-        .copied()
-        .collect();
-
-    // 見出しが無ければ、見出しより前 = 全体になる
-    let has_heading = before_heading.len() < lines.len();
-    let picked = if has_heading && !before_heading.is_empty() {
-        before_heading
-    } else {
-        lines.into_iter().take(NOTES_FALLBACK_LINES).collect()
-    };
-    picked.join("\n")
-}
-
-/// `<details>` や `<summary>…</summary>` のように、行がタグだけでできているか。
-fn is_html_tag_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.starts_with('<') && trimmed.ends_with('>')
-}
-
 /// 設定の「この版は通知しない」が `latest` を指しているか。
 ///
 /// 設定ファイルは手で書き換えられるので、`v` の有無や前後の空白の違いは
@@ -388,7 +356,6 @@ mod tests {
             html_url: format!(
                 "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/{tag}"
             ),
-            body: Some("概要の段落。\n\n### 追加\n\n- 何か".to_string()),
             draft: false,
             prerelease: false,
             assets: vec![AssetJson {
@@ -454,7 +421,7 @@ mod tests {
         };
         assert_eq!(check.current, v("1.1.0"));
         assert_eq!(check.latest, v("1.2.0"));
-        assert_eq!(check.notes_summary, "概要の段落。");
+        assert_eq!(check.tag, "v1.2.0");
         assert_eq!(
             check.release_url,
             "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/v1.2.0"
@@ -566,7 +533,6 @@ mod tests {
         let parsed = parse_release_json(json).expect("API の形は読めなければならない");
 
         assert_eq!(parsed.tag_name, "v1.2.0");
-        assert_eq!(parsed.body, None);
         assert_eq!(parsed.assets.len(), 1);
         assert_eq!(parsed.assets[0].name, "SHA256SUMS.txt");
     }
@@ -582,47 +548,6 @@ mod tests {
             parse_release_json("{}"),
             Err(UpdateError::InvalidResponse(_))
         ));
-    }
-
-    // ---- 要約の切り出し ----
-
-    #[test]
-    fn summarize_notes_takes_text_before_first_heading() {
-        let body = "1 行目。\n2 行目。\n\n### 追加\n\n- 項目\n### 修正\n- 項目";
-        assert_eq!(summarize_notes(body), "1 行目。\n2 行目。");
-    }
-
-    #[test]
-    fn summarize_notes_drops_html_tag_lines() {
-        // 実際の Release（v1.1.0）の形。概要のあとに折りたたみが始まる
-        let body = "概要。\r\n\r\n<details>\r\n<summary>変更の一覧</summary>\r\n\r\n### 追加\r\n\r\n- 項目";
-        assert_eq!(summarize_notes(body), "概要。");
-    }
-
-    #[test]
-    fn summarize_notes_without_heading_takes_first_five_lines() {
-        let body = "1\n2\n3\n4\n5\n6\n7";
-        assert_eq!(summarize_notes(body), "1\n2\n3\n4\n5");
-    }
-
-    #[test]
-    fn summarize_notes_heading_first_takes_first_five_lines() {
-        // 見出しより前が空なら、見出しを含めた先頭 5 行
-        let body = "### 追加\n\n- a\n- b\n- c\n- d\n- e";
-        assert_eq!(summarize_notes(body), "### 追加\n- a\n- b\n- c\n- d");
-    }
-
-    #[test]
-    fn summarize_notes_empty_body_returns_empty() {
-        assert_eq!(summarize_notes(""), "");
-        assert_eq!(summarize_notes("\n\n  \n"), "");
-    }
-
-    #[test]
-    fn summarize_notes_does_not_treat_deeper_heading_as_boundary() {
-        // `#### ` は `### ` で始まらないので境界にしない
-        let body = "概要。\n#### 小見出し\n本文\n### 追加\n- a";
-        assert_eq!(summarize_notes(body), "概要。\n#### 小見出し\n本文");
     }
 
     // ---- 通知の判定 ----
@@ -737,7 +662,24 @@ mod tests {
         };
         assert_eq!(check.current, v("1.0.0"));
         assert_eq!(check.latest, v("1.1.0"));
-        assert_eq!(check.notes_summary, "概要。");
+    }
+
+    #[test]
+    fn check_latest_release_reads_a_local_file_with_a_bom() {
+        // PowerShell 5.1 の Set-Content -Encoding UTF8 で書いた JSON は BOM から始まる
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作れなければならない");
+        let path = dir.path().join("latest.json");
+        std::fs::write(&path, "\u{feff}{\"tag_name\": \"v9.9.9\", \"assets\": []}")
+            .expect("テスト用の JSON を書けなければならない");
+        let overrides = CheckOverrides {
+            current_version: Some(v("1.0.0")),
+            source: Some(ReleaseSource::File(path)),
+        };
+
+        let Ok(CheckOutcome::Available(check)) = check_latest_release(&overrides) else {
+            panic!("BOM 付きの JSON を読めていない");
+        };
+        assert_eq!(check.latest, v("9.9.9"));
     }
 
     #[test]

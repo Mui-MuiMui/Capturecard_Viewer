@@ -159,7 +159,7 @@ fn has_host(after_scheme: &str) -> bool {
     !host.trim_start_matches('[').is_empty()
 }
 
-fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+pub(super) fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
     let head = value.get(..prefix.len())?;
     head.eq_ignore_ascii_case(prefix)
         .then(|| &value[prefix.len()..])
@@ -170,7 +170,10 @@ fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str>
 /// `file:///C:/work/release.json`（標準の形）でも `file://C:/work/release.json`
 /// （スラッシュが 2 本）でも同じパスになるよう、ドライブ文字の前の `/` を落とす。
 /// `%20` のような URL の符号化は解かない。空白を含むパスはそのまま書けばよい。
-fn file_url_to_path(rest: &str) -> Option<PathBuf> {
+///
+/// 更新の適用（`apply`）も、テスト用の Release の JSON に書いた資産の
+/// `file://` の URL をここで読む。
+pub(super) fn file_url_to_path(rest: &str) -> Option<PathBuf> {
     let bytes = rest.as_bytes();
     let path = if bytes.len() >= 3
         && bytes[0] == b'/'

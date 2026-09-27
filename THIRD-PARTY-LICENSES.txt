@@ -29,7 +29,7 @@ file at the root of the repository.
 1. LICENSE OVERVIEW
 ================================================================================
 
-  MIT (MIT License): 203
+  MIT (MIT License): 211
   Apache-2.0 (Apache License 2.0): 19
   Unicode-3.0 (Unicode License v3): 19
   BSD-3-Clause (BSD 3-Clause "New" or "Revised" License): 7
@@ -109,6 +109,10 @@ bitflags 2.13.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/bitflags/bitflags
 
+block-buffer 0.12.1
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/RustCrypto/utils
+
 bytemuck 1.25.2
   License: Zlib OR Apache-2.0 OR MIT
   Repository: https://github.com/Lokathor/bytemuck
@@ -161,6 +165,10 @@ confy 0.6.1
   License: MIT OR X11 OR Apache-2.0
   Repository: https://github.com/rust-cli/confy
 
+const-oid 0.10.2
+  License: Apache-2.0 OR MIT
+  Repository: https://github.com/RustCrypto/formats
+
 core_detect 1.0.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/thomcc/core_detect
@@ -168,6 +176,10 @@ core_detect 1.0.0
 cpal 0.15.3
   License: Apache-2.0
   Repository: https://github.com/rustaudio/cpal
+
+cpufeatures 0.3.1
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/RustCrypto/utils
 
 crc32fast 1.5.2
   License: MIT OR Apache-2.0
@@ -185,6 +197,10 @@ crossbeam-utils 0.8.23
   License: MIT OR Apache-2.0
   Repository: https://github.com/crossbeam-rs/crossbeam
 
+crypto-common 0.2.2
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/RustCrypto/traits
+
 cursor-icon 1.2.0
   License: MIT OR Apache-2.0 OR Zlib
   Repository: https://github.com/rust-windowing/cursor-icon
@@ -196,6 +212,10 @@ dasp_sample 0.11.0
 der 0.8.2
   License: Apache-2.0 OR MIT
   Repository: https://github.com/RustCrypto/formats
+
+digest 0.11.3
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/RustCrypto/traits
 
 directories 5.0.1
   License: MIT OR Apache-2.0
@@ -356,6 +376,10 @@ http 1.5.0
 httparse 1.10.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/seanmonstar/httparse
+
+hybrid-array 0.4.15
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/RustCrypto/hybrid-array
 
 icu_collections 2.3.0
   License: Unicode-3.0
@@ -693,6 +717,10 @@ serde_spanned 0.6.9
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
+sha2 0.11.0
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/RustCrypto/hashes
+
 shlex 2.0.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/comex/rust-shlex
@@ -804,6 +832,10 @@ toml_write 0.1.2
 ttf-parser 0.25.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/harfbuzz/ttf-parser
+
+typenum 1.20.1
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/paholg/typenum
 
 unicode-ident 1.0.24
   License: (MIT OR Apache-2.0) AND Unicode-3.0
@@ -3473,6 +3505,42 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
+  - sha2 0.11.0
+
+Copyright (c) 2016-2026 The RustCrypto Project Developers
+Copyright (c) 2016 Artyom Pavlov
+Copyright (c) 2009-2013 Mozilla Foundation
+Copyright (c) 2006-2009 Graydon Hoare
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+MIT License (MIT)
+================================================================================
+Used by:
   - memoffset 0.9.1
 
 Copyright (c) 2017 Gilad Naaman
@@ -3567,6 +3635,40 @@ Used by:
   - core_detect 1.0.0
 
 Copyright (c) 2017-2020 The Rust Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+MIT License (MIT)
+================================================================================
+Used by:
+  - digest 0.11.3
+
+Copyright (c) 2017-2025 RustCrypto Developers
+Copyright (c) 2017 Artyom Pavlov
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -3846,6 +3948,39 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
+  - block-buffer 0.12.1
+
+Copyright (c) 2018-2025 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+MIT License (MIT)
+================================================================================
+Used by:
   - zeroize 1.9.0
 
 Copyright (c) 2018-2026 The RustCrypto Project Developers
@@ -4006,6 +4141,8 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
+  - const-oid 0.10.2
+  - cpufeatures 0.3.1
   - der 0.8.2
 
 Copyright (c) 2020-2026 The RustCrypto Project Developers
@@ -4072,9 +4209,75 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
+  - crypto-common 0.2.2
+
+Copyright (c) 2021-2026 RustCrypto Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+MIT License (MIT)
+================================================================================
+Used by:
   - qoi 0.4.1
 
 Copyright (c) 2022 Ivan Smirnov
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+MIT License (MIT)
+================================================================================
+Used by:
+  - hybrid-array 0.4.15
+
+Copyright (c) 2022-2026 The RustCrypto Project Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -5322,6 +5525,35 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+================================================================================
+MIT License (MIT)
+================================================================================
+Used by:
+  - typenum 1.20.1
+
+The MIT License (MIT)
+
+Copyright (c) 2014 Paho Lurie-Gregg
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 
 ================================================================================
 MIT License (MIT)

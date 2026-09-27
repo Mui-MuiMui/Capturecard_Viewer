@@ -110,6 +110,7 @@ impl CaptureCardViewer {
                     self.settings_dialog.set_draft_language(language)
                 }
                 ui::SettingsEvent::CheckForUpdates => self.start_update_check(CheckOrigin::Manual),
+                ui::SettingsEvent::StartUpdate => self.start_update_from_settings(),
                 ui::SettingsEvent::SetUpdateSettings(update) => {
                     self.settings_dialog.set_draft_update(update)
                 }

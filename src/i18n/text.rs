@@ -67,7 +67,7 @@ texts! {
     HeadlineScreenshot { ja: "スクリーンショットを出力できません", en: "Cannot output the screenshot" },
     HeadlineHotkey { ja: "ホットキーを登録できません", en: "Cannot register the hotkey" },
     HeadlineSettings { ja: "設定ファイルを読み書きできません", en: "Cannot read or write the settings file" },
-    HeadlineUpdate { ja: "更新を確認できません", en: "Cannot check for updates" },
+    HeadlineUpdate { ja: "更新できません", en: "Cannot update" },
 
     // ---- エラーの文言（各エラー enum の Display） ----
     VideoNoDevices { ja: "映像デバイスが 1 台も見つからない", en: "No video devices found" },
@@ -80,6 +80,14 @@ texts! {
     UpdateTimedOut { ja: "GitHub から 5 秒以内に応答がない", en: "No response from GitHub within 5 seconds" },
     UpdateNoRelease { ja: "公開されたリリースが無い", en: "No published release was found" },
     UpdateRateLimited { ja: "GitHub への問い合わせ回数の上限に達した。しばらくしてから確かめてください", en: "Reached the GitHub request limit. Try again later" },
+    UpdateNoAssets { ja: "このバージョンには自動更新用のファイルがありません。リリースページから手動で更新してください", en: "This release has no files for automatic updates. Update manually from the release page" },
+    UpdateUnexpectedAssetUrl { ja: "自動更新用のファイルの URL がこのリポジトリのものではない", en: "The download URL of the update does not belong to this repository" },
+    UpdateNotWritable { ja: "このフォルダには書き込めないため自動更新できません。リリースページから手動で更新してください", en: "Cannot update automatically because this folder is not writable. Update manually from the release page" },
+    UpdateDownloadTimedOut { ja: "ダウンロードが時間内に終わらない", en: "The download did not finish in time" },
+    UpdateDownloadTooLarge { ja: "ダウンロードするファイルが大きすぎる", en: "The file to download is too large" },
+    UpdateChecksumMissing { ja: "SHA256SUMS.txt に exe の行が無い", en: "SHA256SUMS.txt has no line for the exe" },
+    UpdateChecksumMismatch { ja: "ダウンロードした exe の SHA-256 が SHA256SUMS.txt と合わない", en: "The SHA-256 of the downloaded exe does not match SHA256SUMS.txt" },
+    UpdateCancelled { ja: "キャンセルした", en: "Cancelled" },
 
     // ---- ホットキーのアクション名（HotkeyAction::label） ----
     ActionScreenshot { ja: "スクリーンショット", en: "Screenshot" },
@@ -288,12 +296,18 @@ texts! {
     SettingsResetDone { ja: "初期値に戻しました。「適用」または「OK」で反映します", en: "Reset to defaults. Press Apply or OK to use them" },
 
     // ---- 更新の確認（ui/update_dialog.rs / ui/other_tab.rs） ----
-    UpdateDialogTitle { ja: "新しい版があります", en: "Update available" },
-    UpdateReleaseNotes { ja: "リリースノート（抜粋）", en: "Release notes (excerpt)" },
+    UpdateDialogTitle { ja: "新しいバージョンがあります", en: "Update available" },
+    UpdateViewReleaseNotes { ja: "リリースノートを見る", en: "View release notes" },
     UpdateNow { ja: "更新する", en: "Update" },
-    UpdateNowHint { ja: "リリースページを開きます。新しい版をダウンロードして、いまの exe と置き換えてください。", en: "Opens the release page. Download the new version there and replace the current exe with it." },
+    UpdateNowHint { ja: "新しいバージョンをダウンロードして照合し、いまの exe と置き換えて再起動します。", en: "Downloads and verifies the new version, replaces the current exe, and restarts." },
     UpdateLater { ja: "後で", en: "Later" },
-    UpdateSkipVersion { ja: "この版は通知しない", en: "Don't notify me about this version" },
+    UpdateSkipVersion { ja: "このバージョンは通知しない", en: "Don't notify me about this version" },
+    UpdateApplyingTitle { ja: "更新しています", en: "Updating" },
+    UpdateFailedTitle { ja: "更新できませんでした", en: "Update failed" },
+    UpdatePreparing { ja: "準備しています...", en: "Preparing..." },
+    UpdateInstalling { ja: "照合が済みました。置き換えています...", en: "Verified. Replacing the exe..." },
+    UpdateRestarting { ja: "新しいバージョンを起動します...", en: "Starting the new version..." },
+    UpdateClose { ja: "閉じる", en: "Close" },
     UpdateGroup { ja: "更新", en: "Updates" },
     UpdateCheckNow { ja: "更新を確認", en: "Check for updates" },
     UpdateNotChecked { ja: "まだ確認していません", en: "Not checked yet" },
@@ -301,9 +315,9 @@ texts! {
     UpdateUpToDate { ja: "最新です", en: "You have the latest version" },
     UpdateOpenReleasePage { ja: "リリースページを開く", en: "Open the release page" },
     UpdateCheckOnStartup { ja: "起動時に更新を確認する", en: "Check for updates at startup" },
-    UpdateNotifyOnStartup { ja: "新しい版があれば起動時にダイアログで知らせる", en: "Show a dialog at startup when a new version is available" },
+    UpdateNotifyOnStartup { ja: "新しいバージョンがあれば起動時にダイアログで知らせる", en: "Show a dialog at startup when a new version is available" },
     UpdateClearSkipped { ja: "解除", en: "Clear" },
-    UpdateHint { ja: "確認は GitHub の Release へ問い合わせるだけです。ダウンロードと置き換えは、リリースページから手で行います。", en: "Checking only asks GitHub Releases. Download the new version and replace the exe yourself from the release page." },
+    UpdateHint { ja: "確認は GitHub の Release へ問い合わせるだけです。「更新する」で新しいバージョンをダウンロードし、exe と同じフォルダで置き換えて再起動します。", en: "Checking only asks GitHub Releases. Update downloads the new version, replaces the exe in its folder, and restarts." },
     UpdateDraftHint { ja: "チェックと「解除」は「適用」か「OK」で反映します。", en: "The checkboxes and Clear take effect when you press Apply or OK." },
 }
 

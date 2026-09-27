@@ -238,8 +238,10 @@ fn show_language_group(ui: &mut egui::Ui, draft: &AppSettings, events: &mut Vec<
 /// 現在の版は、テスト用の環境変数で差し替えていればその版を出す
 /// （通知ダイアログの「いまは vA.B.C」と揃える）。
 /// 「更新を確認」は `SettingsEvent::CheckForUpdates` を返し、問い合わせは
-/// `app::update` が別スレッドで行う。2 つのチェックと「解除」はドラフトの
-/// `update` を差し替えるイベントを返すだけで、反映は「適用」「OK」のとき。
+/// `app::update` が別スレッドで行う。「更新する」は `SettingsEvent::StartUpdate` を
+/// 返し、ダウンロードと差し替えも `app::update` が別スレッドで行う。
+/// 2 つのチェックと「解除」はドラフトの `update` を差し替えるイベントを返すだけで、
+/// 反映は「適用」「OK」のとき。
 ///
 /// 「リリースページを開く」は egui のリンク。開くのは eframe（ブラウザの起動）で、
 /// アプリの状態は動かさない。
@@ -267,6 +269,17 @@ fn show_update_group(
             }
             show_update_status(ui, update_status);
         });
+
+        // 新しい版が見つかっていれば、ここからも更新を始められる。
+        // 起動時のダイアログを「後で」で閉じたときや、通知を切っているときの入口
+        if matches!(update_status, UpdateStatus::Available(_))
+            && ui
+                .add_enabled(!update.applying, egui::Button::new(Text::UpdateNow.get()))
+                .on_hover_text(Text::UpdateNowHint.get())
+                .clicked()
+        {
+            events.push(SettingsEvent::StartUpdate);
+        }
 
         ui.hyperlink_to(
             Text::UpdateOpenReleasePage.get(),
