@@ -9,7 +9,7 @@
 //! Web カメラやキャプチャーボードの多くは両方に出るが、同じデバイスを
 //! 2 つ並べても選び間違えるだけなので、実績のある Media Foundation を使う。
 
-use super::{AudioBackend, BackendShared, DeviceBackends, VideoBackend};
+use super::{AudioBackend, BackendShared, DeviceBackends, VideoBackend, VideoEnumeration};
 use crate::audio::{
     self, ActiveAudio, AudioCapabilities, AudioCapture, AudioDirection, AudioError,
     PassthroughRequest, ResampleStatus, ResampleTelemetry,
@@ -163,6 +163,40 @@ impl VideoBackend for SystemVideo {
             _ => self.media_foundation.active(),
         }
     }
+
+    fn enumerate(&self) -> VideoEnumeration {
+        let media_foundation = VideoCapture::try_list_devices();
+        let direct_show = self.direct_show.try_list_friendly_names();
+        enumeration_from(media_foundation, direct_show)
+    }
+}
+
+/// 経路ごとの列挙結果から `VideoEnumeration` を組み立てる。
+///
+/// 設定に書ける名前は `list_devices` と同じく `merge_video_devices` で作る。
+/// **どちらかの経路が失敗していたら作らない**（`VideoEnumeration::selectable`）。
+fn enumeration_from(
+    media_foundation: Result<Vec<(String, String)>, VideoError>,
+    direct_show: Result<Vec<String>, VideoError>,
+) -> VideoEnumeration {
+    let selectable = match (&media_foundation, &direct_show) {
+        (Ok(mf), Ok(ds)) => Some(
+            merge_video_devices(mf.clone(), ds.clone())
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect(),
+        ),
+        _ => None,
+    };
+    let media_foundation =
+        media_foundation.map(|devices| devices.into_iter().map(|(name, _)| name).collect());
+    VideoEnumeration {
+        sources: vec![
+            ("Media Foundation", media_foundation),
+            ("DirectShow", direct_show),
+        ],
+        selectable,
+    }
 }
 
 impl AudioBackend for AudioCapture {
@@ -219,6 +253,10 @@ impl AudioBackend for AudioCapture {
     fn take_stream_error(&self) -> bool {
         AudioCapture::take_stream_error(self)
     }
+
+    fn enumerate_devices(&self, direction: AudioDirection) -> Result<Vec<String>, AudioError> {
+        AudioCapture::try_list_devices(self, direction)
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +303,46 @@ mod tests {
     #[test]
     fn merge_video_devices_both_empty_is_empty() {
         assert!(merge_video_devices(Vec::new(), Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn enumeration_from_merges_the_selectable_names_like_list_devices() {
+        // 設定に書ける名前は `list_devices` と同じ表記（「(DirectShow)」付き）
+        let enumeration = enumeration_from(
+            Ok(vec![("USB Video".to_string(), "MF".to_string())]),
+            Ok(vec![
+                "USB Video".to_string(),
+                "OBS Virtual Camera".to_string(),
+            ]),
+        );
+        assert_eq!(
+            enumeration.selectable,
+            Some(vec![
+                "USB Video".to_string(),
+                "OBS Virtual Camera (DirectShow)".to_string()
+            ])
+        );
+        // ログには経路ごとの生の名前を出す
+        assert_eq!(enumeration.sources.len(), 2);
+        assert_eq!(enumeration.sources[0].0, "Media Foundation");
+        assert_eq!(enumeration.sources[1].0, "DirectShow");
+        assert_eq!(
+            enumeration.sources[1].1,
+            Ok(vec![
+                "USB Video".to_string(),
+                "OBS Virtual Camera".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn enumeration_from_without_selectable_names_when_a_source_failed() {
+        // 失敗した経路に目当てのデバイスが居たかもしれないので、判定には使わせない
+        let failure = VideoError::DeviceQueryFailed("E_FAIL".to_string());
+        let enumeration = enumeration_from(Ok(Vec::new()), Err(failure.clone()));
+        assert_eq!(enumeration.selectable, None);
+        assert_eq!(enumeration.sources[1].1, Err(failure));
+        assert_eq!(enumeration.sources[0].1, Ok(Vec::new()));
     }
 
     #[test]

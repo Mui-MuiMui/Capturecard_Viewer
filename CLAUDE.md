@@ -38,11 +38,11 @@ cargo build --release
 | `src/app/worker.rs` | デバイスワーカーとやり取りする型（コマンド / イベント / `DeviceConfig` / `DeviceSnapshot`）と、UI 側の窓口 `DeviceWorker` |
 | `src/app/worker_loop.rs` | デバイスワーカースレッドの本体。`WorkerState` の定義、コマンドの受け口、待ち時間の決定、観測値の書き出し |
 | `src/app/worker_timers.rs` | ワーカーがタイマーで回す監視。再試行の期限、フレームの途絶、音声ストリームのエラー、既定デバイスの切り替え、クロックドリフト補正 |
-| `src/app/worker_connect.rs` | ワーカーが行うデバイス操作。開く・閉じる・列挙する・能力を問い合わせる |
+| `src/app/worker_connect.rs` | ワーカーが行うデバイス操作。開く・閉じる・列挙する・能力を問い合わせる。列挙の結果のログと「Windows 側にも見えていない」の判定の適用 |
 | `src/app/backend/mod.rs` | ワーカーがデバイスに触るときの入口の trait（`VideoBackend` / `AudioBackend` / `DeviceBackends`）と、本番かフェイクかを環境変数で選ぶ `backends_from_env`。テスト用のモックもここ（`#[cfg(test)]`） |
 | `src/app/backend/system.rs` | 本番のバックエンド `SystemBackends`。映像は `VideoCapture`（Media Foundation）と `DirectShowCapture` を `SystemVideo` で束ね、音声は `AudioCapture` を trait に載せる。一覧の突き合わせ（`merge_video_devices`）とどちらで開くかの判定（`route_for`） |
 | `src/app/backend/fake.rs` | フェイクのバックエンド `FakeBackends`。`FakeVideoCapture` / `FakeAudioCapture` を trait に載せる実装と、環境変数（`CAPTURECARD_VIEWER_FAKE_DEVICES` / `CAPTURECARD_VIEWER_FAKE_SCENARIO`）の解釈 |
-| `src/app/monitor.rs` | 切断や既定デバイスの切り替えの**判定**（純粋関数）。ワーカーが使う |
+| `src/app/monitor.rs` | 切断や既定デバイスの切り替え、列挙をログへ出す回と「Windows 側にも見えていない」の**判定**（純粋関数）。ワーカーが使う |
 | `src/app/retry.rs` | `ConnectRetry` とバックオフ。「いつ試してよいか」だけを持つ。ワーカーが持つ |
 | `src/app/capabilities.rs` | デバイス一覧のキャッシュと、デバイス能力・対応設定の取得要求（ワーカーへ流すところまで） |
 | `src/app/screenshot.rs` | 撮影、保存スレッドの管理、結果の取り込み |

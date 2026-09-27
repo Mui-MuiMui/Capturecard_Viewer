@@ -23,7 +23,7 @@
 
 use super::audio_control::volume_change_result;
 use super::backend::{AudioBackend, BackendShared, DeviceBackends, VideoBackend};
-use super::monitor::VideoLinkAction;
+use super::monitor::{DeviceNotVisible, VideoLinkAction};
 use super::retry::ConnectRetry;
 use super::worker::{
     AudioTarget, DeviceCommand, DeviceConfig, DeviceEvent, DeviceSnapshot, RetryStatus,
@@ -180,6 +180,20 @@ pub(super) struct WorkerState {
     /// 水位が目標から大きく外れている旨の `warn` を最後に出した時刻。
     /// 連打を防ぐための記録
     pub(super) last_resample_warn: Option<Instant>,
+
+    /// 起動時の列挙をまだログへ出していないか。起動直後の `ApplyConfig` で立つ
+    pub(super) startup_enumeration_pending: bool,
+    /// 列挙をログへ出したときの失敗回数 `(映像, 音声)`。同じ回数のまま
+    /// 何度も出さないための記録（`monitor::should_log_enumeration`）
+    pub(super) enumeration_logged_failures: (u32, u32),
+    /// 設定のデバイスが Windows 側にも見えていないか（#236）。列挙のたびに
+    /// 判定し直し、接続できたら消す。失敗の理由に案内として添える
+    pub(super) video_not_visible: Option<DeviceNotVisible>,
+    pub(super) audio_not_visible: Option<DeviceNotVisible>,
+    /// 直近の接続の失敗の理由。案内が付いたときに、次の失敗を待たずに
+    /// 出し直すために持つ。接続できたら消す
+    pub(super) last_video_failure: Option<String>,
+    pub(super) last_audio_failure: Option<String>,
 }
 
 impl WorkerState {
@@ -211,6 +225,12 @@ impl WorkerState {
             audio_capabilities: HashMap::new(),
             last_resample_correction: None,
             last_resample_warn: None,
+            startup_enumeration_pending: false,
+            enumeration_logged_failures: (0, 0),
+            video_not_visible: None,
+            audio_not_visible: None,
+            last_video_failure: None,
+            last_audio_failure: None,
         }
     }
 
@@ -287,6 +307,21 @@ impl WorkerState {
 
         if initial {
             self.resolve_default_devices(&mut config);
+            // 列挙そのものは最初の接続を試したあとの `tick` で行う。ここで
+            // 列挙すると、その分だけ最初の接続が遅れる
+            self.startup_enumeration_pending = true;
+        }
+
+        // 繋ぐ相手が変わったら「見えていない」の判定は前の相手のもの。
+        // **直前に受け取った設定と比べる。** 繋がっていない間は
+        // `last_video_target` が `None` のままなので、そちらと比べると
+        // 2 秒ごとの `apply_settings` のたびに消えてしまう
+        let previous = self.config.as_ref();
+        if previous.map(|config| &config.video) != Some(&config.video) {
+            self.video_not_visible = None;
+        }
+        if previous.map(|config| &config.audio) != Some(&config.audio) {
+            self.audio_not_visible = None;
         }
 
         let need_video_restart = Some(&config.video) != self.last_video_target.as_ref();
