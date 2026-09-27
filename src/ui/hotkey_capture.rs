@@ -83,6 +83,10 @@ const HOTKEY_CAPTURE_DIALOG_MIN_SIZE: egui::Vec2 = egui::vec2(260.0, 140.0);
 
 /// egui のキーを、ホットキー文字列で使う名前に変換する。
 /// ホットキーとして扱わないキーは `None` を返す。
+///
+/// 受け付けるキーは `hotkey::parse` が設定ファイルで受け付けるものと揃える
+/// （F1〜F12、A〜Z、0〜9、Space、Enter、Escape）。Escape が抜けていたため、
+/// 入力ダイアログで Escape を押しても何も確定せず、一覧の表示が変わらなかった（#251）。
 fn hotkey_key_name(key: egui::Key) -> Option<&'static str> {
     let name = match key {
         egui::Key::A => "A",
@@ -135,6 +139,7 @@ fn hotkey_key_name(key: egui::Key) -> Option<&'static str> {
         egui::Key::Num9 => "9",
         egui::Key::Space => "Space",
         egui::Key::Enter => "Enter",
+        egui::Key::Escape => "Escape",
         _ => return None,
     };
     Some(name)
@@ -424,6 +429,67 @@ mod tests {
 
         assert_eq!(capture.editing(), Some(HotkeyAction::ReconnectDevices));
         assert_eq!(capture.rejection(), None);
+    }
+
+    // ---- egui のキー → ホットキー文字列の名前（#251） ----
+
+    #[test]
+    fn hotkey_key_name_accepts_escape() {
+        assert_eq!(hotkey_key_name(egui::Key::Escape), Some("Escape"));
+        assert_eq!(
+            build_hotkey_string(&modifiers(false, false, false), &[egui::Key::Escape]),
+            Some("Escape".to_string())
+        );
+        assert_eq!(
+            build_hotkey_string(&modifiers(true, false, false), &[egui::Key::Escape]),
+            Some("Ctrl+Escape".to_string())
+        );
+    }
+
+    #[test]
+    fn hotkey_key_name_is_never_empty_and_matches_egui_name() {
+        // 一覧に出る名前が空にならないこと。名前は egui の `Key::name()` と同じで、
+        // `hotkey::parse` はこの名前を設定ファイル上の名前として解釈する
+        for &key in egui::Key::ALL {
+            if let Some(name) = hotkey_key_name(key) {
+                assert!(!name.is_empty(), "{key:?}");
+                assert_eq!(name, key.name(), "{key:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn hotkey_key_name_covers_every_key_the_config_file_accepts() {
+        let accepted = [
+            egui::Key::Space,
+            egui::Key::Enter,
+            egui::Key::Escape,
+            egui::Key::A,
+            egui::Key::Z,
+            egui::Key::Num0,
+            egui::Key::Num9,
+            egui::Key::F1,
+            egui::Key::F12,
+        ];
+        for key in accepted {
+            assert!(hotkey_key_name(key).is_some(), "{key:?}");
+        }
+        // 設定ファイルでも受け付けないキーは入力ダイアログでも確定させない
+        for key in [
+            egui::Key::Tab,
+            egui::Key::Backspace,
+            egui::Key::Delete,
+            egui::Key::Insert,
+            egui::Key::Home,
+            egui::Key::End,
+            egui::Key::PageUp,
+            egui::Key::PageDown,
+            egui::Key::ArrowUp,
+            egui::Key::F13,
+            egui::Key::F20,
+        ] {
+            assert_eq!(hotkey_key_name(key), None, "{key:?}");
+        }
     }
 
     fn modifiers(ctrl: bool, shift: bool, alt: bool) -> egui::Modifiers {
