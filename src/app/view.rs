@@ -55,6 +55,29 @@ fn video_placeholder_text(capturing: bool, reconnecting: bool, detail: Option<&s
     }
 }
 
+/// 映像が無いときの領域を確保し、その中央にプレースホルダーの文言を描く。
+/// 返すのは領域全体の応答で、ドラッグや右クリックはこちらで受ける。
+///
+/// **文言は確保した矩形の中へ `put` で置く（#274）。** 以前は領域全体を
+/// `allocate_response` で確保したあとに `centered_and_justified` で文言を
+/// 足していた。確保で残りの場所が 0 になるため、文言は映像エリアの下端の外に
+/// 置かれて切り取られ、一度も画面に出ていなかった。
+///
+/// 文言は選択できないようにする。既定（`selectable_labels`）のままだと
+/// 文字列の選択がドラッグと右クリックを取り、ウィンドウを動かせなくなる。
+fn show_video_placeholder(
+    ui: &mut egui::Ui,
+    available_size: egui::Vec2,
+    placeholder: &str,
+) -> egui::Response {
+    let response = ui.allocate_response(available_size, VIDEO_AREA_SENSE);
+    ui.put(
+        response.rect,
+        egui::Label::new(placeholder).selectable(false),
+    );
+    response
+}
+
 /// 統計オーバーレイに出す行を組み立てる。
 ///
 /// 値が取れていない項目は数値を出さずに「-」や「なし」にする。
@@ -255,10 +278,7 @@ impl CaptureCardViewer {
                         self.handle_volume_scroll(ctx);
                     }
                 } else {
-                    let response = ui.allocate_response(available_size, VIDEO_AREA_SENSE);
-                    ui.centered_and_justified(|ui| {
-                        ui.label(placeholder);
-                    });
+                    let response = show_video_placeholder(ui, available_size, &placeholder);
 
                     // 空エリアでのウィンドウドラッグを処理（設定が有効な場合のみ）
                     if response.dragged() && !on_resize_edge {
@@ -345,10 +365,7 @@ impl CaptureCardViewer {
                     }
                 } else {
                     // 映像信号がない場合
-                    let response = ui.allocate_response(available_size, VIDEO_AREA_SENSE);
-                    ui.centered_and_justified(|ui| {
-                        ui.label(placeholder);
-                    });
+                    let response = show_video_placeholder(ui, available_size, &placeholder);
 
                     // フルスクリーンではドラッグ移動を完全に無効化
                     // （フルスクリーンでは画面の移動自体が意味をなさないため）
@@ -730,5 +747,47 @@ mod tests {
         // 帯を出すかどうかは「接続状態」タブの注意書きと同じ判定を使う
         assert!(status::fake_devices_notice(false).is_none());
         assert!(status::fake_devices_notice(true).is_some());
+    }
+
+    /// 描画せずに 1 フレーム回し、プレースホルダーの文字の矩形と切り取り範囲を返す。
+    fn placeholder_text_rects() -> Vec<(egui::Rect, egui::Rect)> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let available_size = ui.available_size();
+                show_video_placeholder(ui, available_size, "placeholder");
+            });
+        });
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some((
+                    text.galley.rect.translate(text.pos.to_vec2()),
+                    clipped.clip_rect,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn show_video_placeholder_draws_text_inside_visible_area() {
+        // #274: 領域を確保したあとに文言を足していたため、文字が下端の外
+        // （y = 600 付近）に置かれて切り取られていた
+        let rects = placeholder_text_rects();
+        assert_eq!(rects.len(), 1);
+        let (text, clip) = rects[0];
+        assert!(clip.contains_rect(text), "text {text:?} clip {clip:?}");
+        // 上下とも中央に置く
+        assert!((text.center().y - 300.0).abs() < 20.0, "text {text:?}");
+        assert!((text.center().x - 400.0).abs() < 20.0, "text {text:?}");
     }
 }
