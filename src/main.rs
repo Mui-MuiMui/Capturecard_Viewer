@@ -17,6 +17,7 @@ mod keyboard_hook;
 mod logging;
 mod overlay;
 mod platform;
+mod recording;
 mod repaint;
 mod screenshot;
 mod settings;

@@ -481,8 +481,8 @@ mod tests {
     use crate::hotkey::HotkeyAction;
     use crate::settings::{
         AppSettings, AudioSettings, ColorRange, ColorSpace, HotkeySettings, LanguageSetting,
-        Preset, ScreenshotDestination, ScreenshotFormat, ScreenshotSettings, UiSettings,
-        UpdateSettings, VideoBackendSetting, VideoSettings,
+        Preset, RecordingSettings, ScreenshotDestination, ScreenshotFormat, ScreenshotSettings,
+        UiSettings, UpdateSettings, VideoBackendSetting, VideoSettings,
     };
 
     use std::collections::{BTreeMap, BTreeSet};
@@ -534,6 +534,13 @@ mod tests {
                 sound_file: Some(PathBuf::from("sound/custom.mp3")),
                 sound_volume: 50.0,
                 legacy_hotkey: None,
+            },
+            // 録画も全項目を既定値と異なる値にしておく
+            recording: RecordingSettings {
+                folder: PathBuf::from("C:/videos"),
+                file_name_format: "clip_%Y%m%d".to_string(),
+                video_bitrate_kbps: 20_000,
+                hardware_encoder: false,
             },
             ui: UiSettings {
                 volume: 80.0,

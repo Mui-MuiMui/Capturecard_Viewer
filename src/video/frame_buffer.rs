@@ -9,6 +9,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use super::tap::VideoTap;
+
 pub struct VideoFrame {
     pub width: usize,
     pub height: usize,
@@ -227,6 +229,10 @@ impl FrameBuffer {
 #[derive(Clone)]
 pub struct VideoFrames {
     inner: Arc<Mutex<FrameBuffer>>,
+    // 録画へ映像を回す差し込み口。**`VideoFrames` の隣に 1 つだけ持つ。**
+    // `FrameSink::new(&frames, ..)` がここから受け取るので、Media Foundation・
+    // DirectShow・フェイクの 3 経路はコンストラクタを変えずに録画へ繋がる
+    tap: VideoTap,
 }
 
 impl Default for VideoFrames {
@@ -239,6 +245,7 @@ impl VideoFrames {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(FrameBuffer::new())),
+            tap: VideoTap::new(),
         }
     }
 
@@ -299,6 +306,11 @@ impl VideoFrames {
     /// フレームコールバックへ渡す生のハンドル。
     pub(super) fn buffer(&self) -> Arc<Mutex<FrameBuffer>> {
         Arc::clone(&self.inner)
+    }
+
+    /// 録画へ映像を回す差し込み口。録画スレッドが差し込み、フレームコールバックが積む。
+    pub fn tap(&self) -> VideoTap {
+        self.tap.clone()
     }
 }
 

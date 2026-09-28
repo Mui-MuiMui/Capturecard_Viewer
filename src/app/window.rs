@@ -109,6 +109,48 @@ impl CaptureCardViewer {
         !app_fullscreen && viewport_fullscreen != Some(true)
     }
 
+    /// ウィンドウのサイズと位置が変わっていたら設定へ記録する。`update()` が毎フレーム呼ぶ。
+    ///
+    /// フルスクリーン中は画面全体の矩形しか取れないため記録しない
+    /// （`should_record_window_geometry`）。こうすることで、フルスクリーンへ入る
+    /// 直前のジオメトリが設定に残り、フルスクリーンのまま終了しても次回は
+    /// ウィンドウ表示で復元される。
+    ///
+    /// **ここでは書き出さない。** ウィンドウのドラッグ中は毎フレーム値が変わるため、
+    /// 変わるたびに保存すると最大 60 回/秒のディスク書き込みになる。
+    pub(super) fn record_window_geometry(&mut self, viewport: &egui::ViewportInfo) {
+        if !Self::should_record_window_geometry(self.is_fullscreen, viewport.fullscreen) {
+            return;
+        }
+        let current_size = viewport.inner_rect.map(|r| (r.width(), r.height()));
+        let current_pos = viewport.outer_rect.map(|r| (r.left(), r.top()));
+        let changed = match self.settings.lock() {
+            Ok(mut settings) => {
+                let mut changed = false;
+                if let Some(size) = current_size {
+                    if settings.ui.last_window_size != Some(size) {
+                        settings.ui.last_window_size = Some(size);
+                        changed = true;
+                    }
+                }
+                if let Some(pos) = current_pos {
+                    if settings.ui.last_window_pos != Some(pos) {
+                        settings.ui.last_window_pos = Some(pos);
+                        changed = true;
+                    }
+                }
+                changed
+            }
+            Err(_) => {
+                warn!("ウィンドウの位置・大きさの記録で settings のロックを取得できない");
+                false
+            }
+        };
+        if changed {
+            self.mark_settings_dirty();
+        }
+    }
+
     /// 最前面表示を切り替える。
     ///
     /// 右クリックメニューのチェックボックスと同じことを行う。ウィンドウレベルの

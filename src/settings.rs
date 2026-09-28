@@ -73,6 +73,9 @@ pub struct AppSettings {
     pub video: VideoSettings,
     pub audio: AudioSettings,
     pub screenshot: ScreenshotSettings,
+    // 録画。設定ファイルでは [recording] になる。プリセットには入れない
+    // （保存先やビットレートはデバイスと一体の設定ではない。`docs/design/presets.md`）
+    pub recording: RecordingSettings,
     pub ui: UiSettings,
     // アクション → ホットキー文字列。割り当てが無いアクションは入っていない。
     //
@@ -113,6 +116,7 @@ struct RawAppSettings {
     video: VideoSettings,
     audio: AudioSettings,
     screenshot: ScreenshotSettings,
+    recording: RecordingSettings,
     ui: UiSettings,
     hotkeys: Option<BTreeMap<String, String>>,
     hotkey_settings: HotkeySettings,
@@ -127,6 +131,7 @@ impl From<RawAppSettings> for AppSettings {
             video,
             audio,
             mut screenshot,
+            recording,
             ui,
             hotkeys,
             hotkey_settings,
@@ -149,6 +154,7 @@ impl From<RawAppSettings> for AppSettings {
             video,
             audio,
             screenshot,
+            recording,
             ui,
             hotkeys,
             hotkey_settings,
@@ -255,6 +261,7 @@ impl Default for AppSettings {
             video: VideoSettings::default(),
             audio: AudioSettings::default(),
             screenshot: ScreenshotSettings::default(),
+            recording: RecordingSettings::default(),
             ui: UiSettings::default(),
             hotkeys: default_hotkeys(),
             hotkey_settings: HotkeySettings::default(),
@@ -811,6 +818,115 @@ impl ScreenshotSettings {
 pub enum ScreenshotEncoding {
     Jpeg { quality: u8 },
     Png,
+}
+
+// 録画の設定。設定ファイルでは [recording] になる（`docs/design/recording.md` の
+// 「設定 `[recording]`」）。
+//
+// **項目は、その項目が効く段で足す。** 音声（②）とリプレイバッファ（③）の項目は
+// まだ無い。効かない項目を先に出さない（`docs/ARCHITECTURE.md` の「設定は実際に効かせる」）。
+// 録画中に変えた設定は次の録画から効く。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecordingSettings {
+    // 保存先のフォルダ。無ければ録画の開始時に作る
+    pub folder: PathBuf,
+    // ファイル名の書式（chrono の strftime）。拡張子（.mp4）は付けない。
+    // 使う前に `recording::resolve_file_stem` が検め、使えなければ既定へ倒す
+    pub file_name_format: String,
+    // 映像の平均ビットレート（kbps）
+    #[serde(deserialize_with = "deserialize_recording_bitrate")]
+    pub video_bitrate_kbps: u32,
+    // ハードウェアのエンコーダ（Intel / NVIDIA / AMD の MFT）を選ばせるか。
+    // 選べなければソフトウェアのエンコーダへ倒れる
+    pub hardware_encoder: bool,
+}
+
+// 録画のファイル名の既定の書式
+pub const DEFAULT_RECORDING_FILE_NAME_FORMAT: &str = "Recording_%Y-%m-%d_%H-%M-%S";
+
+// 録画の映像のビットレート（kbps）の下限・上限と既定値
+pub const MIN_RECORDING_BITRATE_KBPS: u32 = 1_000;
+pub const MAX_RECORDING_BITRATE_KBPS: u32 = 50_000;
+pub const DEFAULT_RECORDING_BITRATE_KBPS: u32 = 8_000;
+
+impl Default for RecordingSettings {
+    fn default() -> Self {
+        Self {
+            folder: default_recording_folder(),
+            file_name_format: DEFAULT_RECORDING_FILE_NAME_FORMAT.to_string(),
+            video_bitrate_kbps: DEFAULT_RECORDING_BITRATE_KBPS,
+            hardware_encoder: true,
+        }
+    }
+}
+
+impl RecordingSettings {
+    // エンコーダへ渡すビットレート。設定ダイアログからは範囲外を作れないが、
+    // 読み込み後に値を差し替える経路もあるので、渡す前に丸めておく
+    pub fn clamped_bitrate_kbps(&self) -> u32 {
+        self.video_bitrate_kbps
+            .clamp(MIN_RECORDING_BITRATE_KBPS, MAX_RECORDING_BITRATE_KBPS)
+    }
+}
+
+// 範囲外のビットレートが書かれていても、設定全体を失わせない。
+// 考え方は deserialize_jpeg_quality と同じで、TOML の整数である i64 で受けてから丸める。
+fn deserialize_recording_bitrate<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = i64::deserialize(deserializer)?;
+    let clamped = raw.clamp(
+        i64::from(MIN_RECORDING_BITRATE_KBPS),
+        i64::from(MAX_RECORDING_BITRATE_KBPS),
+    );
+    if clamped != raw {
+        warn!(
+            "設定の録画のビットレート {} kbps は範囲外なので {} kbps として扱う",
+            raw, clamped
+        );
+    }
+    // clamp 済みなので u32 に収まる
+    Ok(clamped as u32)
+}
+
+// 録画の保存先の既定値。
+//
+// ビデオフォルダ → デスクトップ → %USERPROFILE% → 実行ファイルの置き場所 → 一時フォルダ。
+// **カレントディレクトリは使わない**（理由は default_screenshot_folder と同じ。
+// `docs/design/assets.md`）。先頭の候補だけがスクリーンショットと違う。
+fn default_recording_folder() -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+
+    recording_folder_from(
+        dirs::video_dir(),
+        dirs::desktop_dir(),
+        dirs::home_dir(),
+        exe_dir,
+        std::env::temp_dir(),
+    )
+}
+
+// 録画の保存先の候補から実際に使うものを選ぶ。選ぶ部分だけを切り出してテストする。
+fn recording_folder_from(
+    videos: Option<PathBuf>,
+    desktop: Option<PathBuf>,
+    home: Option<PathBuf>,
+    exe_dir: Option<PathBuf>,
+    last_resort: PathBuf,
+) -> PathBuf {
+    if let Some(videos) = videos {
+        return videos;
+    }
+    let fallback = desktop.or(home).or(exe_dir).unwrap_or(last_resort);
+    warn!(
+        "ビデオフォルダの場所が分からないので、録画の保存先を {} にする",
+        fallback.display()
+    );
+    fallback
 }
 
 // オーディオのサンプリングレートとチャンネル数の既定値。
@@ -2126,6 +2242,148 @@ volume = 80.0
 
         assert_ne!(folder, PathBuf::from("."));
         assert!(folder.is_absolute(), "保存先の既定値は絶対パスであること");
+    }
+
+    const VIDEOS: &str = r"C:\Users\tester\Videos";
+
+    #[test]
+    fn recording_folder_from_videos_available_uses_videos() {
+        let folder = recording_folder_from(
+            Some(PathBuf::from(VIDEOS)),
+            Some(PathBuf::from(DESKTOP)),
+            Some(PathBuf::from(HOME)),
+            Some(PathBuf::from(EXE_DIR)),
+            PathBuf::from(TEMP),
+        );
+
+        assert_eq!(folder, PathBuf::from(VIDEOS));
+    }
+
+    #[test]
+    fn recording_folder_from_without_videos_falls_back_in_the_screenshot_order() {
+        // ビデオフォルダが無ければ、スクリーンショットと同じ順（デスクトップ → ホーム → exe）
+        let desktop = recording_folder_from(
+            None,
+            Some(PathBuf::from(DESKTOP)),
+            Some(PathBuf::from(HOME)),
+            Some(PathBuf::from(EXE_DIR)),
+            PathBuf::from(TEMP),
+        );
+        let home = recording_folder_from(
+            None,
+            None,
+            Some(PathBuf::from(HOME)),
+            Some(PathBuf::from(EXE_DIR)),
+            PathBuf::from(TEMP),
+        );
+        let exe = recording_folder_from(
+            None,
+            None,
+            None,
+            Some(PathBuf::from(EXE_DIR)),
+            PathBuf::from(TEMP),
+        );
+
+        assert_eq!(desktop, PathBuf::from(DESKTOP));
+        assert_eq!(home, PathBuf::from(HOME));
+        assert_eq!(exe, PathBuf::from(EXE_DIR));
+    }
+
+    #[test]
+    fn recording_folder_from_nothing_available_uses_the_last_resort_not_current_dir() {
+        let folder = recording_folder_from(None, None, None, None, PathBuf::from(TEMP));
+
+        assert_eq!(folder, PathBuf::from(TEMP));
+        assert!(folder.is_absolute());
+    }
+
+    #[test]
+    fn app_settings_without_recording_section_uses_recording_defaults() {
+        // 録画が入る前の版が書いた設定ファイル。録画は既定値で、他の項目は保たれる
+        assert!(!FULL_CONFIG.contains("[recording]"));
+
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("[recording] が無くても読めなければならない");
+
+        assert_eq!(
+            settings.recording.file_name_format,
+            DEFAULT_RECORDING_FILE_NAME_FORMAT
+        );
+        assert_eq!(settings.recording.video_bitrate_kbps, 8_000);
+        assert!(settings.recording.hardware_encoder);
+        assert_eq!(
+            settings.recording.folder,
+            RecordingSettings::default().folder
+        );
+        assert_eq!(settings.screenshot.jpeg_quality, 60);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_partial_recording_section_keeps_the_other_defaults() {
+        let config = format!("{FULL_CONFIG}\n[recording]\nvideo_bitrate_kbps = 12000\n");
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("[recording] の一部だけでも読めなければならない");
+
+        assert_eq!(settings.recording.video_bitrate_kbps, 12_000);
+        assert_eq!(
+            settings.recording.file_name_format,
+            DEFAULT_RECORDING_FILE_NAME_FORMAT
+        );
+        assert!(settings.recording.hardware_encoder);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_recording_section_round_trips() {
+        let original = AppSettings {
+            recording: RecordingSettings {
+                folder: PathBuf::from(r"D:\captures"),
+                file_name_format: "clip_%Y%m%d_%H%M%S".to_string(),
+                video_bitrate_kbps: 25_000,
+                hardware_encoder: false,
+            },
+            ..AppSettings::default()
+        };
+
+        let text = toml::to_string(&original).expect("書き出せる");
+        assert!(text.contains("[recording]"), "{text}");
+        let restored: AppSettings = toml::from_str(&text).expect("読み戻せる");
+
+        assert_eq!(restored.recording, original.recording);
+    }
+
+    #[test]
+    fn app_settings_out_of_range_recording_bitrate_is_clamped_without_losing_settings() {
+        for (written, expected) in [
+            (0, 1_000),
+            (-5, 1_000),
+            (999_999, 50_000),
+            (1_000, 1_000),
+            (50_000, 50_000),
+        ] {
+            let config = format!("{FULL_CONFIG}\n[recording]\nvideo_bitrate_kbps = {written}\n");
+
+            let settings: AppSettings =
+                toml::from_str(&config).expect("範囲外のビットレートでも読めなければならない");
+
+            assert_eq!(settings.recording.video_bitrate_kbps, expected, "{written}");
+            assert_eq!(settings.ui.volume, 80.0);
+        }
+    }
+
+    #[test]
+    fn recording_settings_clamped_bitrate_stays_in_range() {
+        let mut recording = RecordingSettings {
+            video_bitrate_kbps: 10,
+            ..RecordingSettings::default()
+        };
+        assert_eq!(recording.clamped_bitrate_kbps(), MIN_RECORDING_BITRATE_KBPS);
+        recording.video_bitrate_kbps = 60_000;
+        assert_eq!(recording.clamped_bitrate_kbps(), MAX_RECORDING_BITRATE_KBPS);
+        recording.video_bitrate_kbps = 8_000;
+        assert_eq!(recording.clamped_bitrate_kbps(), 8_000);
     }
 
     #[test]

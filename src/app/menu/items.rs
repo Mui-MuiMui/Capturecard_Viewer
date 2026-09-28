@@ -9,7 +9,7 @@
 //! **同じ項目の関数を並び替えて呼ぶ**だけにしてある。項目ごとの文言・有効条件・
 //! 返すアクションを 1 か所に集め、片方だけ直す事故を起こさないため。
 
-use super::MenuView;
+use super::{MenuView, RecordingMenuState};
 use crate::i18n::{self, Text};
 use crate::settings::{MAX_VOLUME, MIN_VOLUME};
 use eframe::egui;
@@ -49,6 +49,8 @@ pub(super) enum MenuAction {
     ResetWindowSize,
     /// 「デバイス再接続」を押した
     ReconnectDevices,
+    /// 「録画を開始」「録画を停止」を押した
+    ToggleRecording,
     /// 「プリセット」から 1 つ選んだ
     ApplyPreset(String),
     /// 「詳細設定...」を押した
@@ -67,6 +69,7 @@ impl MenuAction {
         match self {
             MenuAction::ResetWindowSize
             | MenuAction::ReconnectDevices
+            | MenuAction::ToggleRecording
             | MenuAction::ApplyPreset(_)
             | MenuAction::OpenSettings
             | MenuAction::Quit => true,
@@ -101,6 +104,24 @@ fn volume_items(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction
     let mut muted = view.muted;
     if ui.checkbox(&mut muted, Text::Mute.get()).changed() {
         actions.push(MenuAction::SetMuted(muted));
+    }
+}
+
+/// 「録画を開始」/「録画を停止（00:12:34）」のボタン。
+///
+/// 映像そのものに関わる操作なので、どちらのレイアウトでもサブメニューへ入れずに
+/// 音量の下へ置く。録画を保存している間（`Finalize` を待っている間）は押せない。
+fn recording_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction>) {
+    let (label, enabled) = match view.recording {
+        RecordingMenuState::Idle => (Text::MenuStartRecording.get().to_string(), true),
+        RecordingMenuState::Recording(elapsed) => (
+            i18n::menu_stop_recording(crate::recording::format_elapsed(elapsed)),
+            true,
+        ),
+        RecordingMenuState::Finishing => (Text::MenuRecordingFinishing.get().to_string(), false),
+    };
+    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+        actions.push(MenuAction::ToggleRecording);
     }
 }
 
@@ -362,6 +383,10 @@ pub(super) fn menu_items_flat(
 
     ui.separator();
 
+    recording_item(ui, view, actions);
+
+    ui.separator();
+
     aspect_ratio_item(ui, view, actions);
     always_on_top_item(ui, view, actions);
     fullscreen_item(ui, view, actions);
@@ -407,6 +432,10 @@ pub(super) fn menu_items_collapsed(
 
     ui.separator();
 
+    recording_item(ui, view, actions);
+
+    ui.separator();
+
     fullscreen_item(ui, view, actions);
 
     // サブメニューのボタンは既定だと文字の幅しか取らず、上下のチェック
@@ -442,6 +471,7 @@ mod tests {
         for action in [
             MenuAction::ResetWindowSize,
             MenuAction::ReconnectDevices,
+            MenuAction::ToggleRecording,
             MenuAction::ApplyPreset("既定".to_string()),
             MenuAction::OpenSettings,
             MenuAction::Quit,

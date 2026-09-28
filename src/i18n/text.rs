@@ -68,6 +68,7 @@ texts! {
     HeadlineHotkey { ja: "ホットキーを登録できません", en: "Cannot register the hotkey" },
     HeadlineSettings { ja: "設定ファイルを読み書きできません", en: "Cannot read or write the settings file" },
     HeadlineUpdate { ja: "更新できません", en: "Cannot update" },
+    HeadlineRecording { ja: "録画できません", en: "Cannot record" },
 
     // ---- エラーの文言（各エラー enum の Display） ----
     VideoNoDevices { ja: "映像デバイスが 1 台も見つからない", en: "No video devices found" },
@@ -283,6 +284,8 @@ texts! {
     MenuResetWindowSizeDisabledHint { ja: "フルスクリーン中は変更できません", en: "Not available in fullscreen" },
     MenuAdvancedSettings { ja: "詳細設定...", en: "Settings..." },
     MenuQuit { ja: "終了", en: "Quit" },
+    MenuStartRecording { ja: "録画を開始", en: "Start recording" },
+    MenuRecordingFinishing { ja: "録画を保存しています...", en: "Saving the recording..." },
     // サブメニューを開く項目。矢印は項目名の一部として訳ごとに持つ
     MenuViewSubmenu { ja: "表示  ⏵", en: "View  ⏵" },
     MenuWindowSubmenu { ja: "ウィンドウ  ⏵", en: "Window  ⏵" },
@@ -333,6 +336,12 @@ texts! {
     UpdateClearSkipped { ja: "解除", en: "Clear" },
     UpdateHint { ja: "確認は GitHub の Release へ問い合わせるだけです。「更新する」で新しいバージョンをダウンロードし、exe と同じフォルダで置き換えて再起動します。", en: "Checking only asks GitHub Releases. Update downloads the new version, replaces the exe in its folder, and restarts." },
     UpdateDraftHint { ja: "チェックと「解除」は「適用」か「OK」で反映します。", en: "The checkboxes and Clear take effect when you press Apply or OK." },
+
+    // ---- 録画（recording/ / app/recording.rs） ----
+    RecordingNoVideo { ja: "映像が届かなかったので、ファイルを作りませんでした", en: "No video arrived, so no file was created" },
+    RecordingFileNameEmpty { ja: "ファイル名の書式が空です", en: "The file name format is empty" },
+    RecordingFileNameInvalidSpecifier { ja: "ファイル名の書式に使えない指定子（% で始まるもの）が含まれています", en: "The file name format contains an unknown % specifier" },
+    RecordingFileNameTrailingDot { ja: "ファイル名の末尾を空白や「.」にはできません", en: "A file name cannot end with a space or a period" },
 }
 
 #[cfg(test)]

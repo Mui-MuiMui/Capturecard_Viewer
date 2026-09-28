@@ -34,7 +34,7 @@ use super::color::SharedColorConversion;
 use super::frame_buffer::VideoFrames;
 use super::frame_sink::FrameSink;
 use super::{elapsed_ms, VideoError};
-use crate::com::ComApartment;
+use crate::com::{ComApartment, ComModel};
 use crate::repaint::RepaintWaker;
 use devices::DeviceEntry;
 use graph::{CaptureGraph, FormatRequest, GraphError};
@@ -76,7 +76,7 @@ impl DirectShowCapture {
         color_conversion: Arc<SharedColorConversion>,
         repaint_waker: RepaintWaker,
     ) -> Self {
-        let com = match ComApartment::enter() {
+        let com = match ComApartment::enter(ComModel::SingleThreaded) {
             Ok(com) => Some(com),
             Err(e) => {
                 // 以降の列挙や接続がそれぞれの場所で失敗として出る

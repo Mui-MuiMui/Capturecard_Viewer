@@ -7,8 +7,9 @@
 //! 通せなかった。「幅・高さ・バイト列」を受ける形に出してあるのはそのため
 //! （`docs/design/device-worker.md` の「フェイクデバイス（#142）の置き場所」）。
 //!
-//! **毎フレーム呼ばれるので、ロックはフレームバッファの 1 回だけ、
-//! アロケーションは置き換えたフレームを回収できなかったときだけにする**
+//! **毎フレーム呼ばれるので、ロックはフレームバッファの 1 回だけ（録画中は録画の
+//! リングの待たない `try_lock` が 1 回増える）、アロケーションは置き換えたフレームを
+//! 回収できなかったときだけにする**
 //! （`docs/design/video-pipeline.md`）。
 
 use log::{info, trace, warn};
@@ -18,6 +19,7 @@ use std::time::Instant;
 use super::color::{adjusted_color_matrix, color_matrix_for, ColorMatrix, SharedColorConversion};
 use super::convert::{bgr24_stride, bgr24_to_rgb, mjpeg_to_rgb, yuy2_to_rgb_naive};
 use super::frame_buffer::{FrameBuffer, VideoFrame, VideoFrames};
+use super::tap::VideoTap;
 use super::yuv420::{yuv420_frame_len, yuv420_to_rgb, Yuv420Layout};
 use crate::repaint::RepaintWaker;
 
@@ -63,6 +65,8 @@ pub(super) struct FrameSink {
     /// フレームを置いたことを UI スレッドへ知らせる窓口。
     /// これが無いと、UI 側は保険の間隔でしか新着を見に来ない
     repaint_waker: RepaintWaker,
+    /// 録画へ映像を回す差し込み口。録画中だけ、画面へ置いたのと同じ `Arc` を積む
+    tap: VideoTap,
     /// 直前に置き換えられたフレーム。UI スレッドが手放していれば
     /// 中の Vec を次の変換先として回収し、毎フレームの確保を避ける。
     /// 1 世代ぶん遅らせて回収するのは、置き換えた直後のフレームは
@@ -86,6 +90,7 @@ impl FrameSink {
             buffer: frames.buffer(),
             color_conversion,
             repaint_waker,
+            tap: frames.tap(),
             recyclable: None,
             first_frame: FirstTimeOnly::default(),
             short_frame_notice: FirstTimeOnly::default(),
@@ -96,12 +101,18 @@ impl FrameSink {
 
     /// 次の変換先にする Vec。回収できたものがあれば使い回し、無ければ空
     /// （変換側がリサイズするので、その時だけ確保が起きる）。
+    ///
+    /// 回収できなかった回数は、録画中だけ `VideoTap` が数える。録画スレッドが
+    /// リングから取った `Arc` を持ち続けると増える（`docs/design/recording.md`）。
     fn recycled_buffer(&mut self) -> Vec<u8> {
-        self.recyclable
-            .take()
-            .and_then(|previous| Arc::try_unwrap(previous).ok())
-            .map(|previous| previous.data)
-            .unwrap_or_default()
+        match self.recyclable.take().map(Arc::try_unwrap) {
+            Some(Ok(previous)) => previous.data,
+            Some(Err(_)) => {
+                self.tap.note_recycle_miss();
+                Vec::new()
+            }
+            None => Vec::new(),
+        }
     }
 
     /// YUY2 のフレームを自前の変換（高速パス）で RGB に直して積む。
@@ -324,6 +335,8 @@ impl FrameSink {
         let (width, height) = (frame.width, frame.height);
         // `Arc` に包むのはロックの外で済ませる（包むときに小さな確保が起きる）
         let frame = Arc::new(frame);
+        // 録画中だけ、同じフレームの `Arc` を複製しておく（参照の数が増えるだけで確保は無い）
+        let tapped = self.tap.is_attached().then(|| Arc::clone(&frame));
         // フレームバッファへ置けたか。置けたときだけ UI スレッドを
         // 起こす。**起こすのはロックを手放してから。** 握ったまま
         // 呼ぶと、egui 側の待ちの間このバッファも止まる
@@ -367,6 +380,11 @@ impl FrameSink {
             // 届いたその場で UI スレッドを起こす。ここが映像の
             // 遅延を決めるので、重い処理を前に挟まないこと
             self.repaint_waker.wake();
+            // 録画へ回すのは画面へ出す経路の後ろ。表示の遅延に足さない。
+            // 積めなければ捨てて数えるだけで、待たない（`VideoTap::offer`）
+            if let Some(frame) = tapped {
+                self.tap.offer(frame, received_at);
+            }
         }
         pushed
     }
@@ -559,5 +577,66 @@ mod tests {
         let frame = frames.latest().expect("積んだフレームが読める");
         assert_eq!((frame.width, frame.height), (2, 2));
         assert_eq!(frames.stats().source_format, Some("MJPEG"));
+    }
+
+    #[test]
+    fn frame_sink_push_while_recording_offers_the_same_frame_to_the_tap() {
+        // 録画中は、画面へ置いたのと同じ Arc がリングに積まれる（画素を複製しない）
+        let frames = VideoFrames::new();
+        let tap = frames.tap();
+        let mut consumer = tap.attach(super::super::tap::VIDEO_TAP_CAPACITY);
+        let mut sink = FrameSink::new(
+            &frames,
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::default(),
+        );
+        let at = Instant::now();
+
+        assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], at));
+
+        let (tapped, tapped_at) = consumer.pop().expect("リングに 1 枚積まれている");
+        let shown = frames.latest().expect("画面側にも置かれている");
+        assert!(Arc::ptr_eq(&tapped, &shown));
+        assert_eq!(tapped_at, at);
+    }
+
+    #[test]
+    fn frame_sink_push_without_recording_leaves_the_tap_empty() {
+        let frames = VideoFrames::new();
+        let tap = frames.tap();
+        let mut sink = FrameSink::new(
+            &frames,
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::default(),
+        );
+        assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
+
+        // 差し込まれていないので何も積まず、捨てた数にも入れない
+        let mut consumer = tap.attach(1);
+        assert!(consumer.pop().is_none());
+        assert_eq!(tap.dropped(), 0);
+    }
+
+    #[test]
+    fn frame_sink_recycle_miss_is_counted_while_recording() {
+        // 録画スレッドがリングの Arc を持ったままだと、2 世代前の Vec を回収できない
+        let frames = VideoFrames::new();
+        let tap = frames.tap();
+        let mut consumer = tap.attach(super::super::tap::VIDEO_TAP_CAPACITY);
+        let mut sink = FrameSink::new(
+            &frames,
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::default(),
+        );
+        for _ in 0..3 {
+            assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
+        }
+
+        // 3 枚目の変換先を用意するときに 1 枚目を回収しようとして、リングが持っているので失敗する
+        assert_eq!(tap.recycle_misses(), 1);
+        // 取り出して手放せば、以降は回収できる
+        while consumer.pop().is_some() {}
+        assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
+        assert_eq!(tap.recycle_misses(), 1);
     }
 }

@@ -397,6 +397,9 @@ impl CaptureCardViewer {
         let stats = self.frames.stats();
         // ワーカーが書き出した観測値の複製。ここでデバイスへは問い合わせない
         let audio_underruns = self.device_snapshot.audio_underruns;
+        let mut lines = format_stats_lines(&stats, audio_underruns);
+        // 録画中は録画の行を足す（経過時間、書いた枚数・捨てた枚数、エンコーダ）
+        lines.extend(self.recording_stats_lines());
 
         let shown = egui::Area::new("stats_overlay")
             .order(egui::Order::Foreground)
@@ -409,7 +412,7 @@ impl CaptureCardViewer {
                     .rounding(4.0)
                     .inner_margin(egui::Margin::same(6.0))
                     .show(ui, |ui| {
-                        for line in format_stats_lines(&stats, audio_underruns) {
+                        for line in lines {
                             ui.label(
                                 egui::RichText::new(line)
                                     .monospace()
