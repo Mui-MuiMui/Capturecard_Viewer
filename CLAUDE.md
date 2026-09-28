@@ -29,7 +29,7 @@ cargo build --release
 |---|---|
 | `src/main.rs` | エントリポイント。ロガーの初期化、`NativeOptions` の組み立て、`run_native` だけ |
 | `src/platform.rs` | Windows 固有処理。日本語フォントの探索、埋め込みアイコンの読み込み、モニタの作業領域の列挙、保存されたウィンドウの大きさ・位置が使えるかの判定、OS の表示言語からの言語の推定 |
-| `src/com.rs` | COM の初期化（`ComApartment`）の RAII。DirectShow のバックエンドがデバイスワーカーで使う |
+| `src/com.rs` | COM（`ComApartment`、STA / MTA をモデル引数で選ぶ）と Media Foundation（`MfPlatform`）の初期化の RAII。DirectShow のバックエンドがデバイスワーカーで STA、録画スレッドが MTA で使う |
 | `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`Default`、`eframe::App` 実装（`update` / `on_exit`） |
 | `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、プレースホルダーの文言、統計 OSD、テクスチャの取り込み |
 | `src/app/menu/mod.rs` | 右クリックメニューの置き場所と閉じ方、平らな一覧／サブメニューの出し分け、描画が返した `MenuAction` の処理 |
@@ -48,6 +48,7 @@ cargo build --release
 | `src/app/capabilities.rs` | デバイス一覧のキャッシュと、デバイス能力・対応設定の取得要求（ワーカーへ流すところまで） |
 | `src/app/screenshot.rs` | 撮影、保存スレッドの管理、結果の取り込み |
 | `src/app/screenshot_sound.rs` | 効果音ファイルの読み込みスレッドの管理と結果の取り込み（適用・テスト再生） |
+| `src/app/recording.rs` | 録画の開始・停止（`toggle_recording`、右クリックメニューとホットキーが呼ぶ）、録画スレッドから届いた `RecordingEvent` の取り込み（ログ・トースト・`report_error`）、終了時の停止と `Finalize` の待ち合わせ、録画中の印と統計 OSD の録画の行。フィールド（`recorder`）は `app/mod.rs` |
 | `src/app/settings_dialog.rs` | 設定ダイアログの操作の受け止め、インポート / エクスポート / 初期化、プリセットの適用 |
 | `src/app/settings_store.rs` | 設定のデバウンス保存と即時保存 |
 | `src/app/update.rs` | 更新の確認と適用のスレッドの管理と結果の取り込み（`UpdateState`）、通知ダイアログの操作、前回の更新の残りの後片付け、終了時の新しい exe の起動 |
@@ -68,6 +69,7 @@ cargo build --release
 | `src/video/color.rs` | YCbCr→RGB の係数表とその選び方、映像調整の畳み込み、設定の共有（`SharedColorConversion`） |
 | `src/video/convert.rs` | YUY2→RGB24 の画素変換と、DirectShow の RGB24（BGR）/ MJPEG の展開 |
 | `src/video/frame_buffer.rs` | `FrameBuffer`（`Arc` によるフレーム共有と世代番号）と観測値（`FrameStats`） |
+| `src/video/tap.rs` | 録画へ映像を回す差し込み口 `VideoTap`。録画中だけ、`FrameSink` が画面へ置いたのと同じ `Arc<VideoFrame>` を容量 3 のリングへ積む（待たない `try_lock`、満杯なら捨てて数える）。Vec の回収に失敗した回数も録画中だけ数える |
 | `src/audio/mod.rs` | 音声モジュールの入口。`ActiveAudio` / `AudioDirection` / `AudioError` と能力キャッシュのキー（`cache_key` / `device_name_from_key`）、外から使う経路（`crate::audio::...`）の `pub use` |
 | `src/audio/capabilities.rs` | デバイスの対応設定の取得（`query_capabilities`）と、設定画面に出す選択肢の組み立て（`selectable_*` / `ChoiceSource`） |
 | `src/audio/stream_config.rs` | 対応設定の中から実際に開く設定を選ぶ（`select_best_config` / `select_aligned_configs`）。扱えるサンプル型の一覧もここ |
@@ -77,6 +79,13 @@ cargo build --release
 | `src/audio/resample.rs` | クロックドリフト補正の共有状態（`ResampleTelemetry`）と補正係数の決め方（`decide_resample_correction`） |
 | `src/audio/controls.rs` | `AudioControls`。音量・パススルー・ミュートの共有状態 |
 | `src/audio/fake.rs` | 実機なしで動くフェイクの音声デバイス `FakeAudioCapture`。正弦波の入力と書き込みを捨てる出力のスレッド |
+| `src/recording/mod.rs` | 録画の入口。`RecordingError`（文言は `Display` から `crate::i18n`）、`EncoderInfo`、経過時間の書式（`format_elapsed`）、外から使う経路（`crate::recording::...`）の `pub use` |
+| `src/recording/recorder.rs` | 録画スレッドの窓口 `Recorder`（UI スレッドが持つ。落とすと停止を頼んで join する）と録画スレッドの本体（リングの差し込み、最初のフレームで Sink Writer を作る、ハードウェアからソフトウェアへの作り直し、大きさの変化・空き容量・書き込みの失敗で止める）。`RecordingCommand` / `RecordingEvent` / `RecordingSummary` |
+| `src/recording/writer.rs` | Media Foundation の Sink Writer（`IMFSinkWriter`）の組み立てと NV12 の書き込み、`Finalize`、エンコーダの遅れ（`backlog`）、使っているエンコーダの名前（`encoder_info`） |
+| `src/recording/convert.rs` | RGB → NV12 の画素変換（BT.709 / BT.601 リミテッド、色差は 2x2 の平均）。純粋関数 |
+| `src/recording/pts.rs` | 映像の PTS（受け取った時刻 − 録画の開始、単調増加）。純粋関数 |
+| `src/recording/file_name.rs` | ファイル名の書式の検め（chrono の `Item::Error`、Windows で使えない文字、末尾の空白・ピリオド、予約デバイス名）と、同じ名前があるときの `_2` `_3` … |
+| `src/recording/storage.rs` | 保存先の空き容量（`GetDiskFreeSpaceExW`）と、止める境界（500MB） |
 | `src/hotkey/mod.rs` | 外から使う経路（`crate::hotkey::...`）の `pub use` だけ |
 | `src/hotkey/action.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）と設定ファイル上の名前、溜まった押下の畳み方 |
 | `src/hotkey/parse.rs` | `HotkeyError` と、ホットキー文字列のパース |
@@ -95,6 +104,7 @@ cargo build --release
 | `src/ui/video_mode.rs` | デバイスを切り替えたときに選び直すビデオの既定値（`select_default_video_mode`） |
 | `src/ui/device_tab.rs` | 「デバイス設定」タブの描画 |
 | `src/ui/screenshot_tab.rs` | 「スクリーンショット設定」タブの描画 |
+| `src/ui/recording_tab.rs` | 「録画」タブの描画（保存先、ファイル名の書式と例、映像のビットレート、ハードウェアエンコーダ） |
 | `src/ui/hotkeys_tab.rs` | 「ホットキー」タブの描画と、割り当ての重複判定 |
 | `src/ui/hotkey_capture.rs` | ホットキー入力ダイアログ。確定の判定と描画 |
 | `src/ui/hotkey_keys.rs` | 入力ダイアログが使うキーの対応表（`hotkey_key_name`、`hotkey::parse` と同じ範囲）、割り当てさせない組み合わせ（`is_clipboard_command_chord`）、ホットキー文字列の組み立て |
@@ -113,6 +123,7 @@ cargo build --release
 | `src/i18n/text.rs` | 引数を取らない文字列の表（`texts!` が `Text` のキーと言語ごとの `match` を作る） |
 | `src/i18n/msg.rs` | 引数を取る文字列。1 関数が 1 件で、言語ごとに文全体を組み立てる |
 | `src/i18n/update_msg.rs` | 引数を取る文字列のうち、更新の確認と適用で使うもの。書き方は `msg.rs` と同じ |
+| `src/i18n/recording_msg.rs` | 引数を取る文字列のうち、録画で使うもの。書き方は `msg.rs` と同じ |
 
 `src/app/` の子モジュールは**基本どれも `impl CaptureCardViewer` を足す形**で、状態そのものは `app/mod.rs` の構造体 1 つに集めてある。**子モジュール側にフィールドや `static` を持たせないこと。** 他の子モジュールから呼ぶメソッドにだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
@@ -123,6 +134,8 @@ cargo build --release
 `src/ui/` の子モジュールは**どれも状態を持たず、書き換えるのもドラフトだけ。** 起きたことは `SettingsEvent` / `HotkeyDialogEvent` の列で返す。ダイアログの状態は `state.rs` の `SettingsDialogState` 1 つに集めてある。**外から使う経路（`crate::ui::...`）は `ui/mod.rs` の `pub use` に集める。** `ui` の中だけで使う項目は再輸出せず、子モジュールの経路で参照する（`mod ui;` 自体が私有なので、誰も使わない再輸出は `unused_imports` の警告になる）。
 
 `src/audio/` の子モジュールで**状態を持つのは `capture.rs` の `AudioCapture`、`fake.rs` の `FakeAudioCapture` と、スレッドをまたいで共有する `AudioControls` / `ResampleTelemetry` だけ。** 残りは純粋関数か、cpal のストリームを組み立てて返すだけにする。**外から使う経路（`crate::audio::...`）は `audio/mod.rs` の `pub use` に集める**（`ui/mod.rs` と同じ理由で、誰も使わない再輸出は警告になる）。子モジュール同士で使うものには `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
+
+`src/recording/` の子モジュールで**状態を持つのは `recorder.rs` の `Recorder`（UI スレッドの窓口）と、録画スレッドの中だけにある 1 回の録画（`Session`）、`writer.rs` の `SinkWriter` だけ。** 変換・PTS・ファイル名・空き容量の判定は純粋関数にする。**録画スレッドから `error!` を出さず、失敗は `RecordingEvent` で UI スレッドへ返す**（`docs/design/threads.md`）。外から使う経路は `recording/mod.rs` の `pub use` に集める。
 
 ## 設計の理由はどこにあるか
 
@@ -144,7 +157,7 @@ cargo build --release
 | `docs/design/logging.md` | ログの出力先とレベル、`catch_unwind` が効かないこと |
 | `docs/design/assets.md` | アイコンと効果音の埋め込み、パスの解決 |
 | `docs/design/i18n.md` | 画面に出す文字列を `src/i18n/` に集める仕組み、入れるもの・入れないもの、文字列を足すときの手順 |
-| `docs/design/recording.md` | 録画（#120）とリプレイバッファ（#182）の設計。**未実装。** 録画スレッド、コールバックからロックなしで渡すリング、Media Foundation の Sink Writer、PTS とドリフト、失敗の扱い、`[recording]`、段階分け |
+| `docs/design/recording.md` | 録画（#120）とリプレイバッファ（#182）の設計。**第 1 段（映像のみ、#281）を実装済み。音声（②）とリプレイバッファ（③）は未実装。** 録画スレッド、コールバックからロックなしで渡すリング、Media Foundation の Sink Writer、PTS とドリフト、失敗の扱い、`[recording]`、段階分け |
 | `docs/design/update.md` | 更新の確認（GitHub の Release API、native-tls、確認のスレッド、`[update]`、通知ダイアログ）と適用（資産、書き込みの確認、SHA-256 の照合、`.old` / `.new` での差し替えと戻し方、再起動） |
 
 目指す構造と現状との差分は `docs/ARCHITECTURE.md`。**同じ話が両方にある場合は `docs/ARCHITECTURE.md` を正とする。** デバイス起因の不具合を調べるときは `.claude/skills/device-debug/SKILL.md` の手順（ログの読み方、正常時の所要時間の目安、症状ごとの確認順）に従う。

@@ -26,7 +26,7 @@
 - × は `egui::Window::open()` に渡したローカルの bool を false にするだけでボタンが押されないため、描画後の開閉状態から `ui::resolve_action` が拾ってキャンセルへ倒している
 - **「適用」と「OK」の違いは閉じるかどうかだけ。** 保存の有無で分けると「適用したのに再起動で戻る」という曖昧さが残るため、Windows のプロパティシートと同じ意味に揃えてある
 - **キャンセルは「適用」で反映済みの内容を戻さない。** 戻すには反映前の状態をもう 1 つ持つ必要があり、デバイスの開き直しも 2 度走る
-- 反映は `ui::commit_draft` が `video` / `audio` / `screenshot` / `hotkeys` / `presets` / `active_preset` と、ダイアログが編集する `ui` の 3 項目（`maintain_aspect_ratio` / `volume` / `language`）だけに限っている。`ui` を丸ごと入れると、ダイアログを開いている間に動かしたウィンドウの位置が巻き戻る。**ダイアログに `ui` の項目を足すときは `commit_draft` にも足すこと**
+- 反映は `ui::commit_draft` が `video` / `audio` / `screenshot` / `recording` / `hotkeys` / `presets` / `active_preset` と、ダイアログが編集する `ui` の 3 項目（`maintain_aspect_ratio` / `volume` / `language`）だけに限っている。`ui` を丸ごと入れると、ダイアログを開いている間に動かしたウィンドウの位置が巻き戻る。**ダイアログに `ui` の項目を足すときは `commit_draft` にも足すこと**
 - 逆に、**`video` / `audio` / `screenshot` にダイアログの外から変わる項目を足すときは、`commit_draft` で開いた時点の値と比べ、ドラフトで変わったときだけ反映すること。** `video.auto_reconnect`（右クリックメニューの「デバイスの自動再接続」）がその例。セクションを丸ごと入れるとダイアログを開いている間の切り替えが開いた時点のスナップショットで巻き戻り、逆に無条件で実行中の値を残すと設定の読み込みと初期化で反映されない項目になる
 - **`ui` にダイアログの外だけで変わる項目を足すときは、`commit_draft` に足さないこと。** `ui.muted`（ミュート）と `ui.borderless`（タイトルバーを隠す）がその例で、どちらも右クリックメニューからしか変わらない。`commit_draft` が触ると、ダイアログを開いている間の切り替えが「適用」で巻き戻る。**`ui.enable_drag_move` も同じ。** これは `ui.borderless` を有効にしたときのガードが書き換えるため、`commit_draft` で拾うと「タイトルバーも無く動かせないウィンドウ」が作れてしまう
 - `update` の 2 つのチェック（`check_on_startup` / `notify_on_startup`）は「その他」タブでしか変わらないので無条件に反映する。**`update.skipped_version` だけは起動時の通知ダイアログの「この版は通知しない」でも変わる**ので、`video.auto_reconnect` と同じくドラフトで変わったときだけ反映する（`docs/design/update.md`）
@@ -43,7 +43,7 @@
 
 **能力キャッシュのキー。** 映像は「デバイス名 + 映像の開き方（`video.backend`）」の組（`ui::VideoCapabilityKey`）、音声は `audio::cache_key` の文字列。映像に開き方を含めるのは、両方に出るデバイスを DirectShow で開くときに、選択肢を DirectShow 側の対応形式にするため（#249。経路の決め方は `docs/design/device-worker.md` の「映像の開き方」）。自動と Media Foundation が同じ経路になるデバイスでも別々に取るが、切り替えたときに 1 回取り直すだけで済むので、UI 側で経路を推し量ることはしない（経路の規則はワーカー側の `route_for` 1 か所に置く）。**ドラフトの開き方を切り替えたら、デバイスを切り替えたときと同じく目印を立てて既定値を選び直す**（`should_reselect_video_defaults`）。取り直した一覧は前の経路と形式が違うことがあり、選び直さないと開けない形式を選んだままになる。
 
-`rfd` のファイルダイアログも描画の中からは開かない。`PickScreenshotFolder` / `PickSoundFile` を返し、フレームを描き終えた `app` が開く。UI スレッドを止めるモーダルなので、描画の途中で開くと止まった位置のフレームが画面に残る。
+`rfd` のファイルダイアログも描画の中からは開かない。`PickScreenshotFolder` / `PickRecordingFolder` / `PickSoundFile` を返し、フレームを描き終えた `app` が開く。UI スレッドを止めるモーダルなので、描画の途中で開くと止まった位置のフレームが画面に残る。
 
 **警告や状態の表示は `ui/mod.rs` のヘルパー（`warning_label` / `notice_label` / `status_badge`）を使い、`Color32::YELLOW` のような固定色を直接書かないこと。** 彩度の高い色を文字に使うとテーマの背景と合わずに読めなくなる。ヘルパーはテーマ由来の色を薄く敷いた背景と記号（`⚠` / `×` / `●`）で種別を示す。
 
@@ -63,6 +63,6 @@
 - **読み込みと初期化はドラフトを差し替えるだけ。** その場で反映すると「キャンセル」で取り消せない
 - `rfd` のファイルダイアログは UI スレッドを止めるモーダル。出している間は映像の更新も止まる（効果音ファイル選択と同じ割り切り）。**`settings` のロックを握ったまま出さないこと**
 - 読み書きは `settings::export_to` / `settings::import_from`。中身は confy の `store_path` / `load_path` で、`%AppData%` の設定ファイルと書式を揃えている。**`load_path` はファイルが無いと既定値で新しく作る**ため、`import_from` が先に存在を確かめている
-- 読み込んだ内容からドラフトを作るのは `ui::draft_from_imported`、初期化は `ui::draft_from_defaults`（既定値を読み込んだのと同じ扱い）。**`commit_draft` が反映する項目だけを読み込んだ側から採り、残りは現在の値を保つ。** 採るのは `video` / `audio` / `screenshot` / `hotkeys` / `presets` / `active_preset` と、`ui` の 3 項目（`volume` / `maintain_aspect_ratio` / `language`）。ウィンドウの位置とサイズを持ち込むと別の画面構成で画面外に飛ぶこと、`ui` の他の項目（`always_on_top` など）は `commit_draft` が実行中の値を残すので入れても「適用」で消えるだけ、という 2 つの理由。`video.auto_reconnect` は `commit_draft` を「ドラフトで変わったときだけ反映する」形に変えたので読み込める。**`commit_draft` が反映する項目を増減させたときは `draft_from_imported` も合わせること。** 食い違うと「読み込んだのに反映されない項目」が生まれる
+- 読み込んだ内容からドラフトを作るのは `ui::draft_from_imported`、初期化は `ui::draft_from_defaults`（既定値を読み込んだのと同じ扱い）。**`commit_draft` が反映する項目だけを読み込んだ側から採り、残りは現在の値を保つ。** 採るのは `video` / `audio` / `screenshot` / `recording` / `hotkeys` / `presets` / `active_preset` と、`ui` の 3 項目（`volume` / `maintain_aspect_ratio` / `language`）。ウィンドウの位置とサイズを持ち込むと別の画面構成で画面外に飛ぶこと、`ui` の他の項目（`always_on_top` など）は `commit_draft` が実行中の値を残すので入れても「適用」で消えるだけ、という 2 つの理由。`video.auto_reconnect` は `commit_draft` を「ドラフトで変わったときだけ反映する」形に変えたので読み込める。**`commit_draft` が反映する項目を増減させたときは `draft_from_imported` も合わせること。** 食い違うと「読み込んだのに反映されない項目」が生まれる
 - 結果は `SettingsDialogState::management_message` に入れてタブ内に 1 行で出す。失敗は `ErrorSource::Settings` としてトーストにも出す（トーストは画面下部に出るためダイアログに隠れることがある）。メッセージはドラフトについての説明なので、`begin_edit` / `end_edit` と「適用」で捨てる
 - 「初期化」は 1 段目のボタンで `reset_confirm` を立て、2 段目の「初期化する」で確定する 2 段階。押し間違いで設定が消えないようにするため

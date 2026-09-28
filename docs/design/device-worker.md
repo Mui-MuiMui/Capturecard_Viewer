@@ -21,11 +21,12 @@ flowchart LR
     dev -.->|VideoFrames / Atomic| ui
 ```
 
-**チャネルを通さない共有が 4 つある。** どれもデバイスを開く処理を挟まないので、コマンドの列に並べる理由がない。
+**チャネルを通さない共有が 5 つある。** どれもデバイスを開く処理を挟まないので、コマンドの列に並べる理由がない。
 
 | 共有するもの | 型 | 触る側 |
 |---|---|---|
 | 映像フレーム | `video::VideoFrames`（`Arc<Mutex<FrameBuffer>>`） | フレームコールバックが書き、UI スレッドが読む |
+| 録画へ回す映像フレーム | `video::VideoTap`（`VideoFrames` の隣。`Arc<VideoFrame>` の SPSC リング） | 録画スレッドが録画中だけリングを差し込み、フレームコールバックが画面へ置いたのと同じ `Arc` を積む（待たない `try_lock`、満杯なら捨てて数える）。ワーカーは触らない（`docs/design/recording.md`）。音声の `AudioTap` は第 2 段で足す |
 | 色空間・レンジ・明るさ・コントラスト・彩度 | `Arc<video::SharedColorConversion>`（Atomic） | UI スレッドが書き、フレームコールバックが読む |
 | 音量・ミュート・パススルー | `Arc<audio::AudioControls>`（Atomic） | UI スレッドが書き、出力コールバックが読む |
 | 音声のリサンプル補正の水位・補正係数 | `Arc<audio::ResampleTelemetry>`（Atomic） | 出力コールバックが水位を書き、デバイスワーカーが `tick` の中で補正係数を書く。**入出力の形が揃っている（identity）ストリームでは作らない**（`AudioCapture::resample_telemetry()` が `None` を返す） |
