@@ -29,6 +29,8 @@ mod encoder;
 mod file_name;
 mod pts;
 mod recorder;
+#[allow(dead_code)]
+mod replay_ring;
 mod storage;
 mod writer;
 
