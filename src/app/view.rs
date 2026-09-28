@@ -373,12 +373,15 @@ impl CaptureCardViewer {
     ///
     /// 統計の取り出しは 1 フレームにつきこの 1 回だけ。ロックの中では
     /// 値のコピーと最大 120 要素の集計しか起きないため、毎フレーム呼んでよい。
-    pub(super) fn show_stats_overlay(&self, ctx: &egui::Context) {
+    ///
+    /// 描いた枠の下端の y 座標を返す。フェイクデバイスの帯をその下へずらすため
+    /// （`fake_devices_banner_top`）。
+    pub(super) fn show_stats_overlay(&self, ctx: &egui::Context) -> f32 {
         let stats = self.frames.stats();
         // ワーカーが書き出した観測値の複製。ここでデバイスへは問い合わせない
         let audio_underruns = self.device_snapshot.audio_underruns;
 
-        egui::Area::new("stats_overlay")
+        let shown = egui::Area::new("stats_overlay")
             .order(egui::Order::Foreground)
             .fixed_pos(egui::pos2(8.0, 8.0))
             // 映像のドラッグや右クリックを吸わないようにする
@@ -398,6 +401,51 @@ impl CaptureCardViewer {
                         }
                     });
             });
+        shown.response.rect.bottom()
+    }
+
+    /// フェイクデバイスで動いている間、映像の上端に常設の帯を描く（#252）。
+    ///
+    /// **トースト（`transient_overlay`）には入れない。** あちらは 1 件しか持たず、
+    /// 起動直後に保存済みの実機名で接続に失敗すると、その `report_error` に
+    /// 上書きされて見えなくなる。帯はフェイクで動いている間ずっと出す。
+    /// 文言は「接続状態」タブの注意書きと同じもの。
+    pub(super) fn draw_fake_devices_banner(&self, ctx: &egui::Context, stats_bottom: Option<f32>) {
+        let Some(text) = status::fake_devices_notice(self.device.fake_devices()) else {
+            return;
+        };
+        egui::Area::new(egui::Id::new("fake_devices_banner"))
+            .order(egui::Order::Foreground)
+            .anchor(
+                egui::Align2::CENTER_TOP,
+                egui::vec2(0.0, fake_devices_banner_top(stats_bottom)),
+            )
+            // 映像のドラッグや右クリックを吸わないようにする
+            .interactable(false)
+            .show(ctx, |ui| {
+                // 映像の上でも読めるよう、テーマの不透明な地（popup と同じ）に
+                // 設定ダイアログと同じ注意書きを載せる
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::same(2.0))
+                    .show(ui, |ui| {
+                        crate::ui::warning_label(ui, text);
+                    });
+            });
+    }
+}
+
+/// フェイクデバイスの帯と、画面の上端や統計オーバーレイとの間隔。
+const FAKE_DEVICES_BANNER_MARGIN: f32 = 8.0;
+
+/// フェイクデバイスの帯を画面の上端から何 px 下げて描くか。
+///
+/// 統計オーバーレイ（左上）を出しているときはその下へずらす。狭いウィンドウでは
+/// 上端中央の帯と左上の統計が横に重なるため。`stats_bottom` は統計の枠の下端で、
+/// 出していなければ `None`。
+fn fake_devices_banner_top(stats_bottom: Option<f32>) -> f32 {
+    match stats_bottom {
+        Some(bottom) => bottom + FAKE_DEVICES_BANNER_MARGIN,
+        None => FAKE_DEVICES_BANNER_MARGIN,
     }
 }
 
@@ -656,5 +704,31 @@ mod tests {
                 size
             );
         }
+    }
+
+    #[test]
+    fn fake_devices_banner_sits_at_top_without_stats() {
+        assert_eq!(fake_devices_banner_top(None), FAKE_DEVICES_BANNER_MARGIN);
+    }
+
+    #[test]
+    fn fake_devices_banner_goes_below_stats_overlay() {
+        // 統計の枠の下端より下に来れば、横幅が狭くても重ならない
+        let stats_bottom = 120.0;
+        let top = fake_devices_banner_top(Some(stats_bottom));
+        assert!(
+            top > stats_bottom,
+            "統計の下端 {} に対して {}",
+            stats_bottom,
+            top
+        );
+        assert_eq!(top, stats_bottom + FAKE_DEVICES_BANNER_MARGIN);
+    }
+
+    #[test]
+    fn fake_devices_banner_shown_only_with_fake_devices() {
+        // 帯を出すかどうかは「接続状態」タブの注意書きと同じ判定を使う
+        assert!(status::fake_devices_notice(false).is_none());
+        assert!(status::fake_devices_notice(true).is_some());
     }
 }
