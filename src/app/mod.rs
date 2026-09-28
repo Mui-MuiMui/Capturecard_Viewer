@@ -19,6 +19,7 @@ mod screenshot_sound;
 mod settings_dialog;
 mod settings_store;
 mod update;
+mod video_overlay;
 mod view;
 mod window;
 mod worker;

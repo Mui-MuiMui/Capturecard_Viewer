@@ -91,6 +91,9 @@ impl TransientOverlay {
         ctx.request_repaint_after(left);
 
         egui::Area::new("transient_overlay")
+            // 常設の表示（統計・帯・録画中の印）と違い、設定ダイアログより上に出す（#284）。
+            // ダイアログの中の操作（プリセットの切り替えなど）の結果も知らせるため、
+            // 隠れると役に立たない。出るのも数秒だけ（`app/video_overlay.rs`）
             .order(egui::Order::Foreground)
             // 映像のドラッグや右クリックを吸わないようにする
             .interactable(false)
