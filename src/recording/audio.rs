@@ -203,7 +203,14 @@ impl AudioTrack {
     pub(super) fn finish(&mut self, video_end: i64) {
         let expected = audio_units(self.produced_frames);
         if video_end > expected {
-            self.insert_silence(frames_in(video_end - expected, AUDIO_SAMPLE_RATE));
+            // 1 回に足す無音には上限があるので、足りなくなるまで繰り返す。
+            // 録画スレッドが長く止まったあとで止めると、上限を超える差が残りうる
+            let mut remaining = frames_in(video_end - expected, AUDIO_SAMPLE_RATE);
+            while remaining > 0 {
+                let frames = remaining.min(MAX_SILENCE_FRAMES);
+                self.insert_silence(frames);
+                remaining -= frames;
+            }
         }
     }
 
@@ -379,6 +386,22 @@ mod tests {
 
         // 音声が 1 度も来なくても、映像の長さ（2 秒）まで無音で揃える
         assert_eq!(track.stats().frames, 96_000);
+    }
+
+    #[test]
+    fn audio_track_finish_pads_beyond_the_per_insert_limit() {
+        let tap = AudioTap::new();
+        let t0 = Instant::now();
+        let mut track = AudioTrack::attach(tap, t0);
+
+        // 1 回に足せる無音（10 秒）を超える差（25 秒）でも、映像の終わりまで揃える
+        track.finish(250_000_000);
+
+        assert_eq!(track.stats().frames, 1_200_000);
+        assert_eq!(
+            track.take_chunk(0).map(|chunk| chunk.frames()),
+            Some(1_200_000)
+        );
     }
 
     #[test]
