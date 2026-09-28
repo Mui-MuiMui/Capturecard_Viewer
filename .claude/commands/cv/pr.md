@@ -83,7 +83,7 @@ CodeRabbit の指摘も鵜呑みにせず妥当性を判断する。このリポ
 未解決のスレッドの一覧と Resolve は GraphQL で行う。
 
 ```bash
-gh api graphql -f query='{repository(owner:"Mui-MuiMui",name:"Capturecard_Viewer"){pullRequest(number:<番号>){reviewThreads(first:50){nodes{id isResolved path}}}}}' --jq '.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)|"(.id) (.path)"'
+gh api graphql -f query='{repository(owner:"Mui-MuiMui",name:"Capturecard_Viewer"){pullRequest(number:<番号>){reviewThreads(first:50){nodes{id isResolved path}}}}}' --jq '.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)|"\(.id) \(.path)"'
 ```
 
 ```bash
