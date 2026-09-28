@@ -4,6 +4,7 @@
 //! ここに並べてある。ウィンドウそのものの操作（装飾・リサイズ・
 //! フルスクリーン切替）は `super::window`、右クリックメニューは `super::menu`。
 
+use super::video_overlay::show_video_overlay;
 use super::CaptureCardViewer;
 use crate::i18n::{self, Text};
 use crate::status::{self, ErrorSource};
@@ -401,18 +402,24 @@ impl CaptureCardViewer {
         // 録画中は録画の行を足す（経過時間、書いた枚数・捨てた枚数、エンコーダ）
         lines.extend(self.recording_stats_lines());
 
-        let shown = egui::Area::new("stats_overlay")
-            .order(egui::Order::Foreground)
-            .fixed_pos(egui::pos2(8.0, 8.0))
-            // 映像のドラッグや右クリックを吸わないようにする
-            .interactable(false)
-            .show(ctx, |ui| {
+        // 設定ダイアログより下に描く（#284）。理由は `show_video_overlay` にある
+        let screen = ctx.screen_rect();
+        let area = egui::Rect::from_min_max(
+            screen.min + egui::Vec2::splat(STATS_OVERLAY_MARGIN),
+            screen.max,
+        );
+        let shown = show_video_overlay(
+            ctx,
+            egui::Id::new("stats_overlay"),
+            area,
+            egui::Align2::LEFT_TOP,
+            |ui| {
                 egui::Frame::none()
                     .fill(egui::Color32::from_black_alpha(160))
                     .rounding(4.0)
                     .inner_margin(egui::Margin::same(6.0))
                     .show(ui, |ui| {
-                        for line in lines {
+                        for line in &lines {
                             ui.label(
                                 egui::RichText::new(line)
                                     .monospace()
@@ -420,8 +427,9 @@ impl CaptureCardViewer {
                             );
                         }
                     });
-            });
-        shown.response.rect.bottom()
+            },
+        );
+        shown.bottom()
     }
 
     /// フェイクデバイスで動いている間、映像の上端に常設の帯を描く（#252）。
@@ -434,15 +442,21 @@ impl CaptureCardViewer {
         let Some(text) = status::fake_devices_notice(self.device.fake_devices()) else {
             return;
         };
-        egui::Area::new(egui::Id::new("fake_devices_banner"))
-            .order(egui::Order::Foreground)
-            .anchor(
-                egui::Align2::CENTER_TOP,
-                egui::vec2(0.0, fake_devices_banner_top(stats_bottom)),
-            )
-            // 映像のドラッグや右クリックを吸わないようにする
-            .interactable(false)
-            .show(ctx, |ui| {
+        // 設定ダイアログより下に描く（#284）。理由は `show_video_overlay` にある
+        let screen = ctx.screen_rect();
+        let area = egui::Rect::from_min_max(
+            egui::pos2(
+                screen.left(),
+                screen.top() + fake_devices_banner_top(stats_bottom),
+            ),
+            screen.max,
+        );
+        show_video_overlay(
+            ctx,
+            egui::Id::new("fake_devices_banner"),
+            area,
+            egui::Align2::CENTER_TOP,
+            |ui| {
                 // 映像の上でも読めるよう、テーマの不透明な地（popup と同じ）に
                 // 設定ダイアログと同じ注意書きを載せる
                 egui::Frame::popup(ui.style())
@@ -450,9 +464,13 @@ impl CaptureCardViewer {
                     .show(ui, |ui| {
                         crate::ui::warning_label(ui, text);
                     });
-            });
+            },
+        );
     }
 }
+
+/// 統計オーバーレイを画面の左上からどれだけ離して置くか。
+const STATS_OVERLAY_MARGIN: f32 = 8.0;
 
 /// フェイクデバイスの帯と、画面の上端や統計オーバーレイとの間隔。
 const FAKE_DEVICES_BANNER_MARGIN: f32 = 8.0;
