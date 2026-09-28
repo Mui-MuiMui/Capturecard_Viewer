@@ -352,11 +352,11 @@ texts! {
     RecordingVideoHint { ja: "H.264 の MP4 で保存します。ハードウェアエンコーダ（GPU）が使えなければ、ソフトウェアのエンコーダで保存します。\n使ったエンコーダの名前は、録画中の情報表示に出ます。", en: "Recordings are saved as H.264 MP4. If no hardware (GPU) encoder is available, the software encoder is used.\nThe encoder in use is shown in the stats overlay while recording." },
     RecordingAudioEnabled { ja: "音声も録画する", en: "Record audio" },
     RecordingAudioHint { ja: "音声入力の音を AAC（48kHz 2ch）で保存します。音量・ミュート・パススルーの設定は録画に効きません（入力の音をそのまま録ります）。\n音声デバイスが無い・開けない間は無音が入ります。", en: "Audio from the audio input is saved as AAC (48 kHz, stereo). Volume, mute, and passthrough do not affect the recording (the input is recorded as is).\nWhile no audio device is available, silence is recorded." },
-    RecordingTabHint { ja: "録画の開始と停止は、右クリックメニューかホットキー（「録画の開始・停止」）で行います。\n変更は次の録画から効きます（リプレイバッファの ON / OFF と長さはすぐ効きます）。", en: "Start and stop recording from the right-click menu or with the Start / stop recording hotkey.\nChanges take effect from the next recording (the replay buffer switch and length take effect immediately)." },
+    RecordingTabHint { ja: "録画の開始と停止は、右クリックメニューかホットキー（「録画の開始・停止」）で行います。\n変更は次の録画から効きます（リプレイバッファの ON / OFF と長さはすぐ効きます。ただし録画中に ON にしたときは、その録画が終わってから溜め始めます）。", en: "Start and stop recording from the right-click menu or with the Start / stop recording hotkey.\nChanges take effect from the next recording (the replay buffer switch and length take effect immediately, except that turning it on during a recording starts buffering after that recording ends)." },
     RecordingReplayGroup { ja: "リプレイバッファ（さかのぼり録画）", en: "Replay buffer" },
     RecordingReplayEnabled { ja: "録画の開始時に、直前の映像と音声を含める", en: "Include the footage just before the recording starts" },
     RecordingReplaySecondsLabel { ja: "さかのぼる長さ:", en: "Length:" },
-    RecordingReplayMemoryNotice { ja: "長くするほどメモリを使います（5 分で約 300MB）。", en: "Longer lengths use more memory (about 300 MB for 5 minutes)." },
+    RecordingReplayMemoryNotice { ja: "長くするほどメモリを使います（映像 8000kbps で 5 分なら約 300MB。ビットレートに比例して増えます）。", en: "Longer lengths use more memory (about 300 MB for 5 minutes at 8000 kbps video; it grows with the bitrate)." },
     RecordingReplayHint { ja: "ON のあいだは録画していなくてもエンコーダが動き、直近の映像と音声をメモリに持ちます。録画を始めると、その分をファイルの先頭に入れます（2 秒ごとのキーフレームの位置から）。\nON にしたときから溜め始めます。映像のビットレートやエンコーダ、音声の設定を変えると、溜めた分は捨てて溜め直します。", en: "While on, the encoder runs even when not recording and keeps the latest video and audio in memory. When you start recording, that footage is placed at the beginning of the file (from a keyframe, every 2 seconds).\nBuffering starts when you turn it on. Changing the video bitrate, encoder, or audio settings discards the buffered footage and starts over." },
 }
 

@@ -826,7 +826,8 @@ pub enum ScreenshotEncoding {
 // **項目は、その項目が効く段で足す。** 効かない項目を先に出さない
 // （`docs/ARCHITECTURE.md` の「設定は実際に効かせる」）。
 // 録画中に変えた設定は次の録画から効く。リプレイバッファの ON / OFF とさかのぼる長さは
-// すぐ効く（ON にしたらその時点から溜め始める）。
+// すぐ効く（ON にしたらその時点から溜め始める）。ただし、リプレイバッファを通さない録画の
+// 最中に ON にしたときは、差し込み口が空くその録画の終わりから溜め始める。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RecordingSettings {
