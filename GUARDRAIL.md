@@ -22,6 +22,7 @@
 - 録画スレッドから直接 `error!` を出さない。失敗は `RecordingEvent` で UI スレッドへ返す（理由: `docs/design/threads.md`、`docs/design/recording.md`）
 - 録画スレッドはリング（`VideoTap`）の `Arc<VideoFrame>` を持ったまま `WriteSample` しない。NV12 へ直したらすぐ手放す（理由: `docs/design/recording.md`）
 - `on_exit` では録画をデバイスワーカーより先に止め、`Finalize` を待つ（理由: `docs/design/recording.md`）
+- 録画スレッドを自分から抜けさせない。止めると決めるのは窓口（`Recorder`）だけ（理由: `docs/design/recording.md` の「持ち主と寿命」）
 - UI スレッドから `supported_input_configs()` / `supported_output_configs()` を呼ばない（理由: `docs/design/audio.md`）
 - フレームコールバックと cpal のコールバックでロックもアロケーションもしない。`SharedColorConversion` に項目を足すときも `Mutex` にしない（理由: `docs/design/video-pipeline.md`、`docs/design/audio.md`）
 - 接続を待つために `thread::sleep` を使わない（理由: `docs/design/reconnect.md`）
