@@ -102,7 +102,7 @@ pub(super) const VK_F1: u32 = 0x70;
 ///
 /// 受け付けるキー名は F1〜F12、A〜Z、0〜9、Space、Enter、Escape、Tab、
 /// Backspace、Insert、Delete、Home、End、PageUp、PageDown、Up / Down / Left /
-/// Right（#266）。入力ダイアログの対応表（`ui::hotkey_capture` の
+/// Right（#266）。入力ダイアログの対応表（`ui::hotkey_keys` の
 /// `hotkey_key_name`）と同じ範囲にしておくこと。フックは修飾キー以外の押下を
 /// すべてリスナーへ渡すので、ここで受け付ければそのまま照合される。
 ///
@@ -230,7 +230,7 @@ pub(super) fn remove_hotkey_key_events(
 /// それぞれ Ctrl+C / Ctrl+X / Ctrl+V として読む。egui-winit は Ctrl+Insert /
 /// Shift+Delete / Shift+Insert も同じイベントにするので区別できない。
 /// Insert と Delete は単独なら割り当てられるが（#266）、この組み合わせは
-/// 入力ダイアログで割り当てられないようにしてある（`ui::hotkey_capture` の
+/// 入力ダイアログで割り当てられないようにしてある（`ui::hotkey_keys` の
 /// `is_clipboard_command_chord`）。読み違えて困るのは「Ctrl+C を割り当てている
 /// ときに Ctrl+Insert でのコピーも効かなくなる」と、設定ファイルへ直接
 /// `Ctrl+Insert` などを書いたときに前面で egui のコピーが取り除かれないことだけ。

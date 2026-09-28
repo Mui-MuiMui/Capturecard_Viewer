@@ -27,6 +27,7 @@ mod capability;
 mod device_tab;
 mod draft;
 mod hotkey_capture;
+mod hotkey_keys;
 mod hotkeys_tab;
 mod other_tab;
 mod preset;
