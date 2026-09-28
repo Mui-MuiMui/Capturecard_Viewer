@@ -53,7 +53,8 @@ pub(super) fn background_hotkey_runner(commands: Sender<DeviceCommand>) -> Backg
             HotkeyAction::ToggleMute => DeviceCommand::ToggleMute,
             HotkeyAction::Screenshot
             | HotkeyAction::ToggleFullscreen
-            | HotkeyAction::ToggleAlwaysOnTop => return,
+            | HotkeyAction::ToggleAlwaysOnTop
+            | HotkeyAction::ToggleRecording => return,
         };
         if let Err(e) = commands.send(command) {
             // ワーカーが終わっているときだけ。復帰後に UI 側で実行される
@@ -140,6 +141,7 @@ impl CaptureCardViewer {
             HotkeyAction::VolumeUp => self.adjust_volume(VOLUME_SCROLL_STEP),
             HotkeyAction::VolumeDown => self.adjust_volume(-VOLUME_SCROLL_STEP),
             HotkeyAction::ToggleMute => self.toggle_mute(),
+            HotkeyAction::ToggleRecording => self.toggle_recording(),
         }
     }
 

@@ -99,6 +99,7 @@ texts! {
     ActionVolumeUp { ja: "音量を上げる", en: "Volume up" },
     ActionVolumeDown { ja: "音量を下げる", en: "Volume down" },
     ActionToggleMute { ja: "ミュート切替", en: "Toggle mute" },
+    ActionToggleRecording { ja: "録画の開始・停止", en: "Start / stop recording" },
 
     // ---- 色空間・色レンジ（settings::ColorSpace / ColorRange の label） ----
     ColorSpaceAuto { ja: "自動（解像度から判断）", en: "Auto (based on resolution)" },

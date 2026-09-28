@@ -33,6 +33,8 @@ enum PressRouting {
     Unfocused,
     /// このアプリのテキスト欄に入力中なので捨てる（#206）
     Typing,
+    /// 最小化中に押された、復帰しても実行しないアクション（録画の開始・停止）なので捨てる
+    DiscardedWhileMinimized,
 }
 
 /// リスナースレッドと共有する状態。
@@ -146,6 +148,9 @@ impl ListenerState {
         if self.minimized && action.runs_while_minimized() {
             return PressRouting::Background;
         }
+        if self.minimized && action.discarded_while_minimized() {
+            return PressRouting::DiscardedWhileMinimized;
+        }
         *self.pressed.entry(action).or_insert(0) += 1;
         PressRouting::Deferred
     }
@@ -242,7 +247,10 @@ fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord) {
             match routing {
                 PressRouting::Deferred => wake = Some(state.waker.clone()),
                 PressRouting::Background => background = Some((state.background.clone(), action)),
-                PressRouting::Debounced | PressRouting::Unfocused | PressRouting::Typing => {}
+                PressRouting::Debounced
+                | PressRouting::Unfocused
+                | PressRouting::Typing
+                | PressRouting::DiscardedWhileMinimized => {}
             }
             (action, routing)
         }),
@@ -282,6 +290,12 @@ fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord) {
         }
         Some((action, PressRouting::Typing)) => {
             trace!("テキスト入力中なので {} の押下を捨てた", action.label())
+        }
+        Some((action, PressRouting::DiscardedWhileMinimized)) => {
+            debug!(
+                "最小化中なので {} の押下を捨てた（復帰しても実行しない）",
+                action.label()
+            )
         }
         None => {}
     }
@@ -571,6 +585,32 @@ mod tests {
             PressRouting::Deferred
         );
         assert_eq!(state.pressed.get(&HotkeyAction::ToggleFullscreen), Some(&1));
+    }
+
+    #[test]
+    fn record_press_while_minimized_discards_toggle_recording() {
+        // 録画の開始・停止は最小化中の押下を溜めない。溜めると復帰した瞬間に録画が始まる
+        let mut state = ListenerState {
+            minimized: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            state.record_press(HotkeyAction::ToggleRecording, Instant::now()),
+            PressRouting::DiscardedWhileMinimized
+        );
+        assert!(state.pressed.is_empty());
+    }
+
+    #[test]
+    fn record_press_when_not_minimized_defers_toggle_recording() {
+        let mut state = ListenerState::default();
+
+        assert_eq!(
+            state.record_press(HotkeyAction::ToggleRecording, Instant::now()),
+            PressRouting::Deferred
+        );
+        assert_eq!(state.pressed.get(&HotkeyAction::ToggleRecording), Some(&1));
     }
 
     #[test]

@@ -25,11 +25,13 @@ pub enum HotkeyAction {
     VolumeDown,
     /// ミュートを切り替える
     ToggleMute,
+    /// 録画を始める・止める
+    ToggleRecording,
 }
 
 impl HotkeyAction {
     /// 設定画面と一覧の表示順。宣言順（`Ord`）と同じにしておく。
-    pub const ALL: [HotkeyAction; 7] = [
+    pub const ALL: [HotkeyAction; 8] = [
         HotkeyAction::Screenshot,
         HotkeyAction::ToggleFullscreen,
         HotkeyAction::ToggleAlwaysOnTop,
@@ -37,6 +39,7 @@ impl HotkeyAction {
         HotkeyAction::VolumeUp,
         HotkeyAction::VolumeDown,
         HotkeyAction::ToggleMute,
+        HotkeyAction::ToggleRecording,
     ];
 
     /// 設定ファイルに書かれるキー名。**変えると既存の設定を見失う。**
@@ -49,6 +52,7 @@ impl HotkeyAction {
             HotkeyAction::VolumeUp => "volume_up",
             HotkeyAction::VolumeDown => "volume_down",
             HotkeyAction::ToggleMute => "toggle_mute",
+            HotkeyAction::ToggleRecording => "toggle_recording",
         }
     }
 
@@ -67,6 +71,7 @@ impl HotkeyAction {
             HotkeyAction::VolumeUp => Text::ActionVolumeUp,
             HotkeyAction::VolumeDown => Text::ActionVolumeDown,
             HotkeyAction::ToggleMute => Text::ActionToggleMute,
+            HotkeyAction::ToggleRecording => Text::ActionToggleRecording,
         };
         text.get()
     }
@@ -88,8 +93,20 @@ impl HotkeyAction {
             | HotkeyAction::ToggleMute => true,
             HotkeyAction::Screenshot
             | HotkeyAction::ToggleFullscreen
-            | HotkeyAction::ToggleAlwaysOnTop => false,
+            | HotkeyAction::ToggleAlwaysOnTop
+            | HotkeyAction::ToggleRecording => false,
         }
+    }
+
+    /// 最小化している間の押下を、復帰しても実行せずに捨てるか。
+    ///
+    /// **録画の開始・停止だけが真。** 最小化中は `update()` が呼ばれず録画の窓口
+    /// （UI スレッドが持つ）へ届かないので、その場では実行できない。フルスクリーンの
+    /// ように保留して畳むと、最小化中に 1 回押しただけで復帰した瞬間に録画が始まり、
+    /// 押した人の意図とずれる。溜めずに捨てることで、最小化中の押下は 0 回に畳まれる
+    /// （`docs/design/recording.md` の「操作」）。捨てるのはリスナー（`ListenerState::record_press`）。
+    pub fn discarded_while_minimized(self) -> bool {
+        matches!(self, HotkeyAction::ToggleRecording)
     }
 }
 
@@ -108,6 +125,10 @@ pub(super) fn folded_repeats(action: HotkeyAction, presses: u32) -> u32 {
         HotkeyAction::ToggleFullscreen
         | HotkeyAction::ToggleAlwaysOnTop
         | HotkeyAction::ToggleMute => presses % 2,
+        // 録画も切り替えなので同じ畳み方。最小化中の押下はリスナーが捨てていて
+        // ここへは来ない（`HotkeyAction::discarded_while_minimized`）ので、
+        // 復帰した瞬間に録画が始まることは無い
+        HotkeyAction::ToggleRecording => presses % 2,
         // 復帰してから撮るので、何回押されていても同じ 1 枚にしかならない
         HotkeyAction::Screenshot => presses.min(1),
         // 開き直しは何回要求しても結果が同じ
@@ -185,6 +206,35 @@ mod tests {
         // 復帰してから撮るので、何回押されていても同じ 1 枚にしかならない
         assert_eq!(folded_repeats(HotkeyAction::Screenshot, 5), 1);
         assert_eq!(folded_repeats(HotkeyAction::Screenshot, 0), 0);
+    }
+
+    #[test]
+    fn hotkey_action_toggle_recording_is_named_for_the_settings_file() {
+        // 設定ファイルに書かれる名前。一度出したら変えない
+        assert_eq!(HotkeyAction::ToggleRecording.as_str(), "toggle_recording");
+        assert_eq!(
+            HotkeyAction::from_key("toggle_recording"),
+            Some(HotkeyAction::ToggleRecording)
+        );
+    }
+
+    #[test]
+    fn hotkey_action_only_recording_is_discarded_while_minimized() {
+        for action in HotkeyAction::ALL {
+            assert_eq!(
+                action.discarded_while_minimized(),
+                action == HotkeyAction::ToggleRecording,
+                "{action:?}"
+            );
+            // 捨てるものをその場で実行してはいけない
+            assert!(!(action.discarded_while_minimized() && action.runs_while_minimized()));
+        }
+    }
+
+    #[test]
+    fn folded_repeats_toggle_recording_behaves_like_a_toggle() {
+        assert_eq!(folded_repeats(HotkeyAction::ToggleRecording, 1), 1);
+        assert_eq!(folded_repeats(HotkeyAction::ToggleRecording, 2), 0);
     }
 
     #[test]
