@@ -98,6 +98,7 @@ cargo build --release
 | `src/keyboard_hook.rs` | 低レベルキーボードフック（`WH_KEYBOARD_LL`）。キーを奪わずに押下を観測し、リスナースレッドのメッセージループへ渡す。前面でもフックが呼ばれるよう、winit が登録したキーボードの Raw Input を外す（`stop_raw_keyboard_input`） |
 | `src/screenshot.rs` | rodio による効果音の読み込みと再生 |
 | `src/settings.rs` | `AppSettings` とその serde 定義、confy による読み書き、保存パスの決定、旧形式からの移行 |
+| `src/config_path.rs` | 設定ファイルとログの置き場所（`ConfigLocation`）。既定は confy の置き場所で、環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で差し替える。解釈（`parse_config_dir` / `resolve`）は純粋関数 |
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |
 | `src/ui/mod.rs` | 設定ダイアログの入口 `show_settings_dialog` と、タブをまたいで使うイベント型・注意書きのヘルパー（`warning_label` / `notice_label` / `status_badge`）。外から使う経路（`crate::ui::...`）の `pub use` もここ |
 | `src/ui/state.rs` | `SettingsDialogState`。ドラフトの保持、操作の受け止め、`SettingsDialogView` の切り出し |

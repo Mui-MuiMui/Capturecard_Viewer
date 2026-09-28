@@ -1498,7 +1498,7 @@ impl AutoSavePolicy {
 
 // 退避の結果から読み込み結果を決める。
 //
-// load() 自体は confy が %AppData% を直接読み書きするためテストできない。
+// load() 自体は設定ファイルの置き場所（既定は %AppData%）を直接読み書きするためテストできない。
 // 判断の部分だけをこの関数に切り出して、退避が失敗した場合を含めて検証する。
 fn outcome_from_backup(backup: std::io::Result<Option<PathBuf>>) -> LoadOutcome {
     match backup {
@@ -1548,7 +1548,22 @@ impl AppSettings {
     // 判断できるようにするため。退避に失敗したまま書き戻すと、読めなかった
     // ファイルを既定値で上書きしてしまい、証跡ごと消える。
     pub fn load() -> (Self, LoadOutcome) {
-        match confy::load(APP_NAME, None) {
+        // 置き場所は環境変数 CAPTURECARD_VIEWER_CONFIG_DIR で差し替えられる
+        // （crate::config_path）。指定が無ければ confy の既定
+        let path = match crate::config_path::config_file_path() {
+            Ok(path) => path,
+            // 設定ファイルの置き場所が分からず、退避を試みることすらできない。
+            // 読めなかったファイルが残っている可能性があるため、
+            // 書き戻さない側に倒す。
+            Err(e) => {
+                error!(
+                    "設定ファイルの置き場所が分からないため既定値で起動する: {}",
+                    e
+                );
+                return (Self::default(), LoadOutcome::BrokenFileLeftBehind);
+            }
+        };
+        match confy::load_path(&path) {
             Ok(settings) => (settings, LoadOutcome::Loaded),
             Err(e) => {
                 error!("設定ファイルを読み込めないため既定値で起動する: {}", e);
@@ -1559,33 +1574,21 @@ impl AppSettings {
                 // 失敗したという事実は LoadOutcome として呼び出し側へ渡し、
                 // 理由はログに残す。ここは起動直後で UI がまだ無いため、
                 // ユーザーへ伝える手段がログしかない。
-                let outcome = match confy::get_configuration_file_path(APP_NAME, None) {
-                    Ok(path) => {
-                        let backup = backup_broken_config(&path);
-                        match &backup {
-                            Ok(Some(backup_path)) => warn!(
-                                "読み込めなかった設定ファイルを {} へ退避した",
-                                backup_path.display()
-                            ),
-                            // 元のファイルが無い。退避するものが無いだけなので何も言わない
-                            Ok(None) => {}
-                            Err(e) => error!(
-                                "読み込めなかった設定ファイル {} を退避できない: {}",
-                                path.display(),
-                                e
-                            ),
-                        }
-                        outcome_from_backup(backup)
-                    }
-                    // 設定ファイルの置き場所が分からず、退避を試みることすらできない。
-                    // 読めなかったファイルが残っている可能性があるため、
-                    // 書き戻さない側に倒す。
-                    Err(e) => {
-                        error!("設定ファイルの置き場所が分からず退避できない: {}", e);
-                        LoadOutcome::BrokenFileLeftBehind
-                    }
-                };
-                (Self::default(), outcome)
+                let backup = backup_broken_config(&path);
+                match &backup {
+                    Ok(Some(backup_path)) => warn!(
+                        "読み込めなかった設定ファイルを {} へ退避した",
+                        backup_path.display()
+                    ),
+                    // 元のファイルが無い。退避するものが無いだけなので何も言わない
+                    Ok(None) => {}
+                    Err(e) => error!(
+                        "読み込めなかった設定ファイル {} を退避できない: {}",
+                        path.display(),
+                        e
+                    ),
+                }
+                (Self::default(), outcome_from_backup(backup))
             }
         }
     }
@@ -1596,7 +1599,14 @@ impl AppSettings {
     // 再試行できるようにするため。失敗を握り潰すと、書けなかった変更が
     // 保存済みとして扱われて消える。
     pub fn save(&self) -> bool {
-        match confy::store(APP_NAME, None, self) {
+        let path = match crate::config_path::config_file_path() {
+            Ok(path) => path,
+            Err(e) => {
+                error!("設定の保存に失敗した: {}", e);
+                return false;
+            }
+        };
+        match confy::store_path(&path, self) {
             Ok(()) => true,
             Err(e) => {
                 error!("設定の保存に失敗した: {}", e);

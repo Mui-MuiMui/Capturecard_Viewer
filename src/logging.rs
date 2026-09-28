@@ -76,6 +76,7 @@ pub fn init() -> Result<PathBuf, String> {
         level,
         path.display()
     );
+    log_config_location();
     for name in undeleted {
         log::warn!("古いログファイル {} を削除できなかった", name);
     }
@@ -85,23 +86,32 @@ pub fn init() -> Result<PathBuf, String> {
 
 /// ログの出力先ディレクトリを決める。
 ///
-/// 設定ファイルと同じデータディレクトリの下に置く。場所を confy から引いて
-/// いるのは、設定の置き場所と食い違わせないため。ユーザーに「設定ファイルの
-/// 隣」と案内できる状態を保つ。
+/// 設定ファイルと同じデータディレクトリの下に置く。場所を `config_path` から
+/// 引いているのは、設定の置き場所と食い違わせないため。ユーザーに「設定ファイルの
+/// 隣」と案内できる状態を保つ。`CAPTURECARD_VIEWER_CONFIG_DIR` で差し替えた場合は
+/// そのフォルダの下の `logs` になる。
 fn log_dir() -> Result<PathBuf, String> {
-    let config_path = confy::get_configuration_file_path(crate::settings::APP_NAME, None)
-        .map_err(|e| format!("設定ファイルのパスを取得できない: {}", e))?;
+    Ok(crate::config_path::location()?.data_dir.join(LOG_DIR_NAME))
+}
 
-    // 設定ファイルは <データディレクトリ>\config\default-config.toml に置かれる。
-    // 2 つ上がデータディレクトリなので、その下に logs を作る
-    let data_dir = config_path.parent().and_then(Path::parent).ok_or_else(|| {
-        format!(
-            "設定ファイルのパス {} から親ディレクトリを取れない",
-            config_path.display()
-        )
-    })?;
-
-    Ok(data_dir.join(LOG_DIR_NAME))
+/// 使っている設定ファイルのパスをログの先頭に残す。環境変数で差し替えた場合と、
+/// 差し替えを使えなかった場合は、目立つよう WARN にする。
+fn log_config_location() {
+    let Ok(location) = crate::config_path::location() else {
+        return;
+    };
+    if let Some(notice) = &location.notice {
+        log::warn!("{}", notice);
+    }
+    if location.overridden {
+        log::warn!(
+            "{} が指定されているので、設定とログをそのフォルダに置く（設定ファイル: {}）",
+            crate::config_path::CONFIG_DIR_ENV,
+            location.config_file.display()
+        );
+    } else {
+        log::info!("設定ファイル: {}", location.config_file.display());
+    }
 }
 
 /// 環境変数の値をログレベルに変換する。
