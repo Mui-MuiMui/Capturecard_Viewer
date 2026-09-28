@@ -19,7 +19,13 @@
 //! スレッドを作らない」には当たらない。
 
 mod audio;
+// ③ リプレイバッファの部品。録画スレッドから使うのは経路を切り替える段から。
+// それまでは誰も呼ばないので、dead_code の警告を段の間だけ許す
+#[allow(dead_code)]
+mod bitstream;
 mod convert;
+#[allow(dead_code)]
+mod encoder;
 mod file_name;
 mod pts;
 mod recorder;
