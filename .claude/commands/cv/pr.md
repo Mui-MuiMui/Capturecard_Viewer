@@ -80,10 +80,10 @@ CodeRabbit の指摘も鵜呑みにせず妥当性を判断する。このリポ
 
 **返信したらそのスレッドを Resolve する。** 直したもの、直さない理由を書いたもの、別 Issue に回したもの（Issue 番号を書く）のいずれも、返信だけで放置しない。**例外は判断待ちのスレッド。** 「直すか直さないかを確認中」と返信したものは Resolve せず、判断が出てから結果を返信して Resolve する。判断待ちのまま Resolve すると、未決の指摘がマージ条件を素通りする。`main` と `dev` はルールセットで「レビュースレッドが全て解決されていること」をマージの条件にしているので、未解決のスレッドが 1 つでも残っていると `gh pr merge` も UI のマージも通らない。
 
-未解決のスレッドの一覧と Resolve は GraphQL で行う。
+未解決のスレッドの一覧と Resolve は GraphQL で行う。 1 回で取れるのは 100 件まで（GraphQL の上限）。この上限を超える PR はこのリポジトリでは出ないはずで、出たら `pageInfo{hasNextPage endCursor}` を足して `after:` で続きを取る。
 
 ```bash
-gh api graphql -f query='{repository(owner:"Mui-MuiMui",name:"Capturecard_Viewer"){pullRequest(number:<番号>){reviewThreads(first:50){nodes{id isResolved path}}}}}' --jq '.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)|"\(.id) \(.path)"'
+gh api graphql -f query='{repository(owner:"Mui-MuiMui",name:"Capturecard_Viewer"){pullRequest(number:<番号>){reviewThreads(first:100){nodes{id isResolved path}}}}}' --jq '.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)|"\(.id) \(.path)"'
 ```
 
 ```bash
