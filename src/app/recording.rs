@@ -9,6 +9,7 @@
 //! （`docs/design/recording.md` の「失敗の扱い」）。
 
 use super::menu::RecordingMenuState;
+use super::video_overlay::show_video_overlay;
 use super::CaptureCardViewer;
 use crate::i18n;
 use crate::overlay::OverlayContent;
@@ -195,15 +196,13 @@ impl CaptureCardViewer {
             return;
         };
         let elapsed = format_elapsed(recorder.elapsed());
-        egui::Area::new(egui::Id::new("recording_indicator"))
-            .order(egui::Order::Foreground)
-            .anchor(
-                egui::Align2::RIGHT_TOP,
-                egui::vec2(-INDICATOR_MARGIN, INDICATOR_MARGIN),
-            )
-            // 映像のドラッグや右クリックを吸わないようにする
-            .interactable(false)
-            .show(ctx, |ui| {
+        // 設定ダイアログより下に描く（#284）。理由は `show_video_overlay` にある
+        show_video_overlay(
+            ctx,
+            egui::Id::new("recording_indicator"),
+            ctx.screen_rect().shrink(INDICATOR_MARGIN),
+            egui::Align2::RIGHT_TOP,
+            |ui| {
                 // 統計 OSD と同じ半透明の黒地に白の文字（映像の上で読めるように）
                 egui::Frame::none()
                     .fill(egui::Color32::from_black_alpha(160))
@@ -222,13 +221,14 @@ impl CaptureCardViewer {
                                 egui::Color32::from_rgb(0xe5, 0x39, 0x35),
                             );
                             ui.label(
-                                egui::RichText::new(elapsed)
+                                egui::RichText::new(&elapsed)
                                     .monospace()
                                     .color(egui::Color32::WHITE),
                             );
                         });
                     });
-            });
+            },
+        );
     }
 }
 
