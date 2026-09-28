@@ -132,15 +132,19 @@ impl FrameBuffer {
     ///
     /// 返した `Arc` の参照が呼び出し側だけになっていれば、中の `Vec` を
     /// 次の変換先として回収できる。回収しない場合はそのまま捨ててよい。
+    ///
+    /// **受け取るのは `Arc` に包んだフレーム。** 包むのは呼び出し側で、ロックの
+    /// 外で済ませる。呼び出し側は同じ `Arc` の複製を録画のリング（`VideoTap`）へ
+    /// 積むので、ここで包むと複製を渡せない（`docs/design/recording.md`）。
     pub(super) fn push_back(
         &mut self,
-        frame: VideoFrame,
+        frame: Arc<VideoFrame>,
         received_at: Instant,
         decode_ms: f32,
         fast: bool,
         source_format: &'static str,
     ) -> Option<Arc<VideoFrame>> {
-        let replaced = self.latest.replace(Arc::new(frame));
+        let replaced = self.latest.replace(frame);
         self.generation += 1;
         self.last_decode_ms = decode_ms;
         self.source_format = Some(source_format);
@@ -307,12 +311,12 @@ mod tests {
     const TEST_FRAME_LEN: usize = TEST_WIDTH * TEST_HEIGHT * 3;
 
     /// 識別しやすいように全画素を marker で埋めたフレームを作る
-    fn test_frame(marker: u8) -> VideoFrame {
-        VideoFrame {
+    fn test_frame(marker: u8) -> Arc<VideoFrame> {
+        Arc::new(VideoFrame {
             width: TEST_WIDTH,
             height: TEST_HEIGHT,
             data: vec![marker; TEST_FRAME_LEN],
-        }
+        })
     }
 
     /// 期待値との差が許容範囲に収まっているか調べる。

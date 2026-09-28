@@ -322,6 +322,8 @@ impl FrameSink {
     ) -> bool {
         let decode_ms = received_at.elapsed().as_secs_f32() * 1000.0;
         let (width, height) = (frame.width, frame.height);
+        // `Arc` に包むのはロックの外で済ませる（包むときに小さな確保が起きる）
+        let frame = Arc::new(frame);
         // フレームバッファへ置けたか。置けたときだけ UI スレッドを
         // 起こす。**起こすのはロックを手放してから。** 握ったまま
         // 呼ぶと、egui 側の待ちの間このバッファも止まる
