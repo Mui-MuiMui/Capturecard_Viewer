@@ -9,6 +9,7 @@
 //! 試すための環境変数（比較に使う版と問い合わせ先の差し替え）は `overrides.rs`。
 
 pub mod apply;
+mod assets;
 mod checksum;
 mod overrides;
 mod swap;
@@ -58,7 +59,7 @@ pub fn current_version() -> Version {
 ///
 /// 更新の適用が `capturecard_viewer.exe`（無ければ 1.2.0 の旧名
 /// `capturecard_viewer-<tag>-windows-x64.exe`）と `SHA256SUMS.txt` を
-/// 名前で引く（`apply::ApplyPlan::from_check`、`docs/RELEASE.md` の「配布物」）。
+/// 名前で引く（`assets::ApplyPlan::from_check`、`docs/RELEASE.md` の「配布物」）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseAsset {
     pub name: String,
