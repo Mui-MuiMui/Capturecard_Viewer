@@ -143,6 +143,7 @@ cargo build --release
 | `docs/design/logging.md` | ログの出力先とレベル、`catch_unwind` が効かないこと |
 | `docs/design/assets.md` | アイコンと効果音の埋め込み、パスの解決 |
 | `docs/design/i18n.md` | 画面に出す文字列を `src/i18n/` に集める仕組み、入れるもの・入れないもの、文字列を足すときの手順 |
+| `docs/design/recording.md` | 録画（#120）とリプレイバッファ（#182）の設計。**未実装。** 録画スレッド、コールバックからロックなしで渡すリング、Media Foundation の Sink Writer、PTS とドリフト、失敗の扱い、`[recording]`、段階分け |
 | `docs/design/update.md` | 更新の確認（GitHub の Release API、native-tls、確認のスレッド、`[update]`、通知ダイアログ）と適用（資産、書き込みの確認、SHA-256 の照合、`.old` / `.new` での差し替えと戻し方、再起動） |
 
 目指す構造と現状との差分は `docs/ARCHITECTURE.md`。**同じ話が両方にある場合は `docs/ARCHITECTURE.md` を正とする。** デバイス起因の不具合を調べるときは `.claude/skills/device-debug/SKILL.md` の手順（ログの読み方、正常時の所要時間の目安、症状ごとの確認順）に従う。
