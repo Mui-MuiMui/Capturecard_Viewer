@@ -162,6 +162,29 @@ pub fn stats_recording_encoder(name: Option<&str>, hardware: Option<bool>) -> St
     }
 }
 
+/// 統計 OSD の録画の音声の行。起点を揃えるために足した無音と削った入力の合計（ms）、
+/// リングが溢れた回数。削った入力が 0 なら出さない（通常は録画の開始時に数 ms 削るだけ）。
+pub fn stats_recording_audio(silence_ms: u64, trimmed_ms: u64, overflows: u64) -> String {
+    match language() {
+        Language::Japanese => {
+            let trimmed = if trimmed_ms > 0 {
+                format!(" / 削除 -{trimmed_ms} ms")
+            } else {
+                String::new()
+            };
+            format!("音声: 無音 +{silence_ms} ms{trimmed} / 溢れ {overflows} 回")
+        }
+        Language::English => {
+            let trimmed = if trimmed_ms > 0 {
+                format!(" / trimmed -{trimmed_ms} ms")
+            } else {
+                String::new()
+            };
+            format!("Audio: silence +{silence_ms} ms{trimmed} / overflows {overflows}")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +215,18 @@ mod tests {
             stats_recording_encoder(Some("NVIDIA H.264 Encoder MFT"), Some(true))
         });
         assert_eq!(english, "Encoder NVIDIA H.264 Encoder MFT (hardware)");
+    }
+
+    #[test]
+    fn stats_recording_audio_shows_trim_only_when_trimmed() {
+        let text = with_language(Language::Japanese, || stats_recording_audio(0, 0, 0));
+        assert_eq!(text, "音声: 無音 +0 ms / 溢れ 0 回");
+        let text = with_language(Language::Japanese, || stats_recording_audio(120, 8, 2));
+        assert_eq!(text, "音声: 無音 +120 ms / 削除 -8 ms / 溢れ 2 回");
+        let english = with_language(Language::English, || stats_recording_audio(120, 8, 2));
+        assert_eq!(
+            english,
+            "Audio: silence +120 ms / trimmed -8 ms / overflows 2"
+        );
     }
 }

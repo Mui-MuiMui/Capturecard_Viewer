@@ -14,7 +14,8 @@ use super::CaptureCardViewer;
 use crate::i18n;
 use crate::overlay::OverlayContent;
 use crate::recording::{
-    format_elapsed, resolve_file_stem, Recorder, RecordingEvent, RecordingRequest, RecordingSummary,
+    format_elapsed, resolve_file_stem, Recorder, RecordingAudioStats, RecordingEvent,
+    RecordingRequest, RecordingSummary,
 };
 use crate::status::ErrorSource;
 use chrono::Local;
@@ -184,6 +185,7 @@ impl CaptureCardViewer {
                 encoder.hardware,
             ));
         }
+        lines.extend(audio_stats_line(recorder.audio_stats()));
         lines
     }
 
@@ -234,6 +236,17 @@ impl CaptureCardViewer {
     }
 }
 
+/// 統計 OSD の録画の音声の行。音声を録らない設定（`None`）なら出さない。
+/// 値が 0 でも出す（「音声を録っていて、揃え直しも溢れも起きていない」ことが分かるように）。
+fn audio_stats_line(stats: Option<RecordingAudioStats>) -> Option<String> {
+    let stats = stats?;
+    Some(i18n::stats_recording_audio(
+        stats.silence_ms,
+        stats.trimmed_ms,
+        stats.overflows,
+    ))
+}
+
 /// 閉じた録画の内容をログへ 1 行で残す。回収に失敗した回数は、生データを渡す方式へ
 /// 切り替えるかの判断材料（`docs/design/recording.md`）。
 fn log_summary(prefix: &str, summary: &RecordingSummary) {
@@ -246,4 +259,37 @@ fn log_summary(prefix: &str, summary: &RecordingSummary) {
         summary.frames_dropped,
         summary.recycle_misses
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::{with_language, Language};
+
+    #[test]
+    fn audio_stats_line_is_absent_when_audio_is_off() {
+        assert_eq!(audio_stats_line(None), None);
+    }
+
+    #[test]
+    fn audio_stats_line_shows_zero_values() {
+        let line = with_language(Language::Japanese, || {
+            audio_stats_line(Some(RecordingAudioStats::default()))
+        });
+        assert_eq!(line.as_deref(), Some("音声: 無音 +0 ms / 溢れ 0 回"));
+    }
+
+    #[test]
+    fn audio_stats_line_shows_silence_trim_and_overflows() {
+        let stats = RecordingAudioStats {
+            silence_ms: 1_250,
+            trimmed_ms: 6,
+            overflows: 3,
+        };
+        let line = with_language(Language::Japanese, || audio_stats_line(Some(stats)));
+        assert_eq!(
+            line.as_deref(),
+            Some("音声: 無音 +1250 ms / 削除 -6 ms / 溢れ 3 回")
+        );
+    }
 }

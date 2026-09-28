@@ -24,10 +24,10 @@ use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 
-use super::audio::{AudioChunk, AudioTrack};
+use super::audio::{AudioChunk, AudioStats, AudioTrack};
 use super::convert::{even_size, rgb_to_nv12, Nv12Matrix};
 use super::file_name::unique_path;
-use super::pts::{units_from, PtsClock, AUDIO_SAMPLE_RATE};
+use super::pts::{units_from, PtsClock, AUDIO_SAMPLE_RATE, UNITS_PER_SECOND};
 use super::storage::{free_bytes, is_low, megabytes, DISK_CHECK_INTERVAL};
 use super::writer::{SinkWriter, WriterError, WriterParams, WriterStage};
 use super::{EncoderInfo, RecordingError};
@@ -116,6 +116,36 @@ struct RecordingTelemetry {
     frames_written: AtomicU64,
     /// エンコーダの遅れで捨てた枚数
     frames_skipped: AtomicU64,
+    /// 音声の起点を揃えるために足した無音（出力フレーム数、48kHz）。
+    /// 音声が来ていない間に埋めた分と、止めるときに映像の終わりまで埋めた分も含む
+    audio_silence_frames: AtomicU64,
+    /// 音声の起点を揃えるために先頭から削った入力の長さ（100ns）
+    audio_trimmed_units: AtomicU64,
+    /// 音声のリングが溢れて捨てたコールバックの回数
+    audio_overflows: AtomicU64,
+}
+
+impl RecordingTelemetry {
+    /// 音声の観測値を書き出す。**書くのは録画スレッドだけ**、UI は読むだけ。
+    fn publish_audio(&self, stats: &AudioStats) {
+        self.audio_silence_frames
+            .store(stats.silence_frames, Ordering::Relaxed);
+        self.audio_trimmed_units
+            .store(stats.trimmed_units, Ordering::Relaxed);
+        self.audio_overflows
+            .store(stats.overflows, Ordering::Relaxed);
+    }
+}
+
+/// 統計 OSD に出す録画の音声の状態。音声を録らない設定なら作らない。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecordingAudioStats {
+    /// 揃えるために足した無音の合計（ms）
+    pub silence_ms: u64,
+    /// 揃えるために先頭から削った入力の合計（ms）
+    pub trimmed_ms: u64,
+    /// リングが溢れて捨てたコールバックの回数
+    pub overflows: u64,
 }
 
 /// 録画スレッドの窓口。UI スレッドが持つ。
@@ -128,6 +158,8 @@ pub struct Recorder {
     started_at: Instant,
     stop_requested: bool,
     encoder: Option<EncoderInfo>,
+    /// 音声を録っているか（`RecordingRequest::audio_bitrate_kbps` が `Some`）
+    audio: bool,
 }
 
 impl Recorder {
@@ -141,6 +173,7 @@ impl Recorder {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let telemetry = Arc::new(RecordingTelemetry::default());
+        let audio = request.audio_bitrate_kbps.is_some();
         let thread = {
             let tap = tap.clone();
             let telemetry = Arc::clone(&telemetry);
@@ -162,6 +195,7 @@ impl Recorder {
             started_at: Instant::now(),
             stop_requested: false,
             encoder: None,
+            audio,
         })
     }
 
@@ -218,6 +252,25 @@ impl Recorder {
     pub fn frames_dropped(&self) -> u64 {
         self.tap.dropped() + self.telemetry.frames_skipped.load(Ordering::Relaxed)
     }
+
+    /// 音声の状態（足した無音・削った入力・リングの溢れ）。音声を録らない設定なら `None`。
+    pub fn audio_stats(&self) -> Option<RecordingAudioStats> {
+        if !self.audio {
+            return None;
+        }
+        let telemetry = &self.telemetry;
+        Some(RecordingAudioStats {
+            silence_ms: audio_frames_to_ms(telemetry.audio_silence_frames.load(Ordering::Relaxed)),
+            trimmed_ms: telemetry.audio_trimmed_units.load(Ordering::Relaxed)
+                / (UNITS_PER_SECOND as u64 / 1000),
+            overflows: telemetry.audio_overflows.load(Ordering::Relaxed),
+        })
+    }
+}
+
+/// 出力フレーム数（48kHz）を ms に直す。
+fn audio_frames_to_ms(frames: u64) -> u64 {
+    frames.saturating_mul(1000) / u64::from(AUDIO_SAMPLE_RATE)
 }
 
 impl Drop for Recorder {
@@ -628,6 +681,7 @@ impl Session {
             return Ok(());
         };
         audio.pump(Instant::now());
+        self.telemetry.publish_audio(&audio.stats());
         let chunk = audio.take_chunk(min_frames);
         if let Some(chunk) = chunk {
             self.queue_audio(chunk);
@@ -647,6 +701,7 @@ impl Session {
         if has_writer {
             audio.finish(video_end);
         }
+        self.telemetry.publish_audio(&audio.stats());
         let chunk = audio.take_chunk(0);
         if let Some(chunk) = chunk {
             self.queue_audio(chunk);
@@ -756,6 +811,15 @@ fn remove_partial_file(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_frames_to_ms_converts_48k_frames() {
+        assert_eq!(audio_frames_to_ms(0), 0);
+        assert_eq!(audio_frames_to_ms(48), 1);
+        // 1ms に満たない端数は切り捨てる
+        assert_eq!(audio_frames_to_ms(47), 0);
+        assert_eq!(audio_frames_to_ms(48_000 * 3), 3_000);
+    }
 
     #[test]
     fn check_folder_accepts_an_absolute_path() {
