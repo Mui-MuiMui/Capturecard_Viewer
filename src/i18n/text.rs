@@ -221,7 +221,7 @@ texts! {
     ButtonClear { ja: "クリア", en: "Clear" },
     HotkeyModifiersOnly { ja: "修飾キーだけでは登録できません", en: "Modifier keys alone cannot be registered" },
     HotkeyCaptureWaiting { ja: "キー入力待機中...", en: "Waiting for keys..." },
-    HotkeyClipboardCommand { ja: "Ctrl+Insert / Shift+Insert / Shift+Delete はコピー・貼り付け・切り取りと区別できないため割り当てられません", en: "Ctrl+Insert / Shift+Insert / Shift+Delete cannot be assigned because they cannot be told apart from copy, paste, and cut" },
+    HotkeyClipboardCommand { ja: "コピー・切り取り・貼り付けになるキー（Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+Insert / Shift+Insert / Shift+Delete）はここでは割り当てられません", en: "Keys that act as copy, cut, or paste (Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+Insert / Shift+Insert / Shift+Delete) cannot be assigned here" },
     HotkeyNavigationKeyHint { ja: "Tab・矢印・Home・End・PageUp・PageDown を修飾キーなしで割り当てると、このアプリが前面にある間は画面のキー操作（フォーカスの移動など）と重なることがあります。Ctrl などとの組み合わせをおすすめします。", en: "If you assign Tab, an arrow key, Home, End, PageUp, or PageDown without a modifier, it can clash with keyboard navigation in this app (such as moving focus) while the app is in front. Combining it with Ctrl or another modifier is recommended." },
 
     // ---- 「その他」タブとプリセット（ui/other_tab.rs / ui/preset.rs） ----

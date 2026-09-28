@@ -9,7 +9,9 @@ use crate::i18n::{self, Text};
 use eframe::egui;
 use std::collections::BTreeMap;
 
-use super::hotkey_keys::{build_hotkey_string, hotkey_key_name, is_clipboard_command_chord};
+use super::hotkey_keys::{
+    build_hotkey_string, hotkey_key_name, is_clipboard_command_chord, is_clipboard_command_event,
+};
 use super::hotkeys_tab::normalize_hotkey;
 use super::{notice_label, status_badge, NoticeKind, SETTINGS_WINDOW_SCREEN_MARGIN};
 
@@ -149,6 +151,35 @@ fn judge_hotkey_capture(
     }
 }
 
+/// このフレームの判定から出す拒否の理由。`previous` は覚えている直前の理由。
+///
+/// - 待機中と確定ではここでは理由を消さない（`None`）。呼び出し側（app/mod.rs）が
+///   `HotkeyManager::try_register` の失敗理由をこのフレームより後で
+///   `set_rejection` することがあり、ここで無条件に消すと次のフレームの
+///   冒頭（この判定）で即座に消えて一度も表示されない。理由を消すのは
+///   `begin_for`（編集対象の切り替え）と `reset`（キャンセル・× で閉じる）の役目
+/// - **修飾キーだけの判定は、直前の理由がクリップボードの組み合わせなら上書き
+///   しない**（#266）。クリップボードのイベントは押した瞬間の 1 フレームにしか
+///   届かないので、Ctrl を押したままの次のフレームで「修飾キーだけ」に
+///   置き換わり、理由がすぐ消えてしまう
+fn rejection_for(judgement: &HotkeyCaptureJudgement, previous: Option<&str>) -> Option<String> {
+    match judgement {
+        HotkeyCaptureJudgement::ModifiersOnly
+            if previous == Some(Text::HotkeyClipboardCommand.get()) =>
+        {
+            None
+        }
+        HotkeyCaptureJudgement::ModifiersOnly => Some(Text::HotkeyModifiersOnly.get().to_string()),
+        HotkeyCaptureJudgement::Duplicate { other, .. } => {
+            Some(i18n::hotkey_duplicate_assignment(other.label()))
+        }
+        HotkeyCaptureJudgement::ClipboardCommand => {
+            Some(Text::HotkeyClipboardCommand.get().to_string())
+        }
+        HotkeyCaptureJudgement::Waiting | HotkeyCaptureJudgement::Accepted(_) => None,
+    }
+}
+
 /// ホットキー入力ダイアログの 1 フレームで起きたこと。
 ///
 /// 開いた瞬間から受付状態で、修飾キー以外のキーが押されて `judge_hotkey_capture`
@@ -199,6 +230,11 @@ pub fn show_hotkey_capture_dialog(
         // ホットキー文字列が得られるよう並べてから渡す
         let mut keys_down: Vec<egui::Key> = i.keys_down.iter().copied().collect();
         keys_down.sort();
+        // Ctrl+C や Ctrl+Insert などは keys_down に入らず、クリップボードの
+        // イベントだけが届く（`is_clipboard_command_event`）
+        if i.events.iter().any(is_clipboard_command_event) {
+            return HotkeyCaptureJudgement::ClipboardCommand;
+        }
         judge_hotkey_capture(&i.modifiers, &keys_down, action, existing)
     });
 
@@ -207,22 +243,7 @@ pub fn show_hotkey_capture_dialog(
     // **表示にはこちらを優先して使う。** 覚えてもらうのは呼び出し側なので、
     // `Rejected` を返しただけでは `rejection` に入るのは次のフレーム。
     // キーを押したまま次の再描画が来ないと、理由が一度も出ないことがある
-    let judged_rejection = match &judgement {
-        HotkeyCaptureJudgement::ModifiersOnly => Some(Text::HotkeyModifiersOnly.get().to_string()),
-        HotkeyCaptureJudgement::Duplicate { other, .. } => {
-            Some(i18n::hotkey_duplicate_assignment(other.label()))
-        }
-        HotkeyCaptureJudgement::ClipboardCommand => {
-            Some(Text::HotkeyClipboardCommand.get().to_string())
-        }
-        // 待機中でもここでは理由を消さない。呼び出し側（app/mod.rs）が
-        // `HotkeyManager::try_register` の失敗理由をこのフレームより後で
-        // `set_rejection` することがあり、ここで無条件に消すと次のフレームの
-        // 冒頭（この判定）で即座に消えて一度も表示されない。
-        // 理由を消すのは `begin_for`（編集対象の切り替え）と `reset`
-        // （キャンセル・× で閉じる）の役目
-        HotkeyCaptureJudgement::Waiting | HotkeyCaptureJudgement::Accepted(_) => None,
-    };
+    let judged_rejection = rejection_for(&judgement, rejection);
     if let Some(reason) = &judged_rejection {
         events.push(HotkeyDialogEvent::Rejected(reason.clone()));
     }
@@ -380,6 +401,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn rejection_for_modifiers_only_keeps_the_clipboard_reason() {
+        // Ctrl+C を押した次のフレーム（Ctrl だけが押されたまま）で、
+        // クリップボードの理由が「修飾キーだけ」に置き換わらない
+        let clipboard = Text::HotkeyClipboardCommand.get();
+        assert_eq!(
+            rejection_for(&HotkeyCaptureJudgement::ClipboardCommand, None).as_deref(),
+            Some(clipboard)
+        );
+        assert_eq!(
+            rejection_for(&HotkeyCaptureJudgement::ModifiersOnly, Some(clipboard)),
+            None
+        );
+    }
+
+    #[test]
+    fn rejection_for_modifiers_only_replaces_other_reasons() {
+        let modifiers_only = Some(Text::HotkeyModifiersOnly.get());
+        assert_eq!(
+            rejection_for(&HotkeyCaptureJudgement::ModifiersOnly, None).as_deref(),
+            modifiers_only
+        );
+        assert_eq!(
+            rejection_for(
+                &HotkeyCaptureJudgement::ModifiersOnly,
+                Some("同じキーが「フルスクリーン切替」に割り当てられています")
+            )
+            .as_deref(),
+            modifiers_only
+        );
+        assert_eq!(
+            rejection_for(&HotkeyCaptureJudgement::Waiting, Some("理由")),
+            None
+        );
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! ホットキー入力ダイアログが使う、egui のキー入力 → ホットキー文字列の変換。
 //!
 //! 受け付けるキーの対応表（`hotkey_key_name`）、割り当てさせない組み合わせ
-//! （`is_clipboard_command_chord`）、文字列の組み立て（`build_hotkey_string`）。
+//! （`is_clipboard_command_chord` / `is_clipboard_command_event`）、文字列の
+//! 組み立て（`build_hotkey_string`）。
 //! どれも純粋関数で、確定の判定と描画は `hotkey_capture` にある。
 //! `hotkey_capture.rs` が 800 行を超えたので分けた（#266）。
 
@@ -95,15 +96,29 @@ pub(super) fn hotkey_key_name(key: egui::Key) -> Option<&'static str> {
 /// Insert / Delete を使うこの組み合わせを割り当てると、取り除く対象を読み違える。
 /// **入力ダイアログでは割り当てられないようにする**（#266）。
 ///
-/// 普段はこの組み合わせの押下は `keys_down` に入らないので確定しないが、
-/// Insert を押した直後の同じフレームで Shift を押すと、`keys_down` に Insert、
-/// 修飾キーに Shift が載った状態で判定に来る。
+/// 普段はこの組み合わせの押下は `keys_down` に入らず、代わりにクリップボードの
+/// イベントが届く（`is_clipboard_command_event` で拾う）。ただし Insert を
+/// 押した直後の同じフレームで Shift を押すと、`keys_down` に Insert、修飾キーに
+/// Shift が載った状態で判定に来るので、こちらでも弾く。
 pub(super) fn is_clipboard_command_chord(modifiers: &egui::Modifiers, key: egui::Key) -> bool {
     match key {
         egui::Key::Insert => modifiers.ctrl || modifiers.shift,
         egui::Key::Delete => modifiers.shift,
         _ => false,
     }
+}
+
+/// egui-winit がキーの押下の代わりに作るクリップボードのイベントか。
+///
+/// Ctrl+C / Ctrl+X / Ctrl+V と Ctrl+Insert / Shift+Delete / Shift+Insert は
+/// `Event::Key` にならず、`keys_down` にも入らない。拾わないと、修飾キーだけが
+/// 押されているように見えて「修飾キーだけでは登録できません」と出てしまう。
+/// どのキーだったかはイベントからは分からないので、まとめて同じ理由を出す。
+pub(super) fn is_clipboard_command_event(event: &egui::Event) -> bool {
+    matches!(
+        event,
+        egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_)
+    )
 }
 
 /// 押されている修飾キーと通常キーから、`screenshot::parse_hotkey` が解釈できる
@@ -139,6 +154,27 @@ pub(super) fn build_hotkey_string(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- クリップボードのイベント（#266） ----
+
+    #[test]
+    fn is_clipboard_command_event_detects_only_copy_cut_and_paste() {
+        assert!(is_clipboard_command_event(&egui::Event::Copy));
+        assert!(is_clipboard_command_event(&egui::Event::Cut));
+        assert!(is_clipboard_command_event(&egui::Event::Paste(
+            "text".to_string()
+        )));
+        assert!(!is_clipboard_command_event(&egui::Event::Text(
+            "c".to_string()
+        )));
+        assert!(!is_clipboard_command_event(&egui::Event::Key {
+            key: egui::Key::Insert,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }));
+    }
 
     // ---- egui のキー → ホットキー文字列の名前（#251） ----
 
