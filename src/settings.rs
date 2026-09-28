@@ -823,8 +823,8 @@ pub enum ScreenshotEncoding {
 // 録画の設定。設定ファイルでは [recording] になる（`docs/design/recording.md` の
 // 「設定 `[recording]`」）。
 //
-// **項目は、その項目が効く段で足す。** 音声（②）とリプレイバッファ（③）の項目は
-// まだ無い。効かない項目を先に出さない（`docs/ARCHITECTURE.md` の「設定は実際に効かせる」）。
+// **項目は、その項目が効く段で足す。** リプレイバッファ（③）の項目はまだ無い。
+// 効かない項目を先に出さない（`docs/ARCHITECTURE.md` の「設定は実際に効かせる」）。
 // 録画中に変えた設定は次の録画から効く。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -840,6 +840,13 @@ pub struct RecordingSettings {
     // ハードウェアのエンコーダ（Intel / NVIDIA / AMD の MFT）を選ばせるか。
     // 選べなければソフトウェアのエンコーダへ倒れる
     pub hardware_encoder: bool,
+    // 音声（AAC）も録るか。録るのは入力の音そのもので、音量・ミュート・
+    // パススルーの無効は効かない（`docs/design/recording.md`）
+    pub audio_enabled: bool,
+    // 音声の平均ビットレート（kbps）。Microsoft の AAC エンコーダが受け付ける
+    // RECORDING_AUDIO_BITRATES_KBPS の 4 つだけ。それ以外は近いものへ寄せる
+    #[serde(deserialize_with = "deserialize_recording_audio_bitrate")]
+    pub audio_bitrate_kbps: u32,
 }
 
 // 録画のファイル名の既定の書式
@@ -850,6 +857,12 @@ pub const MIN_RECORDING_BITRATE_KBPS: u32 = 1_000;
 pub const MAX_RECORDING_BITRATE_KBPS: u32 = 50_000;
 pub const DEFAULT_RECORDING_BITRATE_KBPS: u32 = 8_000;
 
+// 録画の音声（AAC）のビットレート（kbps）の選択肢と既定値。
+// Microsoft の AAC エンコーダが受け付けるのはこの 4 つだけ
+// （`MF_MT_AUDIO_AVG_BYTES_PER_SECOND` = 12000 / 16000 / 20000 / 24000）
+pub const RECORDING_AUDIO_BITRATES_KBPS: [u32; 4] = [96, 128, 160, 192];
+pub const DEFAULT_RECORDING_AUDIO_BITRATE_KBPS: u32 = 160;
+
 impl Default for RecordingSettings {
     fn default() -> Self {
         Self {
@@ -857,6 +870,8 @@ impl Default for RecordingSettings {
             file_name_format: DEFAULT_RECORDING_FILE_NAME_FORMAT.to_string(),
             video_bitrate_kbps: DEFAULT_RECORDING_BITRATE_KBPS,
             hardware_encoder: true,
+            audio_enabled: true,
+            audio_bitrate_kbps: DEFAULT_RECORDING_AUDIO_BITRATE_KBPS,
         }
     }
 }
@@ -868,6 +883,44 @@ impl RecordingSettings {
         self.video_bitrate_kbps
             .clamp(MIN_RECORDING_BITRATE_KBPS, MAX_RECORDING_BITRATE_KBPS)
     }
+
+    // 録画スレッドへ渡す音声のビットレート。音声を録らないなら None。
+    // 4 つの選択肢のどれかへ寄せてから渡す（理由は clamped_bitrate_kbps と同じ）
+    pub fn audio_bitrate_for_recording(&self) -> Option<u32> {
+        self.audio_enabled
+            .then(|| nearest_audio_bitrate_kbps(i64::from(self.audio_bitrate_kbps)))
+    }
+}
+
+// RECORDING_AUDIO_BITRATES_KBPS のうち `kbps` に最も近いもの。
+// ちょうど中間（例: 112）なら高いほうへ寄せる（音質を落とさない側）
+pub fn nearest_audio_bitrate_kbps(kbps: i64) -> u32 {
+    RECORDING_AUDIO_BITRATES_KBPS
+        .iter()
+        .copied()
+        .min_by_key(|&candidate| {
+            let distance = (i64::from(candidate) - kbps).unsigned_abs();
+            // 距離が同じなら高いほうを先にする
+            (distance, std::cmp::Reverse(candidate))
+        })
+        .unwrap_or(DEFAULT_RECORDING_AUDIO_BITRATE_KBPS)
+}
+
+// 選択肢に無い音声のビットレートが書かれていても、設定全体を失わせない。
+// 近い選択肢へ寄せる。考え方は deserialize_recording_bitrate と同じ。
+fn deserialize_recording_audio_bitrate<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = i64::deserialize(deserializer)?;
+    let nearest = nearest_audio_bitrate_kbps(raw);
+    if i64::from(nearest) != raw {
+        warn!(
+            "設定の録画の音声のビットレート {} kbps は選べないので {} kbps として扱う",
+            raw, nearest
+        );
+    }
+    Ok(nearest)
 }
 
 // 範囲外のビットレートが書かれていても、設定全体を失わせない。
@@ -2311,6 +2364,8 @@ volume = 80.0
         );
         assert_eq!(settings.recording.video_bitrate_kbps, 8_000);
         assert!(settings.recording.hardware_encoder);
+        assert!(settings.recording.audio_enabled);
+        assert_eq!(settings.recording.audio_bitrate_kbps, 160);
         assert_eq!(
             settings.recording.folder,
             RecordingSettings::default().folder
@@ -2343,6 +2398,8 @@ volume = 80.0
                 file_name_format: "clip_%Y%m%d_%H%M%S".to_string(),
                 video_bitrate_kbps: 25_000,
                 hardware_encoder: false,
+                audio_enabled: false,
+                audio_bitrate_kbps: 128,
             },
             ..AppSettings::default()
         };
@@ -2371,6 +2428,64 @@ volume = 80.0
             assert_eq!(settings.recording.video_bitrate_kbps, expected, "{written}");
             assert_eq!(settings.ui.volume, 80.0);
         }
+    }
+
+    #[test]
+    fn app_settings_recording_section_from_the_video_only_version_enables_audio() {
+        // 第 1 段（映像のみ）の版が書いた [recording] には音声の項目が無い。
+        // 構造体の既定値（音声を録る、160kbps）になり、書いてある項目は保たれる
+        let config = format!(
+            "{FULL_CONFIG}\n[recording]\nvideo_bitrate_kbps = 12000\nhardware_encoder = false\n"
+        );
+
+        let settings: AppSettings = toml::from_str(&config).expect("読めなければならない");
+
+        assert!(settings.recording.audio_enabled);
+        assert_eq!(settings.recording.audio_bitrate_kbps, 160);
+        assert_eq!(settings.recording.video_bitrate_kbps, 12_000);
+        assert!(!settings.recording.hardware_encoder);
+    }
+
+    #[test]
+    fn app_settings_unlisted_recording_audio_bitrate_snaps_without_losing_settings() {
+        for (written, expected) in [
+            (0, 96),
+            (-5, 96),
+            (100, 96),
+            (112, 128),
+            (150, 160),
+            (999_999, 192),
+            (128, 128),
+            (192, 192),
+        ] {
+            let config = format!("{FULL_CONFIG}\n[recording]\naudio_bitrate_kbps = {written}\n");
+
+            let settings: AppSettings =
+                toml::from_str(&config).expect("選べないビットレートでも読めなければならない");
+
+            assert_eq!(settings.recording.audio_bitrate_kbps, expected, "{written}");
+            assert_eq!(settings.ui.volume, 80.0);
+        }
+    }
+
+    #[test]
+    fn nearest_audio_bitrate_prefers_the_higher_one_at_the_midpoint() {
+        assert_eq!(nearest_audio_bitrate_kbps(112), 128);
+        assert_eq!(nearest_audio_bitrate_kbps(144), 160);
+        assert_eq!(nearest_audio_bitrate_kbps(176), 192);
+        assert_eq!(nearest_audio_bitrate_kbps(143), 128);
+    }
+
+    #[test]
+    fn recording_settings_audio_bitrate_for_recording_follows_the_switch() {
+        let mut recording = RecordingSettings {
+            audio_bitrate_kbps: 130,
+            ..RecordingSettings::default()
+        };
+        // 読み込んだあとに値を差し替えられても、渡す前に選択肢へ寄せる
+        assert_eq!(recording.audio_bitrate_for_recording(), Some(128));
+        recording.audio_enabled = false;
+        assert_eq!(recording.audio_bitrate_for_recording(), None);
     }
 
     #[test]

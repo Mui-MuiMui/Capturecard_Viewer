@@ -350,6 +350,8 @@ texts! {
     RecordingBitrateLabel { ja: "ビットレート:", en: "Bitrate:" },
     RecordingHardwareEncoder { ja: "ハードウェアエンコーダを使う", en: "Use a hardware encoder" },
     RecordingVideoHint { ja: "H.264 の MP4 で保存します。ハードウェアエンコーダ（GPU）が使えなければ、ソフトウェアのエンコーダで保存します。\n使ったエンコーダの名前は、録画中の情報表示に出ます。", en: "Recordings are saved as H.264 MP4. If no hardware (GPU) encoder is available, the software encoder is used.\nThe encoder in use is shown in the stats overlay while recording." },
+    RecordingAudioEnabled { ja: "音声も録画する", en: "Record audio" },
+    RecordingAudioHint { ja: "音声入力の音を AAC（48kHz 2ch）で保存します。音量・ミュート・パススルーの設定は録画に効きません（入力の音をそのまま録ります）。\n音声デバイスが無い・開けない間は無音が入ります。", en: "Audio from the audio input is saved as AAC (48 kHz, stereo). Volume, mute, and passthrough do not affect the recording (the input is recorded as is).\nWhile no audio device is available, silence is recorded." },
     RecordingTabHint { ja: "録画の開始と停止は、右クリックメニューかホットキー（「録画の開始・停止」）で行います。\n変更は次の録画から効きます。", en: "Start and stop recording from the right-click menu or with the Start / stop recording hotkey.\nChanges take effect from the next recording." },
 }
 

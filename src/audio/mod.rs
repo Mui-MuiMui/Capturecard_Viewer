@@ -14,6 +14,7 @@
 //! | `resample.rs` | クロックドリフト補正の共有状態と、補正係数の決め方 |
 //! | `controls.rs` | 音量・パススルー・ミュートの共有状態 |
 //! | `fake.rs` | 実機なしで動くフェイクの音声デバイス（正弦波の入力と、書き込みを捨てる出力）。環境変数で有効にしたときだけ使う |
+//! | `tap.rs` | 録画へ音声を回す差し込み口（`AudioTap`）。録画中だけ、入力コールバックが f32 へ直した値を入力の形のまま録画のリングへも積む。PTS を決めるための累計・時刻・入力の形・開き直しの番号も持つ |
 
 mod capabilities;
 mod capture;
@@ -23,6 +24,7 @@ mod fake;
 mod resample;
 mod stream;
 mod stream_config;
+mod tap;
 
 // `audio` の外から使うものだけを並べる。**使われていない再輸出は
 // `unused_imports` で落ちる**（このクレートは bin だけで lib を持たないため、
@@ -37,6 +39,9 @@ pub use controls::AudioControls;
 pub use fake::{FakeAudioCapture, FakeAudioOptions};
 pub(crate) use resample::decide_resample_correction;
 pub use resample::{ResampleStatus, ResampleTelemetry};
+// 録画スレッド（`crate::recording`）が録画用に 1 つ持つ変換器と、16bit PCM への変換
+pub(crate) use convert::{f32_to_i16, PassthroughConverter};
+pub use tap::{AudioTap, AudioTapConsumer, AudioTapSnapshot};
 
 use cpal::SampleFormat;
 use std::fmt;

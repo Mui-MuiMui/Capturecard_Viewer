@@ -38,6 +38,7 @@ use super::convert::PassthroughConverter;
 use super::resample::{ResampleStatus, ResampleTelemetry};
 use super::stream::{process_input, process_output, AudioConsumer, AudioProducer};
 use super::stream_config::{choose_passthrough_configs, resolve_ranges};
+use super::tap::AudioTap;
 use super::{ActiveAudio, AudioDirection, AudioError};
 
 const INPUT_NAME_PREFIX: &str = "Fake Audio Input";
@@ -125,6 +126,8 @@ struct FakeAudioStream {
 /// `AudioCapture` と同じ。
 pub struct FakeAudioCapture {
     controls: Arc<AudioControls>,
+    /// 録画へ回す差し込み口。入力のスレッドが `process_input` 越しに積む（本物と同じ経路）
+    tap: AudioTap,
     options: FakeAudioOptions,
     /// シナリオ（`failures_before_success`）で、あと何回失敗させるか
     remaining_failures: u32,
@@ -145,9 +148,10 @@ pub struct FakeAudioCapture {
 }
 
 impl FakeAudioCapture {
-    pub fn new(controls: Arc<AudioControls>, options: FakeAudioOptions) -> Self {
+    pub fn new(controls: Arc<AudioControls>, tap: AudioTap, options: FakeAudioOptions) -> Self {
         Self {
             controls,
+            tap,
             remaining_failures: options.failures_before_success,
             options,
             stream: None,
@@ -265,10 +269,14 @@ impl FakeAudioCapture {
         };
         let converter = converter.with_telemetry(resample_telemetry.clone());
 
+        // 録画へ入力の形と開き直しを知らせる。入力のスレッドを起こす前に書く（本物と同じ）
+        self.tap.begin_stream(input_rate, input_channels);
+
         let (stop_input, input_rx) = mpsc::channel();
         let (stop_output, output_rx) = mpsc::channel();
         let sine = SineInput {
             producer,
+            tap: self.tap.clone(),
             sample_rate: input_rate,
             channels: input_channels,
             frequency_hz: input.frequency_hz,
@@ -515,6 +523,7 @@ fn fill_sine(
 /// 正弦波を吐く入力。cpal の入力コールバックの代わり。
 struct SineInput {
     producer: Arc<Mutex<AudioProducer>>,
+    tap: AudioTap,
     sample_rate: u32,
     channels: u16,
     frequency_hz: f64,
@@ -538,7 +547,7 @@ impl SineInput {
                 self.frequency_hz,
                 &mut phase,
             );
-            process_input(chunk, &self.producer, |sample| sample);
+            process_input(chunk, &self.producer, &self.tap, |sample| sample);
         });
         debug!("フェイクの音声入力のスレッドを終えた");
     }
@@ -582,6 +591,7 @@ mod tests {
     fn capture(input_count: u32, failures_before_success: u32) -> FakeAudioCapture {
         FakeAudioCapture::new(
             Arc::new(AudioControls::default()),
+            AudioTap::new(),
             FakeAudioOptions {
                 input_count,
                 failures_before_success,
@@ -718,6 +728,45 @@ mod tests {
         assert_ne!(telemetry.water_level(), target, "出力が水位を書いていない");
         // 溢れていないこと（容量は目標の 2 倍）
         assert!(telemetry.water_level() <= target * 2);
+    }
+
+    #[test]
+    fn fake_audio_input_reaches_the_recording_tap() {
+        // 録画の差し込み口にも、本物と同じ `process_input` の経路で正弦波が積まれること
+        let tap = AudioTap::new();
+        let mut capture = FakeAudioCapture::new(
+            Arc::new(AudioControls::default()),
+            tap.clone(),
+            FakeAudioOptions {
+                input_count: 1,
+                failures_before_success: 0,
+                stream_error_after: None,
+            },
+        );
+        let mut attachment = tap.attach(tap.one_second_capacity());
+        capture
+            .start_passthrough(&request(None, None))
+            .expect("開ける");
+        assert_eq!(tap.format(), Some((INPUT_SAMPLE_RATE, INPUT_CHANNELS)));
+        assert_eq!(tap.snapshot().generation, 1);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while tap.snapshot().samples_total == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        capture.stop_capture();
+        tap.detach();
+
+        let snapshot = tap.snapshot();
+        assert!(
+            snapshot.samples_total > 0,
+            "入力が録画のリングへ積んでいない"
+        );
+        let mut read = vec![0.0f32; snapshot.samples_total as usize];
+        let count = attachment.consumer.pop_slice(&mut read);
+        assert_eq!(count as u64, snapshot.samples_total);
+        // 正弦波が入力の形のまま入っている
+        assert!(read[..count].iter().any(|&sample| sample != 0.0));
     }
 
     #[test]

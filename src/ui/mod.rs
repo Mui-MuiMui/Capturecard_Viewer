@@ -554,6 +554,8 @@ mod tests {
                 file_name_format: "clip_%Y%m%d".to_string(),
                 video_bitrate_kbps: 20_000,
                 hardware_encoder: false,
+                audio_enabled: false,
+                audio_bitrate_kbps: 96,
             },
             ui: UiSettings {
                 volume: 80.0,

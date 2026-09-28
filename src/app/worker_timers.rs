@@ -588,6 +588,7 @@ mod tests {
         let after = Duration::from_secs(5);
         let audio = FakeAudioCapture::new(
             Arc::new(AudioControls::default()),
+            audio::AudioTap::new(),
             FakeAudioOptions {
                 input_count: 1,
                 failures_before_success: 0,

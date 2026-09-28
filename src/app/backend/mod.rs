@@ -25,8 +25,8 @@
 //! `DeviceWorker::spawn` の 1 か所だけ。
 
 use crate::audio::{
-    ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, AudioError, PassthroughRequest,
-    ResampleStatus, ResampleTelemetry,
+    ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, AudioError, AudioTap,
+    PassthroughRequest, ResampleStatus, ResampleTelemetry,
 };
 use crate::repaint::RepaintWaker;
 use crate::settings::VideoBackendSetting;
@@ -191,6 +191,9 @@ pub(super) struct BackendShared {
     pub(super) color_conversion: Arc<SharedColorConversion>,
     /// UI スレッドが書き、出力コールバックが読む音量・ミュート・パススルー
     pub(super) audio_controls: Arc<AudioControls>,
+    /// 入力コールバックが書き、録画スレッドが読む録画の差し込み口。
+    /// `audio_controls` と同じく開き直しても引き継ぐ
+    pub(super) audio_tap: AudioTap,
     /// フレームが届いたことを UI スレッドへ知らせる窓口。
     /// **キャプチャを開くより前に渡す必要がある**（`VideoCapture::new` の説明）
     pub(super) repaint_waker: RepaintWaker,

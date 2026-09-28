@@ -5,10 +5,10 @@
 //! `DeviceCommand` を送り、`DeviceEvent` を `update()` の中で非ブロックに
 //! 受け取るだけにする。
 //!
-//! **チャネルを通さない共有が 3 つある。** 映像フレーム（`video::VideoFrames`）、
+//! **チャネルを通さない共有が 4 つある。** 映像フレーム（`video::VideoFrames`）、
 //! 色変換と映像調整（`video::SharedColorConversion`）、音量・ミュート・
-//! パススルー（`audio::AudioControls`）。どれもデバイスを開く処理を挟まない
-//! うえ、フレームはコマンドの列に並べると遅延が増える。
+//! パススルー（`audio::AudioControls`）、録画へ音声を回す差し込み口（`audio::AudioTap`）。
+//! どれもデバイスを開く処理を挟まないうえ、フレームはコマンドの列に並べると遅延が増える。
 //!
 //! これとは別に、「いま何に繋がっているか」のような軽い観測値も
 //! チャネルを通さず `DeviceSnapshot` に写してあり、UI は `Arc<RwLock<..>>`
@@ -16,7 +16,9 @@
 //! 必ずこちらを正とする。
 
 use super::backend::{self, BackendShared};
-use crate::audio::{ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, ResampleStatus};
+use crate::audio::{
+    ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, AudioTap, ResampleStatus,
+};
 use crate::repaint::RepaintWaker;
 use crate::settings::{AppSettings, VideoBackendSetting};
 use crate::video::{ActiveVideo, DeviceCapabilities, SharedColorConversion, VideoFrames};
@@ -240,6 +242,7 @@ impl DeviceWorker {
         frames: VideoFrames,
         color_conversion: Arc<SharedColorConversion>,
         audio_controls: Arc<AudioControls>,
+        audio_tap: AudioTap,
         repaint_waker: RepaintWaker,
     ) -> Self {
         let (command_tx, command_rx) = std::sync::mpsc::channel();
@@ -251,6 +254,7 @@ impl DeviceWorker {
             frames,
             color_conversion,
             audio_controls,
+            audio_tap,
             repaint_waker,
         };
         // 本番かフェイクか。環境変数を読むだけなので UI スレッドで決めてよい

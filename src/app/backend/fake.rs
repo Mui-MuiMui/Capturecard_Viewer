@@ -75,6 +75,7 @@ impl DeviceBackends for FakeBackends {
             frames,
             color_conversion,
             audio_controls,
+            audio_tap,
             repaint_waker,
         } = shared;
         let video = FakeVideoCapture::new(
@@ -89,6 +90,7 @@ impl DeviceBackends for FakeBackends {
         );
         let audio = FakeAudioCapture::new(
             audio_controls,
+            audio_tap,
             FakeAudioOptions {
                 input_count: self.device_count,
                 failures_before_success: self.scenario.failures_before_success,
@@ -383,7 +385,7 @@ mod tests {
         // 再試行で繋がって実際にフレームが届くところまでを通す
         use crate::app::worker::{DeviceCommand, DeviceEvent, DeviceSnapshot};
         use crate::app::worker_loop::testing::config_for;
-        use crate::audio::AudioControls;
+        use crate::audio::{AudioControls, AudioTap};
         use crate::repaint::RepaintWaker;
         use crate::video::{SharedColorConversion, VideoFrames};
         use std::sync::mpsc::channel;
@@ -407,6 +409,7 @@ mod tests {
                         frames,
                         color_conversion: Arc::new(SharedColorConversion::new()),
                         audio_controls: Arc::new(AudioControls::default()),
+                        audio_tap: AudioTap::new(),
                         repaint_waker: RepaintWaker::new(),
                     },
                     Box::new(backends),

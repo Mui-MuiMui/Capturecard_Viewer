@@ -75,8 +75,10 @@ impl CaptureCardViewer {
                 .active_video
                 .as_ref()
                 .map(|video| video.requested_fps),
+            // 音声を録らない設定なら None（映像だけの MP4）
+            audio_bitrate_kbps: settings.audio_bitrate_for_recording(),
         };
-        match Recorder::start(request, self.frames.tap()) {
+        match Recorder::start(request, self.frames.tap(), self.audio_tap.clone()) {
             Ok(recorder) => self.recorder = Some(recorder),
             Err(reason) => {
                 error!("録画を始められない: {}", reason);

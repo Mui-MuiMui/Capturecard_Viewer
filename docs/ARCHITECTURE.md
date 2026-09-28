@@ -27,7 +27,7 @@ flowchart TD
     settings["settings<br/>永続化"]
     hotkey["hotkey<br/>ホットキー"]
     device["device<br/>ワーカー層"]
-    recording["recording<br/>録画（映像のみ）"]
+    recording["recording<br/>録画（映像と音声）"]
     video["video"]
     audio["audio"]
     platform["platform"]
@@ -59,7 +59,7 @@ flowchart TD
 | `ui` | 描画と入力の受け取り | 状態、副作用 |
 | `device` | デバイス操作をワーカースレッドへ隔離し、チャネルで橋渡しする | UI の知識 |
 | `video` / `audio` | デバイス固有の処理 | アプリ状態の知識 |
-| `recording` | 録画スレッド、Media Foundation の Sink Writer による H.264 / AAC の MP4 への書き出し、PTS。**第 1 段（映像のみ、#281）を実装済み。音声とリプレイバッファは未実装**（設計は `docs/design/recording.md`、#120 / #182） | デバイスの開閉（`video` / `audio` がコールバックから渡すリングを読むだけ）、UI の知識 |
+| `recording` | 録画スレッド、Media Foundation の Sink Writer による H.264 / AAC の MP4 への書き出し、PTS。**第 1 段（映像、#281）と第 2 段（音声、#282）を実装済み。リプレイバッファは未実装**（設計は `docs/design/recording.md`、#120 / #182） | デバイスの開閉（`video` / `audio` がコールバックから渡すリングを読むだけ）、UI の知識 |
 | `settings` | 設定の型と永続化 | 実行時状態 |
 | `hotkey` | 割り当てられる操作の定義、ホットキーの登録と押下の検出（押下は `keyboard_hook` の低レベルキーボードフックでキーを奪わずに観測する） | 操作そのものの実行（`app` が行う） |
 | `platform` | Windows 固有処理（フォント、アイコン、モニタ情報） | 汎用ロジック |

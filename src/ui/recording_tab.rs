@@ -1,7 +1,7 @@
 //! 「録画」タブ（`docs/design/recording.md` の「設定 `[recording]`」）。
 //!
-//! 保存先・ファイル名の書式・映像のビットレート・ハードウェアエンコーダの 4 つ。
-//! 音声（②）とリプレイバッファ（③）の項目は、効く段になってから足す。
+//! 保存先・ファイル名の書式・映像のビットレート・ハードウェアエンコーダ・音声（録るか、ビットレート）。
+//! リプレイバッファ（③）の項目は、効く段になってから足す。
 //! フォルダの選択はここでは開かず、`SettingsEvent::PickRecordingFolder` で上へ返す
 //! （`docs/design/settings-dialog.md`）。
 
@@ -11,7 +11,10 @@ use eframe::egui;
 use super::{warning_label, SettingsEvent};
 use crate::i18n::{self, Text};
 use crate::recording::{render_file_name, RECORDING_EXTENSION};
-use crate::settings::{AppSettings, MAX_RECORDING_BITRATE_KBPS, MIN_RECORDING_BITRATE_KBPS};
+use crate::settings::{
+    AppSettings, MAX_RECORDING_BITRATE_KBPS, MIN_RECORDING_BITRATE_KBPS,
+    RECORDING_AUDIO_BITRATES_KBPS,
+};
 
 /// 「録画」タブを描画する。書き換えるのはドラフトだけ。
 pub(super) fn show_recording_settings_tab(
@@ -85,5 +88,36 @@ pub(super) fn show_recording_settings_tab(
         );
         ui.add_space(5.0);
         ui.small(Text::RecordingVideoHint.get());
+    });
+
+    ui.add_space(15.0);
+
+    // 音声
+    ui.group(|ui| {
+        ui.strong(Text::LinkAudio.get());
+        ui.add_space(5.0);
+        ui.checkbox(
+            &mut settings.recording.audio_enabled,
+            Text::RecordingAudioEnabled.get(),
+        );
+        ui.add_enabled_ui(settings.recording.audio_enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(Text::RecordingBitrateLabel.get());
+                // Id は表示文字列から作らない（`docs/design/i18n.md`）
+                egui::ComboBox::from_id_source("recording_audio_bitrate")
+                    .selected_text(format!("{} kbps", settings.recording.audio_bitrate_kbps))
+                    .show_ui(ui, |ui| {
+                        for kbps in RECORDING_AUDIO_BITRATES_KBPS {
+                            ui.selectable_value(
+                                &mut settings.recording.audio_bitrate_kbps,
+                                kbps,
+                                format!("{kbps} kbps"),
+                            );
+                        }
+                    });
+            });
+        });
+        ui.add_space(5.0);
+        ui.small(Text::RecordingAudioHint.get());
     });
 }

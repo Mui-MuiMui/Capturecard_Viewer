@@ -18,7 +18,7 @@
 | 効果音再生 | 再生ごと | rodio による再生 |
 | スクリーンショットの保存 | 撮影ごと | JPEG / PNG エンコードとファイル書き出し、設定によってはクリップボードへの転送 |
 | 効果音ファイルの読み込み | 適用・テスト再生ごと | 設定の効果音ファイルを読み、デコードできるかを確かめる |
-| 録画（`recorder`） | 録画中に 1 本 | `VideoTap` のリングからフレームを取り、RGB → NV12 の変換と Media Foundation の Sink Writer への書き込み（H.264 のエンコードと MP4 へのまとめ）を行う。COM は MTA で初期化する。デバイスには触らない。開始で起こし、停止で `Finalize` まで終えたら自分で抜ける。`JoinHandle` は `Recorder` が持ち、落とすとき（`on_exit` を含む）に join する（`docs/design/recording.md`） |
+| 録画（`recorder`） | 録画中に 1 本 | `VideoTap` のリングからフレームを、`AudioTap` のリングから音声を取り、RGB → NV12 と 48kHz 2ch の 16bit PCM への変換、Media Foundation の Sink Writer への書き込み（H.264 / AAC のエンコードと MP4 へのまとめ）を行う。COM は MTA で初期化する。デバイスには触らない。開始で起こし、停止で `Finalize` まで終えたら自分で抜ける。`JoinHandle` は `Recorder` が持ち、落とすとき（`on_exit` を含む）に join する（`docs/design/recording.md`） |
 | 更新の確認（`update-check`） | 確認ごと（同時に 1 本まで） | GitHub の Release API へ問い合わせる。起動時に 1 回と「その他」タブの「更新を確認」。上限 5 秒。副作用が無いので `on_exit` で join しない（`docs/design/update.md`） |
 | 更新の適用（`update-apply`） | 「更新する」ごと（同時に 1 本まで） | 新しい版の exe を exe と同じフォルダの `.new` へ落とし、SHA-256 を照合して差し替える。`on_exit` で join しない（キャンセルを立てるだけ。書きかけの `.new` は次の起動で消す。`docs/design/update.md` の「適用」） |
 | 更新の後片付け（`update-cleanup`） | 起動時に 1 回（残りがあるときだけ） | 前回の更新の `.old` と書きかけの `.new` を消す。前の版のプロセスが終わるまで 0.5 秒おきに 20 回まで試す。`on_exit` で join しない |
@@ -55,7 +55,7 @@
 
 ## ロック順序
 
-**ネストしたロックを取る場面が無くなった。** デバイス操作をワーカースレッドへ移した結果、`CaptureCardViewer` が直接持つ `Arc<Mutex<..>>` は 2 つだけになり、どちらも他方と重ねて取る経路が存在しない。**`frames` と録画の差し込み口（`VideoTap`）の中にも `Mutex` があるので、ロック順序を確かめるときは次の表の 4 つとも見ること。**
+**ネストしたロックを取る場面が無くなった。** デバイス操作をワーカースレッドへ移した結果、`CaptureCardViewer` が直接持つ `Arc<Mutex<..>>` は 2 つだけになり、どちらも他方と重ねて取る経路が存在しない。**`frames` と録画の差し込み口（`VideoTap` / `AudioTap`）の中にも `Mutex` があるので、ロック順序を確かめるときは次の表の 5 つとも見ること。**
 
 | 共有するもの | 型 | 誰と共有しているか |
 |---|---|---|
@@ -63,6 +63,7 @@
 | `screenshot_manager` | `Arc<Mutex<ScreenshotManager>>` | 実質 UI スレッドだけ（効果音の再生は内部で spawn する） |
 | `frames` | `video::VideoFrames`（内部が `Arc<Mutex<FrameBuffer>>`） | フレームコールバックスレッド ⇄ UI スレッド ⇄ ワーカー |
 | 録画の差し込み口 | `video::VideoTap`（`VideoFrames` の隣。内部が `Mutex<Option<Producer>>`） | フレームコールバックスレッド（`try_lock` だけで待たない）⇄ 録画スレッド（差し込み・抜き取りの瞬間だけ待つ）。他のロックと重ねて取らない |
+| 録画の音声の差し込み口 | `audio::AudioTap`（内部が `Mutex<Option<Producer>>`） | 入力コールバックスレッド（`try_lock` だけで待たない。パススルーのリングバッファの `try_lock` と同じコールバックの中で取るが、どちらも待たないので順序の問題にならない）⇄ 録画スレッド（差し込み・抜き取りの瞬間だけ待つ）。他のロックと重ねて取らない |
 
 - `VideoCapture` / `AudioCapture` はワーカースレッドが所有していて `Mutex` が無い。**UI スレッドからは触れない**
 - `hotkey_manager` も `Mutex` を持たない。UI スレッドからしか触らないため（内部の `ListenerState` だけがリスナースレッドと共有されている）

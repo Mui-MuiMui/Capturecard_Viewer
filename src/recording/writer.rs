@@ -1,4 +1,5 @@
-//! Media Foundation の Sink Writer（`IMFSinkWriter`）で NV12 を H.264 の MP4 へ書く。
+//! Media Foundation の Sink Writer（`IMFSinkWriter`）で NV12 を H.264、16bit PCM を
+//! AAC にして MP4 へ書く。
 //!
 //! **録画スレッドだけが触る。** COM（MTA）と MF の初期化は録画スレッドの入口で済ませて
 //! ある（`crate::com`）。組み立ての手順と決めた値の理由は `docs/design/recording.md` の
@@ -6,6 +7,8 @@
 //!
 //! - 入力は NV12 に揃える。ハードウェアの MFT も Microsoft のソフトウェアの H.264
 //!   エンコーダも必ず受け取る形式で、Sink Writer に変換を挟ませない
+//! - 音声の入力は 16bit PCM の 48kHz 2ch に揃える。Microsoft の AAC エンコーダが
+//!   受け取る形に、録画スレッド（`super::audio`）が寄せてから渡す
 //! - スロットリングは切る（`MF_SINK_WRITER_DISABLE_THROTTLING`）。エンコーダの遅れは
 //!   `backlog` を見て録画スレッドが自分で間引く
 //! - D3D のデバイスマネージャは渡さない。サンプルはシステムメモリに置く
@@ -16,11 +19,11 @@ use std::ptr;
 use windows::core::{Interface, GUID, HSTRING, PWSTR};
 use windows::Win32::Media::MediaFoundation::{
     eAVEncH264VProfile_High, CODECAPI_AVEncMPVGOPSize, IMFActivate, IMFAttributes, IMFMediaType,
-    IMFSinkWriter, IMFTransform, MFCreateAttributes, MFCreateMediaType, MFCreateMemoryBuffer,
-    MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Video, MFNominalRange_16_235, MFTEnumEx,
-    MFTGetInfo, MFT_ENUM_HARDWARE_URL_Attribute, MFT_FRIENDLY_NAME_Attribute,
-    MFT_TRANSFORM_CLSID_Attribute, MFTranscodeContainerType_MPEG4, MFVideoFormat_H264,
-    MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709,
+    IMFSample, IMFSinkWriter, IMFTransform, MFCreateAttributes, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Video,
+    MFNominalRange_16_235, MFTEnumEx, MFTGetInfo, MFT_ENUM_HARDWARE_URL_Attribute,
+    MFT_FRIENDLY_NAME_Attribute, MFT_TRANSFORM_CLSID_Attribute, MFTranscodeContainerType_MPEG4,
+    MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709,
     MFVideoPrimaries_SMPTE170M, MFVideoTransFunc_709, MFVideoTransferMatrix_BT601,
     MFVideoTransferMatrix_BT709, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_ASYNCMFT,
     MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SYNCMFT, MFT_REGISTER_TYPE_INFO, MF_MT_AVG_BITRATE,
@@ -30,9 +33,15 @@ use windows::Win32::Media::MediaFoundation::{
     MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SINK_WRITER_DISABLE_THROTTLING,
     MF_SINK_WRITER_STATISTICS, MF_TRANSCODE_CONTAINERTYPE,
 };
+use windows::Win32::Media::MediaFoundation::{
+    MFAudioFormat_AAC, MFAudioFormat_PCM, MFMediaType_Audio, MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+    MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
+    MF_MT_AUDIO_SAMPLES_PER_SECOND,
+};
 use windows::Win32::System::Com::{CoTaskMemFree, IPersist};
 
 use super::convert::{nv12_len, Nv12Matrix};
+use super::pts::{AUDIO_CHANNELS, AUDIO_SAMPLE_RATE};
 use super::EncoderInfo;
 
 /// Sink Writer を組み立てるときに決める値。
@@ -46,6 +55,9 @@ pub(super) struct WriterParams {
     pub(super) bitrate_kbps: u32,
     /// ハードウェアの MFT を選ばせるか
     pub(super) hardware: bool,
+    /// AAC の平均ビットレート（kbps）。`None` なら音声トラックを作らない。
+    /// Microsoft の AAC エンコーダが受け付ける 96 / 128 / 160 / 192 のどれか（呼び出し側で寄せてある）
+    pub(super) audio_bitrate_kbps: Option<u32>,
 }
 
 impl WriterParams {
@@ -97,6 +109,8 @@ impl std::fmt::Display for WriterError {
 pub(super) struct SinkWriter {
     writer: IMFSinkWriter,
     stream: u32,
+    /// 音声のストリーム。音声トラックを作らなければ `None`
+    audio_stream: Option<u32>,
     params: WriterParams,
     samples_written: u64,
 }
@@ -120,12 +134,28 @@ impl SinkWriter {
             encoding_parameters(&params).map_err(WriterError::at(WriterStage::Configure))?;
         unsafe { writer.SetInputMediaType(stream, &input, &encoding) }
             .map_err(WriterError::at(WriterStage::Configure))?;
+        // 音声（②）。出力は AAC、入力は 16bit PCM の 48kHz 2ch
+        let audio_stream = match params.audio_bitrate_kbps {
+            Some(bitrate_kbps) => {
+                let output = audio_output_media_type(bitrate_kbps)
+                    .map_err(WriterError::at(WriterStage::Configure))?;
+                let audio_stream = unsafe { writer.AddStream(&output) }
+                    .map_err(WriterError::at(WriterStage::Configure))?;
+                let input =
+                    audio_input_media_type().map_err(WriterError::at(WriterStage::Configure))?;
+                unsafe { writer.SetInputMediaType(audio_stream, &input, None) }
+                    .map_err(WriterError::at(WriterStage::Configure))?;
+                Some(audio_stream)
+            }
+            None => None,
+        };
         // ここでエンコーダが決まる
         unsafe { writer.BeginWriting() }.map_err(WriterError::at(WriterStage::Configure))?;
 
         Ok(Self {
             writer,
             stream,
+            audio_stream,
             params,
             samples_written: 0,
         })
@@ -172,26 +202,39 @@ impl SinkWriter {
     ) -> Result<(), WriterError> {
         let expected = nv12_len(self.params.width as usize, self.params.height as usize);
         debug_assert_eq!(data.len(), expected);
-        let write = WriterError::at(WriterStage::Write);
-        let sample = (|| -> windows::core::Result<_> {
-            let length = data.len() as u32;
-            let buffer = unsafe { MFCreateMemoryBuffer(length) }?;
-            let mut target: *mut u8 = ptr::null_mut();
-            unsafe { buffer.Lock(&mut target, None, None) }?;
-            // SAFETY: Lock が長さ `length` 以上の書き込める領域を返している
-            unsafe { ptr::copy_nonoverlapping(data.as_ptr(), target, data.len()) };
-            unsafe { buffer.Unlock() }?;
-            unsafe { buffer.SetCurrentLength(length) }?;
-            let sample = unsafe { MFCreateSample() }?;
-            unsafe { sample.AddBuffer(&buffer) }?;
-            unsafe { sample.SetSampleTime(pts) }?;
-            unsafe { sample.SetSampleDuration(duration) }?;
-            Ok(sample)
-        })()
-        .map_err(write)?;
+        let sample =
+            memory_sample(data, pts, duration).map_err(WriterError::at(WriterStage::Write))?;
         unsafe { self.writer.WriteSample(self.stream, &sample) }
             .map_err(WriterError::at(WriterStage::Write))?;
         self.samples_written += 1;
+        Ok(())
+    }
+
+    /// 16bit PCM（48kHz 2ch インターリーブ）を書く。`pts` と `duration` は 100ns 単位。
+    /// 音声トラックを作っていなければ何もしない。
+    pub(super) fn write_pcm(
+        &mut self,
+        samples: &[i16],
+        pts: i64,
+        duration: i64,
+    ) -> Result<(), WriterError> {
+        let Some(stream) = self.audio_stream else {
+            return Ok(());
+        };
+        if samples.is_empty() {
+            return Ok(());
+        }
+        // SAFETY: i16 の並びをそのままバイト列として読む（リトルエンディアンの PCM と同じ並び）
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                samples.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(samples),
+            )
+        };
+        let sample =
+            memory_sample(bytes, pts, duration).map_err(WriterError::at(WriterStage::Write))?;
+        unsafe { self.writer.WriteSample(stream, &sample) }
+            .map_err(WriterError::at(WriterStage::Write))?;
         Ok(())
     }
 
@@ -429,6 +472,59 @@ fn input_media_type(params: &WriterParams) -> windows::core::Result<IMFMediaType
     Ok(media_type)
 }
 
+/// システムメモリに置いたサンプルを 1 つ作る。映像（NV12）と音声（PCM）で共通。
+fn memory_sample(data: &[u8], pts: i64, duration: i64) -> windows::core::Result<IMFSample> {
+    let length = data.len() as u32;
+    let buffer = unsafe { MFCreateMemoryBuffer(length) }?;
+    let mut target: *mut u8 = ptr::null_mut();
+    unsafe { buffer.Lock(&mut target, None, None) }?;
+    // SAFETY: Lock が長さ `length` 以上の書き込める領域を返している
+    unsafe { ptr::copy_nonoverlapping(data.as_ptr(), target, data.len()) };
+    unsafe { buffer.Unlock() }?;
+    unsafe { buffer.SetCurrentLength(length) }?;
+    let sample = unsafe { MFCreateSample() }?;
+    unsafe { sample.AddBuffer(&buffer) }?;
+    unsafe { sample.SetSampleTime(pts) }?;
+    unsafe { sample.SetSampleDuration(duration) }?;
+    Ok(sample)
+}
+
+/// 16bit PCM の 1 秒あたりのバイト数（48kHz 2ch なら 192000）
+const PCM_BYTES_PER_SECOND: u32 = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS as u32 * 2;
+
+/// 音声の出力（AAC 48kHz 2ch）。ビットレートは `AVG_BYTES_PER_SECOND`（kbps × 1000 ÷ 8）で渡す。
+fn audio_output_media_type(bitrate_kbps: u32) -> windows::core::Result<IMFMediaType> {
+    let media_type = unsafe { MFCreateMediaType() }?;
+    unsafe {
+        media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        media_type.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC)?;
+        media_type.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+        media_type.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, AUDIO_SAMPLE_RATE)?;
+        media_type.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, u32::from(AUDIO_CHANNELS))?;
+        media_type.SetUINT32(
+            &MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+            bitrate_kbps.saturating_mul(1000) / 8,
+        )?;
+    }
+    Ok(media_type)
+}
+
+/// 音声の入力（16bit PCM 48kHz 2ch）。Microsoft の AAC エンコーダが受け取るのは
+/// 16bit PCM の 44.1kHz / 48kHz、1 / 2 / 6ch だけなので、録画スレッドで寄せてから渡す。
+fn audio_input_media_type() -> windows::core::Result<IMFMediaType> {
+    let media_type = unsafe { MFCreateMediaType() }?;
+    unsafe {
+        media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        media_type.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
+        media_type.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+        media_type.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, AUDIO_SAMPLE_RATE)?;
+        media_type.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, u32::from(AUDIO_CHANNELS))?;
+        media_type.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, u32::from(AUDIO_CHANNELS) * 2)?;
+        media_type.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, PCM_BYTES_PER_SECOND)?;
+    }
+    Ok(media_type)
+}
+
 /// エンコーダへ渡す値。2 秒ごとのキーフレームだけ。レート制御の方式は触らない。
 fn encoding_parameters(params: &WriterParams) -> windows::core::Result<IMFAttributes> {
     let attributes = new_attributes(1)?;
@@ -443,7 +539,8 @@ mod tests {
     use crate::recording::convert::rgb_to_nv12;
     use tempfile::tempdir;
     use windows::Win32::Media::MediaFoundation::{
-        MFCreateSourceReaderFromURL, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+        MFCreateSourceReaderFromURL, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+        MF_SOURCE_READER_FIRST_VIDEO_STREAM,
     };
 
     fn params(width: u32, height: u32, fps: u32) -> WriterParams {
@@ -453,6 +550,7 @@ mod tests {
             fps,
             bitrate_kbps: 8000,
             hardware: false,
+            audio_bitrate_kbps: None,
         }
     }
 
@@ -536,5 +634,70 @@ mod tests {
             read(&MF_MT_TRANSFER_FUNCTION),
             Some(MFVideoTransFunc_709.0 as u32)
         );
+    }
+
+    #[test]
+    #[ignore = "Media Foundation の H.264 / AAC エンコーダが必要（CI のランナーにあるかは未確認）"]
+    fn sink_writer_writes_an_aac_track_alongside_the_video() {
+        // 実行: cargo test -- --ignored sink_writer_writes_an_aac_track_alongside_the_video
+        let _com = ComApartment::enter(ComModel::MultiThreaded).expect("COM を初期化できる");
+        let _mf = MfPlatform::start().expect("MF を起こせる");
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("test_audio.mp4");
+        let params = WriterParams {
+            audio_bitrate_kbps: Some(160),
+            ..params(320, 240, 30)
+        };
+        let mut writer = SinkWriter::create(&path, params).expect("Sink Writer を作れる");
+
+        let mut nv12 = Vec::new();
+        assert!(rgb_to_nv12(
+            &vec![64u8; 320 * 240 * 3],
+            320,
+            240,
+            320,
+            240,
+            params.matrix(),
+            &mut nv12
+        ));
+        // 1 秒ぶん。映像は 30 枚、音声は 440Hz の正弦波を 100ms ずつ 10 回
+        let frames_per_chunk = 4_800usize;
+        for index in 0..30 {
+            writer
+                .write_nv12(&nv12, index * 333_333, 333_333)
+                .expect("映像を書ける");
+        }
+        for chunk in 0..10u64 {
+            let pcm: Vec<i16> = (0..frames_per_chunk)
+                .flat_map(|frame| {
+                    let t = (chunk as usize * frames_per_chunk + frame) as f64 / 48_000.0;
+                    let value = (8_000.0 * (std::f64::consts::TAU * 440.0 * t).sin()) as i16;
+                    [value, value]
+                })
+                .collect();
+            writer
+                .write_pcm(&pcm, chunk as i64 * 1_000_000, 1_000_000)
+                .expect("音声を書ける");
+        }
+        writer.finalize().expect("閉じられる");
+
+        // MF の MP4 ソースで読み戻し、AAC 48kHz 2ch の音声ストリームがあること
+        let reader = unsafe { MFCreateSourceReaderFromURL(&HSTRING::from(path.as_path()), None) }
+            .expect("書いた MP4 を開ける");
+        let native =
+            unsafe { reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32, 0) }
+                .expect("音声のストリームがある");
+        assert_eq!(
+            unsafe { native.GetGUID(&MF_MT_SUBTYPE) }.ok(),
+            Some(MFAudioFormat_AAC)
+        );
+        let read = |key: &GUID| unsafe { native.GetUINT32(key) }.ok();
+        assert_eq!(read(&MF_MT_AUDIO_SAMPLES_PER_SECOND), Some(48_000));
+        assert_eq!(read(&MF_MT_AUDIO_NUM_CHANNELS), Some(2));
+        // 映像のストリームも残っている
+        assert!(unsafe {
+            reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, 0)
+        }
+        .is_ok());
     }
 }

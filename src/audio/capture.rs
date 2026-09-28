@@ -19,6 +19,7 @@ use super::convert::{
 use super::resample::{ResampleStatus, ResampleTelemetry};
 use super::stream::{build_input_stream_with, build_output_stream_with, OutputSignals};
 use super::stream_config::{choose_passthrough_configs, resolve_ranges};
+use super::tap::AudioTap;
 use super::{ActiveAudio, AudioDirection, AudioError};
 
 /// パススルーを開くときの要求。
@@ -72,6 +73,9 @@ pub struct AudioCapture {
     /// 出力コールバックと共有する音量・パススルー・ミュート。
     /// ストリームを開き直しても差し替えない
     controls: Arc<AudioControls>,
+    /// 録画へ回す差し込み口。`controls` と同じく開き直しても差し替えない。
+    /// 入力の形と開き直しの番号は、ストリームを開くたびに書く
+    tap: AudioTap,
     /// クロックドリフト補正の共有状態。変換が要らない（identity）、または
     /// まだ音声を開いていなければ `None`。デバイスワーカーが `tick` の中で
     /// 数秒ごとに読み書きする（`app::worker_loop`）
@@ -104,8 +108,8 @@ impl AudioCapture {
     ///
     /// **`cpal::Stream` はスレッドをまたげない（`!Send`）ので、実際に使う
     /// スレッドで作ること。** いまはデバイスワーカースレッドが唯一の持ち主で、
-    /// `AudioControls` だけを UI スレッドと共有する。
-    pub fn new(controls: Arc<AudioControls>) -> Self {
+    /// `AudioControls` と録画の差し込み口（`AudioTap`）だけを UI スレッドと共有する。
+    pub fn new(controls: Arc<AudioControls>, tap: AudioTap) -> Self {
         let host = cpal::default_host();
         debug!("AudioCapture を作成した（ホスト: {:?}）", host.id());
 
@@ -115,6 +119,7 @@ impl AudioCapture {
             output_stream: None,
             active: None,
             controls,
+            tap,
             resample_telemetry: None,
             stream_error: Arc::new(AtomicBool::new(false)),
             underruns: Arc::new(AtomicU32::new(0)),
@@ -290,6 +295,11 @@ impl AudioCapture {
         // アンダーランの数え手も同じく作り直す（開き直したら 0 から）
         let underruns = Arc::new(AtomicU32::new(0));
 
+        // 録画へ入力の形と開き直しを知らせる。**入力のコールバックが動き出す前に書く。**
+        // 録画スレッドはここを境に、前のストリームのサンプルと分けて扱う
+        self.tap
+            .begin_stream(input_config.sample_rate().0, input_config.channels());
+
         // 入力ストリーム。デバイスのサンプル型ごとに正規化の仕方が違うので明示的に分ける
         let input_stream_config = input_config.config();
         let input_stream = match input_config.sample_format() {
@@ -297,6 +307,7 @@ impl AudioCapture {
                 &input_device,
                 &input_stream_config,
                 producer.clone(),
+                self.tap.clone(),
                 stream_error.clone(),
                 |sample| sample,
             ),
@@ -304,6 +315,7 @@ impl AudioCapture {
                 &input_device,
                 &input_stream_config,
                 producer.clone(),
+                self.tap.clone(),
                 stream_error.clone(),
                 i16_to_f32,
             ),
@@ -311,6 +323,7 @@ impl AudioCapture {
                 &input_device,
                 &input_stream_config,
                 producer.clone(),
+                self.tap.clone(),
                 stream_error.clone(),
                 u16_to_f32,
             ),
@@ -318,6 +331,7 @@ impl AudioCapture {
                 &input_device,
                 &input_stream_config,
                 producer.clone(),
+                self.tap.clone(),
                 stream_error.clone(),
                 i32_to_f32,
             ),

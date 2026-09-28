@@ -36,6 +36,7 @@ impl DeviceBackends for SystemBackends {
             frames,
             color_conversion,
             audio_controls,
+            audio_tap,
             repaint_waker,
         } = shared;
         // どちらも同じフレームバッファへ積む。同時に開くのは片方だけ
@@ -48,7 +49,10 @@ impl DeviceBackends for SystemBackends {
             direct_show: DirectShowCapture::new(frames, color_conversion, repaint_waker),
             open: None,
         };
-        (Box::new(video), Box::new(AudioCapture::new(audio_controls)))
+        (
+            Box::new(video),
+            Box::new(AudioCapture::new(audio_controls, audio_tap)),
+        )
     }
 }
 

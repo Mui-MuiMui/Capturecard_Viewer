@@ -21,12 +21,13 @@ flowchart LR
     dev -.->|VideoFrames / Atomic| ui
 ```
 
-**チャネルを通さない共有が 5 つある。** どれもデバイスを開く処理を挟まないので、コマンドの列に並べる理由がない。
+**チャネルを通さない共有が 6 つある。** どれもデバイスを開く処理を挟まないので、コマンドの列に並べる理由がない。
 
 | 共有するもの | 型 | 触る側 |
 |---|---|---|
 | 映像フレーム | `video::VideoFrames`（`Arc<Mutex<FrameBuffer>>`） | フレームコールバックが書き、UI スレッドが読む |
-| 録画へ回す映像フレーム | `video::VideoTap`（`VideoFrames` の隣。`Arc<VideoFrame>` の SPSC リング） | 録画スレッドが録画中だけリングを差し込み、フレームコールバックが画面へ置いたのと同じ `Arc` を積む（待たない `try_lock`、満杯なら捨てて数える）。ワーカーは触らない（`docs/design/recording.md`）。音声の `AudioTap` は第 2 段で足す |
+| 録画へ回す映像フレーム | `video::VideoTap`（`VideoFrames` の隣。`Arc<VideoFrame>` の SPSC リング） | 録画スレッドが録画中だけリングを差し込み、フレームコールバックが画面へ置いたのと同じ `Arc` を積む（待たない `try_lock`、満杯なら捨てて数える）。ワーカーは触らない（`docs/design/recording.md`） |
+| 録画へ回す音声 | `audio::AudioTap`（`Arc` の中に f32 の SPSC リングの差し込み口と Atomic の観測値） | 録画スレッドが録画中だけリングを差し込み、入力コールバック（`process_input`）が f32 へ直した値を入力の形のまま積む（待たない `try_lock`、空きが足りなければそのコールバックの分を捨てて数える）。コールバックは累計のサンプル数と最後に積んだ時刻も書く。**ワーカーはストリームを開くたびに `begin_stream` で入力のレート・チャンネル数と開き直しの番号を書く**（コールバックが動き出す前）。`AudioControls` と同じく開き直しても引き継ぐ共有物で、`BackendShared` に載せて `AudioCapture` / `FakeAudioCapture` へ渡す（`docs/design/recording.md`） |
 | 色空間・レンジ・明るさ・コントラスト・彩度 | `Arc<video::SharedColorConversion>`（Atomic） | UI スレッドが書き、フレームコールバックが読む |
 | 音量・ミュート・パススルー | `Arc<audio::AudioControls>`（Atomic） | UI スレッドが書き、出力コールバックが読む |
 | 音声のリサンプル補正の水位・補正係数 | `Arc<audio::ResampleTelemetry>`（Atomic） | 出力コールバックが水位を書き、デバイスワーカーが `tick` の中で補正係数を書く。**入出力の形が揃っている（identity）ストリームでは作らない**（`AudioCapture::resample_telemetry()` が `None` を返す） |
@@ -53,7 +54,7 @@ eframe は最小化されたウィンドウの再描画要求を捨てるため�
 
 ## デバイスに触る入口は trait 1 枚で仕切る
 
-**ワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。** `worker_loop` / `worker_connect` / `worker_timers` はどれも `Box<dyn ..>` を持つだけで、`VideoCapture` / `AudioCapture` という具体型を知らない。実装を選ぶのは `DeviceWorker::spawn` の 1 か所（`backend::backends_from_env`。既定は `SystemBackends`、環境変数を指定したときだけフェイク）で、そこが `BackendShared`（フレーム・色変換・音量・再描画の窓口）と一緒にワーカースレッドへ送り、**組み立てはあちら側で行う**（`cpal::Stream` が `!Send` なので、作る場所は使うスレッドでなければならない）。
+**ワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。** `worker_loop` / `worker_connect` / `worker_timers` はどれも `Box<dyn ..>` を持つだけで、`VideoCapture` / `AudioCapture` という具体型を知らない。実装を選ぶのは `DeviceWorker::spawn` の 1 か所（`backend::backends_from_env`。既定は `SystemBackends`、環境変数を指定したときだけフェイク）で、そこが `BackendShared`（フレーム・色変換・音量・録画の音声の差し込み口・再描画の窓口）と一緒にワーカースレッドへ送り、**組み立てはあちら側で行う**（`cpal::Stream` が `!Send` なので、作る場所は使うスレッドでなければならない）。
 
 ```mermaid
 flowchart LR

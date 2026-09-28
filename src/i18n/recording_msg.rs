@@ -56,8 +56,8 @@ pub fn recording_write_failed(reason: impl Display) -> String {
 
 pub fn recording_encoder_unavailable(reason: impl Display) -> String {
     match language() {
-        Language::Japanese => format!("H.264 のエンコーダを用意できない: {reason}"),
-        Language::English => format!("Cannot set up an H.264 encoder: {reason}"),
+        Language::Japanese => format!("H.264 / AAC のエンコーダを用意できない: {reason}"),
+        Language::English => format!("Cannot set up the H.264 / AAC encoder: {reason}"),
     }
 }
 
