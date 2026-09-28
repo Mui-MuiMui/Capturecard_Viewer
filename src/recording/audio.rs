@@ -479,6 +479,39 @@ mod tests {
     }
 
     #[test]
+    fn audio_stats_since_subtracts_the_counters_and_keeps_the_drift() {
+        let base = AudioStats {
+            frames: 48_000,
+            silence_frames: 4_800,
+            trimmed_samples: 10,
+            trimmed_units: 1_000,
+            overflows: 1,
+            drift: None,
+        };
+        let now = AudioStats {
+            frames: 96_000,
+            silence_frames: 9_600,
+            trimmed_samples: 30,
+            trimmed_units: 3_000,
+            overflows: 4,
+            drift: Some((10_000_000, 9_999_000)),
+        };
+        assert_eq!(
+            now.since(&base),
+            AudioStats {
+                frames: 48_000,
+                silence_frames: 4_800,
+                trimmed_samples: 20,
+                trimmed_units: 2_000,
+                overflows: 3,
+                drift: Some((10_000_000, 9_999_000)),
+            }
+        );
+        // 差し込み直しで溢れた回数が 0 に戻っていても、負にはしない
+        assert_eq!(base.since(&now).overflows, 0);
+    }
+
+    #[test]
     fn samples_to_units_uses_the_input_format() {
         // 48kHz 2ch の 9600 サンプルは 4800 フレーム = 100ms
         assert_eq!(samples_to_units(9_600, 48_000, 2), 1_000_000);

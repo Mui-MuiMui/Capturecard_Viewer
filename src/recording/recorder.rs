@@ -554,4 +554,227 @@ mod tests {
         assert_eq!(recorder.replay_ring(), None);
         assert!(recorder.try_recv().is_none());
     }
+
+    /// フェイクの映像（720p60 のカラーバーにフレーム番号を焼き込んだもの）と音声（正弦波）を流す。
+    fn start_fakes(
+        frames: &crate::video::VideoFrames,
+        audio_tap: &AudioTap,
+    ) -> (
+        crate::video::FakeVideoCapture,
+        crate::audio::FakeAudioCapture,
+    ) {
+        use crate::audio::{AudioControls, FakeAudioCapture, FakeAudioOptions, PassthroughRequest};
+        use crate::repaint::RepaintWaker;
+        use crate::video::{FakeVideoCapture, FakeVideoOptions, SharedColorConversion};
+        let mut video = FakeVideoCapture::new(
+            frames.clone(),
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::new(),
+            FakeVideoOptions {
+                device_count: 1,
+                disconnect_after: None,
+                failures_before_success: 0,
+            },
+        );
+        video
+            .start_capture(
+                Some("Fake Camera 1"),
+                Some((1280, 720)),
+                Some("YUY2"),
+                Some(60),
+            )
+            .expect("フェイクの映像を開ける");
+        let mut audio = FakeAudioCapture::new(
+            Arc::new(AudioControls::default()),
+            audio_tap.clone(),
+            FakeAudioOptions {
+                input_count: 1,
+                failures_before_success: 0,
+                stream_error_after: None,
+            },
+        );
+        audio
+            .start_passthrough(&PassthroughRequest {
+                input_device_name: Some("Fake Audio Input 1"),
+                output_device_name: Some("Fake Audio Output 1"),
+                sample_rate: None,
+                channels: None,
+                input_capabilities: None,
+                output_capabilities: None,
+                buffer_ms: 50,
+            })
+            .expect("フェイクの音声を開ける");
+        (video, audio)
+    }
+
+    /// 届いたイベントを集めながら `duration` だけ待つ。
+    fn poll_for(recorder: &mut Recorder, duration: Duration) -> Vec<RecordingEvent> {
+        let until = Instant::now() + duration;
+        let mut events = Vec::new();
+        while Instant::now() < until {
+            events.extend(std::iter::from_fn(|| recorder.try_recv()));
+            thread::sleep(Duration::from_millis(50));
+        }
+        events
+    }
+
+    /// フェイクを流してリプレイバッファを `seconds` 秒で ON にし（`None` なら OFF のまま）、
+    /// `wait` 待ってから `record` だけ録画して止める。保存した結果と、読み戻した長さ（100ns）を返す。
+    fn record_with_replay(
+        seconds: Option<u32>,
+        wait: Duration,
+        record: Duration,
+    ) -> (RecordingSummary, i64) {
+        use crate::com::{ComApartment, ComModel, MfPlatform};
+        use windows::core::HSTRING;
+        use windows::Win32::Media::MediaFoundation::{
+            MFCreateSourceReaderFromURL, MF_PD_DURATION, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+            MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
+        };
+
+        let frames = crate::video::VideoFrames::new();
+        let audio_tap = AudioTap::new();
+        let (mut video, mut audio) = start_fakes(&frames, &audio_tap);
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作れること");
+        let mut recorder = Recorder::new(frames.tap(), audio_tap);
+        recorder
+            .set_replay(seconds.map(|seconds| ReplayConfig {
+                seconds,
+                video_bitrate_kbps: 4000,
+                hardware_encoder: false,
+                audio_bitrate_kbps: Some(160),
+                nominal_fps: Some(60),
+            }))
+            .expect("リプレイバッファを始められる");
+        // OFF のままならスレッドは起きない（OFF のときの負荷は①②と同じ）
+        assert_eq!(recorder.thread.is_some(), seconds.is_some());
+        let events = poll_for(&mut recorder, wait);
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, RecordingEvent::ReplayFailed(_))),
+            "{events:?}"
+        );
+
+        recorder
+            .start(RecordingRequest {
+                folder: dir.path().to_path_buf(),
+                file_stem: "replay".to_string(),
+                video_bitrate_kbps: 4000,
+                hardware_encoder: false,
+                nominal_fps: Some(60),
+                audio_bitrate_kbps: Some(160),
+            })
+            .expect("録画を始められる");
+        poll_for(&mut recorder, record);
+        let lead = recorder.replay_lead();
+        assert_eq!(lead.is_some(), seconds.is_some());
+        recorder.request_stop();
+        let events = poll_for(&mut recorder, Duration::from_secs(3));
+        let summary = events
+            .iter()
+            .find_map(|event| match event {
+                RecordingEvent::Stopped(summary) => Some(summary.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("保存できた: {events:?}"));
+        // 統計 OSD の値は ms で丸めてある
+        assert_eq!(
+            summary.replay_lead.map(|lead| lead.as_millis()),
+            lead.map(|lead| lead.as_millis())
+        );
+        // リプレイバッファが ON のままなら、止めてもスレッドは動き続ける。OFF なら止まる
+        poll_for(&mut recorder, Duration::from_millis(200));
+        assert_eq!(recorder.thread.is_some(), seconds.is_some());
+        recorder.shutdown();
+        video.stop_capture();
+        audio.stop_capture();
+
+        let _com = ComApartment::enter(ComModel::MultiThreaded).expect("COM を初期化できる");
+        let _mf = MfPlatform::start().expect("MF を起こせる");
+        let reader =
+            unsafe { MFCreateSourceReaderFromURL(&HSTRING::from(summary.path.as_path()), None) }
+                .expect("書いた MP4 を開ける");
+        let value = unsafe {
+            reader.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
+        }
+        .expect("長さを読める");
+        let duration = unsafe { value.Anonymous.Anonymous.Anonymous.uhVal } as i64;
+        assert!(unsafe {
+            reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32, 0)
+        }
+        .is_ok());
+        // 先頭の映像のサンプルは 0 から始まる（最初から再生できる）
+        let (mut flags, mut time, mut sample) = (0u32, -1i64, None);
+        unsafe {
+            reader.ReadSample(
+                MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+                0,
+                None,
+                Some(&mut flags),
+                Some(&mut time),
+                Some(&mut sample),
+            )
+        }
+        .expect("読める");
+        assert!(sample.is_some());
+        // リングからの書き出しは先頭のキーフレームを 0 にする。①②の経路は録画の開始から
+        // 最初のフレームが届くまでの分（1 枚ぶん程度）だけ後ろから始まる
+        let limit = if seconds.is_some() { 10_000 } else { 1_000_000 };
+        assert!(time.abs() < limit, "先頭の時刻 {time}");
+        (summary, duration)
+    }
+
+    #[test]
+    #[ignore = "Media Foundation の H.264 / AAC エンコーダが必要。30 秒ほどかかる"]
+    fn recorder_replay_buffer_prepends_the_seconds_before_the_start() {
+        // 実行: cargo test -- --ignored recorder_replay_buffer_prepends_the_seconds_before_the_start
+        //
+        // 30 秒で ON にして 20 秒待ち、5 秒録画する。溜まっているのは 20 秒ぶんなので、
+        // ファイルは 20 秒 + 5 秒 ≒ 25 秒（先頭はフェイクの最初のキーフレーム）
+        let (summary, duration) =
+            record_with_replay(Some(30), Duration::from_secs(20), Duration::from_secs(5));
+        let lead = summary.replay_lead.expect("さかのぼった");
+        assert!(lead > Duration::from_secs(18), "さかのぼり {lead:?}");
+        assert!(
+            (230_000_000..=270_000_000).contains(&duration),
+            "長さ {duration}（{summary:?}）"
+        );
+    }
+
+    #[test]
+    #[ignore = "Media Foundation の H.264 / AAC エンコーダが必要。20 秒ほどかかる"]
+    fn recorder_replay_buffer_keeps_only_the_configured_seconds() {
+        // 実行: cargo test -- --ignored recorder_replay_buffer_keeps_only_the_configured_seconds
+        //
+        // 5 秒で ON にして 12 秒待ち、3 秒録画する。さかのぼるのは「いま − 5 秒」以降の
+        // 最初のキーフレームからなので 3〜5 秒（キーフレームは 2 秒ごと）
+        let (summary, duration) =
+            record_with_replay(Some(5), Duration::from_secs(12), Duration::from_secs(3));
+        let lead = summary.replay_lead.expect("さかのぼった");
+        assert!(
+            (Duration::from_secs(3)..=Duration::from_millis(5_200)).contains(&lead),
+            "さかのぼり {lead:?}"
+        );
+        assert!(
+            (55_000_000..=85_000_000).contains(&duration),
+            "長さ {duration}（{summary:?}）"
+        );
+    }
+
+    #[test]
+    #[ignore = "Media Foundation の H.264 / AAC エンコーダが必要。10 秒ほどかかる"]
+    fn recorder_without_replay_records_only_after_the_start() {
+        // 実行: cargo test -- --ignored recorder_without_replay_records_only_after_the_start
+        //
+        // リプレイバッファが OFF なら①②の経路（Sink Writer がエンコードも行う）で録る。
+        // 開始前の 5 秒は入らず、ファイルは録画した 3 秒ぶん
+        let (summary, duration) =
+            record_with_replay(None, Duration::from_secs(5), Duration::from_secs(3));
+        assert_eq!(summary.replay_lead, None);
+        assert!(
+            (25_000_000..=40_000_000).contains(&duration),
+            "長さ {duration}（{summary:?}）"
+        );
+    }
 }
