@@ -90,7 +90,8 @@ The settings window → **Hotkeys tab** lets you assign a key to each of the fol
 
 - Press Set... on a row to open the capture dialog. **It accepts a key the instant it opens: press anything other than a modifier key and it captures that combination and closes automatically.** There is no "start capturing" or OK button. Use Clear in the list to remove an assignment.
 - Hotkeys are temporarily suspended while the dialog is open, so pressing an assigned key does not run its action. **You can press the key already assigned to the action you are editing to assign it again.** A key assigned to another action is not accepted (see the next item).
-- If the key you pressed cannot be accepted, the dialog stays open and shows the reason in red: it was only modifier keys, or it is already assigned to another action.
+- You can assign F1-F12, A-Z, 0-9, Space, Enter, Escape, Tab, Backspace, Insert, Delete, Home, End, PageUp, PageDown, and the arrow keys, alone or with Ctrl / Shift / Alt (the numeric keypad is not supported). For keys that also drive the app's own controls, such as Tab and the arrow keys, combining them with Ctrl or another modifier is recommended.
+- If the key you pressed cannot be accepted, the dialog stays open and shows the reason in red: it was only modifier keys, it is already assigned to another action, or it is a combination that cannot be told apart from copy, paste, and cut (Ctrl+Insert / Shift+Insert / Shift+Delete).
 - Changes take effect when you press Apply or OK.
 - A hotkey does exactly what the mouse does: changing the volume shows the volume bar at the bottom, toggling fullscreen shows the indicator at the top-left.
 - Assigning the same key to more than one action shows a warning. If you apply it anyway, only the action higher in the list stays active.
