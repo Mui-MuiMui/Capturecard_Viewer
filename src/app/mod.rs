@@ -73,9 +73,6 @@ pub struct CaptureCardViewer {
     color_conversion: Arc<SharedColorConversion>,
     // 音量・ミュート・パススルー。出力コールバックが 1 回ごとに読む Atomic
     audio_controls: Arc<AudioControls>,
-    // 録画へ音声を回す差し込み口。入力コールバックが積み、録画スレッドが読む。
-    // 録画を始めるときに複製を `Recorder` へ渡す（映像の `VideoTap` は `frames` の中）
-    audio_tap: AudioTap,
     screenshot_manager: Arc<Mutex<ScreenshotManager>>,
     // グローバルホットキーの登録と押下の検出。
     //
@@ -194,10 +191,11 @@ pub struct CaptureCardViewer {
     // 更新の確認。結果のチャネル、確認のスレッド、「その他」タブに出す状態、
     // 起動時の通知ダイアログをまとめて持つ（`app::update`）
     update_check: UpdateState,
-    // 録画スレッドの窓口。録画していない間は `None`。**`on_exit` ではデバイスワーカーを
-    // 止める前に止めて join する**（最後のフレームまでファイルに入れるため）。
-    // 操作とイベントの取り込みは `app::recording`
-    recorder: Option<Recorder>,
+    // 録画スレッドの窓口。録画へ映像と音声を回す差し込み口（`VideoTap` / `AudioTap`）の
+    // 複製を持ち、録画中かリプレイバッファが ON のあいだだけスレッドを起こす。
+    // **`on_exit` ではデバイスワーカーを止める前に止めて join する**（最後のフレームまで
+    // ファイルに入れるため）。操作とイベントの取り込みは `app::recording`
+    recorder: Recorder,
 
     // OS の表示言語から推定した言語。設定の言語が「自動」のときに使う。
     //
@@ -250,6 +248,8 @@ impl Default for CaptureCardViewer {
             // 渡す必要があるので、ワーカーの起動時に持たせる
             repaint_waker.clone(),
         );
+        // 録画の窓口は差し込み口の複製を持つ。スレッドは録画かリプレイバッファで起こす
+        let recorder = Recorder::new(frames.tap(), audio_tap);
 
         let mut app = Self {
             settings,
@@ -258,7 +258,6 @@ impl Default for CaptureCardViewer {
             frames,
             color_conversion,
             audio_controls,
-            audio_tap,
             screenshot_manager,
             hotkey_manager,
             repaint_waker,
@@ -308,7 +307,7 @@ impl Default for CaptureCardViewer {
             screenshot_save_threads: Vec::new(),
             sound_load_threads: Vec::new(),
             update_check: UpdateState::new(),
-            recorder: None,
+            recorder,
 
             os_language,
         };

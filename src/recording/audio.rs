@@ -50,7 +50,7 @@ impl AudioChunk {
 }
 
 /// 閉じたときにログへ残す値。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct AudioStats {
     /// 作った出力フレームの累計（48kHz）
     pub(super) frames: u64,
@@ -68,6 +68,20 @@ pub(super) struct AudioStats {
 }
 
 impl AudioStats {
+    /// `base` からの差。リプレイバッファ（③）は音声トラックを録画をまたいで使い続けるので、
+    /// 1 回の録画の値は録画を始めたときの値からの差で出す。ドリフトの区間はそのまま使う
+    /// （揃え直すたびに始め直す区間で、録画の始まりとは関係しない）。
+    pub(super) fn since(&self, base: &AudioStats) -> AudioStats {
+        AudioStats {
+            frames: self.frames.saturating_sub(base.frames),
+            silence_frames: self.silence_frames.saturating_sub(base.silence_frames),
+            trimmed_samples: self.trimmed_samples.saturating_sub(base.trimmed_samples),
+            trimmed_units: self.trimmed_units.saturating_sub(base.trimmed_units),
+            overflows: self.overflows.saturating_sub(base.overflows),
+            drift: self.drift,
+        }
+    }
+
     /// ログへ 1 行で残す。録画スレッドが閉じたときに呼ぶ（失敗ではないので `info`）。
     ///
     /// **途切れずに続いた区間での「映像の時計（PC）での経過」と「音声のサンプル数 ÷ レート」の差**
