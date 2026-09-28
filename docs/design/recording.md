@@ -2,11 +2,11 @@
 
 キャプチャーボードの映像と音声を H.264 + AAC の MP4 へ書き出す仕組みの設計。Issue #120（録画）と #182（リプレイバッファ）。
 フレームコールバックと cpal のコールバックから録画スレッドへ渡す経路、Media Foundation の Sink Writer の使い方、PTS の付け方、失敗の扱い、設定と UI を扱う。
-**この文書は実装前の設計で、コードはまだ無い。** 実装した段で「状態」の列と本文を実際の形へ書き換える。
+**①（映像のみ）は実装済み（PR #283）。②③はまだ設計だけで、コードは無い。** 実装した段で「状態」の列と本文を実際の形へ書き換える。①で設計から詰めたところ（エンコーダの名前の引き方、色空間の印を出力にも付けること、最小化中のホットキーの捨て方）は該当の節に書いてある。
 
 | 段階 | 中身 | 状態 |
 |---|---|---|
-| ① | 映像のみの録画（右クリックメニューとホットキーで開始・停止、`[recording]` の設定、録画中の印） | 未着手 |
+| ① | 映像のみの録画（右クリックメニューとホットキーで開始・停止、`[recording]` の設定、録画中の印） | 実装済み（PR #283） |
 | ② | 音声トラック（AAC） | 未着手 |
 | ③ | リプレイバッファ（#182。録画開始時に直近 N 秒を先頭に含める） | 未着手 |
 
@@ -153,7 +153,7 @@ sequenceDiagram
 | 属性 | `MFCreateAttributes` | `MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS` = 設定の `hardware_encoder`、`MF_TRANSCODE_CONTAINERTYPE` = `MFTranscodeContainerType_MPEG4`、`MF_SINK_WRITER_DISABLE_THROTTLING` = TRUE |
 | 作成 | `MFCreateSinkWriterFromURL(パス, None, 属性)` | 入れ物は拡張子に頼らず属性で MP4 を指定する |
 | 映像の出力 | `AddStream` | `MFMediaType_Video` / `MFVideoFormat_H264`、`MF_MT_AVG_BITRATE`、`MF_MT_FRAME_SIZE`、`MF_MT_FRAME_RATE`、`MF_MT_PIXEL_ASPECT_RATIO` = 1:1、`MF_MT_INTERLACE_MODE` = progressive、`MF_MT_MPEG2_PROFILE` = High |
-| 映像の入力 | `SetInputMediaType(映像, NV12, 符号化の引数)` | `MFVideoFormat_NV12`、同じ大きさと fps、`MF_MT_DEFAULT_STRIDE` = 幅、`MF_MT_YUV_MATRIX` / `MF_MT_VIDEO_PRIMARIES` / `MF_MT_VIDEO_NOMINAL_RANGE`（HD は BT.709、SD は BT.601、16〜235）。符号化の引数に `CODECAPI_AVEncMPVGOPSize` = fps × 2（2 秒ごとのキーフレーム） |
+| 映像の入力 | `SetInputMediaType(映像, NV12, 符号化の引数)` | `MFVideoFormat_NV12`、同じ大きさと fps、`MF_MT_DEFAULT_STRIDE` = 幅、`MF_MT_YUV_MATRIX` / `MF_MT_VIDEO_PRIMARIES` / `MF_MT_VIDEO_NOMINAL_RANGE`（HD は BT.709、SD は BT.601、16〜235）。**同じ印（と `MF_MT_TRANSFER_FUNCTION`）を映像の出力のメディアタイプにも付ける。** 入力だけに付けるとエンコーダは H.264 の VUI に書かず、プレーヤーが色空間を推し量ることになる（①の実装で MF の Source Reader で読み戻して確かめた。`#[ignore]` のテスト `sink_writer_writes_a_playable_mp4` が見ている）。符号化の引数に `CODECAPI_AVEncMPVGOPSize` = fps × 2（2 秒ごとのキーフレーム） |
 | 音声の出力（②） | `AddStream` | `MFAudioFormat_AAC`、48000Hz、2ch、16bit、`MF_MT_AUDIO_AVG_BYTES_PER_SECOND` = 設定のビットレート ÷ 8 |
 | 音声の入力（②） | `SetInputMediaType(音声, PCM)` | `MFAudioFormat_PCM`、48000Hz、2ch、16bit、`MF_MT_AUDIO_BLOCK_ALIGNMENT` = 4 |
 | 開始 | `BeginWriting` | ここでエンコーダが決まる |
@@ -168,7 +168,7 @@ sequenceDiagram
 
 - `hardware_encoder` が真なら `MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS` を立て、Sink Writer にハードウェアの MFT を選ばせる。無ければ Microsoft のソフトウェアエンコーダへ自然に倒れる
 - **D3D のデバイスマネージャ（`MF_SINK_WRITER_D3D_MANAGER`）は渡さない。** サンプルはシステムメモリに置く。ハードウェアの MFT の中にはこれを要求して `BeginWriting` や最初の `WriteSample` で失敗するものがあるので、**その場合は書きかけのファイルを消し、ハードウェアを切って作り直す。** 倒したことは `warn` で残す
-- 実際に使ったエンコーダを `info` で残す。`GetServiceForStream` で MFT を取り、属性の `MFT_FRIENDLY_NAME_Attribute` と `MFT_ENUM_HARDWARE_URL_Attribute`（あればハードウェア）を読む（取り方は実装時に確かめる）。統計 OSD にも出す。「壊れても原因が分かる」（`docs/ARCHITECTURE.md` の「設計の前提」）ため
+- 実際に使ったエンコーダを `info` で残す。`GetServiceForStream` で MFT を取り、属性の `MFT_FRIENDLY_NAME_Attribute` と `MFT_ENUM_HARDWARE_URL_Attribute`（あればハードウェア）を読む。**名前は属性 → CLSID（属性の `MFT_TRANSFORM_CLSID_Attribute`、無ければ `IPersist::GetClassID`）から `MFTGetInfo` の登録名 → 同じ種類（ハードウェア / ソフトウェア）で NV12 → H.264 の登録が 1 つだけならその名前、の順に引く。** Microsoft のソフトウェアの H.264 エンコーダ（`H264 Encoder MFT`）は自分の属性に名前も CLSID も持たないことを①の実装で確かめたため。どれも取れなければ「名前不明」と出す（`recording::writer::SinkWriter::encoder_info`）。統計 OSD にも出す。「壊れても原因が分かる」（`docs/ARCHITECTURE.md` の「設計の前提」）ため
 - ソフトウェアエンコーダで 4K60 は間に合わない見込み。間に合わなければ上の間引きで録画側がコマ落ちするだけで、表示は落とさない
 
 ### `windows` クレートのフィーチャ
@@ -268,7 +268,7 @@ MF の時間の単位は 100ns。
 
 - **右クリックメニュー**に「録画を開始」を置く。録画中は同じ位置が「録画を停止（00:12:34）」になる。描画は `MenuAction::ToggleRecording` を返すだけ（`src/app/menu/items.rs` は状態を書き換えない）
 - **ホットキーのアクション** `HotkeyAction::ToggleRecording`、設定ファイル上の名前は **`toggle_recording`**。**一度出したら変えない**（`docs/design/hotkeys.md`）。右クリックメニューと同じ `toggle_recording` を呼ぶ
-- `runs_while_minimized()` は偽（①の時点）。**最小化中の押下は復帰しても実行しない**（溜まった押下を畳んだ結果を 0 回にする）。フルスクリーンのように偶数回で打ち消す畳み方にすると、最小化中に 1 回押しただけで復帰した瞬間に録画が始まり、意図とずれるため
+- `runs_while_minimized()` は偽（①の時点）。**最小化中の押下は復帰しても実行しない**（溜まった押下を畳んだ結果を 0 回にする）。フルスクリーンのように偶数回で打ち消す畳み方にすると、最小化中に 1 回押しただけで復帰した瞬間に録画が始まり、意図とずれるため。**実装では `folded_repeats` を 0 にせず、リスナーが最小化中の押下を溜めずに捨てる**（`HotkeyAction::discarded_while_minimized`、`PressRouting::DiscardedWhileMinimized`）。`folded_repeats` は押された回数しか受け取らないので、最小化中の押下と通常のフレームの 1 回の押下を区別できず、0 にすると通常の押下でも録画が始まらなくなるため。通常のフレームの畳み方はトグルと同じ（奇数回なら 1 回）
 - 設定ダイアログに「録画」タブを足す（①は保存先・ファイル名・映像のビットレート・ハードウェアエンコーダ、②で音声、③でリプレイバッファ）。保存先のフォルダ選択は `SettingsEvent` を返し、描画の外で `rfd` を開く（`docs/design/settings-dialog.md`）。③のさかのぼる長さの横には「長くするほどメモリを使う」を添える（#182 の決定）
 - 画面に出す文字列はすべて `crate::i18n` を通す（`docs/design/i18n.md`）。量が増えるので、引数を取るものは `src/i18n/update_msg.rs` にならって録画用のファイルを分ける
 
@@ -348,8 +348,8 @@ CI で回すのは純粋関数（RGB → NV12、ファイル名の書式の検�
 
 ## 実装したら書き足す場所
 
-- `docs/design/threads.md` のスレッドの一覧に録画スレッド（`recorder`）の行を足す
-- `docs/design/device-worker.md` の「チャネルを通さない共有」の表に `VideoTap` / `AudioTap` を足す
-- `docs/design/video-pipeline.md` の「映像パイプライン」に録画への分岐を足す
-- `CLAUDE.md` のモジュール構成の表に `src/recording/` の各ファイルを足す
-- `GUARDRAIL.md` に「録画スレッドから直接 `error!` を出さない」「リングの `Arc` を持ったまま `WriteSample` しない」を足す
+- `docs/design/threads.md` のスレッドの一覧に録画スレッド（`recorder`）の行を足す — ①で済み（PR #283。ロックの表と、`error!` を出さないこと・`Arc` を手放してから書くことの段落も足した）
+- `docs/design/device-worker.md` の「チャネルを通さない共有」の表に `VideoTap` / `AudioTap` を足す — `VideoTap` は①で済み（PR #283）。`AudioTap` は②で足す
+- `docs/design/video-pipeline.md` の「映像パイプライン」に録画への分岐を足す — ①で済み（PR #283）
+- `CLAUDE.md` のモジュール構成の表に `src/recording/` の各ファイルを足す — ①で済み（PR #283。`src/app/recording.rs` / `src/video/tap.rs` / `src/ui/recording_tab.rs` / `src/i18n/recording_msg.rs` / `src/com.rs` も）
+- `GUARDRAIL.md` に「録画スレッドから直接 `error!` を出さない」「リングの `Arc` を持ったまま `WriteSample` しない」を足す — ①で済み（PR #283。「`on_exit` では録画をデバイスワーカーより先に止める」も足した）

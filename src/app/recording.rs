@@ -215,7 +215,7 @@ impl CaptureCardViewer {
                                 egui::Vec2::splat(INDICATOR_DOT_RADIUS * 2.0),
                                 egui::Sense::hover(),
                             );
-                            // 録画中の赤は意味を持つ色なので、テーマの色ではなく固定の赤にする
+                            // 固定色でよい: 映像の上の OSD で統計 OSD の白と同じ扱い（warning_label 系は設定ダイアログ用）
                             ui.painter().circle_filled(
                                 rect.center(),
                                 INDICATOR_DOT_RADIUS,
