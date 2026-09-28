@@ -77,7 +77,7 @@ gh pr create --base main --head dev --title "chore: 1.0.7 をリリースする"
 
 - **`main` へ PR を出してよいのはこのときだけ。** 通常の PR は `dev` へ向ける（`.claude/skills/naming-conventions/SKILL.md`）
 - マージは merge commit。squash も rebase も使わない
-- CI が緑になってからマージする
+- CI が緑で、レビュースレッド（CodeRabbit の指摘）が全て解決されてからマージする。ルールセットが両方をマージの条件にしているので、未解決があるとマージできない。リリース PR で初めて出た指摘は、このリリースに含めるか別 Issue に回すかを決め、返信して Resolve する
 
 ## 4. タグを打つ
 
@@ -147,10 +147,10 @@ SHA256SUMS.txt           exe の SHA-256
 
 `dev` → `main` をマージコミットで取り込むと、`main` に `dev` が持たないコミット（マージコミットそのもの）ができる。そのままにすると次のリリース PR の差分が読みにくくなるため、`main` を `dev` へマージして揃える。
 
+`dev` はルールセットで PR 経由のマージしか受け付けないため、直接 push ではなく `main` → `dev` の PR を作ってマージする。差分はリリース PR のマージコミットだけなので、CI はそのまま通る。
+
 ```bash
-git checkout dev && git pull --ff-only
-git merge origin/main
-git push origin dev
+gh pr create --base dev --head main --title "chore: 1.0.7 のリリース後に main を dev へ戻す" --body "Refs #<リリース PR の番号>"
 ```
 
 早送りで済む場合はこの操作自体が不要になる。`git log --oneline dev..main` が空なら何もしなくてよい。

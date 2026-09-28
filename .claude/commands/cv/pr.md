@@ -78,6 +78,18 @@ CodeRabbit の指摘も鵜呑みにせず妥当性を判断する。このリポ
 
 対応内容を PR にコメントする。指摘に対して何をどう変えたか、直さなかった場合はその理由を書く。
 
+**返信したらそのスレッドを Resolve する。** 直したもの、直さない理由を書いたもの、別 Issue に回したもの（Issue 番号を書く）のいずれも、返信だけで放置しない。`main` と `dev` はルールセットで「レビュースレッドが全て解決されていること」をマージの条件にしているので、未解決のスレッドが 1 つでも残っていると `gh pr merge` も UI のマージも通らない。
+
+未解決のスレッドの一覧と Resolve は GraphQL で行う。
+
+```bash
+gh api graphql -f query='{repository(owner:"Mui-MuiMui",name:"Capturecard_Viewer"){pullRequest(number:<番号>){reviewThreads(first:50){nodes{id isResolved path}}}}}' --jq '.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)|"(.id) (.path)"'
+```
+
+```bash
+gh api graphql -f query='mutation{resolveReviewThread(input:{threadId:"<id>"}){thread{isResolved}}}'
+```
+
 PR の題意が変わった場合はタイトルと本文も更新する。
 
 ### 5. Issue へ反映する

@@ -40,6 +40,8 @@ description: 版を切って GitHub Release を出すときの進め方。バー
 
 `docs/RELEASE.md` の手順 3。**`--base main` を明示する。** 通常の PR は `dev` 向けなので、ここだけが例外。
 
+CodeRabbit の指摘はこの PR にも付く（複数の PR が合わさって初めて見える指摘が出る）。このリリースに含めるか別 Issue に回すかを決め、返信して Resolve しないとマージできない（ルールセット）。別 Issue に回すときは Issue のリンクを返信に書く。
+
 **この PR にだけはクローズ用キーワードが実際に効く。絶対に書かないこと。** 通常の `dev` 向け PR では無視されるのに対し、ここは既定ブランチ向けなのでそのまま発火し、実機確認の済んでいない Issue まで閉じる。含まれる変更は `Refs #<番号>` で並べるか、`CHANGELOG.md` の該当節を指すに留める。
 
 同じ理由で、**`dev` に積まれたコミットメッセージにキーワードが紛れていないか**も確認する。コミット側のキーワードは `main` に載った時点で発火する。
@@ -73,7 +75,7 @@ gh pr view <番号> --json headRefOid --jq .headRefOid
 
 ### 7. 後片付け
 
-`docs/RELEASE.md` の手順 6（`main` を `dev` へ戻す）と、`area:release` ラベルの付いた Issue の更新（`~/.claude/skills/github-issues/SKILL.md`）。
+`docs/RELEASE.md` の手順 6（`main` → `dev` の PR を作ってマージする。直接 push はルールセットで塞がれている）と、`area:release` ラベルの付いた Issue の更新（`~/.claude/skills/github-issues/SKILL.md`）。
 
 ## やらないこと
 
