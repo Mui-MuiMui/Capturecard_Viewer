@@ -101,7 +101,8 @@ cargo build --release
 | `src/ui/update_dialog.rs` | 新しい版を知らせ、更新の進み具合と結果を出すダイアログの描画（`UpdateDialogView`）。押されたものを `UpdateDialogEvent` で返す |
 | `src/status.rs` | 失敗の記録（`ErrorCenter`）とトーストの間引き判定、設定ダイアログへ渡す接続状態（`ConnectionStatus`）、発生源ごとの定型文 |
 | `src/update/mod.rs` | 更新の確認。GitHub の Release API への問い合わせ（`check_latest_release`）と、版の比較・通知するかの判定（純粋関数）、`UpdateError` |
-| `src/update/apply.rs` | 更新の適用の本体（`run_apply`）。資産の選び方（`ApplyPlan`）、ダウンロードと SHA-256 の計算、進み具合（`ApplyProgress`）、`ApplyError` |
+| `src/update/apply.rs` | 更新の適用の本体（`run_apply`）。ダウンロードと SHA-256 の計算、進み具合（`ApplyProgress`）、`ApplyError` |
+| `src/update/assets.rs` | 更新の適用のうち資産の選び方（`ApplyPlan`）。版なしの exe 名（`EXE_ASSET_NAME`）→ 1.2.0 の旧名へのフォールバック、Release の資産からの選択、URL の検証 |
 | `src/update/swap.rs` | 更新の適用のうちファイルの置き換え。exe の隣の一時名（`ExePaths`）、フォルダに書けるかの確認、`.old` / `.new` を使った差し替えと失敗時の戻し方（`swap_in` / `recovery_for` / `roll_back`）、前回の残りの後片付け |
 | `src/update/checksum.rs` | `SHA256SUMS.txt` の行の読み方（`find_checksum`）と、大文字小文字を区別しない照合（`checksum_matches`） |
 | `src/update/overrides.rs` | 更新の確認を試すための環境変数（`CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` / `CAPTURECARD_VIEWER_UPDATE_API_URL`）の解釈（`CheckOverrides`） |
