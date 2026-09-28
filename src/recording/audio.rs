@@ -58,6 +58,9 @@ pub(super) struct AudioStats {
     pub(super) silence_frames: u64,
     /// 揃えるために先頭から捨てた入力のサンプル数
     pub(super) trimmed_samples: u64,
+    /// 揃えるために先頭から捨てた入力の長さ（100ns）。統計 OSD に出す。
+    /// 入力の形は開き直しで変わりうるので、捨てたときの形で時間に直して足す
+    pub(super) trimmed_units: u64,
     /// リングが溢れて捨てたコールバックの回数
     pub(super) overflows: u64,
     /// 最後に途切れずに続いた区間の `(PC の時計での経過, サンプル数 ÷ レート)`（100ns）
@@ -127,6 +130,7 @@ pub(super) struct AudioTrack {
     drift: Option<DriftSpan>,
     silence_frames: u64,
     trimmed_samples: u64,
+    trimmed_units: u64,
 }
 
 impl AudioTrack {
@@ -152,6 +156,7 @@ impl AudioTrack {
             drift: None,
             silence_frames: 0,
             trimmed_samples: 0,
+            trimmed_units: 0,
             tap,
         }
     }
@@ -239,6 +244,7 @@ impl AudioTrack {
             frames: self.produced_frames,
             silence_frames: self.silence_frames,
             trimmed_samples: self.trimmed_samples,
+            trimmed_units: self.trimmed_units,
             overflows: self.tap.overflows(),
             drift: self.drift.map(|span| span.measure()),
         }
@@ -263,6 +269,9 @@ impl AudioTrack {
             .min(count);
         self.trim_remaining -= skip as u64;
         self.trimmed_samples += skip as u64;
+        if let Some((sample_rate, channels)) = self.format {
+            self.trimmed_units += samples_to_units(skip as u64, sample_rate, channels);
+        }
         // 形が分からないサンプルは解釈できない（開く前に積まれることは無いので来ない）
         if self.converter.is_some() {
             self.input.extend(&self.popped[skip..count]);
@@ -321,6 +330,15 @@ impl AudioTrack {
         self.produced_frames += frames;
         self.silence_frames += frames;
     }
+}
+
+/// 入力のサンプル数（インターリーブ）を、その形での長さ（100ns）に直す。
+fn samples_to_units(samples: u64, sample_rate: u32, channels: u16) -> u64 {
+    if sample_rate == 0 || channels == 0 {
+        return 0;
+    }
+    let frames = samples / u64::from(channels);
+    frames.saturating_mul(UNITS_PER_SECOND as u64) / u64::from(sample_rate)
 }
 
 /// 入力の形から録画の形（48kHz 2ch）への変換器。クロックドリフト補正は付けない（②）。
@@ -444,5 +462,17 @@ mod tests {
         assert_eq!(track.format, Some((44_100, 1)));
         assert_eq!(track.next_index, 960 + 441);
         assert!(track.stats().drift.is_some());
+    }
+
+    #[test]
+    fn samples_to_units_uses_the_input_format() {
+        // 48kHz 2ch の 9600 サンプルは 4800 フレーム = 100ms
+        assert_eq!(samples_to_units(9_600, 48_000, 2), 1_000_000);
+        // 44.1kHz 1ch の 441 サンプルは 10ms
+        assert_eq!(samples_to_units(441, 44_100, 1), 100_000);
+        assert_eq!(samples_to_units(0, 48_000, 2), 0);
+        // 形が分からないときは 0（割り算で落とさない）
+        assert_eq!(samples_to_units(100, 0, 2), 0);
+        assert_eq!(samples_to_units(100, 48_000, 0), 0);
     }
 }

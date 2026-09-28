@@ -27,7 +27,9 @@ mod storage;
 mod writer;
 
 pub use file_name::{render_file_name, resolve_file_stem, RECORDING_EXTENSION};
-pub use recorder::{Recorder, RecordingEvent, RecordingRequest, RecordingSummary};
+pub use recorder::{
+    Recorder, RecordingAudioStats, RecordingEvent, RecordingRequest, RecordingSummary,
+};
 
 use std::fmt;
 use std::path::PathBuf;
