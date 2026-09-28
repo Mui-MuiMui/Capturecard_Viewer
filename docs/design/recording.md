@@ -268,7 +268,7 @@ MF の時間の単位は 100ns。
 
 - **右クリックメニュー**に「録画を開始」を置く。録画中は同じ位置が「録画を停止（00:12:34）」になる。描画は `MenuAction::ToggleRecording` を返すだけ（`src/app/menu/items.rs` は状態を書き換えない）
 - **ホットキーのアクション** `HotkeyAction::ToggleRecording`、設定ファイル上の名前は **`toggle_recording`**。**一度出したら変えない**（`docs/design/hotkeys.md`）。右クリックメニューと同じ `toggle_recording` を呼ぶ
-- `runs_while_minimized()` は偽（①の時点）。**最小化中の押下は復帰しても実行しない**（溜まった押下を畳んだ結果を 0 回にする）。フルスクリーンのように偶数回で打ち消す畳み方にすると、最小化中に 1 回押しただけで復帰した瞬間に録画が始まり、意図とずれるため。**実装では `folded_repeats` を 0 にせず、リスナーが最小化中の押下を溜めずに捨てる**（`HotkeyAction::discarded_while_minimized`、`PressRouting::DiscardedWhileMinimized`）。`folded_repeats` は押された回数しか受け取らないので、最小化中の押下と通常のフレームの 1 回の押下を区別できず、0 にすると通常の押下でも録画が始まらなくなるため。通常のフレームの畳み方はトグルと同じ（奇数回なら 1 回）
+- `runs_while_minimized()` は偽（①の時点）。**最小化中の押下は復帰しても実行しない**（押下を溜めずに捨てるので、復帰したときに実行される回数は 0）。フルスクリーンのように偶数回で打ち消す畳み方にすると、最小化中に 1 回押しただけで復帰した瞬間に録画が始まり、意図とずれるため。**実装では `folded_repeats` を 0 にせず、リスナーが最小化中の押下を溜めずに捨てる**（`HotkeyAction::discarded_while_minimized`、`PressRouting::DiscardedWhileMinimized`）。`folded_repeats` は押された回数しか受け取らないので、最小化中の押下と通常のフレームの 1 回の押下を区別できず、0 にすると通常の押下でも録画が始まらなくなるため。通常のフレームの畳み方はトグルと同じ（奇数回なら 1 回）
 - 設定ダイアログに「録画」タブを足す（①は保存先・ファイル名・映像のビットレート・ハードウェアエンコーダ、②で音声、③でリプレイバッファ）。保存先のフォルダ選択は `SettingsEvent` を返し、描画の外で `rfd` を開く（`docs/design/settings-dialog.md`）。③のさかのぼる長さの横には「長くするほどメモリを使う」を添える（#182 の決定）
 - 画面に出す文字列はすべて `crate::i18n` を通す（`docs/design/i18n.md`）。量が増えるので、引数を取るものは `src/i18n/update_msg.rs` にならって録画用のファイルを分ける
 

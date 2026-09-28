@@ -532,5 +532,9 @@ mod tests {
             read(&MF_MT_VIDEO_NOMINAL_RANGE),
             Some(MFNominalRange_16_235.0 as u32)
         );
+        assert_eq!(
+            read(&MF_MT_TRANSFER_FUNCTION),
+            Some(MFVideoTransFunc_709.0 as u32)
+        );
     }
 }
