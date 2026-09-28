@@ -17,6 +17,7 @@
 //! | `video_mode.rs` | デバイス切り替え時に選び直すビデオの既定値 |
 //! | `device_tab.rs` | 「デバイス設定」タブ |
 //! | `screenshot_tab.rs` | 「スクリーンショット設定」タブ |
+//! | `recording_tab.rs` | 「録画」タブ |
 //! | `hotkeys_tab.rs` | 「ホットキー」タブ |
 //! | `hotkey_capture.rs` | ホットキー入力ダイアログ |
 //! | `other_tab.rs` | 「その他」タブ |
@@ -31,6 +32,7 @@ mod hotkey_keys;
 mod hotkeys_tab;
 mod other_tab;
 mod preset;
+mod recording_tab;
 mod screenshot_tab;
 mod state;
 mod status_tab;
@@ -54,6 +56,7 @@ pub use self::update_dialog::{show_update_dialog, UpdateDialogEvent, UpdateDialo
 use self::device_tab::show_device_settings_tab;
 use self::hotkeys_tab::show_hotkey_settings_tab;
 use self::other_tab::show_other_tab;
+use self::recording_tab::show_recording_settings_tab;
 use self::screenshot_tab::show_screenshot_settings_tab;
 use self::status_tab::show_status_tab;
 
@@ -144,6 +147,8 @@ pub enum SettingsEvent {
     OpenHotkeyCapture(HotkeyAction),
     /// スクリーンショットの保存フォルダーをファイルダイアログで選ぶ
     PickScreenshotFolder,
+    /// 録画の保存先をファイルダイアログで選ぶ
+    PickRecordingFolder,
     /// 効果音のファイルをファイルダイアログで選ぶ
     PickSoundFile,
     /// デバイス能力のキャッシュに対する要求
@@ -277,7 +282,7 @@ fn status_badge(ui: &mut egui::Ui, text: &str, kind: NoticeKind) {
 
 /// 設定ダイアログのタブ。
 ///
-/// 並びはデバイス設定 / スクリーンショット設定 / ホットキー / その他 / 接続状態。
+/// 並びはデバイス設定 / スクリーンショット設定 / 録画 / ホットキー / その他 / 接続状態。
 /// 「接続状態」を最後に置き、既定は「デバイス設定」のままにしてある。
 /// ダイアログを開く主な目的は設定の変更で、状態の確認は調べたいときだけ
 /// だからで、先頭に置くと毎回そこを通ることになる。
@@ -286,6 +291,8 @@ pub enum SettingsTab {
     #[default]
     Device,
     Screenshot,
+    /// 録画の保存先・ファイル名・映像の設定
+    Recording,
     /// ホットキーの一覧と割り当て。以前はスクリーンショット設定タブの中にあったが、
     /// フルスクリーン切替や音量操作などスクリーンショット以外のアクションも
     /// 増えたため、タブ名と内容を合わせて独立させた
@@ -391,6 +398,11 @@ pub fn show_settings_dialog(
                     SettingsTab::Screenshot,
                     Text::TabScreenshot.get(),
                 );
+                ui.selectable_value(
+                    &mut selected_tab,
+                    SettingsTab::Recording,
+                    Text::TabRecording.get(),
+                );
                 ui.selectable_value(&mut selected_tab, SettingsTab::Hotkeys, Text::Hotkeys.get());
                 ui.selectable_value(&mut selected_tab, SettingsTab::Other, Text::TabOther.get());
                 ui.selectable_value(
@@ -444,6 +456,7 @@ pub fn show_settings_dialog(
                         &mut events,
                     ),
                     SettingsTab::Screenshot => show_screenshot_settings_tab(ui, draft, &mut events),
+                    SettingsTab::Recording => show_recording_settings_tab(ui, draft, &mut events),
                     SettingsTab::Hotkeys => {
                         show_hotkey_settings_tab(ui, draft, hotkey_errors, &mut events)
                     }

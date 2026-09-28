@@ -92,6 +92,14 @@ pub fn recording_file_name_reserved(name: impl Display) -> String {
     }
 }
 
+/// 設定ダイアログの「録画」タブに出す、いまの書式で作られるファイル名の例
+pub fn recording_file_name_preview(file_name: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("例: {file_name}"),
+        Language::English => format!("Example: {file_name}"),
+    }
+}
+
 // ---- 録画の結果と表示（app/recording.rs / app/menu/items.rs） ----
 
 /// 録画を保存したときのトースト。`file_name` は拡張子まで含めたファイル名。

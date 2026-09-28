@@ -135,6 +135,7 @@ texts! {
     SettingsTitle { ja: "設定", en: "Settings" },
     TabDevice { ja: "デバイス設定", en: "Devices" },
     TabScreenshot { ja: "スクリーンショット設定", en: "Screenshots" },
+    TabRecording { ja: "録画", en: "Recording" },
     Hotkeys { ja: "ホットキー", en: "Hotkeys" },
     TabOther { ja: "その他", en: "Other" },
     TabStatus { ja: "接続状態", en: "Connection status" },
@@ -343,6 +344,13 @@ texts! {
     RecordingFileNameEmpty { ja: "ファイル名の書式が空です", en: "The file name format is empty" },
     RecordingFileNameInvalidSpecifier { ja: "ファイル名の書式に使えない指定子（% で始まるもの）が含まれています", en: "The file name format contains an unknown % specifier" },
     RecordingFileNameTrailingDot { ja: "ファイル名の末尾を空白や「.」にはできません", en: "A file name cannot end with a space or a period" },
+    RecordingFileNameGroup { ja: "ファイル名", en: "File name" },
+    RecordingFileNameFormatLabel { ja: "書式:", en: "Format:" },
+    RecordingFileNameHint { ja: "日時は chrono の書式（%Y 年、%m 月、%d 日、%H 時、%M 分、%S 秒）で書きます。拡張子（.mp4）は自動で付きます。\n同じ名前のファイルがあれば _2、_3 … を付けます。使えない書式なら既定の書式で保存します。", en: "Write the date and time with chrono specifiers (%Y year, %m month, %d day, %H hour, %M minute, %S second). The .mp4 extension is added automatically.\nIf a file with the same name exists, _2, _3, ... is appended. An invalid format falls back to the default." },
+    RecordingBitrateLabel { ja: "ビットレート:", en: "Bitrate:" },
+    RecordingHardwareEncoder { ja: "ハードウェアエンコーダを使う", en: "Use a hardware encoder" },
+    RecordingVideoHint { ja: "H.264 の MP4 で保存します。ハードウェアエンコーダ（GPU）が使えなければ、ソフトウェアのエンコーダで保存します。\n使ったエンコーダの名前は、録画中の情報表示に出ます。", en: "Recordings are saved as H.264 MP4. If no hardware (GPU) encoder is available, the software encoder is used.\nThe encoder in use is shown in the stats overlay while recording." },
+    RecordingTabHint { ja: "録画の開始と停止は、右クリックメニューかホットキー（「録画の開始・停止」）で行います。\n変更は次の録画から効きます。", en: "Start and stop recording from the right-click menu or with the Start / stop recording hotkey.\nChanges take effect from the next recording." },
 }
 
 #[cfg(test)]
