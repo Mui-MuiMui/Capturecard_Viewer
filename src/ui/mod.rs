@@ -259,7 +259,9 @@ fn notice_label(ui: &mut egui::Ui, kind: NoticeKind, text: impl Into<String>) {
 }
 
 /// 続行できるが想定と違うことを伝える。設定ダイアログの注意書きはほぼこれ。
-fn warning_label(ui: &mut egui::Ui, text: impl Into<String>) {
+///
+/// 設定ダイアログの外では、映像の上に出すフェイクデバイスの帯（#252）も使う。
+pub(crate) fn warning_label(ui: &mut egui::Ui, text: impl Into<String>) {
     notice_label(ui, NoticeKind::Warning, text);
 }
 

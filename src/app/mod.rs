@@ -298,9 +298,6 @@ impl Default for CaptureCardViewer {
             os_language,
         };
 
-        // 環境変数でフェイクデバイスが選ばれていれば画面でも知らせる（#252）
-        app.notify_fake_devices();
-
         // 最小化中のホットキーは UI スレッドを通せないので、リスナーから
         // 直接デバイスワーカーへコマンドを積ませる（#133）。
         // **ワーカーを起動したあとでしか渡せない**ので、ここで渡す
@@ -526,9 +523,15 @@ impl eframe::App for CaptureCardViewer {
 
         // 統計オーバーレイ。ウィンドウ表示とフルスクリーンで同じものを出すため、
         // どちらの描画のあとでもここで 1 回だけ描く
-        if self.show_stats_overlay {
-            self.show_stats_overlay(ctx);
-        }
+        let stats_bottom = if self.show_stats_overlay {
+            Some(self.show_stats_overlay(ctx))
+        } else {
+            None
+        };
+
+        // フェイクデバイスで動いている間の常設の帯（#252）。統計と重ならない
+        // 位置へずらすため、統計オーバーレイのあとで描く
+        self.draw_fake_devices_banner(ctx, stats_bottom);
 
         // 設定ダイアログ
         if self.show_settings {
