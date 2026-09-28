@@ -32,7 +32,7 @@ use self::screenshot_sound::SoundLoadResult;
 use self::update::UpdateState;
 use self::window::needs_drag_move_guard;
 use self::worker::{DeviceSnapshot, DeviceWorker};
-use crate::audio::AudioControls;
+use crate::audio::{AudioControls, AudioTap};
 use crate::hotkey::{HotkeyAction, HotkeyManager};
 use crate::i18n::Language;
 use crate::overlay::TransientOverlay;
@@ -71,6 +71,10 @@ pub struct CaptureCardViewer {
     color_conversion: Arc<SharedColorConversion>,
     // 音量・ミュート・パススルー。出力コールバックが 1 回ごとに読む Atomic
     audio_controls: Arc<AudioControls>,
+    // 録画へ音声を回す差し込み口。入力コールバックが積み、録画スレッドが読む。
+    // 録画を始めるときに複製を `Recorder` へ渡す（映像の `VideoTap` は `frames` の中）
+    #[allow(dead_code)] // 録画に音声を書く段で使い始める。それまでの一時的な許可
+    audio_tap: AudioTap,
     screenshot_manager: Arc<Mutex<ScreenshotManager>>,
     // グローバルホットキーの登録と押下の検出。
     //
@@ -231,14 +235,16 @@ impl Default for CaptureCardViewer {
         let (sound_load_tx, sound_load_rx) = std::sync::mpsc::channel();
 
         // デバイスに触るものは、すべてワーカースレッドの中で作る。
-        // ここから渡すのは UI スレッドとも共有する 3 つだけ
+        // ここから渡すのは UI スレッドとも共有する 4 つだけ
         let frames = VideoFrames::new();
         let color_conversion = Arc::new(SharedColorConversion::new());
         let audio_controls = Arc::new(AudioControls::default());
+        let audio_tap = AudioTap::new();
         let device = DeviceWorker::spawn(
             frames.clone(),
             Arc::clone(&color_conversion),
             Arc::clone(&audio_controls),
+            audio_tap.clone(),
             // **フレームコールバックへ渡る窓口。** キャプチャを開くより前に
             // 渡す必要があるので、ワーカーの起動時に持たせる
             repaint_waker.clone(),
@@ -251,6 +257,7 @@ impl Default for CaptureCardViewer {
             frames,
             color_conversion,
             audio_controls,
+            audio_tap,
             screenshot_manager,
             hotkey_manager,
             repaint_waker,

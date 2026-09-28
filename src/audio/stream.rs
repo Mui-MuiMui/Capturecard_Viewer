@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use super::controls::{load_volume, AudioControls};
 use super::convert::PassthroughConverter;
+use super::tap::AudioTap;
 
 /// リングバッファの内部表現は f32 に統一する。デバイス側のサンプル型は
 /// 入力で f32 へ正規化し、出力で書き戻す。
@@ -53,10 +54,12 @@ fn count_underrun(counter: &AtomicU32) {
 /// 入力ストリームを組み立てる。
 ///
 /// `to_f32` でデバイスのサンプル型をリングバッファの表現（f32）へ正規化する。
+/// `tap` は録画へ回す差し込み口（録画中だけ同じ値を積む）。
 pub(super) fn build_input_stream_with<T>(
     device: &Device,
     config: &cpal::StreamConfig,
     producer: Arc<Mutex<AudioProducer>>,
+    tap: AudioTap,
     stream_error: Arc<AtomicBool>,
     to_f32: impl Fn(T) -> f32 + Send + 'static,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
@@ -66,7 +69,7 @@ where
     device.build_input_stream(
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
-            process_input(data, &producer, &to_f32);
+            process_input(data, &producer, &tap, &to_f32);
         },
         move |e| {
             error!("入力ストリームのエラー: {}", e);
@@ -123,19 +126,33 @@ where
 }
 
 /// 入力コールバック 1 回分の処理。デバイスのサンプルを f32 へ直して
-/// リングバッファへ積む。
+/// リングバッファへ積む。録画中なら同じ値を録画のリング（`AudioTap`）にも積む。
 ///
 /// **cpal の入力コールバックとフェイクの入力（`super::fake`）の両方から
 /// 呼ぶ。** リングバッファが溢れた分は捨てる。ロックは `try_lock` だけで、
-/// 取れなければそのコールバック分を捨てる（待たない）。
+/// 取れなければそのコールバック分を捨てる（待たない）。パススルーと録画は
+/// 別々に判定し、片方を取れなくてももう片方には積む。
+///
+/// 録画へは入力の形のまま積む。音量・ミュート・パススルーの無効は出力
+/// コールバックの判定なので、録画には効かない（`docs/design/recording.md`）。
 pub(super) fn process_input<T: Copy>(
     data: &[T],
     producer: &Mutex<AudioProducer>,
+    tap: &AudioTap,
     to_f32: impl Fn(T) -> f32,
 ) {
-    if let Ok(mut prod) = producer.try_lock() {
-        for &sample in data {
-            let _ = prod.push(to_f32(sample));
+    let mut passthrough = producer.try_lock().ok();
+    let mut recording = tap.writer(data.len());
+    if passthrough.is_none() && recording.is_none() {
+        return;
+    }
+    for &sample in data {
+        let value = to_f32(sample);
+        if let Some(prod) = passthrough.as_mut() {
+            let _ = prod.push(value);
+        }
+        if let Some(writer) = recording.as_mut() {
+            writer.push(value);
         }
     }
 }
@@ -230,7 +247,7 @@ fn render_output_samples<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::convert::{f32_to_i16, f32_to_i32, f32_to_u16};
+    use crate::audio::convert::{f32_to_i16, f32_to_i32, f32_to_u16, i16_to_f32};
 
     /// テスト用のサンプル供給源。取り出した回数も数える。
     struct SampleSource {
@@ -445,7 +462,9 @@ mod tests {
         let underruns = AtomicU32::new(0);
         let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2);
 
-        process_input(&[1.0f32, -0.5], &producer, |sample| sample);
+        process_input(&[1.0f32, -0.5], &producer, &AudioTap::new(), |sample| {
+            sample
+        });
         let mut data = [9.0f32; 2];
         process_output(
             &mut data,
@@ -468,7 +487,9 @@ mod tests {
         let underruns = AtomicU32::new(0);
         let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2);
 
-        process_input(&[1.0f32, 1.0, 1.0], &producer, |sample| sample);
+        process_input(&[1.0f32, 1.0, 1.0], &producer, &AudioTap::new(), |sample| {
+            sample
+        });
         let mut data = [9.0f32; 2];
         process_output(
             &mut data,
@@ -482,6 +503,37 @@ mod tests {
         assert_eq!(data, [0.0, 0.0]);
         // ミュート中も同じだけ取り出す（残りは 1 つ）
         assert_eq!(consumer.lock().expect("ロックできる").len(), 1);
+    }
+
+    #[test]
+    fn process_input_feeds_the_recording_tap_with_the_input_values() {
+        // 録画は入力から取るので、音量・ミュートに関係なく元の値が入る
+        let (producer, _consumer) = ring(8);
+        let tap = AudioTap::new();
+        let mut attachment = tap.attach(8);
+
+        process_input(&[16_384i16, -32_768], &producer, &tap, i16_to_f32);
+
+        let mut read = [0.0f32; 4];
+        let count = attachment.consumer.pop_slice(&mut read);
+        assert_eq!(&read[..count], &[0.5, -1.0]);
+        assert_eq!(tap.snapshot().samples_total, 2);
+    }
+
+    #[test]
+    fn process_input_records_even_when_the_passthrough_ring_is_busy() {
+        let (producer, _consumer) = ring(8);
+        let tap = AudioTap::new();
+        let mut attachment = tap.attach(8);
+
+        // パススルーのリングを別の誰かが握っていても、録画には積む
+        let held = producer.lock().expect("ロックできる");
+        process_input(&[0.25f32, 0.5], &producer, &tap, |sample| sample);
+        drop(held);
+
+        let mut read = [0.0f32; 4];
+        assert_eq!(attachment.consumer.pop_slice(&mut read), 2);
+        assert!(producer.lock().expect("ロックできる").is_empty());
     }
 
     #[test]

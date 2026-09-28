@@ -553,6 +553,7 @@ mod tests {
                     frames: VideoFrames::new(),
                     color_conversion: Arc::new(SharedColorConversion::new()),
                     audio_controls: thread_controls,
+                    audio_tap: crate::audio::AudioTap::new(),
                     repaint_waker: RepaintWaker::new(),
                 },
                 backends,
