@@ -119,7 +119,7 @@ Turning on "Show stats" in the context menu (under View when collapsed) overlays
 2. Select video and audio devices in the **Devices** tab.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
 3. Configure the destination, save location, file format, and sound effect in the **Screenshots** tab.
-4. Configure the recording folder, file name, bitrate, and hardware encoder in the **Recording** tab.
+4. Configure the recording folder, file name, bitrate, hardware encoder, and audio in the **Recording** tab.
 5. Configure the per-action hotkeys in the **Hotkeys** tab.
 6. Manage presets, choose the interface language, and export, import or reset the settings in the **Other** tab.
 
@@ -211,7 +211,7 @@ Setting the destination to the clipboard (or to both) puts the captured frame st
 
 ### Recording
 
-Saves the video on screen as H.264 MP4. **For now only the video is recorded, without audio** (audio recording will come in a later version).
+Saves the video on screen as H.264 and the sound from the audio input as AAC in an MP4 file.
 
 - **Start / stop**: "Start recording" in the right-click menu. While recording, the same item reads "Stop recording (00:12:34)". The "Start / stop recording" hotkey works too
 - **Recording indicator**: a red dot and the elapsed time at the top-right of the video, shown even with the stats overlay off and in fullscreen
@@ -219,6 +219,7 @@ Saves the video on screen as H.264 MP4. **For now only the video is recorded, wi
 - **File name**: `Recording_YYYY-MM-DD_HH-MM-SS.mp4` (the format is configurable; `_2`, `_3`, ... is appended when the name is taken)
 - **Bitrate**: 8000 kbps (1000-50000 kbps)
 - **Encoder**: the GPU hardware encoder (Intel / NVIDIA / AMD) when available, otherwise the Windows software encoder. The encoder in use is shown in the stats overlay
+- **Audio**: AAC (48 kHz, stereo) at 160 kbps (96 / 128 / 160 / 192 kbps, or off). **Volume, mute, and passthrough do not affect the recording** (turning down what you hear still records the input as is). While no audio device is available, silence is recorded
 
 The recording looks exactly like the preview, including the color space, color range, and brightness / contrast / saturation adjustments. If the video size (resolution) changes while recording, the file so far is closed and recording stops. Recording also stops before the disk fills up, when less than 500 MB is left. Both show the reason at the bottom of the window. If the USB connection drops briefly and comes back at the same resolution, recording continues into the same file.
 
