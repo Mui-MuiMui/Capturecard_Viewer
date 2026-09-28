@@ -210,7 +210,13 @@ impl ReplayPipeline {
     /// 録画をすぐ閉じる（終了時）。止めた時刻より後のサンプルを待たない。
     pub(super) fn finish_recording_now(&mut self) {
         self.stop_recording();
-        if let Some(recording) = self.recording.take() {
+        if let Some(mut recording) = self.recording.take() {
+            // リングの中身を書いている途中なら、止めた時刻までを書き切ってから閉じる
+            if let Err(error) = recording.catch_up_all(&self.ring) {
+                self.recording = Some(recording);
+                self.end_recording_with_error(error);
+                return;
+            }
             self.close(recording);
         }
     }
@@ -222,9 +228,24 @@ impl ReplayPipeline {
         self.drain_video()?;
         self.pump_audio(now)?;
 
-        let now_units = units_since(self.t0, now);
-        self.ring
-            .trim(keep_from(now_units, self.retain_seconds, GOP_UNITS));
+        // リングの中身の続きを書く。書き終えるまではリングを切らない（書く前に捨てないため）
+        let flushing = self
+            .recording
+            .as_ref()
+            .is_some_and(ReplayRecording::is_flushing);
+        if flushing {
+            let result = match self.recording.as_mut() {
+                Some(recording) => recording.catch_up(&self.ring),
+                None => Ok(()),
+            };
+            if let Err(error) = result {
+                self.end_recording_with_error(error);
+            }
+        } else {
+            let now_units = units_since(self.t0, now);
+            self.ring
+                .trim(keep_from(now_units, self.retain_seconds, GOP_UNITS));
+        }
         self.telemetry
             .publish_ring(self.ring.held_units(), self.ring.discarded_gops());
 
@@ -256,7 +277,13 @@ impl ReplayPipeline {
     // ---- 映像 ----
 
     fn drain_video(&mut self) -> Result<(), RecordingError> {
-        while let Some((frame, received_at)) = self.consumer.pop() {
+        // 1 回に捌くのはリングの容量ぶんまで。エンコードがフレームの間隔より遅いと、
+        // 取り出したそばから次が積まれて抜けられなくなり、音声やコマンドが止まるため
+        // （捌けなかった分は差し込み口が捨てて数える）
+        for _ in 0..VIDEO_TAP_CAPACITY {
+            let Some((frame, received_at)) = self.consumer.pop() else {
+                break;
+            };
             let Some(pts) = self.clock.pts_for(received_at) else {
                 continue;
             };
@@ -406,8 +433,11 @@ impl ReplayPipeline {
             return;
         };
         if recording.has_cut() {
-            if let Err(error) = recording.write(Track::Video, &sample) {
-                self.end_recording_with_error(error);
+            // リングの中身を書き終えるまでは、リングから順に書く（`tick` の `catch_up`）
+            if recording.is_live() {
+                if let Err(error) = recording.write(Track::Video, &sample) {
+                    self.end_recording_with_error(error);
+                }
             }
         } else if sample.keyframe && !recording.stop_requested() {
             // 「いま − N 秒」以降のキーフレームがリングに無かったので、ライブの
@@ -529,8 +559,11 @@ impl ReplayPipeline {
         let Some(recording) = self.recording.as_mut() else {
             return;
         };
-        if let Err(error) = recording.write(Track::Audio, &sample) {
-            self.end_recording_with_error(error);
+        // 先頭が決まる前と、リングの中身を書き終える前はリングから順に書く
+        if recording.is_live() {
+            if let Err(error) = recording.write(Track::Audio, &sample) {
+                self.end_recording_with_error(error);
+            }
         }
     }
 

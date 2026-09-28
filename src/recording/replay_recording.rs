@@ -8,9 +8,13 @@
 //! - 先頭のキーフレームの時刻を 0 にする。音声は同じ時刻より前を捨てて先頭を揃える
 //! - リングに「いま − N 秒」以降のキーフレームが無ければ（映像がまだ来ていない、
 //!   途絶えていた）、次のキーフレームがエンコーダから出てくるのを待って、そこから書く
+//! - **リングの中身は数 ms ごとに少しずつ書く**（`FLUSH_BATCH` 個ずつ、`catch_up`）。
+//!   5 分ぶんを 1 度に書くと録画スレッドがその間止まり、ライブのフレームを差し込み口で
+//!   取りこぼす。書き終えるまでは、ライブのサンプルもリングに積むだけにして、リングから
+//!   順に書く。追いついたら（`live`）、ライブのサンプルを届いた順に直接書く
 //! - 止めるときは、止めた時刻より前のサンプルがエンコーダから出てくるのを最大
 //!   `STOP_GRACE` だけ待ってから閉じる。エンコーダは数枚遅れて出力するので、
-//!   すぐ閉じると最後の数枚が入らない
+//!   すぐ閉じると最後の数枚が入らない。リングの中身を書き終えるまでは閉じない
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -26,13 +30,17 @@ use super::file_name::unique_path;
 use super::passthrough::PassthroughWriter;
 use super::pts::UNITS_PER_SECOND;
 use super::recorder::{RecordingRequest, RecordingSummary, RecordingTelemetry};
-use super::replay_ring::{Cut, EncodedRing, Placement, Track};
+use super::replay_ring::{Cut, EncodedRing, Placement, Track, Written};
 use super::session::{create_error, remove_partial_file, write_error, Finished};
 use super::storage::DISK_CHECK_INTERVAL;
 use super::RecordingError;
 
 /// 止めてから、止めた時刻より前のサンプルが出てくるのを待つ上限。
 const STOP_GRACE: Duration = Duration::from_secs(1);
+
+/// リングの中身を 1 回（録画スレッドが起きるたび）に書く数。60fps の映像と AAC の音声で
+/// 約 2 秒ぶん。1 回あたり数 ms で済み、5 分ぶんでも 1 秒ほどで書き終える見込み
+const FLUSH_BATCH: usize = 240;
 
 /// 録画を始めたときの観測値。録画中の値はここからの差で出す（リプレイバッファの
 /// リングと差し込み口は録画をまたいで使い続けるため）。
@@ -61,6 +69,10 @@ pub(super) struct ReplayRecording {
     cut: Option<Cut>,
     writer: Option<PassthroughWriter>,
     path: Option<PathBuf>,
+    /// トラックごとに最後に書いたサンプル。リングからの書き出しの続きの位置
+    written: Written,
+    /// リングの中身を書き終え、ライブのサンプルを直接書いているか
+    live: bool,
     /// 書いた映像の終わり（付け替えた時刻、100ns）
     video_end: i64,
     video_passed_stop: bool,
@@ -89,6 +101,8 @@ impl ReplayRecording {
             cut: None,
             writer: None,
             path: None,
+            written: Written::default(),
+            live: false,
             video_end: 0,
             video_passed_stop: false,
             audio_passed_stop: false,
@@ -127,7 +141,44 @@ impl ReplayRecording {
             .store(self.frames_skipped, Ordering::Relaxed);
     }
 
-    /// 先頭を `offset` のキーフレームに決め、ファイルを作って、リングの `offset` 以降を書く。
+    /// リングの中身を書いている途中か（先頭は決まったが、まだライブに追いついていない）。
+    pub(super) fn is_flushing(&self) -> bool {
+        self.cut.is_some() && !self.live
+    }
+
+    /// ライブのサンプルを直接書いてよいか（リングの中身を書き終えた）。
+    pub(super) fn is_live(&self) -> bool {
+        self.live
+    }
+
+    /// リングの中身の続きを `FLUSH_BATCH` 個まで書く。リングの最後まで書いたらライブに切り替える。
+    pub(super) fn catch_up(&mut self, ring: &EncodedRing) -> Result<(), RecordingError> {
+        let Some(cut) = self.cut else {
+            return Ok(());
+        };
+        if self.live {
+            return Ok(());
+        }
+        let batch = ring.samples_after(cut.offset, self.written, FLUSH_BATCH);
+        let caught_up = batch.len() < FLUSH_BATCH;
+        for (track, sample) in batch {
+            self.write(track, sample)?;
+        }
+        if caught_up {
+            self.live = true;
+        }
+        Ok(())
+    }
+
+    /// リングの中身を最後まで書く（終了時）。
+    pub(super) fn catch_up_all(&mut self, ring: &EncodedRing) -> Result<(), RecordingError> {
+        while self.is_flushing() {
+            self.catch_up(ring)?;
+        }
+        Ok(())
+    }
+
+    /// 先頭を `offset` のキーフレームに決め、ファイルを作って、リングの `offset` 以降を書き始める。
     pub(super) fn open(
         &mut self,
         offset: i64,
@@ -158,10 +209,7 @@ impl ReplayRecording {
         self.writer = Some(writer);
         self.path = Some(path);
         self.cut = Some(Cut::new(offset));
-        for (track, sample) in ring.samples_from(offset) {
-            self.write(track, sample)?;
-        }
-        Ok(())
+        self.catch_up(ring)
     }
 
     /// 止めるよう頼まれたか。頼まれたあとは先頭を決めない（ファイルを作らない）。
@@ -169,7 +217,8 @@ impl ReplayRecording {
         self.stop_deadline.is_some()
     }
 
-    /// サンプルを 1 つ書く。先頭より前と止めた時刻以降は書かない。
+    /// サンプルを 1 つ書く。先頭より前と止めた時刻以降は書かない。ライブのサンプルは
+    /// `is_live` のときだけ渡す（書き終える前はリングから順に書く）。
     pub(super) fn write(
         &mut self,
         track: Track,
@@ -183,24 +232,31 @@ impl ReplayRecording {
         };
         match cut.place(sample.pts) {
             Placement::Before => Ok(()),
-            Placement::Inside(pts) => match track {
-                Track::Video => {
-                    writer
-                        .write_video(sample, pts)
-                        .map_err(|e| write_error(&e))?;
-                    self.video_end = self.video_end.max(pts + sample.duration);
-                    self.telemetry
-                        .frames_written
-                        .fetch_add(1, Ordering::Relaxed);
-                    Ok(())
+            Placement::Inside(pts) => {
+                match track {
+                    Track::Video => {
+                        writer
+                            .write_video(sample, pts)
+                            .map_err(|e| write_error(&e))?;
+                        self.video_end = self.video_end.max(pts + sample.duration);
+                        self.telemetry
+                            .frames_written
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    Track::Audio => writer
+                        .write_audio(sample, pts)
+                        .map_err(|e| write_error(&e))?,
                 }
-                Track::Audio => writer.write_audio(sample, pts).map_err(|e| write_error(&e)),
-            },
+                self.written.note(track, sample.pts);
+                Ok(())
+            }
             Placement::After => {
                 match track {
                     Track::Video => self.video_passed_stop = true,
                     Track::Audio => self.audio_passed_stop = true,
                 }
+                // 書かないが、リングからの書き出しの続きの位置は進める（同じものを読み直さない）
+                self.written.note(track, sample.pts);
                 Ok(())
             }
         }
@@ -222,10 +278,14 @@ impl ReplayRecording {
     }
 
     /// 止めて閉じてよいか。止めた時刻以降のサンプルが映像と音声の両方で出てきたか、待つ上限を過ぎた。
+    /// リングの中身を書いている途中なら、まだ閉じない（書き終えれば止めた時刻までが入る）。
     pub(super) fn is_done(&self, now: Instant) -> bool {
         let Some(deadline) = self.stop_deadline else {
             return false;
         };
+        if self.is_flushing() {
+            return false;
+        }
         let passed = self.video_passed_stop && (self.audio_passed_stop || !self.has_audio);
         passed || now >= deadline
     }

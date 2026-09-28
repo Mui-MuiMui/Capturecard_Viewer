@@ -36,6 +36,22 @@ pub(super) enum Track {
     Audio,
 }
 
+/// トラックごとに、最後に書いたサンプルの時刻（付け替える前）。まだ書いていなければ `None`。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Written {
+    pub(super) video: Option<i64>,
+    pub(super) audio: Option<i64>,
+}
+
+impl Written {
+    pub(super) fn note(&mut self, track: Track, pts: i64) {
+        match track {
+            Track::Video => self.video = Some(pts),
+            Track::Audio => self.audio = Some(pts),
+        }
+    }
+}
+
 impl EncodedRing {
     /// 映像のサンプルを積む。空のリングはキーフレームからしか始めない（それより前の
     /// 差分のフレームは単独では復号できない）。
@@ -99,19 +115,41 @@ impl EncodedRing {
     /// `offset` 以降のサンプルを、時刻の順に 2 つのトラックを混ぜて返す。映像は `offset` の
     /// キーフレームから、音声は `offset` 以降。Sink Writer が 2 つのトラックを揃えて
     /// まとめられるよう、片方だけを先に大量に渡さない。
+    ///
+    /// 録画では `samples_after` で少しずつ取り出す。これは全部を 1 度に取り出す形で、テストが使う。
+    #[cfg(test)]
     pub(super) fn samples_from(&self, offset: i64) -> Vec<(Track, &EncodedSample)> {
+        self.samples_after(offset, Written::default(), usize::MAX)
+    }
+
+    /// `samples_from` の続きを少しずつ取り出す。`written` より後（トラックごと）のサンプルを
+    /// 最大 `limit` 個返す。返った数が `limit` に満たなければ、リングの最後まで取り出し終えた。
+    ///
+    /// 5 分ぶんを 1 度に書くと録画スレッドがその間止まり、ライブのフレームを取りこぼすので、
+    /// 書き出しは数 ms ごとに少しずつ進める（`super::replay_recording`）。
+    pub(super) fn samples_after(
+        &self,
+        offset: i64,
+        written: Written,
+        limit: usize,
+    ) -> Vec<(Track, &EncodedSample)> {
+        let after = |last: Option<i64>| {
+            move |sample: &&EncodedSample| {
+                sample.pts < offset || last.is_some_and(|last| sample.pts <= last)
+            }
+        };
         let mut video = self
             .video
             .iter()
-            .skip_while(|sample| sample.pts < offset)
+            .skip_while(after(written.video))
             .peekable();
         let mut audio = self
             .audio
             .iter()
-            .skip_while(|sample| sample.pts < offset)
+            .skip_while(after(written.audio))
             .peekable();
         let mut merged = Vec::new();
-        loop {
+        while merged.len() < limit {
             let next = match (video.peek(), audio.peek()) {
                 (Some(v), Some(a)) if a.pts < v.pts => Track::Audio,
                 (Some(_), _) => Track::Video,
@@ -368,6 +406,38 @@ mod tests {
                 (Track::Audio, 4 * SECOND),
             ]
         );
+    }
+
+    #[test]
+    fn encoded_ring_samples_after_continues_where_the_last_batch_ended() {
+        let mut ring = ring_with_video(4);
+        for index in 0..8 {
+            ring.push_audio(sample(index * SECOND / 2 + 1, true, 1));
+        }
+        let all: Vec<(Track, i64)> = ring
+            .samples_from(0)
+            .into_iter()
+            .map(|(track, sample)| (track, sample.pts))
+            .collect();
+
+        // 3 個ずつ取り出して、全部を 1 度に取り出したときと同じ並びになる
+        let mut written = Written::default();
+        let mut batches = Vec::new();
+        loop {
+            let batch = ring.samples_after(0, written, 3);
+            let done = batch.len() < 3;
+            for (track, sample) in batch {
+                written.note(track, sample.pts);
+                batches.push((track, sample.pts));
+            }
+            if done {
+                break;
+            }
+        }
+        assert_eq!(batches, all);
+        assert_eq!(all.len(), 16);
+        // 書き終えたら何も返らない
+        assert!(ring.samples_after(0, written, 3).is_empty());
     }
 
     #[test]

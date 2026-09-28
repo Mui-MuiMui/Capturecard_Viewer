@@ -278,6 +278,7 @@ impl Worker {
 
     /// 録画を閉じ、リプレイバッファを止める。終了時。
     fn shutdown(&mut self) {
+        info!("録画スレッドを止める");
         if let Some(session) = self.session.take() {
             session.stop();
         }
@@ -285,6 +286,5 @@ impl Worker {
             pipeline.finish_recording_now();
         }
         self.replay = ReplayState::Off;
-        info!("録画スレッドを止める");
     }
 }
