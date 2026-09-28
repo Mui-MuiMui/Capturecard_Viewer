@@ -9,6 +9,10 @@ target
 # Claude Code が作成する作業用 worktree（.claude/skills はコミットする）
 .claude/worktrees/
 
+# CAPTURECARD_VIEWER_CONFIG_DIR で指す作業用の設定とログの置き場所
+# （.claude/skills/subagent-workflow/SKILL.md の 3 節）
+.agent-config/
+
 # 手動でリリースを出すときに作業ディレクトリへ作るもの（docs/RELEASE.md）。
 # release.yml も同じ名前でリリースノートを書き出す
 release-notes.md
