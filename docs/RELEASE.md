@@ -77,7 +77,7 @@ gh pr create --base main --head dev --title "chore: 1.0.7 をリリースする"
 
 - **`main` へ PR を出してよいのはこのときだけ。** 通常の PR は `dev` へ向ける（`.claude/skills/naming-conventions/SKILL.md`）
 - マージは merge commit。squash も rebase も使わない
-- CI が緑で、レビュースレッド（CodeRabbit の指摘）が全て解決されてからマージする。ルールセットが両方をマージの条件にしているので、未解決があるとマージできない。リリース PR で初めて出た指摘は、このリリースに含めるか別 Issue に回すかを決め、返信して Resolve する
+- CI が緑で、レビュースレッド（CodeRabbit の指摘も人のレビューも含めて全て）が解決されてからマージする。ルールセットが両方をマージの条件にしているので、未解決があるとマージできない。リリース PR で初めて出た指摘は、このリリースに含めるか別 Issue に回すかを決め、返信して Resolve する
 
 ## 4. タグを打つ
 
