@@ -49,6 +49,8 @@ pub struct EncoderInfo {
 pub enum RecordingError {
     /// 保存先を作れない・書けない
     Folder { path: PathBuf, reason: String },
+    /// 保存先が空か相対パス。カレントディレクトリ基準にはしない
+    FolderNotAbsolute { path: PathBuf },
     /// 保存先の空き容量が足りない（開始時、または録画中に 500MB を切った）
     DiskLow { free_mb: u64 },
     /// 書き込みに失敗した。ファイルは再生できないかもしれない
@@ -68,6 +70,9 @@ impl fmt::Display for RecordingError {
         let text = match self {
             RecordingError::Folder { path, reason } => {
                 i18n::recording_folder_failed(path.display(), reason)
+            }
+            RecordingError::FolderNotAbsolute { path } => {
+                i18n::recording_folder_not_absolute(path.display())
             }
             RecordingError::DiskLow { free_mb } => i18n::recording_disk_low(*free_mb),
             RecordingError::WriteFailed { reason } => i18n::recording_write_failed(reason),

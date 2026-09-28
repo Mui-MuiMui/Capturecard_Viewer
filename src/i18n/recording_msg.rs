@@ -17,6 +17,19 @@ pub fn recording_folder_failed(path: impl Display, reason: impl Display) -> Stri
     }
 }
 
+/// 保存先が空か相対パスのとき。空のときに「保存先  に」と読めない文にならないよう、
+/// パスはかぎかっこで囲む。
+pub fn recording_folder_not_absolute(path: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "保存先「{path}」はドライブ名（C:\\ など）かネットワークのパスから始まるフォルダではない。設定の「録画」タブで選び直してください"
+        ),
+        Language::English => format!(
+            "The folder \"{path}\" does not start with a drive (such as C:\\) or a network path. Choose it again in the Recording tab of the settings"
+        ),
+    }
+}
+
 pub fn recording_disk_low(free_mb: u64) -> String {
     match language() {
         Language::Japanese => {

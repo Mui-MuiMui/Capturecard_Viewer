@@ -374,6 +374,7 @@ impl Session {
 
     /// 保存先を作り、空き容量を確かめる。
     fn prepare(&self) -> Result<(), RecordingError> {
+        check_folder(&self.request.folder)?;
         std::fs::create_dir_all(&self.request.folder).map_err(|e| RecordingError::Folder {
             path: self.request.folder.clone(),
             reason: e.to_string(),
@@ -590,6 +591,19 @@ impl Session {
     }
 }
 
+/// 保存先に使えるパスか。**空や相対パスは拒む。** カレントディレクトリ基準で解決すると、
+/// 起動元によって保存先が変わる（`Program Files` を指すこともある。`docs/design/assets.md`）。
+/// 設定ダイアログの欄は空にも相対パスにもできるので、ここで弾く。
+fn check_folder(folder: &Path) -> Result<(), RecordingError> {
+    if folder.is_absolute() {
+        Ok(())
+    } else {
+        Err(RecordingError::FolderNotAbsolute {
+            path: folder.to_path_buf(),
+        })
+    }
+}
+
 /// Sink Writer を作れなかった理由を、利用者に出す種別へ直す。
 fn create_error(folder: &Path, error: &WriterError) -> RecordingError {
     match error.stage {
@@ -620,5 +634,29 @@ fn remove_partial_file(path: &Path) {
             path.display(),
             e
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_folder_accepts_an_absolute_path() {
+        assert_eq!(check_folder(Path::new(r"C:\Users\tester\Videos")), Ok(()));
+    }
+
+    #[test]
+    fn check_folder_rejects_empty_and_relative_paths() {
+        // 空や相対パスはカレントディレクトリ基準になり、保存先が起動元で変わる
+        for folder in ["", "videos", r".\videos", r"..\videos"] {
+            assert_eq!(
+                check_folder(Path::new(folder)),
+                Err(RecordingError::FolderNotAbsolute {
+                    path: PathBuf::from(folder)
+                }),
+                "{folder}"
+            );
+        }
     }
 }
