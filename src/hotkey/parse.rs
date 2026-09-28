@@ -81,15 +81,38 @@ pub(super) fn parse_hotkey(hotkey_str: &str) -> Result<KeyChord, HotkeyError> {
 }
 
 // Win32 の仮想キーコード。英字と数字は ASCII の大文字・数字と同じ値。
+const VK_BACK: u32 = 0x08;
+const VK_TAB: u32 = 0x09;
 const VK_RETURN: u32 = 0x0D;
 const VK_ESCAPE: u32 = 0x1B;
 const VK_SPACE: u32 = 0x20;
+const VK_PRIOR: u32 = 0x21;
+const VK_NEXT: u32 = 0x22;
+const VK_END: u32 = 0x23;
+const VK_HOME: u32 = 0x24;
+const VK_LEFT: u32 = 0x25;
+const VK_UP: u32 = 0x26;
+const VK_RIGHT: u32 = 0x27;
+const VK_DOWN: u32 = 0x28;
+const VK_INSERT: u32 = 0x2D;
+const VK_DELETE: u32 = 0x2E;
 pub(super) const VK_F1: u32 = 0x70;
 
 /// 単一のキー名を仮想キーコードに変換する。大文字小文字と前後の空白は無視する。
 ///
-/// 受け付けるキー名は global-hotkey を使っていたころと同じ
-/// （F1〜F12、A〜Z、0〜9、Space、Enter、Escape）。
+/// 受け付けるキー名は F1〜F12、A〜Z、0〜9、Space、Enter、Escape、Tab、
+/// Backspace、Insert、Delete、Home、End、PageUp、PageDown、Up / Down / Left /
+/// Right（#266）。入力ダイアログの対応表（`ui::hotkey_keys` の
+/// `hotkey_key_name`）と同じ範囲にしておくこと。フックは修飾キー以外の押下を
+/// すべてリスナーへ渡すので、ここで受け付ければそのまま照合される。
+///
+/// **名前は egui 0.26 の `Key::name()` と同じ文字列にする。** 設定ファイルに
+/// 書かれる名前なので一度出したら変えられず、`chord_from_egui` も `Key::name()`
+/// をここへ通して引くため。矢印が `ArrowUp` ではなく `Up` なのはこのため。
+///
+/// テンキーは受け付けない。egui 0.26 にはテンキーのキーが無く、egui-winit は
+/// テンキーの `0` や `+` をメイン列の `Key::Num0` / `Key::Plus` と同じキーに
+/// するので、入力ダイアログで区別して割り当てられない。
 fn parse_key_code(key: &str) -> Result<u32, HotkeyError> {
     let normalized = key.trim().to_ascii_lowercase();
     match normalized.as_str() {
@@ -108,6 +131,18 @@ fn parse_key_code(key: &str) -> Result<u32, HotkeyError> {
         "space" => Ok(VK_SPACE),
         "enter" => Ok(VK_RETURN),
         "escape" => Ok(VK_ESCAPE),
+        "tab" => Ok(VK_TAB),
+        "backspace" => Ok(VK_BACK),
+        "insert" => Ok(VK_INSERT),
+        "delete" => Ok(VK_DELETE),
+        "home" => Ok(VK_HOME),
+        "end" => Ok(VK_END),
+        "pageup" => Ok(VK_PRIOR),
+        "pagedown" => Ok(VK_NEXT),
+        "up" => Ok(VK_UP),
+        "down" => Ok(VK_DOWN),
+        "left" => Ok(VK_LEFT),
+        "right" => Ok(VK_RIGHT),
         // 英字 1 文字と数字 1 文字。仮想キーコードは大文字と数字の ASCII と同じ
         single if single.len() == 1 && is_letter_or_digit(single.as_bytes()[0]) => {
             Ok(u32::from(single.as_bytes()[0].to_ascii_uppercase()))
@@ -117,7 +152,7 @@ fn parse_key_code(key: &str) -> Result<u32, HotkeyError> {
 }
 
 /// egui が受け取ったキー入力を、フックが観測するのと同じ `KeyChord` に直す。
-/// ホットキーに使えないキー（Tab や矢印キーなど）は `None` を返す。
+/// ホットキーに使えないキー（記号キーや F13 以降など）は `None` を返す。
 ///
 /// 自アプリが前面のとき、ホットキーのキーを egui から取り除くために使う（#217）。
 /// **キー名は egui の `Key::name()` を `parse_key_code` へ通して引く。**
@@ -193,9 +228,12 @@ pub(super) fn remove_hotkey_key_events(
 /// `Paste` で届く。** egui-winit 0.26 が押下の時点でコマンドへ置き換え、
 /// `Event::Key` を作らないため。これらを割り当てたときも取り除けるように、
 /// それぞれ Ctrl+C / Ctrl+X / Ctrl+V として読む。egui-winit は Ctrl+Insert /
-/// Shift+Delete / Shift+Insert も同じイベントにするので区別できないが、
-/// Insert と Delete はホットキーに割り当てられないので、読み違えて困るのは
-/// 「Ctrl+C を割り当てているときに Ctrl+Insert でのコピーも効かなくなる」だけ。
+/// Shift+Delete / Shift+Insert も同じイベントにするので区別できない。
+/// Insert と Delete は単独なら割り当てられるが（#266）、この組み合わせは
+/// 入力ダイアログで割り当てられないようにしてある（`ui::hotkey_keys` の
+/// `is_clipboard_command_chord`）。読み違えて困るのは「Ctrl+C を割り当てている
+/// ときに Ctrl+Insert でのコピーも効かなくなる」と、設定ファイルへ直接
+/// `Ctrl+Insert` などを書いたときに前面で egui のコピーが取り除かれないことだけ。
 /// 入力中は取り除かないので、テキスト欄でのコピーと貼り付けには影響しない。
 pub(super) fn chord_from_egui_event(event: &egui::Event) -> Option<KeyChord> {
     let (key, modifiers) = match event {
@@ -489,8 +527,83 @@ mod tests {
     #[test]
     fn chord_from_egui_unsupported_key_returns_none() {
         // ホットキーに割り当てられないキーは、取り除く対象にもならない
-        for key in [egui::Key::Tab, egui::Key::ArrowDown, egui::Key::Plus] {
+        for key in [
+            egui::Key::Plus,
+            egui::Key::Minus,
+            egui::Key::F13,
+            egui::Key::F20,
+        ] {
             assert_eq!(chord_from_egui(key, egui::Modifiers::NONE), None, "{key:?}");
+        }
+    }
+
+    // ---- #266 で足したキー ----
+
+    /// #266 で足したキーと、その仮想キーコード。名前は egui の `Key::name()`
+    const ADDED_KEYS: [(egui::Key, u32); 12] = [
+        (egui::Key::Tab, 0x09),
+        (egui::Key::Backspace, 0x08),
+        (egui::Key::Insert, 0x2D),
+        (egui::Key::Delete, 0x2E),
+        (egui::Key::Home, 0x24),
+        (egui::Key::End, 0x23),
+        (egui::Key::PageUp, 0x21),
+        (egui::Key::PageDown, 0x22),
+        (egui::Key::ArrowUp, 0x26),
+        (egui::Key::ArrowDown, 0x28),
+        (egui::Key::ArrowLeft, 0x25),
+        (egui::Key::ArrowRight, 0x27),
+    ];
+
+    #[test]
+    fn parse_key_code_added_keys_map_egui_names_to_virtual_keys() {
+        // 設定ファイル上の名前（egui の名前）を解析した結果が、フックが観測する
+        // 仮想キーコードと一致すること。食い違うと割り当てても反応しない
+        for (key, vk) in ADDED_KEYS {
+            assert!(!key.name().is_empty(), "{key:?}");
+            assert_eq!(parse_key_code(key.name()), Ok(vk), "{key:?}");
+            assert_eq!(
+                parse_key_code(&key.name().to_ascii_uppercase()),
+                Ok(vk),
+                "{key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_key_code_arrow_keys_use_egui_names() {
+        // 矢印は egui の名前（Up / Down / Left / Right）に揃える。別名は受け付けない
+        assert_eq!(parse_key_code("Up"), Ok(0x26));
+        assert!(parse_key_code("ArrowUp").is_err());
+        assert!(parse_key_code("PgUp").is_err());
+    }
+
+    #[test]
+    fn chord_from_egui_added_keys_match_the_parsed_hotkey() {
+        // 前面で押したときに egui から取り除けるよう、フックと同じ組になること
+        for (key, vk) in ADDED_KEYS {
+            assert_eq!(
+                chord_from_egui(key, egui::Modifiers::NONE),
+                Some(KeyChord {
+                    modifiers: Modifiers::empty(),
+                    vk
+                }),
+                "{key:?}"
+            );
+            let hotkey = format!("Ctrl+Shift+{}", key.name());
+            assert_eq!(
+                chord_from_egui(key, egui::Modifiers::CTRL | egui::Modifiers::SHIFT),
+                Some(parse_hotkey(&hotkey).expect("解析できること")),
+                "{hotkey}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_key_code_numpad_names_are_not_accepted() {
+        // テンキーは egui で区別できないので受け付けない（入力ダイアログと揃える）
+        for name in ["Numpad0", "Numpad9", "NumpadAdd", "Add"] {
+            assert!(parse_key_code(name).is_err(), "{name}");
         }
     }
 

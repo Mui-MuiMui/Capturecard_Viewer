@@ -9,6 +9,9 @@ use crate::i18n::{self, Text};
 use eframe::egui;
 use std::collections::BTreeMap;
 
+use super::hotkey_keys::{
+    build_hotkey_string, hotkey_key_name, is_clipboard_command_chord, is_clipboard_command_event,
+};
 use super::hotkeys_tab::normalize_hotkey;
 use super::{notice_label, status_badge, NoticeKind, SETTINGS_WINDOW_SCREEN_MARGIN};
 
@@ -81,97 +84,6 @@ impl HotkeyCaptureState {
 /// それに合わせて小さくしてある
 const HOTKEY_CAPTURE_DIALOG_MIN_SIZE: egui::Vec2 = egui::vec2(260.0, 140.0);
 
-/// egui のキーを、ホットキー文字列で使う名前に変換する。
-/// ホットキーとして扱わないキーは `None` を返す。
-///
-/// 受け付けるキーは `hotkey::parse` が設定ファイルで受け付けるものと揃える
-/// （F1〜F12、A〜Z、0〜9、Space、Enter、Escape）。Escape が抜けていたため、
-/// 入力ダイアログで Escape を押しても何も確定せず、一覧の表示が変わらなかった（#251）。
-fn hotkey_key_name(key: egui::Key) -> Option<&'static str> {
-    let name = match key {
-        egui::Key::A => "A",
-        egui::Key::B => "B",
-        egui::Key::C => "C",
-        egui::Key::D => "D",
-        egui::Key::E => "E",
-        egui::Key::F => "F",
-        egui::Key::G => "G",
-        egui::Key::H => "H",
-        egui::Key::I => "I",
-        egui::Key::J => "J",
-        egui::Key::K => "K",
-        egui::Key::L => "L",
-        egui::Key::M => "M",
-        egui::Key::N => "N",
-        egui::Key::O => "O",
-        egui::Key::P => "P",
-        egui::Key::Q => "Q",
-        egui::Key::R => "R",
-        egui::Key::S => "S",
-        egui::Key::T => "T",
-        egui::Key::U => "U",
-        egui::Key::V => "V",
-        egui::Key::W => "W",
-        egui::Key::X => "X",
-        egui::Key::Y => "Y",
-        egui::Key::Z => "Z",
-        egui::Key::F1 => "F1",
-        egui::Key::F2 => "F2",
-        egui::Key::F3 => "F3",
-        egui::Key::F4 => "F4",
-        egui::Key::F5 => "F5",
-        egui::Key::F6 => "F6",
-        egui::Key::F7 => "F7",
-        egui::Key::F8 => "F8",
-        egui::Key::F9 => "F9",
-        egui::Key::F10 => "F10",
-        egui::Key::F11 => "F11",
-        egui::Key::F12 => "F12",
-        egui::Key::Num0 => "0",
-        egui::Key::Num1 => "1",
-        egui::Key::Num2 => "2",
-        egui::Key::Num3 => "3",
-        egui::Key::Num4 => "4",
-        egui::Key::Num5 => "5",
-        egui::Key::Num6 => "6",
-        egui::Key::Num7 => "7",
-        egui::Key::Num8 => "8",
-        egui::Key::Num9 => "9",
-        egui::Key::Space => "Space",
-        egui::Key::Enter => "Enter",
-        egui::Key::Escape => "Escape",
-        _ => return None,
-    };
-    Some(name)
-}
-
-/// 押されている修飾キーと通常キーから、`screenshot::parse_hotkey` が解釈できる
-/// ホットキー文字列を組み立てる。
-///
-/// 通常キーが 1 つも押されていない（修飾キーだけの）場合は `None` を返す。
-fn build_hotkey_string(modifiers: &egui::Modifiers, keys_down: &[egui::Key]) -> Option<String> {
-    // 通常キーが 1 つも無いうちは確定させない。修飾キーだけの文字列を確定させると
-    // screenshot::parse_hotkey が "No key code specified" で弾き、登録に失敗する。
-    // 押されているキーのうち対応している最初の 1 つだけを使う（ホットキーに含められる
-    // 通常キーは 1 つだけのため）。
-    let key_name = keys_down.iter().copied().find_map(hotkey_key_name)?;
-
-    let mut parts = Vec::new();
-
-    if modifiers.ctrl {
-        parts.push("Ctrl");
-    }
-    if modifiers.shift {
-        parts.push("Shift");
-    }
-    if modifiers.alt {
-        parts.push("Alt");
-    }
-    parts.push(key_name);
-
-    Some(parts.join("+"))
-}
-
 /// ホットキー入力ダイアログで、確定候補のキー入力をどう扱うかの判定。
 ///
 /// 実機のキー入力を経由せずテストできるよう、`egui::Context` から取り出した
@@ -186,6 +98,9 @@ enum HotkeyCaptureJudgement {
     Accepted(String),
     /// 他のアクションに割り当て済みのキーなので拒否する
     Duplicate { hotkey: String, other: HotkeyAction },
+    /// egui-winit がクリップボードの操作へ置き換える組み合わせなので拒否する
+    /// （`is_clipboard_command_chord`）
+    ClipboardCommand,
 }
 
 /// 押されている修飾キー・通常キーから、確定候補のキー入力をどう扱うか判定する。
@@ -196,6 +111,8 @@ enum HotkeyCaptureJudgement {
 /// - 候補が組み立てられても、`action` 以外のアクションに同じキーが
 ///   割り当て済みなら `Duplicate`。**`action` 自身への再割当て（変更なし、
 ///   または同じキーの入力し直し）は許す**
+/// - Ctrl+Insert / Shift+Insert / Shift+Delete（と、それに修飾キーを足したもの）は
+///   重複の有無より先に `ClipboardCommand` で弾く（`is_clipboard_command_chord`）
 /// - それ以外は `Accepted`。ただし押下を観測する仕組み（キーボードフック）が
 ///   使えているかはここでは分からない。呼び出し側が
 ///   `HotkeyManager::try_register` で確かめること
@@ -205,6 +122,14 @@ fn judge_hotkey_capture(
     action: HotkeyAction,
     existing: &BTreeMap<HotkeyAction, String>,
 ) -> HotkeyCaptureJudgement {
+    // build_hotkey_string と同じく、対応している最初の 1 つを通常キーとして見る
+    let key = keys_down
+        .iter()
+        .copied()
+        .find(|key| hotkey_key_name(*key).is_some());
+    if key.is_some_and(|key| is_clipboard_command_chord(modifiers, key)) {
+        return HotkeyCaptureJudgement::ClipboardCommand;
+    }
     match build_hotkey_string(modifiers, keys_down) {
         Some(candidate) => {
             let normalized = normalize_hotkey(&candidate);
@@ -223,6 +148,35 @@ fn judge_hotkey_capture(
         }
         None if keys_down.is_empty() && modifiers.any() => HotkeyCaptureJudgement::ModifiersOnly,
         None => HotkeyCaptureJudgement::Waiting,
+    }
+}
+
+/// このフレームの判定から出す拒否の理由。`previous` は覚えている直前の理由。
+///
+/// - 待機中と確定ではここでは理由を消さない（`None`）。呼び出し側（app/mod.rs）が
+///   `HotkeyManager::try_register` の失敗理由をこのフレームより後で
+///   `set_rejection` することがあり、ここで無条件に消すと次のフレームの
+///   冒頭（この判定）で即座に消えて一度も表示されない。理由を消すのは
+///   `begin_for`（編集対象の切り替え）と `reset`（キャンセル・× で閉じる）の役目
+/// - **修飾キーだけの判定は、直前の理由がクリップボードの組み合わせなら上書き
+///   しない**（#266）。クリップボードのイベントは押した瞬間の 1 フレームにしか
+///   届かないので、Ctrl を押したままの次のフレームで「修飾キーだけ」に
+///   置き換わり、理由がすぐ消えてしまう
+fn rejection_for(judgement: &HotkeyCaptureJudgement, previous: Option<&str>) -> Option<String> {
+    match judgement {
+        HotkeyCaptureJudgement::ModifiersOnly
+            if previous == Some(Text::HotkeyClipboardCommand.get()) =>
+        {
+            None
+        }
+        HotkeyCaptureJudgement::ModifiersOnly => Some(Text::HotkeyModifiersOnly.get().to_string()),
+        HotkeyCaptureJudgement::Duplicate { other, .. } => {
+            Some(i18n::hotkey_duplicate_assignment(other.label()))
+        }
+        HotkeyCaptureJudgement::ClipboardCommand => {
+            Some(Text::HotkeyClipboardCommand.get().to_string())
+        }
+        HotkeyCaptureJudgement::Waiting | HotkeyCaptureJudgement::Accepted(_) => None,
     }
 }
 
@@ -276,6 +230,11 @@ pub fn show_hotkey_capture_dialog(
         // ホットキー文字列が得られるよう並べてから渡す
         let mut keys_down: Vec<egui::Key> = i.keys_down.iter().copied().collect();
         keys_down.sort();
+        // Ctrl+C や Ctrl+Insert などは keys_down に入らず、クリップボードの
+        // イベントだけが届く（`is_clipboard_command_event`）
+        if i.events.iter().any(is_clipboard_command_event) {
+            return HotkeyCaptureJudgement::ClipboardCommand;
+        }
         judge_hotkey_capture(&i.modifiers, &keys_down, action, existing)
     });
 
@@ -284,19 +243,7 @@ pub fn show_hotkey_capture_dialog(
     // **表示にはこちらを優先して使う。** 覚えてもらうのは呼び出し側なので、
     // `Rejected` を返しただけでは `rejection` に入るのは次のフレーム。
     // キーを押したまま次の再描画が来ないと、理由が一度も出ないことがある
-    let judged_rejection = match &judgement {
-        HotkeyCaptureJudgement::ModifiersOnly => Some(Text::HotkeyModifiersOnly.get().to_string()),
-        HotkeyCaptureJudgement::Duplicate { other, .. } => {
-            Some(i18n::hotkey_duplicate_assignment(other.label()))
-        }
-        // 待機中でもここでは理由を消さない。呼び出し側（app/mod.rs）が
-        // `HotkeyManager::try_register` の失敗理由をこのフレームより後で
-        // `set_rejection` することがあり、ここで無条件に消すと次のフレームの
-        // 冒頭（この判定）で即座に消えて一度も表示されない。
-        // 理由を消すのは `begin_for`（編集対象の切り替え）と `reset`
-        // （キャンセル・× で閉じる）の役目
-        HotkeyCaptureJudgement::Waiting | HotkeyCaptureJudgement::Accepted(_) => None,
-    };
+    let judged_rejection = rejection_for(&judgement, rejection);
     if let Some(reason) = &judged_rejection {
         events.push(HotkeyDialogEvent::Rejected(reason.clone()));
     }
@@ -431,64 +378,115 @@ mod tests {
         assert_eq!(capture.rejection(), None);
     }
 
-    // ---- egui のキー → ホットキー文字列の名前（#251） ----
-
     #[test]
-    fn hotkey_key_name_accepts_escape() {
-        assert_eq!(hotkey_key_name(egui::Key::Escape), Some("Escape"));
-        assert_eq!(
-            build_hotkey_string(&modifiers(false, false, false), &[egui::Key::Escape]),
-            Some("Escape".to_string())
-        );
-        assert_eq!(
-            build_hotkey_string(&modifiers(true, false, false), &[egui::Key::Escape]),
-            Some("Ctrl+Escape".to_string())
-        );
-    }
-
-    #[test]
-    fn hotkey_key_name_is_never_empty_and_matches_egui_name() {
-        // 一覧に出る名前が空にならないこと。名前は egui の `Key::name()` と同じで、
-        // `hotkey::parse` はこの名前を設定ファイル上の名前として解釈する
+    fn judge_hotkey_capture_every_assignable_key_is_accepted_alone_and_with_alt() {
+        // 対応表にあるキー（#266 で足した Tab / 矢印 / Insert なども含む）は、
+        // 単独でも Alt との組み合わせでも確定する。Ctrl / Shift との組み合わせは
+        // Insert / Delete で弾かれるものがあるので、ここでは Alt だけを足す
+        // （弾く組み合わせは次のテスト）
         for &key in egui::Key::ALL {
-            if let Some(name) = hotkey_key_name(key) {
-                assert!(!name.is_empty(), "{key:?}");
-                assert_eq!(name, key.name(), "{key:?}");
+            let Some(name) = hotkey_key_name(key) else {
+                continue;
+            };
+            for (mods, expected) in [
+                (no_modifiers(), name.to_string()),
+                (modifiers(false, false, true), format!("Alt+{name}")),
+            ] {
+                let judged =
+                    judge_hotkey_capture(&mods, &[key], HotkeyAction::Screenshot, &BTreeMap::new());
+                assert_eq!(
+                    judged,
+                    HotkeyCaptureJudgement::Accepted(expected),
+                    "{key:?}"
+                );
             }
         }
     }
 
     #[test]
-    fn hotkey_key_name_covers_every_key_the_config_file_accepts() {
-        let accepted = [
-            egui::Key::Space,
-            egui::Key::Enter,
-            egui::Key::Escape,
-            egui::Key::A,
-            egui::Key::Z,
-            egui::Key::Num0,
-            egui::Key::Num9,
-            egui::Key::F1,
-            egui::Key::F12,
+    fn rejection_for_modifiers_only_keeps_the_clipboard_reason() {
+        // Ctrl+C を押した次のフレーム（Ctrl だけが押されたまま）で、
+        // クリップボードの理由が「修飾キーだけ」に置き換わらない
+        let clipboard = Text::HotkeyClipboardCommand.get();
+        assert_eq!(
+            rejection_for(&HotkeyCaptureJudgement::ClipboardCommand, None).as_deref(),
+            Some(clipboard)
+        );
+        assert_eq!(
+            rejection_for(&HotkeyCaptureJudgement::ModifiersOnly, Some(clipboard)),
+            None
+        );
+    }
+
+    #[test]
+    fn rejection_for_modifiers_only_replaces_other_reasons() {
+        let modifiers_only = Some(Text::HotkeyModifiersOnly.get());
+        assert_eq!(
+            rejection_for(&HotkeyCaptureJudgement::ModifiersOnly, None).as_deref(),
+            modifiers_only
+        );
+        assert_eq!(
+            rejection_for(
+                &HotkeyCaptureJudgement::ModifiersOnly,
+                Some("同じキーが「フルスクリーン切替」に割り当てられています")
+            )
+            .as_deref(),
+            modifiers_only
+        );
+        assert_eq!(
+            rejection_for(&HotkeyCaptureJudgement::Waiting, Some("理由")),
+            None
+        );
+    }
+
+    #[test]
+    fn judge_hotkey_capture_clipboard_command_chords_are_rejected() {
+        // egui-winit が Copy / Paste / Cut に置き換える組み合わせ。修飾キーを
+        // 足しても置き換えは同じなので、足したものも弾く
+        let rejected = [
+            (modifiers(true, false, false), egui::Key::Insert),
+            (modifiers(false, true, false), egui::Key::Insert),
+            (modifiers(false, true, false), egui::Key::Delete),
+            (modifiers(true, true, false), egui::Key::Insert),
+            (modifiers(true, true, true), egui::Key::Delete),
         ];
-        for key in accepted {
-            assert!(hotkey_key_name(key).is_some(), "{key:?}");
+        for (mods, key) in rejected {
+            assert_eq!(
+                judge_hotkey_capture(&mods, &[key], HotkeyAction::Screenshot, &BTreeMap::new()),
+                HotkeyCaptureJudgement::ClipboardCommand,
+                "{mods:?} {key:?}"
+            );
         }
-        // 設定ファイルでも受け付けないキーは入力ダイアログでも確定させない
-        for key in [
-            egui::Key::Tab,
-            egui::Key::Backspace,
-            egui::Key::Delete,
-            egui::Key::Insert,
-            egui::Key::Home,
-            egui::Key::End,
-            egui::Key::PageUp,
-            egui::Key::PageDown,
-            egui::Key::ArrowUp,
-            egui::Key::F13,
-            egui::Key::F20,
-        ] {
-            assert_eq!(hotkey_key_name(key), None, "{key:?}");
+    }
+
+    #[test]
+    fn judge_hotkey_capture_other_insert_and_delete_chords_are_accepted() {
+        // 置き換えられない組み合わせまで弾かない
+        let accepted = [
+            (no_modifiers(), egui::Key::Insert, "Insert"),
+            (no_modifiers(), egui::Key::Delete, "Delete"),
+            (
+                modifiers(true, false, false),
+                egui::Key::Delete,
+                "Ctrl+Delete",
+            ),
+            (
+                modifiers(false, false, true),
+                egui::Key::Insert,
+                "Alt+Insert",
+            ),
+            (
+                modifiers(false, false, true),
+                egui::Key::Delete,
+                "Alt+Delete",
+            ),
+        ];
+        for (mods, key, expected) in accepted {
+            assert_eq!(
+                judge_hotkey_capture(&mods, &[key], HotkeyAction::Screenshot, &BTreeMap::new()),
+                HotkeyCaptureJudgement::Accepted(expected.to_string()),
+                "{expected}"
+            );
         }
     }
 
@@ -501,112 +499,6 @@ mod tests {
             // Windows では command は ctrl と同じ値にする決まりになっている
             command: ctrl,
         }
-    }
-
-    #[test]
-    fn build_hotkey_string_no_input_returns_none() {
-        assert_eq!(
-            build_hotkey_string(&modifiers(false, false, false), &[]),
-            None
-        );
-    }
-
-    #[test]
-    fn build_hotkey_string_one_modifier_only_returns_none() {
-        assert_eq!(
-            build_hotkey_string(&modifiers(true, false, false), &[]),
-            None
-        );
-        assert_eq!(
-            build_hotkey_string(&modifiers(false, true, false), &[]),
-            None
-        );
-        assert_eq!(
-            build_hotkey_string(&modifiers(false, false, true), &[]),
-            None
-        );
-    }
-
-    #[test]
-    fn build_hotkey_string_two_modifiers_only_returns_none() {
-        // 修飾キーが 2 つ押されただけで確定してしまう不具合の再現
-        assert_eq!(
-            build_hotkey_string(&modifiers(true, true, false), &[]),
-            None
-        );
-        assert_eq!(
-            build_hotkey_string(&modifiers(true, false, true), &[]),
-            None
-        );
-        assert_eq!(
-            build_hotkey_string(&modifiers(false, true, true), &[]),
-            None
-        );
-    }
-
-    #[test]
-    fn build_hotkey_string_three_modifiers_only_returns_none() {
-        assert_eq!(build_hotkey_string(&modifiers(true, true, true), &[]), None);
-    }
-
-    #[test]
-    fn build_hotkey_string_unsupported_key_only_returns_none() {
-        // 対応していないキーは通常キーとして数えない
-        assert_eq!(
-            build_hotkey_string(&modifiers(true, true, false), &[egui::Key::Tab]),
-            None
-        );
-    }
-
-    #[test]
-    fn build_hotkey_string_single_key_returns_key_only() {
-        assert_eq!(
-            build_hotkey_string(&modifiers(false, false, false), &[egui::Key::F5]),
-            Some("F5".to_string())
-        );
-        assert_eq!(
-            build_hotkey_string(&modifiers(false, false, false), &[egui::Key::A]),
-            Some("A".to_string())
-        );
-    }
-
-    #[test]
-    fn build_hotkey_string_one_modifier_with_key_returns_combination() {
-        assert_eq!(
-            build_hotkey_string(&modifiers(true, false, false), &[egui::Key::S]),
-            Some("Ctrl+S".to_string())
-        );
-    }
-
-    #[test]
-    fn build_hotkey_string_three_modifiers_with_key_keeps_fixed_order() {
-        assert_eq!(
-            build_hotkey_string(&modifiers(true, true, true), &[egui::Key::A]),
-            Some("Ctrl+Shift+Alt+A".to_string())
-        );
-    }
-
-    #[test]
-    fn build_hotkey_string_digit_keys_are_supported() {
-        assert_eq!(
-            build_hotkey_string(&modifiers(false, false, false), &[egui::Key::Num0]),
-            Some("0".to_string())
-        );
-        assert_eq!(
-            build_hotkey_string(&modifiers(true, true, false), &[egui::Key::Num9]),
-            Some("Ctrl+Shift+9".to_string())
-        );
-    }
-
-    #[test]
-    fn build_hotkey_string_ignores_unsupported_keys_when_key_is_present() {
-        assert_eq!(
-            build_hotkey_string(
-                &modifiers(true, false, false),
-                &[egui::Key::Tab, egui::Key::S]
-            ),
-            Some("Ctrl+S".to_string())
-        );
     }
 
     // ---- ホットキー入力ダイアログの確定判定 ----
@@ -652,12 +544,12 @@ mod tests {
 
     #[test]
     fn judge_hotkey_capture_unsupported_key_only_is_waiting() {
-        // Tab は hotkey_key_name の対象外。修飾キーの単独入力とは区別しなくてよい
+        // Plus は hotkey_key_name の対象外。修飾キーの単独入力とは区別しなくてよい
         // （build_hotkey_string が None を返す点は同じで、実害も無い）
         assert_eq!(
             judge_hotkey_capture(
                 &no_modifiers(),
-                &[egui::Key::Tab],
+                &[egui::Key::Plus],
                 HotkeyAction::Screenshot,
                 &BTreeMap::new()
             ),

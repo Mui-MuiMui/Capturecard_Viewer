@@ -132,6 +132,14 @@ fn show_hotkey_assignments(
             warning_label(ui, i18n::hotkey_duplicates_warning(&names));
         }
 
+        // 修飾キーなしの移動系のキーは、前面にいる間 egui のフォーカス移動と
+        // 重なる（取り除くのが egui の処理に間に合わない、docs/design/hotkeys.md）。
+        // 動作は変えず、案内だけ出す（#266）
+        if has_bare_navigation_key(&settings.hotkeys) {
+            ui.add_space(5.0);
+            warning_label(ui, Text::HotkeyNavigationKeyHint.get());
+        }
+
         // 登録に失敗したものを、理由とともに出す。トーストは気付かせるための
         // もので流れて消えるため、どのアクションが失敗しているかはここで見る。
         // 見出しは status.rs の定型文をそのまま使い、通知と表現を揃える
@@ -175,6 +183,23 @@ pub fn duplicate_hotkey_actions(
         .filter(|actions| actions.len() > 1)
         .flatten()
         .collect()
+}
+
+/// 修飾キーなしで移動系のキー（Tab、矢印、Home、End、PageUp、PageDown）を
+/// 割り当てているものがあるか。
+///
+/// これらは egui がフォーカスの移動などに使い、前面にいる間はホットキーと
+/// 同時に egui 側も動くことがある（#266）。Backspace / Delete / Insert は
+/// テキスト欄の外では egui が使わず、テキスト欄に入力している間はホットキーが
+/// 反応しないので含めない。
+fn has_bare_navigation_key(hotkeys: &BTreeMap<HotkeyAction, String>) -> bool {
+    const NAVIGATION_KEYS: [&str; 9] = [
+        "tab", "up", "down", "left", "right", "home", "end", "pageup", "pagedown",
+    ];
+    hotkeys
+        .values()
+        .map(|hotkey| normalize_hotkey(hotkey))
+        .any(|normalized| NAVIGATION_KEYS.contains(&normalized.as_str()))
 }
 
 /// ホットキー文字列を、同じキーの組み合わせなら同じになる形へ正規化する。
@@ -270,5 +295,33 @@ mod tests {
         );
         assert_ne!(normalize_hotkey("Ctrl+S"), normalize_hotkey("Ctrl+A"));
         assert_ne!(normalize_hotkey("Ctrl+S"), normalize_hotkey("Alt+S"));
+    }
+
+    // ---- 修飾キーなしの移動系のキー（#266） ----
+
+    #[test]
+    fn has_bare_navigation_key_detects_navigation_keys_without_modifiers() {
+        for key in [
+            "Tab", "Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown", " tab ",
+        ] {
+            let assigned = hotkeys(&[(HotkeyAction::VolumeUp, key)]);
+            assert!(has_bare_navigation_key(&assigned), "{key}");
+        }
+    }
+
+    #[test]
+    fn has_bare_navigation_key_ignores_combinations_and_other_keys() {
+        // 修飾キーと組み合わせていれば egui の操作と重ならない。Delete などの
+        // 移動系でないキーも案内の対象にしない
+        let assigned = hotkeys(&[
+            (HotkeyAction::Screenshot, "F5"),
+            (HotkeyAction::VolumeUp, "Ctrl+Up"),
+            (HotkeyAction::VolumeDown, "Ctrl+Down"),
+            (HotkeyAction::ToggleFullscreen, "Shift+Tab"),
+            (HotkeyAction::ToggleMute, "Delete"),
+            (HotkeyAction::ReconnectDevices, "Backspace"),
+        ]);
+        assert!(!has_bare_navigation_key(&assigned));
+        assert!(!has_bare_navigation_key(&BTreeMap::new()));
     }
 }
