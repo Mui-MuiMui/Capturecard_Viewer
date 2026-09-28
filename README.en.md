@@ -111,7 +111,7 @@ Turning on "Show stats" in the context menu (under View when collapsed) overlays
 | Decode | Time spent on the RGB conversion of the most recent frame, plus how many frames took the fast path versus the generic path |
 | Resolution / format | Pixel size and input format of the frames actually arriving |
 | Last frame | Time elapsed since the last frame arrived |
-| Recording | Only while recording: elapsed time, frames written and dropped, and the encoder in use (hardware / software) |
+| Recording | Only while recording: elapsed time, frames written and dropped, how far back the replay buffer went (when recording through it), and the encoder in use (hardware / software) |
 
 ### Settings
 
@@ -119,7 +119,7 @@ Turning on "Show stats" in the context menu (under View when collapsed) overlays
 2. Select video and audio devices in the **Devices** tab.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
 3. Configure the destination, save location, file format, and sound effect in the **Screenshots** tab.
-4. Configure the recording folder, file name, bitrate, hardware encoder, and audio in the **Recording** tab.
+4. Configure the recording folder, file name, bitrate, hardware encoder, audio, and replay buffer in the **Recording** tab.
 5. Configure the per-action hotkeys in the **Hotkeys** tab.
 6. Manage presets, choose the interface language, and export, import or reset the settings in the **Other** tab.
 
@@ -220,6 +220,7 @@ Saves the video on screen as H.264 and the sound from the audio input as AAC in 
 - **Bitrate**: 8000 kbps (1000-50000 kbps)
 - **Encoder**: the GPU hardware encoder (Intel / NVIDIA / AMD) when available, otherwise the Windows software encoder. The encoder in use is shown in the stats overlay
 - **Audio**: AAC (48 kHz, stereo) at 160 kbps (96 / 128 / 160 / 192 kbps, or off). **Volume, mute, and passthrough do not affect the recording** (turning down what you hear still records the input as is). While no audio device is available, silence is recorded
+- **Replay buffer**: when turned on in the Recording tab, starting a recording also puts **the video and audio from just before** (30 seconds by default, 5 seconds to 5 minutes) at the beginning of the file, so you can still keep a moment you would otherwise have missed. While on, the encoder runs even when not recording and keeps the latest footage in memory (longer lengths use more memory; about 300 MB for 5 minutes). The starting point is aligned to a keyframe every 2 seconds, so the included footage can be up to 2 seconds shorter than the length. Buffering starts when you turn it on and starts over when you change the bitrate, encoder, or audio settings. While recording, the recording line of the stats overlay shows how far back it went. It is off by default, and while off it adds no load when not recording
 
 The recording looks exactly like the preview, including the color space, color range, and brightness / contrast / saturation adjustments. If the video size (resolution) changes while recording, the file so far is closed and recording stops. Recording also stops before the disk fills up, when less than 500 MB is left. Both show the reason at the bottom of the window. If the USB connection drops briefly and comes back at the same resolution, recording continues into the same file.
 
