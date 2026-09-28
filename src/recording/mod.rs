@@ -8,7 +8,8 @@
 //! | `recorder.rs` | 録画スレッドの窓口 `Recorder`（UI スレッドが持つ）と、録画スレッドの本体 |
 //! | `writer.rs` | Sink Writer の組み立てと書き込み、使っているエンコーダの名前 |
 //! | `convert.rs` | RGB → NV12 の画素変換（純粋関数） |
-//! | `pts.rs` | 映像の PTS（純粋関数） |
+//! | `audio.rs` | 音声トラック。`AudioTap` のリングから取り出し、48kHz 2ch の 16bit PCM へ寄せて PTS を付ける |
+//! | `pts.rs` | 映像と音声の PTS（純粋関数） |
 //! | `file_name.rs` | ファイル名の書式の検めと連番（純粋関数） |
 //! | `storage.rs` | 保存先の空き容量 |
 //!
@@ -16,6 +17,9 @@
 //! コールバックは `video::VideoTap` のリングへ積むだけ。**録画スレッドはデバイスに
 //! 触らない**ので、「デバイスに触る使い捨てのスレッドを作らない」には当たらない。
 
+// 録画スレッドが音声を書く段で使い始める。それまでの一時的な許可
+#[allow(dead_code)]
+mod audio;
 mod convert;
 mod file_name;
 mod pts;

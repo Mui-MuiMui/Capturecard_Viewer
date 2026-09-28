@@ -4,6 +4,7 @@
 //! 入力で f32 へ正規化し、出力で書き戻す（`i16_to_f32` などの一連の関数）。
 //! レートやチャンネル数の違いは `PassthroughConverter` が吸収する。
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::resample::ResampleTelemetry;
@@ -24,7 +25,7 @@ pub(super) fn i16_to_f32(sample: i16) -> f32 {
 ///
 /// 音量 200% では 1.0 を超える値が来る。Rust の float → int キャストは飽和するので、
 /// 折り返して最大音量が最小音量に化けることはない。
-pub(super) fn f32_to_i16(sample: f32) -> i16 {
+pub(crate) fn f32_to_i16(sample: f32) -> i16 {
     (sample * I16_SCALE) as i16
 }
 
@@ -190,6 +191,47 @@ impl PassthroughConverter {
             self.channel = 0;
         }
         sample
+    }
+
+    /// 溜めてある入力から、出力フレームを出せるだけ組み立てて `output` へ足す。
+    /// 録画スレッドが使う（`crate::recording`）。
+    ///
+    /// **出力フレームの途中で入力を切らさない。** `next_sample` は入力が尽きると
+    /// 組み立て途中の状態を捨てて次のフレームで読み直す（リアルタイムの出力で
+    /// 途切れたときの扱い）。録画は数 ms ごとに溜まった分を渡すので、そのたびに
+    /// 状態を捨てると補間が途切れて雑音になる。ここでは次のフレームに要る入力が
+    /// 揃っているときだけ組み立て、足りない分は `input` に残して次の呼び出しへ回す。
+    pub fn convert_buffered(&mut self, input: &mut VecDeque<f32>, output: &mut Vec<f32>) {
+        // レート比が 0 以下だと入力を読まずに出力し続けてしまう。形は録画側が
+        // 0 を弾いてから渡すので来ないが、無限に回らないよう止める
+        if !self.identity && self.step <= 0.0 {
+            return;
+        }
+        while input.len() >= self.input_needed_for_next_frame() {
+            let mut pop = || input.pop_front();
+            for _ in 0..self.out_channels {
+                match self.next_sample(&mut pop) {
+                    Some(sample) => output.push(sample),
+                    // 足りることは確かめてあるので来ない
+                    None => return,
+                }
+            }
+        }
+    }
+
+    /// 次の出力フレームを組み立てるのに読む入力サンプル数。出力フレームの境界で呼ぶ。
+    fn input_needed_for_next_frame(&self) -> usize {
+        if self.identity {
+            return self.in_channels;
+        }
+        // 読み込み前なら補間の両端の 2 フレーム。読み込み後は、位置が `next` を
+        // 追い越した分だけ進める（`fill_frame` の while と同じ数）
+        let frames = if self.primed {
+            self.position.floor() as usize
+        } else {
+            2
+        };
+        frames * self.in_channels
     }
 
     /// 次の出力フレームを組み立てる。入力が足りなければ `false`。
@@ -554,5 +596,57 @@ mod tests {
         for raw in [0u16, 1, 32768, 65535] {
             assert_eq!(f32_to_u16(u16_to_f32(raw)), raw);
         }
+    }
+
+    #[test]
+    fn convert_buffered_identity_keeps_an_incomplete_frame_for_later() {
+        let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2);
+        let mut input: VecDeque<f32> = [0.1, 0.2, 0.3, 0.4, 0.5].into_iter().collect();
+        let mut output = Vec::new();
+
+        converter.convert_buffered(&mut input, &mut output);
+
+        // 2ch なので 2 フレームぶんだけ出し、半端な 1 サンプルは次へ回す
+        assert_eq!(output, vec![0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(input.len(), 1);
+    }
+
+    #[test]
+    fn convert_buffered_in_small_chunks_matches_one_pass() {
+        // 録画は数 ms ごとに溜まった分を渡す。分けて渡しても補間が途切れず、
+        // まとめて渡したときと同じ出力になること
+        let samples: Vec<f32> = (0..441).map(|i| (i as f32 / 441.0) - 0.5).collect();
+
+        let mut whole = PassthroughConverter::new(44_100, 1, 48_000, 2);
+        let mut all_input: VecDeque<f32> = samples.iter().copied().collect();
+        let mut expected = Vec::new();
+        whole.convert_buffered(&mut all_input, &mut expected);
+
+        let mut chunked = PassthroughConverter::new(44_100, 1, 48_000, 2);
+        let mut pending = VecDeque::new();
+        let mut actual = Vec::new();
+        for chunk in samples.chunks(7) {
+            pending.extend(chunk.iter().copied());
+            chunked.convert_buffered(&mut pending, &mut actual);
+        }
+
+        assert_eq!(actual, expected);
+        // 441 入力フレーム（10ms）から、48kHz でおよそ 480 フレーム（2ch）が出る
+        assert!((950..=962).contains(&actual.len()), "{}", actual.len());
+        assert_eq!(actual.len() % 2, 0);
+    }
+
+    #[test]
+    fn convert_buffered_spreads_mono_to_both_output_channels() {
+        let mut converter = PassthroughConverter::new(48_000, 1, 48_000, 2);
+        let mut input: VecDeque<f32> = [0.5, -0.5, 0.25].into_iter().collect();
+        let mut output = Vec::new();
+
+        converter.convert_buffered(&mut input, &mut output);
+
+        // モノラルは同じ値を左右へ配る。最後の 1 フレームは補間の右端として読み込み済みで、
+        // 次の入力が来たら出る（変換の遅れは 1 入力フレーム）
+        assert_eq!(output, vec![0.5, 0.5, -0.5, -0.5]);
+        assert!(input.is_empty());
     }
 }

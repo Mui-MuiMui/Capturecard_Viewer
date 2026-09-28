@@ -39,7 +39,9 @@ pub use controls::AudioControls;
 pub use fake::{FakeAudioCapture, FakeAudioOptions};
 pub(crate) use resample::decide_resample_correction;
 pub use resample::{ResampleStatus, ResampleTelemetry};
-pub use tap::AudioTap;
+// 録画スレッド（`crate::recording`）が録画用に 1 つ持つ変換器と、16bit PCM への変換
+pub(crate) use convert::{f32_to_i16, PassthroughConverter};
+pub use tap::{AudioTap, AudioTapConsumer, AudioTapSnapshot};
 
 use cpal::SampleFormat;
 use std::fmt;

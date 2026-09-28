@@ -283,6 +283,17 @@ impl AudioTap {
         }
     }
 
+    /// 入力コールバック 1 回ぶんを積む。`audio` の外（録画スレッドのテスト）から
+    /// 入力コールバックの代わりに使う。
+    #[cfg(test)]
+    pub fn push_for_test(&self, samples: &[f32]) {
+        if let Some(mut writer) = self.writer(samples.len()) {
+            for &sample in samples {
+                writer.push(sample);
+            }
+        }
+    }
+
     /// 溢れを数え、ここを途切れの位置として記録する。
     fn note_overflow(&self) {
         let shared = &self.shared;
