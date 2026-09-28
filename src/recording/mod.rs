@@ -27,6 +27,8 @@ mod convert;
 #[allow(dead_code)]
 mod encoder;
 mod file_name;
+#[allow(dead_code)]
+mod passthrough;
 mod pts;
 mod recorder;
 #[allow(dead_code)]

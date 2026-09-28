@@ -94,7 +94,7 @@ pub(super) struct WriterError {
 }
 
 impl WriterError {
-    fn at(stage: WriterStage) -> impl FnOnce(windows::core::Error) -> Self {
+    pub(super) fn at(stage: WriterStage) -> impl FnOnce(windows::core::Error) -> Self {
         move |error| Self { stage, error }
     }
 }
