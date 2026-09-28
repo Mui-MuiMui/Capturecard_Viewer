@@ -256,7 +256,7 @@ MF の時間の単位は 100ns。
 | `replay_seconds` | `u32` | 30 | 5〜300（上限 5 分は #182 の決定） | ③ |
 
 - 保存先の既定は `default_screenshot_folder` と同じ理由でカレントディレクトリを使わない（`docs/design/assets.md`）。先頭の候補だけが違う（`dirs::video_dir()`）
-- **ファイル名の書式は使う前に検める。** chrono は解釈できない指定子を含む書式を文字列にするとパニックする（release は `panic = "abort"`）。`StrftimeItems` に `Item::Error` が混じる、または結果に Windows のファイル名に使えない文字（`\ / : * ? " < > |`）が入るなら既定へ倒し、`warn` を残す。設定ダイアログでも同じ判定で注意書きを出す
+- **ファイル名の書式は使う前に検める。** chrono は解釈できない指定子を含む書式を文字列にするとパニックする（release は `panic = "abort"`）。`StrftimeItems` に `Item::Error` が混じる、結果に Windows のファイル名に使えない文字（`\ / : * ? " < > |`）が入る、末尾が空白か `.` になる、または結果が大文字小文字を問わず Windows の予約デバイス名（`CON` / `PRN` / `AUX` / `NUL` / `COM1`〜`COM9` / `LPT1`〜`LPT9`）に一致するなら既定へ倒し、`warn` を残す。予約名は拡張子を付けても（`NUL.mp4`）予約名のままで、連番を付ける処理では避けられないため、ここで弾く。設定ダイアログでも同じ判定で注意書きを出す
 - 同じ名前のファイルがあれば `_2`、`_3` … を付ける（スクリーンショットの連番と同じ考え方）
 - **プリセットには入れない。** プリセットはキャプチャーボードの使い分け（`video` / `audio`）のためのもので、録画の保存先やビットレートはデバイスと一体の設定ではない（`docs/design/presets.md`）。`screenshot` を入れていないのと同じ
 - `commit_draft` と `draft_from_imported` の両方で扱う（`docs/design/settings-dialog.md`）。録画中に変えた設定は次の録画から効く
