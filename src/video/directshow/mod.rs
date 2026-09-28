@@ -34,10 +34,10 @@ use super::color::SharedColorConversion;
 use super::frame_buffer::VideoFrames;
 use super::frame_sink::FrameSink;
 use super::{elapsed_ms, VideoError};
+use crate::com::ComApartment;
 use crate::repaint::RepaintWaker;
 use devices::DeviceEntry;
 use graph::{CaptureGraph, FormatRequest, GraphError};
-use media_type::ComApartment;
 
 /// DirectShow のデバイス名に添える印。**設定に保存される識別子の一部なので、
 /// 翻訳しない。**

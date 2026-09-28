@@ -10,6 +10,7 @@ use eframe::egui;
 
 mod app;
 mod audio;
+mod com;
 mod hotkey;
 mod i18n;
 mod keyboard_hook;
