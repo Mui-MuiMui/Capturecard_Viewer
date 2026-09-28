@@ -295,11 +295,14 @@ mkdir -p .agent-config && cp "$APPDATA/capturecard_viewer/config/default-config.
 ```
 
 ```bash
-CAPTURECARD_VIEWER_CONFIG_DIR="$(pwd -W)/.agent-config" CAPTURECARD_VIEWER_LOG=debug ./target/release/capturecard_viewer.exe
+CAPTURECARD_VIEWER_CONFIG_DIR="$(pwd -W)/.agent-config" CAPTURECARD_VIEWER_LOG=debug ./target/release/capturecard_viewer.exe &
+cat /proc/$!/winpid > .agent-config/pid
 ```
 
+終えるときは、起動したプロセスだけを PID で止める。**`taskkill //IM capturecard_viewer.exe` は使わない。** 同名の全プロセスが止まり、別の worktree やエージェントが起動したものまで巻き込む。
+
 ```bash
-taskkill //IM capturecard_viewer.exe //F
+taskkill //PID "$(cat .agent-config/pid)" //F
 ```
 
 ログもそのフォルダの `logs/` に出る。`.agent-config/` は `.gitignore` に入っている。
