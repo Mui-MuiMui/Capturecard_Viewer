@@ -67,7 +67,7 @@ gh pr view <番号> --json headRefOid --jq .headRefOid
 
 ### 6. 結果を確認する
 
-`docs/RELEASE.md` の手順 5。Release ができたら URL を報告する。**資産が 3 つ（`capturecard_viewer-<tag>-windows-x64.zip` / `.exe` と `SHA256SUMS.txt`）付いていることを `gh release view <tag>` で確かめる。** 資産名は自動アップデートが読むので変えない（`docs/RELEASE.md` の「配布物」）。**zip を展開して exe が起動するかの確認はユーザーに依頼する。** ビルドが通ったことと、配った物が動くことは別。
+`docs/RELEASE.md` の手順 5。Release ができたら URL を報告する。**資産が 2 つ（`capturecard_viewer.exe` と `SHA256SUMS.txt`）付いていることを `gh release view <tag>` で確かめる。** 資産名は自動アップデートが読むので変えない（`docs/RELEASE.md` の「配布物」）。**exe を落として起動するかの確認はユーザーに依頼する。** ビルドが通ったことと、配った物が動くことは別。
 
 失敗していたら「ワークフローが失敗したとき」の表で切り分ける。**手動でリリースを出す前に、タグを打ち直せる状況か（Release がまだ無いか）を確認する。**
 

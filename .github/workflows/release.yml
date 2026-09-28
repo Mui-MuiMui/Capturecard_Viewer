@@ -1,4 +1,4 @@
-# タグを push したら release ビルドを作り、zip・単体の exe・SHA256SUMS.txt を GitHub Release に添付する。
+# タグを push したら release ビルドを作り、単体の exe と SHA256SUMS.txt を GitHub Release に添付する。
 #
 # 手順の全体は docs/RELEASE.md を参照。ここが受け持つのはタグ push 以降だけで、
 # バージョンの更新・CHANGELOG の整理・dev → main のマージは人が行う。
@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   release:
-    name: build / zip / release
+    name: build / release
     runs-on: windows-latest
 
     env:
@@ -113,28 +113,18 @@ jobs:
       - name: release ビルドする
         run: cargo build --locked --release
 
-      # 配布物は exe 単体。icon.ico と sound/SS.mp3 は exe に埋め込み済みなので同梱しない
-      # （docs/BUILD.md の「配布時に同梱するもの」）
-      - name: zip に固める
+      # 配布物は exe 単体と SHA256SUMS.txt の 2 つ。icon.ico と sound/SS.mp3 は exe に埋め込み済みなので
+      # 同梱しない（docs/BUILD.md の「配布時に同梱するもの」）。exe はビルド成果物をそのまま添付し、
+      # 資産名は版を含まない capturecard_viewer.exe（gh はパスの末尾をそのまま資産名にする）。
+      # 資産名は自動アップデートが読むので変えない（docs/RELEASE.md の「配布物」）。
+      # SHA256SUMS.txt の形式は sha256sum と同じ「<小文字の hash>  <ファイル名>」、BOM なしの UTF-8、改行は LF
+      - name: 配布する exe と SHA-256 の一覧を作る
         run: |
-          $zip = "capturecard_viewer-${env:TAG}-windows-x64.zip"
-          Compress-Archive -Path target/release/capturecard_viewer.exe -DestinationPath $zip -Force
-          "ZIP=$zip" | Out-File -FilePath ${env:GITHUB_ENV} -Append -Encoding utf8
-
-      # 自動アップデートがアプリから直接落とせるよう、zip の中身と同じ exe を単体でも添付し、
-      # zip と exe の SHA-256 を SHA256SUMS.txt に書く。資産名は自動アップデートが読むので変えない
-      # （docs/RELEASE.md の「配布物」）。形式は sha256sum と同じ「<小文字の hash>  <ファイル名>」を
-      # 1 行 1 ファイル、BOM なしの UTF-8、改行は LF
-      - name: 単体の exe と SHA-256 の一覧を作る
-        run: |
-          $exe = "capturecard_viewer-${env:TAG}-windows-x64.exe"
-          Copy-Item -Path target/release/capturecard_viewer.exe -Destination $exe
-          $lines = foreach ($file in @(${env:ZIP}, $exe)) {
-            $hash = (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $file"
-          }
+          $exe = "target/release/capturecard_viewer.exe"
+          $name = Split-Path -Path $exe -Leaf
+          $hash = (Get-FileHash -Path $exe -Algorithm SHA256).Hash.ToLowerInvariant()
           $sums = "SHA256SUMS.txt"
-          [System.IO.File]::WriteAllText((Join-Path (Get-Location) $sums), (($lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding $false))
+          [System.IO.File]::WriteAllText((Join-Path (Get-Location) $sums), "$hash  $name`n", (New-Object System.Text.UTF8Encoding $false))
           Get-Content -Path $sums
           "EXE=$exe" | Out-File -FilePath ${env:GITHUB_ENV} -Append -Encoding utf8
           "SUMS=$sums" | Out-File -FilePath ${env:GITHUB_ENV} -Append -Encoding utf8
@@ -144,4 +134,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create ${env:TAG} ${env:ZIP} ${env:EXE} ${env:SUMS} --title ${env:TAG} --notes-file release-notes.md --verify-tag
+          gh release create ${env:TAG} ${env:EXE} ${env:SUMS} --title ${env:TAG} --notes-file release-notes.md --verify-tag

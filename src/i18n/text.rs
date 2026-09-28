@@ -261,6 +261,7 @@ texts! {
     LinkAudio { ja: "音声", en: "Audio" },
     StatusReadOnlyHint { ja: "この内容は表示だけで、「適用」や「OK」では変わりません。", en: "This tab is for information only. Apply and OK do not change it." },
     StatusLogHint { ja: "詳しい経過はログファイルに残っています（%AppData%\\capturecard_viewer\\logs）。", en: "Details are recorded in the log files (%AppData%\\capturecard_viewer\\logs)." },
+    FakeDevicesNotice { ja: "テスト用のフェイクデバイスで動いています（環境変数 CAPTURECARD_VIEWER_FAKE_DEVICES）", en: "Running with fake test devices (environment variable CAPTURECARD_VIEWER_FAKE_DEVICES)" },
     StateLabel { ja: "状態:", en: "Status:" },
     NoRecentError { ja: "直近のエラー: なし", en: "Recent error: none" },
 

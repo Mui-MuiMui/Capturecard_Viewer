@@ -221,6 +221,7 @@ OBS Studio をインストールしておく（OBS の仮想カメラは DirectS
 - [ ] 「(DirectShow)」のデバイスで MJPEG / RGB24 に対応するものがあれば、フォーマットで選んだ形式で開く（「接続状態」タブに選んだ形式が出る）
 - [ ] 映像の開き方（#237）: 「自動」のままキャプチャーボードを映すと、「接続状態」タブの映像の欄に「開き方: Media Foundation」と出る。デバイス設定タブの「映像の開き方」を「DirectShow」にして「適用」すると、映像が一度途切れてから戻り、「開き方: DirectShow」になる（キャプチャーボードも DirectShow で開く）。「自動」以外を選んでいる間は、コンボボックスの下に「選んだ方法の一覧に無いデバイスには接続できません」の注意書きが出る。「Media Foundation」（または「自動」）に戻して「適用」すると「開き方: Media Foundation」に戻る
 - [ ] 映像の開き方を「Media Foundation」にして「OBS Virtual Camera (DirectShow)」を選ぶと、接続できずトーストと「接続状態」タブに「見つからない」が出る。「自動」に戻すと映像が出る
+- [ ] 映像の開き方（#249）: 両方に出るデバイス（キャプチャーボード、Web カメラ）を選び、「映像の開き方」を「DirectShow」にすると、解像度・フォーマット・fps の選択肢が DirectShow 側の対応形式になる（一瞬「対応形式を取得中...」が出て取り直す。フォーマットは新しい一覧の先頭、解像度と fps は前の値に最も近いものへ選び直される）。「自動」に戻すと Media Foundation 側の選択肢に戻る。ログに `デバイス能力を取得した: <名前>（開き方 DirectShow、...）` が出る
 - [ ] 映像の開き方を「DirectShow」にしたままプリセットを保存し、「自動」に戻してから保存したプリセットを読み込むと、開き方も「DirectShow」に戻る（プリセットに含まれる）
 - [ ] 「OBS Virtual Camera (DirectShow)」のフォーマットの選択肢に NV12 と I420 が出る（#228）。それぞれ選んで「適用」すると映像が出て、「接続状態」タブにその形式が出る。YUY2 のときと色味が変わらない（OBS 側で色の付いたソースを映して見比べる）。明るさ・コントラスト・彩度と色空間を動かすと、YUY2 のときと同じく次のフレームから効く
 
@@ -508,12 +509,13 @@ OBS Studio をインストールしておく（OBS の仮想カメラは DirectS
 - [ ] 入力欄の外（ダイアログの余白など）をクリックしてから同じキーを押すと、ホットキーが効く
 - [ ] 入力欄を選んだまま他のアプリ（メモ帳など）へ切り替えて同じキーを押すと、ホットキーが効く（「このアプリにフォーカスがあるときだけ反応する」がオフのとき）
 
-前面にいるときは画面操作に渡さない（#217）。音量を上げるに `Escape` を割り当てて適用してから確かめる（ホットキー設定ダイアログでは Escape を入力できないので、設定ファイルの `[hotkeys]` に `volume_up = "Escape"` と書いて起動する）。
+前面にいるときは画面操作に渡さない（#217）。音量を上げるに `Escape` を割り当てて適用してから確かめる（ホットキー設定ダイアログで Escape を押して割り当てる）。
 
 - [ ] Escape を割り当てても右クリックメニューが閉じない（右クリックメニューを開いたまま Escape を押すと、音量が上がり、メニューは開いたまま）
 - [ ] 割り当てていないとき（`volume_up` の行を消して起動し直す）は、Escape で右クリックメニューが閉じる
 - [ ] 音量を上げるに `Space` を割り当てて適用し、設定画面のボタンを Tab キーで選んだ状態で Space を押すと、音量が上がり、ボタンは押されない（ボタンのフォーカスは入力中の扱いにならない、#238）
 - [ ] ホットキー設定ダイアログを開いた状態で割り当て済みのキーを押すと、ダイアログがそのキーを受け取る（取り除かれない）
+- [ ] ホットキー設定ダイアログで Escape を押して割り当てると、ダイアログが閉じ、一覧に「Escape」と出る（空にならない、#251）
 
 最小化中の扱い（#133）。音が出ている状態で最小化してから、他のアプリを操作しつつ押す。
 
@@ -784,18 +786,18 @@ set CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION=1.0.0
 
 **ローカルのファイルを資産にして最後まで通す**（ネットワークは要らない）
 
-作業用のフォルダ（例: `C:\work`）に、いまビルドした exe を「新しい版」として置き、その hash の `SHA256SUMS.txt` と、それらを資産に持つ Release の JSON を作る。差し替えられる側として、同じ exe を `C:\work\app` にもコピーする。PowerShell で次のとおり。
+作業用のフォルダ（例: `C:\work`）に、いまビルドした exe を「新しい版」として `C:\work\release` に資産名（`capturecard_viewer.exe`）で置き、その hash の `SHA256SUMS.txt` と、それらを資産に持つ Release の JSON を作る。差し替えられる側として、同じ exe を `C:\work\app` にもコピーする。PowerShell で次のとおり。
 
 ```powershell
 $w = "C:\work"
-New-Item -ItemType Directory -Force "$w\app" | Out-Null
+New-Item -ItemType Directory -Force "$w\app", "$w\release" | Out-Null
 Copy-Item target\release\capturecard_viewer.exe "$w\app\capturecard_viewer.exe"
-$exe = "capturecard_viewer-v9.9.9-windows-x64.exe"
-Copy-Item target\release\capturecard_viewer.exe "$w\$exe"
-$hash = (Get-FileHash "$w\$exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+$exe = "capturecard_viewer.exe"
+Copy-Item target\release\capturecard_viewer.exe "$w\release\$exe"
+$hash = (Get-FileHash "$w\release\$exe" -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText("$w\SHA256SUMS.txt", "$hash  $exe`n")
 @{ tag_name = "v9.9.9"; html_url = "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/v9.9.9"; body = "テスト用"; assets = @(
-    @{ name = $exe; browser_download_url = "file:///$w/$exe" },
+    @{ name = $exe; browser_download_url = "file:///$w/release/$exe" },
     @{ name = "SHA256SUMS.txt"; browser_download_url = "file:///$w/SHA256SUMS.txt" }) } |
   ConvertTo-Json -Depth 3 | ForEach-Object { [IO.File]::WriteAllText("$w\latest.json", $_) }
 ```
@@ -807,11 +809,13 @@ $hash = (Get-FileHash "$w\$exe" -Algorithm SHA256).Hash.ToLowerInvariant()
 - [ ] 閉じる前に変えた設定（ウィンドウの位置や音量）が、起動した新しい exe に引き継がれている
 - [ ] `C:\work\SHA256SUMS.txt` の hash を 1 文字変えてからもう一度「更新する」を押すと、「ダウンロードした exe の SHA-256 が SHA256SUMS.txt と合わない」が出る。`C:\work\app\capturecard_viewer.exe` はそのままで（更新日時が変わらない）、`.new` は残らない
 - [ ] `SHA256SUMS.txt` の hash を大文字にしても、更新は通る
+- [ ] 上の PowerShell の `$exe` を 1.2.0 の旧名 `"capturecard_viewer-v9.9.9-windows-x64.exe"` にして作り直しても、更新は通る。差し替わった exe の名前は `C:\work\app\capturecard_viewer.exe` のまま
 - [ ] 更新中も映像と音声は止まらない（ローカルのファイルでは一瞬で終わるので、次のリリースで確かめる）
 
 **次のリリース（自動更新用のファイルを添付した版）で確かめること**
 
-- [ ] 1 つ前の版を書き込めるフォルダに置いて起動し、「更新する」を押すと、進み具合が % で進み、終わるとウィンドウが閉じて新しい版が起動する。設定 > その他 の「現在のバージョン」が上がっている
+- [ ] 1.2.1 の公開後、1.2.0 で「更新する」を押すと「このバージョンには自動更新用のファイルがありません。リリースページから手動で更新してください」が出る（1.2.0 は版付きの名前しか探さないため。想定どおりの動き）。Release の資産が `capturecard_viewer.exe` と `SHA256SUMS.txt` の 2 つである
+- [ ] 1.2.1 以降の版（`capturecard_viewer.exe` を探す版）を書き込めるフォルダに置いて起動し、その次の版が出たあとで「更新する」を押すと、進み具合が % で進み、終わるとウィンドウが閉じて新しい版が起動する。設定 > その他 の「現在のバージョン」が上がっている
 - [ ] ダウンロード中に「キャンセル」を押すと、ダイアログが閉じ、exe の隣に `.new` が残らない（数秒以内に消える）。exe は元の版のまま
 - [ ] ダウンロード中にアプリを閉じると、待たされずに終わる。次の起動で `.new` が消える
 

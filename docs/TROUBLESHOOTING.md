@@ -182,7 +182,7 @@ CPU 負荷が高いときに発生しやすいので、他の重いアプリを�
 
 ## 映像がカラーバーや青一色になる、デバイス名が「Fake Camera」になる
 
-環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` が設定されたまま起動している。これは**実機なしで動作を確かめるための開発者向けの機能**で、指定するとキャプチャーボードやオーディオデバイスの代わりに、アプリの中で作ったテスト用のデバイス（「Fake Camera 1」「Fake Audio Input 1」など）を使う。実機の映像や音声は出ない。
+環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` が設定されたまま起動している。これは**実機なしで動作を確かめるための開発者向けの機能**で、指定するとキャプチャーボードやオーディオデバイスの代わりに、アプリの中で作ったテスト用のデバイス（「Fake Camera 1」「Fake Audio Input 1」など）を使う。実機の映像や音声は出ない。このとき起動直後のトーストと、設定画面の「接続状態」タブの先頭にも「テスト用のフェイクデバイスで動いています」と出る。
 
 コマンドプロンプトで設定した場合は、そのウィンドウを閉じるか次のように消してから起動し直す。
 
@@ -243,7 +243,7 @@ set CAPTURECARD_VIEWER_UPDATE_API_URL=
 
 ### 手で更新する
 
-1. 「リリースページを開く」（設定 > その他 の「更新」の欄にもある）で開いたページから、`capturecard_viewer-vX.Y.Z-windows-x64.zip` を落として展開する（exe 単体の `capturecard_viewer-vX.Y.Z-windows-x64.exe` を落としてもよい）
+1. 「リリースページを開く」（設定 > その他 の「更新」の欄にもある）で開いたページから、`capturecard_viewer.exe` を落とす（1.2.0 は `capturecard_viewer-v1.2.0-windows-x64.exe`、1.1.0 以前は zip で配っており、zip なら展開して中の exe を使う）
 2. アプリを閉じる
 3. いまの `capturecard_viewer.exe` を、落とした exe で置き換える（名前は `capturecard_viewer.exe` にする）。設定は `%AppData%` にあるので引き継がれる
 

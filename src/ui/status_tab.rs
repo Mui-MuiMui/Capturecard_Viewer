@@ -4,7 +4,7 @@
 //! 直近の失敗を読むためのタブ（`docs/design/error-reporting.md`）。
 
 use crate::i18n::{self, Text};
-use crate::status::{ConnectionStatus, LinkStatus};
+use crate::status::{self, ConnectionStatus, LinkStatus};
 use eframe::egui;
 
 use super::{status_badge, warning_label, NoticeKind};
@@ -32,6 +32,12 @@ fn link_status_badge(status: &LinkStatus) -> (String, NoticeKind) {
 pub(super) fn show_status_tab(ui: &mut egui::Ui, connection: &ConnectionStatus) {
     ui.heading(Text::TabStatus.get());
     ui.add_space(10.0);
+
+    // 実機に繋がらない原因がここで分かるよう、先頭に出す（#252）
+    if let Some(notice) = status::fake_devices_notice(connection.fake_devices) {
+        warning_label(ui, notice);
+        ui.add_space(10.0);
+    }
 
     show_link_status(ui, Text::LinkVideo.get(), &connection.video);
     ui.add_space(15.0);

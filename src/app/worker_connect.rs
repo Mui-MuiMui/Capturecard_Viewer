@@ -17,6 +17,7 @@ use super::worker::{DeviceConfig, DeviceEvent};
 use super::worker_loop::WorkerState;
 use crate::audio::{self, AudioDirection};
 use crate::i18n;
+use crate::settings::VideoBackendSetting;
 use log::{debug, info, warn};
 use std::fmt::Display;
 use std::time::Instant;
@@ -404,22 +405,34 @@ impl WorkerState {
     }
 
     /// 映像デバイスの対応形式を問い合わせる。
-    pub(super) fn query_video_capabilities(&mut self, device: String) {
+    ///
+    /// 経路は開くときと同じ規則で決まる（`backend::system` の `route_for`）。
+    /// DirectShow で開く設定なら、選択肢も DirectShow 側の対応形式になる（#249）
+    pub(super) fn query_video_capabilities(
+        &mut self,
+        device: String,
+        backend: VideoBackendSetting,
+    ) {
         let started = Instant::now();
         // 設定ダイアログの能力キャッシュは理由を画面に出すだけなので、
         // ここで日本語の 1 行へ落として渡す
-        let result = self.video.capabilities(Some(&device));
+        let result = self.video.capabilities(Some(&device), backend);
         match &result {
             Ok(caps) => info!(
-                "デバイス能力を取得した: {}（{} フォーマット, {} ms）",
+                "デバイス能力を取得した: {}（開き方 {:?}、{} フォーマット, {} ms）",
                 device,
+                backend,
                 caps.len(),
                 started.elapsed().as_millis()
             ),
-            Err(e) => warn!("デバイス能力を取得できない: {}: {}", device, e),
+            Err(e) => warn!(
+                "デバイス能力を取得できない: {}（開き方 {:?}）: {}",
+                device, backend, e
+            ),
         }
         self.emit(DeviceEvent::VideoCapabilities(
             device,
+            backend,
             Box::new(result.map_err(|e| e.to_string())),
         ));
     }
@@ -628,6 +641,61 @@ mod tests {
         assert_eq!(
             video.with(|state| state.last_backend),
             Some(VideoBackendSetting::DirectShow)
+        );
+    }
+
+    #[test]
+    fn query_video_capabilities_asks_the_route_for_the_given_backend() {
+        // 開き方を DirectShow にした設定なら、選択肢も DirectShow 側の対応形式に
+        // する（#249）。開き方はイベントにも添えて返し、UI のキャッシュのキーにする
+        use crate::video::capabilities::FormatCapability;
+        use crate::video::VideoMode;
+
+        let media_foundation = vec![FormatCapability::new(
+            "YUY2",
+            vec![VideoMode::new(1920, 1080, 60)],
+        )];
+        let direct_show = vec![FormatCapability::new(
+            "MJPEG",
+            vec![VideoMode::new(1280, 720, 30)],
+        )];
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| {
+            state
+                .capabilities
+                .insert(VideoBackendSetting::MediaFoundation, media_foundation);
+            state
+                .capabilities
+                .insert(VideoBackendSetting::DirectShow, direct_show.clone());
+        });
+        let (mut state, events) = mock_state(&video, &audio);
+
+        state.query_video_capabilities(
+            "キャプチャーボード".to_string(),
+            VideoBackendSetting::DirectShow,
+        );
+
+        assert_eq!(
+            video.with(|state| state.last_capabilities_backend),
+            Some(VideoBackendSetting::DirectShow)
+        );
+        let replies: Vec<_> = drain(&events)
+            .into_iter()
+            .filter_map(|event| match event {
+                DeviceEvent::VideoCapabilities(device, backend, result) => {
+                    Some((device, backend, *result))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            replies,
+            vec![(
+                "キャプチャーボード".to_string(),
+                VideoBackendSetting::DirectShow,
+                Ok(direct_show)
+            )]
         );
     }
 

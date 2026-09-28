@@ -4,6 +4,33 @@
 
 ## [未リリース]
 
+## [1.2.1] - 2026-09-28
+
+1.2.0 の不具合の修正と、配布物の整理。設定ファイルは 1.2.0 のまま読める。**1.2.0 の更新機能は旧名の exe しか探さないため、1.2.0 からこのバージョンへの更新は手動で（`capturecard_viewer.exe` をダウンロードして置き換える）。** 次のバージョン以降はアプリ内の「更新する」で更新できる。
+
+- **配布物**: Release の添付は `capturecard_viewer.exe` と `SHA256SUMS.txt` の 2 つ。zip は付かない。exe の名前にバージョンを含めない
+- **修正**: ホットキーに Escape を割り当てると一覧の表示が空になっていた。「映像の開き方」を DirectShow にしたとき、解像度・フォーマット・fps の選択肢が Media Foundation 側のままだった
+- 開発者向け: フェイクデバイスで動いているとき「接続状態」タブにその旨を出す（起動直後のトーストは接続失敗の表示に隠れて見えないことがある。次のバージョンで直す）
+
+<hr>
+
+Fixes on top of 1.2.0 and a cleanup of the release assets. Config files from 1.2.0 load as they are. **The updater in 1.2.0 only looks for the old versioned exe name, so updating from 1.2.0 to this version is manual (download `capturecard_viewer.exe` and replace the exe).** From the next version on, use "Update" inside the app.
+
+- **Release assets**: only `capturecard_viewer.exe` and `SHA256SUMS.txt`. No zip. The exe name no longer contains the version
+- **Fixes**: assigning Escape as a hotkey left the key label blank. With "Video backend" set to DirectShow, the resolution / format / fps choices still came from Media Foundation
+- For developers: the Connection tab says so when running on fake devices (the startup toast can be hidden by a connection error toast; fixed in the next version)
+
+### 変更
+
+- 開発者向けのフェイクデバイス（`CAPTURECARD_VIEWER_FAKE_DEVICES`）で動いているとき、起動直後のトーストと「接続状態」タブにその旨を出す
+- Release の配布物を単体の exe（`capturecard_viewer.exe`）と `SHA256SUMS.txt` の 2 つにした。zip は付かない。exe をダウンロードして任意のフォルダに置けば使える
+- Release の exe の名前を、バージョンを含まない `capturecard_viewer.exe` にした。ダウンロードした名前のまま使っても、アプリ内の更新のあとに古いバージョンの名前が残らない。アプリ内の更新はこの名前を探し、無ければ 1.2.0 のバージョン付きの名前を探す。**1.2.0 の更新機能はバージョン付きの名前しか探さないため、1.2.0 からこのバージョンへの更新は手動で（exe をダウンロードして置き換える）。** 次のバージョン以降はアプリ内の「更新する」で更新できる
+
+### 修正
+
+- ホットキー設定ダイアログで Escape を押しても割り当てられず、一覧のキーの表示が変わらなかった不具合を修正（「Escape」と出る）
+- 映像の開き方を「DirectShow」にしたとき、解像度・フォーマット・fps の選択肢が Media Foundation 側のものになっていた不具合を修正（DirectShow 側の対応形式を出す。開き方を切り替えると選択肢を取り直す）
+
 ## [1.2.0] - 2026-09-27
 
 1.1.0 以降の変更をまとめたバージョン。設定ファイルは 1.1.0 のまま読める。**このバージョンから自動アップデートが入るが、1.1.0 からの更新は手動で（zip を展開して exe を置き換える）。** 次のバージョン以降はアプリ内の「更新する」で更新できる。

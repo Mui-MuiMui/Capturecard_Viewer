@@ -113,8 +113,9 @@ pub(super) enum DeviceCommand {
     ToggleMute,
     /// デバイス一覧を取り直す。設定ダイアログの選択肢に使う
     RefreshDeviceLists,
-    /// 映像デバイスの対応形式を問い合わせる
-    QueryVideoCapabilities(String),
+    /// 映像デバイスの対応形式を問い合わせる。開き方（`video.backend`）で
+    /// Media Foundation と DirectShow のどちらに問い合わせるかが決まる（#249）
+    QueryVideoCapabilities(String, VideoBackendSetting),
     /// 音声デバイスの対応設定を問い合わせる。キーは `audio::cache_key`
     QueryAudioCapabilities(AudioDirection, String),
     /// ストリームを閉じてスレッドを終える
@@ -135,8 +136,12 @@ pub(super) enum DeviceEvent {
     /// 映像フレームが途絶えたので、表示中のテクスチャを捨ててほしい。
     /// 開き直すかどうかはワーカーが判断済みで、UI は表示を戻すだけ
     VideoSignalLost,
-    /// 映像デバイスの対応形式が揃った
-    VideoCapabilities(String, Box<Result<DeviceCapabilities, String>>),
+    /// 映像デバイスの対応形式が揃った。デバイス名と開き方は要求と同じもの
+    VideoCapabilities(
+        String,
+        VideoBackendSetting,
+        Box<Result<DeviceCapabilities, String>>,
+    ),
     /// 音声デバイスの対応設定が揃った
     AudioCapabilities(
         AudioDirection,
@@ -214,6 +219,8 @@ pub(super) struct DeviceWorker {
     snapshot: SharedSnapshot,
     /// ワーカースレッドのハンドル。`shutdown` で join したら `None` になる
     handle: Option<JoinHandle<()>>,
+    /// フェイクデバイスで動いているか。起動時に決まり、以後変わらない（#252）
+    fake_devices: bool,
 }
 
 impl DeviceWorker {
@@ -247,7 +254,7 @@ impl DeviceWorker {
             repaint_waker,
         };
         // 本番かフェイクか。環境変数を読むだけなので UI スレッドで決めてよい
-        let backends = backend::backends_from_env();
+        let (backends, fake_devices) = backend::backends_from_env();
         let handle = std::thread::Builder::new()
             .name("device-worker".to_string())
             .spawn(move || {
@@ -272,7 +279,13 @@ impl DeviceWorker {
             events: event_rx,
             snapshot,
             handle,
+            fake_devices,
         }
+    }
+
+    /// 環境変数でフェイクデバイスが選ばれているか。
+    pub(super) fn fake_devices(&self) -> bool {
+        self.fake_devices
     }
 
     /// コマンドを送る。ワーカーが落ちている場合はログへ残して捨てる。

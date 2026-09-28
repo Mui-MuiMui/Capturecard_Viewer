@@ -12,6 +12,7 @@ use super::worker::{DeviceCommand, DeviceConfig, DeviceEvent};
 use super::CaptureCardViewer;
 use crate::audio::AudioDirection;
 use crate::status::ErrorSource;
+use crate::ui;
 use crate::video::VideoAdjustments;
 use log::warn;
 use std::time::Instant;
@@ -51,10 +52,10 @@ impl CaptureCardViewer {
                 // 開き直すかどうかはワーカーが判断済み
                 self.video_texture = None;
             }
-            DeviceEvent::VideoCapabilities(device, result) => {
+            DeviceEvent::VideoCapabilities(device, backend, result) => {
                 self.settings_dialog
                     .capabilities_mut()
-                    .apply_result(device, *result);
+                    .apply_result(ui::VideoCapabilityKey::new(Some(&device), backend), *result);
             }
             DeviceEvent::AudioCapabilities(direction, key, result) => match direction {
                 AudioDirection::Input => self

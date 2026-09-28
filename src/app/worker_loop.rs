@@ -286,7 +286,9 @@ impl WorkerState {
             DeviceCommand::ApplyConfig { config, initial } => self.apply_config(*config, initial),
             DeviceCommand::ReconnectNow => self.reconnect_now(),
             DeviceCommand::RefreshDeviceLists => self.refresh_device_lists(),
-            DeviceCommand::QueryVideoCapabilities(device) => self.query_video_capabilities(device),
+            DeviceCommand::QueryVideoCapabilities(device, backend) => {
+                self.query_video_capabilities(device, backend)
+            }
             DeviceCommand::QueryAudioCapabilities(direction, key) => {
                 self.query_audio_capabilities(direction, &key);
             }

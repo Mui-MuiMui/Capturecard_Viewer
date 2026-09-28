@@ -90,7 +90,7 @@ clippy は `-D warnings` 付きで回すため、警告が 1 件でも増える�
 
 ## 配布時に同梱するもの
 
-実行ファイル単体で動作する。
+実行ファイル単体で動作する。Release にも exe 単体（と `SHA256SUMS.txt`）だけを添付し、zip には固めない（`docs/RELEASE.md` の「配布物」）。
 
 ```
 capturecard_viewer.exe

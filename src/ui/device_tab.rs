@@ -14,8 +14,9 @@ use eframe::egui;
 use log::debug;
 
 use super::capability::{
-    channel_label, out_of_range_note, show_audio_capability_progress, show_choice_note,
-    CapabilityState, VideoCapabilityCache,
+    channel_label, out_of_range_note, should_reselect_video_defaults,
+    show_audio_capability_progress, show_choice_note, CapabilityState, VideoCapabilityCache,
+    VideoCapabilityKey,
 };
 use super::video_mode::select_default_video_mode;
 use super::{warning_label, AudioCapabilityCaches, CapabilityEvent, DeviceLists, SettingsEvent};
@@ -52,8 +53,10 @@ pub(super) fn show_device_settings_tab(
         // ビデオデバイス選択
         // 一覧は app 側でキャッシュ済みのものを受け取る（毎フレームの列挙を避けるため）
         let current_device = settings.video.device_name.clone().unwrap_or_default();
+        // 切り替え前のキー。デバイスか開き方が変わったら既定値を選び直す
+        let previous_key =
+            VideoCapabilityKey::new(settings.video.device_name.as_deref(), settings.video.backend);
 
-        let mut device_changed = false;
         // Id は表示文字列から作らない。言語を切り替えると Id が変わり、
         // 開いていた一覧の状態が引き継がれないため（docs/design/i18n.md）
         egui::ComboBox::new("video_device_combo", Text::VideoDevice.get())
@@ -78,7 +81,6 @@ pub(super) fn show_device_settings_tab(
                         && settings.video.device_name.as_ref() != Some(name)
                     {
                         settings.video.device_name = Some(name.clone());
-                        device_changed = true;
                     }
                 }
             });
@@ -102,28 +104,31 @@ pub(super) fn show_device_settings_tab(
             warning_label(ui, Text::VideoBackendNotice.get());
         }
 
-        // 選択後のデバイス名。この下の能力参照はすべてこちらを使う。
-        // 切り替えたフレームで切り替え前の名前を見ると、1 フレームだけ前の
-        // デバイスの選択肢が出てしまう
-        let selected_device = settings.video.device_name.clone().unwrap_or_default();
+        // 選択後のデバイス名と開き方。この下の能力参照はすべてこちらを使う。
+        // 切り替えたフレームで切り替え前のキーを見ると、1 フレームだけ前の
+        // デバイス（開き方）の選択肢が出てしまう。開き方もキーに含めるのは、
+        // 両方に出るデバイスを DirectShow で開くときに DirectShow 側の対応形式を
+        // 選択肢に出すため（#249）
+        let selected_key =
+            VideoCapabilityKey::new(settings.video.device_name.as_deref(), settings.video.backend);
 
-        if device_changed {
+        if should_reselect_video_defaults(&previous_key, &selected_key) {
             // 能力が届いた時点でフォーマットを選び直させる
             events.push(SettingsEvent::Capability(
-                CapabilityEvent::ExpectVideoDefaults(selected_device.clone()),
+                CapabilityEvent::ExpectVideoDefaults(selected_key.clone()),
             ));
         }
 
         // 能力の取得を要求する。デバイスを開くのはワーカーなので UI は止まらない。
         // 要求済み・取得済み・失敗済みのときは何も起きない
         events.push(SettingsEvent::Capability(CapabilityEvent::RequestVideo(
-            selected_device.clone(),
+            selected_key.clone(),
         )));
 
         // 取得の進行状況。失敗を黙って捨てると、選択肢が既定値のまま出る理由が
         // ユーザーに分からない
         let mut retry_requested = false;
-        match capabilities.state(&selected_device) {
+        match capabilities.state(&selected_key) {
             Some(CapabilityState::Pending) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -143,7 +148,7 @@ pub(super) fn show_device_settings_tab(
         }
         if retry_requested {
             events.push(SettingsEvent::Capability(CapabilityEvent::RetryVideo(
-                selected_device.clone(),
+                selected_key.clone(),
             )));
         }
 
@@ -159,18 +164,18 @@ pub(super) fn show_device_settings_tab(
         //
         // 目印を落とすのは `app`。**入れ直せたかどうかに関わらず落とす。**
         // 残すと、ユーザーが選び直したフォーマットを毎フレーム先頭へ戻す
-        if capabilities.awaits_defaults(&selected_device) {
+        if capabilities.awaits_defaults(&selected_key) {
             events.push(SettingsEvent::Capability(
-                CapabilityEvent::ClearVideoDefaults(selected_device.clone()),
+                CapabilityEvent::ClearVideoDefaults(selected_key.clone()),
             ));
             if let Some((format, resolution, fps)) =
-                capabilities.ready(&selected_device).and_then(|caps| {
+                capabilities.ready(&selected_key).and_then(|caps| {
                     select_default_video_mode(caps, settings.video.resolution, settings.video.fps)
                 })
             {
                 debug!(
-                    "デバイスを {} に切り替えたので既定値を選び直した: {} {}x{} {}fps",
-                    selected_device, format, resolution.0, resolution.1, fps
+                    "デバイスか開き方を {}（{:?}）に切り替えたので既定値を選び直した: {} {}x{} {}fps",
+                    selected_key.device, selected_key.backend, format, resolution.0, resolution.1, fps
                 );
                 settings.video.format = Some(format);
                 settings.video.resolution = Some(resolution);
@@ -192,7 +197,7 @@ pub(super) fn show_device_settings_tab(
                 .selected_text(&current_format)
                 .show_ui(ui, |ui| {
                     // キャッシュからフォーマット一覧を取得
-                    if let Some(caps) = capabilities.ready(&selected_device) {
+                    if let Some(caps) = capabilities.ready(&selected_key) {
                         for capability in caps {
                             if ui
                                 .selectable_value(
@@ -228,7 +233,7 @@ pub(super) fn show_device_settings_tab(
 
         // フォーマット変更時に解像度をリセット
         if format_changed {
-            if let Some(caps) = capabilities.ready(&selected_device) {
+            if let Some(caps) = capabilities.ready(&selected_key) {
                 if let Some(current_format) = &settings.video.format {
                     // 現在のフォーマットに対応する最初の解像度を選択
                     for capability in caps {
@@ -253,7 +258,7 @@ pub(super) fn show_device_settings_tab(
             egui::ComboBox::from_id_source("resolution_combo")
                 .selected_text(format!("{}x{}", current_resolution.0, current_resolution.1))
                 .show_ui(ui, |ui| {
-                    if let Some(caps) = capabilities.ready(&selected_device) {
+                    if let Some(caps) = capabilities.ready(&selected_key) {
                         if let Some(current_format) = &settings.video.format {
                             // 現在のフォーマットに対応する解像度一覧
                             let mut unique_resolutions =
@@ -311,7 +316,7 @@ pub(super) fn show_device_settings_tab(
 
         // 解像度変更時にFPSをリセット
         if resolution_changed {
-            if let Some(caps) = capabilities.ready(&selected_device) {
+            if let Some(caps) = capabilities.ready(&selected_key) {
                 if let Some(current_format) = &settings.video.format {
                     if let Some((w, h)) = settings.video.resolution {
                         // 現在のフォーマットと解像度に対応する最初のFPSを選択
@@ -339,7 +344,7 @@ pub(super) fn show_device_settings_tab(
             egui::ComboBox::from_id_source("fps_combo")
                 .selected_text(format!("{} fps", current_fps))
                 .show_ui(ui, |ui| {
-                    if let Some(caps) = capabilities.ready(&selected_device) {
+                    if let Some(caps) = capabilities.ready(&selected_key) {
                         if let Some(current_format) = &settings.video.format {
                             if let Some((w, h)) = settings.video.resolution {
                                 // 現在のフォーマットと解像度に対応するFPS一覧
