@@ -748,7 +748,7 @@ mod tests {
             .start_passthrough(&request(None, None))
             .expect("開ける");
         assert_eq!(tap.format(), Some((INPUT_SAMPLE_RATE, INPUT_CHANNELS)));
-        assert_eq!(tap.generation(), 1);
+        assert_eq!(tap.snapshot().generation, 1);
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while tap.snapshot().samples_total == 0 && Instant::now() < deadline {

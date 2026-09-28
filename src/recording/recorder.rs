@@ -14,6 +14,7 @@
 //! 書いた枚数などの観測値は `RecordingTelemetry`（Atomic）で共有し、UI が統計 OSD を
 //! 描くときに読む。
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -23,12 +24,14 @@ use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 
+use super::audio::{AudioChunk, AudioTrack};
 use super::convert::{even_size, rgb_to_nv12, Nv12Matrix};
 use super::file_name::unique_path;
-use super::pts::PtsClock;
+use super::pts::{units_from, PtsClock, AUDIO_SAMPLE_RATE};
 use super::storage::{free_bytes, is_low, megabytes, DISK_CHECK_INTERVAL};
 use super::writer::{SinkWriter, WriterError, WriterParams, WriterStage};
 use super::{EncoderInfo, RecordingError};
+use crate::audio::AudioTap;
 use crate::com::{ComApartment, ComModel, MfPlatform};
 use crate::video::{VideoFrame, VideoTap, VideoTapConsumer, VIDEO_TAP_CAPACITY};
 
@@ -46,6 +49,15 @@ const MAX_ENCODER_BACKLOG: u64 = 30;
 /// 映像が無いときに使う公称 fps
 const FALLBACK_FPS: u32 = 60;
 
+/// 音声を Sink Writer へ渡す最小の長さ（出力フレーム数、約 21ms）。数 ms ごとの小さな
+/// 塊で `WriteSample` を増やさないため。止めるときは残りをまとめて渡す
+const MIN_AUDIO_CHUNK_FRAMES: usize = 1024;
+
+/// Sink Writer を作る前（最初の映像のフレームが届く前）に溜めておく音声の上限
+/// （出力フレーム数、5 秒）。超えたら古いものから捨てる。塊は PTS を持っているので、
+/// 先頭を捨てても後ろの時刻はずれない
+const MAX_PENDING_AUDIO_FRAMES: usize = AUDIO_SAMPLE_RATE as usize * 5;
+
 /// 録画を始めるのに要るもの。UI スレッドが設定から組み立てる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingRequest {
@@ -58,6 +70,9 @@ pub struct RecordingRequest {
     /// 公称 fps。デバイスへ要求した fps（`ActiveVideo::requested_fps`）。
     /// 映像が無ければ `None`（60 として扱う）
     pub nominal_fps: Option<u32>,
+    /// 音声（AAC）の平均ビットレート（kbps）。96 / 128 / 160 / 192 のどれかに寄せてある。
+    /// `None` なら音声を録らない（映像だけの MP4）
+    pub audio_bitrate_kbps: Option<u32>,
 }
 
 /// UI スレッド → 録画スレッド。
@@ -117,7 +132,12 @@ pub struct Recorder {
 
 impl Recorder {
     /// 録画スレッドを起こして録画を始める。スレッドを起こせなければ失敗。
-    pub fn start(request: RecordingRequest, tap: VideoTap) -> Result<Self, RecordingError> {
+    /// `audio_tap` は音声の差し込み口。`request.audio_bitrate_kbps` が `None` なら差し込まない。
+    pub fn start(
+        request: RecordingRequest,
+        tap: VideoTap,
+        audio_tap: AudioTap,
+    ) -> Result<Self, RecordingError> {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let telemetry = Arc::new(RecordingTelemetry::default());
@@ -126,7 +146,7 @@ impl Recorder {
             let telemetry = Arc::clone(&telemetry);
             thread::Builder::new()
                 .name("recorder".to_string())
-                .spawn(move || run(command_rx, event_tx, tap, telemetry))
+                .spawn(move || run(command_rx, event_tx, tap, audio_tap, telemetry))
                 .map_err(|e| RecordingError::Platform {
                     reason: e.to_string(),
                 })?
@@ -218,6 +238,7 @@ fn run(
     commands: Receiver<RecordingCommand>,
     events: Sender<RecordingEvent>,
     tap: VideoTap,
+    audio_tap: AudioTap,
     telemetry: Arc<RecordingTelemetry>,
 ) {
     let request = match commands.recv() {
@@ -240,7 +261,7 @@ fn run(
             return;
         }
     };
-    Session::new(request, tap, telemetry, events).run(&commands);
+    Session::new(request, tap, audio_tap, telemetry, events).run(&commands);
 }
 
 fn platform_error(error: windows::core::Error) -> RecordingError {
@@ -270,6 +291,12 @@ enum Finished {
 struct Session {
     request: RecordingRequest,
     tap: VideoTap,
+    audio_tap: AudioTap,
+    /// 音声トラック。音声を録らない設定なら `None`
+    audio: Option<AudioTrack>,
+    /// Sink Writer へまだ渡していない音声（Sink Writer を作る前の分）
+    audio_pending: VecDeque<AudioChunk>,
+    audio_pending_frames: usize,
     telemetry: Arc<RecordingTelemetry>,
     events: Sender<RecordingEvent>,
     consumer: Option<VideoTapConsumer>,
@@ -286,6 +313,7 @@ impl Session {
     fn new(
         request: RecordingRequest,
         tap: VideoTap,
+        audio_tap: AudioTap,
         telemetry: Arc<RecordingTelemetry>,
         events: Sender<RecordingEvent>,
     ) -> Self {
@@ -294,6 +322,10 @@ impl Session {
         Self {
             request,
             tap,
+            audio_tap,
+            audio: None,
+            audio_pending: VecDeque::new(),
+            audio_pending_frames: 0,
             telemetry,
             events,
             consumer: None,
@@ -320,8 +352,13 @@ impl Session {
         let t0 = Instant::now();
         self.clock = PtsClock::new(t0, self.fps());
         self.last_disk_check = t0;
+        // 音声も同じ t0 を基準にする。差し込むのは t0 の直後なので、t0 より前に
+        // 届いたサンプルはリングに入らない（コールバック 1 回ぶんの端数は削る）
+        if self.request.audio_bitrate_kbps.is_some() {
+            self.audio = Some(AudioTrack::attach(self.audio_tap.clone(), t0));
+        }
         info!(
-            "録画を始めた（保存先: {}、ファイル名: {}.mp4、{}kbps、ハードウェアエンコーダ: {}）",
+            "録画を始めた（保存先: {}、ファイル名: {}.mp4、{}kbps、ハードウェアエンコーダ: {}、音声: {}）",
             self.request.folder.display(),
             self.request.file_stem,
             self.request.video_bitrate_kbps,
@@ -329,6 +366,10 @@ impl Session {
                 "使う"
             } else {
                 "使わない"
+            },
+            match self.request.audio_bitrate_kbps {
+                Some(kbps) => format!("AAC {kbps}kbps"),
+                None => "録らない".to_string(),
             }
         );
         let _ = self.events.send(RecordingEvent::Started);
@@ -339,7 +380,12 @@ impl Session {
                 Ok(RecordingCommand::Start(_)) => debug!("録画中の開始要求は無視する"),
                 Err(RecvTimeoutError::Timeout) => {}
             }
-            if let Err(error) = self.drain() {
+            // 映像を先に書く。Sink Writer は最初の映像のフレームで作るので、
+            // 音声はそれまで溜めておき、作られたあとで渡す
+            if let Err(error) = self
+                .drain()
+                .and_then(|()| self.pump_audio(MIN_AUDIO_CHUNK_FRAMES))
+            {
                 self.end_with_error(error);
                 return;
             }
@@ -356,7 +402,10 @@ impl Session {
 
         // 止める。リングを抜いてから、残っている分を書き切る
         self.tap.detach();
-        if let Err(error) = self.drain() {
+        if let Some(audio) = &self.audio {
+            audio.detach();
+        }
+        if let Err(error) = self.drain().and_then(|()| self.finish_audio()) {
             self.end_with_error(error);
             return;
         }
@@ -514,6 +563,7 @@ impl Session {
             fps: self.fps(),
             bitrate_kbps: self.request.video_bitrate_kbps,
             hardware,
+            audio_bitrate_kbps: self.request.audio_bitrate_kbps,
         };
         match SinkWriter::create(&path, params) {
             Ok(writer) => {
@@ -558,7 +608,11 @@ impl Session {
             return Finished::NoFile;
         };
         let summary = self.summary();
-        match (writer.finalize(), summary) {
+        let finalized = writer.finalize();
+        if let Some(audio) = &self.audio {
+            audio.stats().log(self.clock.duration());
+        }
+        match (finalized, summary) {
             (Ok(()), Some(summary)) => Finished::Saved(summary),
             // Sink Writer はあるのにパスが無いことは無い
             (Ok(()), None) => Finished::NoFile,
@@ -567,9 +621,71 @@ impl Session {
         }
     }
 
+    /// 音声トラックのリングから取り出して PCM にし、溜まった分を Sink Writer へ渡す。
+    /// `min_frames` に満たない分は次の呼び出しへ回す。音声を録らない設定なら何もしない。
+    fn pump_audio(&mut self, min_frames: usize) -> Result<(), RecordingError> {
+        let Some(audio) = self.audio.as_mut() else {
+            return Ok(());
+        };
+        audio.pump(Instant::now());
+        let chunk = audio.take_chunk(min_frames);
+        if let Some(chunk) = chunk {
+            self.queue_audio(chunk);
+        }
+        self.write_pending_audio()
+    }
+
+    /// 止めるときの音声。残りを取り出し、映像より短ければ映像の終わりまで無音で埋めて
+    /// すべて渡す（音声トラックの長さを映像と揃えるため）。
+    fn finish_audio(&mut self) -> Result<(), RecordingError> {
+        let video_end = units_from(self.clock.duration());
+        let has_writer = self.writer.is_some();
+        let Some(audio) = self.audio.as_mut() else {
+            return Ok(());
+        };
+        audio.pump(Instant::now());
+        if has_writer {
+            audio.finish(video_end);
+        }
+        let chunk = audio.take_chunk(0);
+        if let Some(chunk) = chunk {
+            self.queue_audio(chunk);
+        }
+        self.write_pending_audio()
+    }
+
+    /// 渡す音声を列へ積む。Sink Writer を作る前は溜め、上限を超えたら古いものから捨てる。
+    fn queue_audio(&mut self, chunk: AudioChunk) {
+        self.audio_pending_frames += chunk.frames();
+        self.audio_pending.push_back(chunk);
+        while self.audio_pending_frames > MAX_PENDING_AUDIO_FRAMES {
+            match self.audio_pending.pop_front() {
+                Some(dropped) => self.audio_pending_frames -= dropped.frames(),
+                None => break,
+            }
+        }
+    }
+
+    /// 溜めた音声を Sink Writer へ書く。Sink Writer がまだ無ければ溜めたままにする。
+    fn write_pending_audio(&mut self) -> Result<(), RecordingError> {
+        let Some(writer) = self.writer.as_mut() else {
+            return Ok(());
+        };
+        while let Some(chunk) = self.audio_pending.pop_front() {
+            self.audio_pending_frames -= chunk.frames();
+            writer
+                .write_pcm(&chunk.samples, chunk.pts, chunk.duration)
+                .map_err(|e| write_error(&e))?;
+        }
+        Ok(())
+    }
+
     /// 途中で止める。リングを抜き、書いていればファイルを閉じてから知らせる。
     fn end_with_error(mut self, error: RecordingError) {
         self.tap.detach();
+        if let Some(audio) = &self.audio {
+            audio.detach();
+        }
         let summary = match self.finish() {
             Finished::NoFile => None,
             Finished::Saved(summary) => Some(summary),

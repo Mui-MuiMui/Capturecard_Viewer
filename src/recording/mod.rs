@@ -1,6 +1,6 @@
-//! 録画。映像を Media Foundation の Sink Writer で H.264 の MP4 へ書き出す。
+//! 録画。映像を H.264、音声を AAC にして、Media Foundation の Sink Writer で MP4 へ書き出す。
 //!
-//! 設計は `docs/design/recording.md`。いまは第 1 段（映像のみ）で、音声（②）と
+//! 設計は `docs/design/recording.md`。いまは第 2 段（映像と音声）まで。
 //! リプレイバッファ（③）はまだ無い。
 //!
 //! | ファイル | 役割 |
@@ -13,12 +13,11 @@
 //! | `file_name.rs` | ファイル名の書式の検めと連番（純粋関数） |
 //! | `storage.rs` | 保存先の空き容量 |
 //!
-//! 依存の向きは `app → recording → video`。`video` は録画を知らず、フレーム
-//! コールバックは `video::VideoTap` のリングへ積むだけ。**録画スレッドはデバイスに
-//! 触らない**ので、「デバイスに触る使い捨てのスレッドを作らない」には当たらない。
+//! 依存の向きは `app → recording → video / audio`。`video` と `audio` は録画を知らず、
+//! フレームコールバックは `video::VideoTap`、入力コールバックは `audio::AudioTap` のリングへ
+//! 積むだけ。**録画スレッドはデバイスに触らない**ので、「デバイスに触る使い捨ての
+//! スレッドを作らない」には当たらない。
 
-// 録画スレッドが音声を書く段で使い始める。それまでの一時的な許可
-#[allow(dead_code)]
 mod audio;
 mod convert;
 mod file_name;
@@ -59,7 +58,7 @@ pub enum RecordingError {
     DiskLow { free_mb: u64 },
     /// 書き込みに失敗した。ファイルは再生できないかもしれない
     WriteFailed { reason: String },
-    /// H.264 のエンコーダを用意できない
+    /// H.264 / AAC のエンコーダを用意できない（音声を録らない設定なら H.264 だけ）
     EncoderUnavailable { reason: String },
     /// 録画中に映像の大きさが変わった。そこまでのファイルは閉じてある
     SizeChanged { from: (u32, u32), to: (u32, u32) },

@@ -16,11 +16,13 @@
 //!   映像に合わせて無音を書き続ける。音声トラックの長さを映像と揃えるため
 
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use log::info;
 
 use super::pts::{
-    align, audio_units, frames_in, silence_until, units_since, Alignment, DriftSpan, TapTiming,
-    AUDIO_CHANNELS, AUDIO_SAMPLE_RATE,
+    align, audio_units, frames_in, silence_until, units_from, units_since, Alignment, DriftSpan,
+    TapTiming, AUDIO_CHANNELS, AUDIO_SAMPLE_RATE, UNITS_PER_SECOND,
 };
 use crate::audio::{
     f32_to_i16, AudioTap, AudioTapConsumer, AudioTapSnapshot, PassthroughConverter,
@@ -60,6 +62,38 @@ pub(super) struct AudioStats {
     pub(super) overflows: u64,
     /// 最後に途切れずに続いた区間の `(PC の時計での経過, サンプル数 ÷ レート)`（100ns）
     pub(super) drift: Option<(i64, i64)>,
+}
+
+impl AudioStats {
+    /// ログへ 1 行で残す。録画スレッドが閉じたときに呼ぶ（失敗ではないので `info`）。
+    ///
+    /// **途切れずに続いた区間での「映像の時計（PC）での経過」と「音声のサンプル数 ÷ レート」の差**
+    /// が、録画の中で音が映像からずれていく量（ドリフト）。②では直さず、この値を実機で
+    /// 測ってから、録画の音声を PC の時計へ合わせる補正を入れるか決める
+    /// （`docs/design/recording.md` の「ドリフト」）。
+    pub(super) fn log(&self, video: Duration) {
+        let secs = |units: i64| units as f64 / UNITS_PER_SECOND as f64;
+        let millis = |units: i64| units as f64 * 1000.0 / UNITS_PER_SECOND as f64;
+        let drift = match self.drift {
+            Some((by_clock, by_samples)) if by_clock > 0 => format!(
+                "途切れずに続いた最後の区間で、映像の時計（PC）の {:.3} 秒に対して音声のサンプル数 ÷ レートは {:.3} 秒（差 {:+.1}ms、{:+.0}ppm。負なら音声が映像より遅れていく）",
+                secs(by_clock),
+                secs(by_samples),
+                millis(by_samples - by_clock),
+                (by_samples - by_clock) as f64 / by_clock as f64 * 1_000_000.0
+            ),
+            _ => "音声が途切れずに続いた区間が無い（音声が届かなかった）".to_string(),
+        };
+        info!(
+            "録画の音声: 長さ {:.3} 秒（映像 {:.3} 秒）。{}。揃えるために足した無音 {:.1}ms、削った入力 {} サンプル、リングの溢れ {} 回",
+            secs(audio_units(self.frames)),
+            secs(units_from(video)),
+            drift,
+            millis(audio_units(self.silence_frames)),
+            self.trimmed_samples,
+            self.overflows
+        );
+    }
 }
 
 /// 1 回の録画の音声トラック。
@@ -290,7 +324,6 @@ fn converter_for((sample_rate, channels): (u32, u16)) -> PassthroughConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn audio_track_without_any_stream_writes_silence_up_to_now_minus_the_stale_margin() {

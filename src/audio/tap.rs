@@ -27,9 +27,6 @@
 //! `audio` は録画を知らない。ここにあるのは「差し込まれたリングへ積む」ことと
 //! 観測値だけで、読み手（録画スレッド）は `crate::recording` にある。
 
-// 読み手（録画スレッド）の側は、録画に音声を書く段で使い始める。それまでの一時的な許可
-#![allow(dead_code)]
-
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -244,11 +241,6 @@ impl AudioTap {
         shared.breaks.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// 開き直しの番号。
-    pub fn generation(&self) -> u64 {
-        self.shared.generation.load(Ordering::Acquire)
-    }
-
     /// 入力コールバック 1 回ぶんの書き手を取る。`len` はこれから積むサンプル数。
     ///
     /// 差し込まれていなければ `None`（何もしない）。差し込まれているのに書き手を
@@ -401,7 +393,7 @@ mod tests {
     fn audio_tap_begin_stream_sets_the_format_and_marks_a_break() {
         let tap = AudioTap::new();
         assert_eq!(tap.format(), None);
-        assert_eq!(tap.generation(), 0);
+        assert_eq!(tap.snapshot().generation, 0);
 
         let _attachment = tap.attach(16);
         push_all(&tap, &[0.0; 6]);

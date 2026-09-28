@@ -222,7 +222,7 @@ pub(super) fn units_since(t0: Instant, at: Instant) -> i64 {
     }
 }
 
-fn units_from(duration: Duration) -> i64 {
+pub(super) fn units_from(duration: Duration) -> i64 {
     i64::try_from(duration.as_nanos() / 100).unwrap_or(i64::MAX)
 }
 

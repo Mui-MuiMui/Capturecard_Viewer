@@ -74,8 +74,10 @@ impl CaptureCardViewer {
                 .active_video
                 .as_ref()
                 .map(|video| video.requested_fps),
+            // 設定（[recording] の音声の項目）は次の段で足す。それまでは既定の 160kbps で録る
+            audio_bitrate_kbps: Some(160),
         };
-        match Recorder::start(request, self.frames.tap()) {
+        match Recorder::start(request, self.frames.tap(), self.audio_tap.clone()) {
             Ok(recorder) => self.recorder = Some(recorder),
             Err(reason) => {
                 error!("録画を始められない: {}", reason);

@@ -73,7 +73,6 @@ pub struct CaptureCardViewer {
     audio_controls: Arc<AudioControls>,
     // 録画へ音声を回す差し込み口。入力コールバックが積み、録画スレッドが読む。
     // 録画を始めるときに複製を `Recorder` へ渡す（映像の `VideoTap` は `frames` の中）
-    #[allow(dead_code)] // 録画に音声を書く段で使い始める。それまでの一時的な許可
     audio_tap: AudioTap,
     screenshot_manager: Arc<Mutex<ScreenshotManager>>,
     // グローバルホットキーの登録と押下の検出。
