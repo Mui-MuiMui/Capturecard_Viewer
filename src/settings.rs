@@ -823,9 +823,11 @@ pub enum ScreenshotEncoding {
 // 録画の設定。設定ファイルでは [recording] になる（`docs/design/recording.md` の
 // 「設定 `[recording]`」）。
 //
-// **項目は、その項目が効く段で足す。** リプレイバッファ（③）の項目はまだ無い。
-// 効かない項目を先に出さない（`docs/ARCHITECTURE.md` の「設定は実際に効かせる」）。
-// 録画中に変えた設定は次の録画から効く。
+// **項目は、その項目が効く段で足す。** 効かない項目を先に出さない
+// （`docs/ARCHITECTURE.md` の「設定は実際に効かせる」）。
+// 録画中に変えた設定は次の録画から効く。リプレイバッファの ON / OFF とさかのぼる長さは
+// すぐ効く（ON にしたらその時点から溜め始める）。ただし、リプレイバッファを通さない録画の
+// 最中に ON にしたときは、差し込み口が空くその録画の終わりから溜め始める。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RecordingSettings {
@@ -847,6 +849,13 @@ pub struct RecordingSettings {
     // RECORDING_AUDIO_BITRATES_KBPS の 4 つだけ。それ以外は近いものへ寄せる
     #[serde(deserialize_with = "deserialize_recording_audio_bitrate")]
     pub audio_bitrate_kbps: u32,
+    // リプレイバッファ（さかのぼり録画、#182）。ON のあいだはエンコーダを常に回し、
+    // 直近 replay_seconds 秒ぶんのエンコード済みの映像と音声をメモリに持つ。
+    // 録画を始めると、その分を先頭に含める
+    pub replay_enabled: bool,
+    // さかのぼる長さ（秒）。MIN_REPLAY_SECONDS〜MAX_REPLAY_SECONDS（上限 5 分は #182 の決定）
+    #[serde(deserialize_with = "deserialize_replay_seconds")]
+    pub replay_seconds: u32,
 }
 
 // 録画のファイル名の既定の書式
@@ -863,6 +872,12 @@ pub const DEFAULT_RECORDING_BITRATE_KBPS: u32 = 8_000;
 pub const RECORDING_AUDIO_BITRATES_KBPS: [u32; 4] = [96, 128, 160, 192];
 pub const DEFAULT_RECORDING_AUDIO_BITRATE_KBPS: u32 = 160;
 
+// リプレイバッファのさかのぼる長さ（秒）の下限・上限と既定値。
+// 上限の 5 分は #182 の決定（8Mbps + 160kbps で約 300MB のメモリを使う）
+pub const MIN_REPLAY_SECONDS: u32 = 5;
+pub const MAX_REPLAY_SECONDS: u32 = 300;
+pub const DEFAULT_REPLAY_SECONDS: u32 = 30;
+
 impl Default for RecordingSettings {
     fn default() -> Self {
         Self {
@@ -872,6 +887,8 @@ impl Default for RecordingSettings {
             hardware_encoder: true,
             audio_enabled: true,
             audio_bitrate_kbps: DEFAULT_RECORDING_AUDIO_BITRATE_KBPS,
+            replay_enabled: false,
+            replay_seconds: DEFAULT_REPLAY_SECONDS,
         }
     }
 }
@@ -890,6 +907,33 @@ impl RecordingSettings {
         self.audio_enabled
             .then(|| nearest_audio_bitrate_kbps(i64::from(self.audio_bitrate_kbps)))
     }
+
+    // 録画スレッドへ渡すさかのぼる長さ。リプレイバッファが OFF なら None。
+    // 範囲に丸めてから渡す（理由は clamped_bitrate_kbps と同じ）
+    pub fn replay_seconds_for_recording(&self) -> Option<u32> {
+        self.replay_enabled.then(|| {
+            self.replay_seconds
+                .clamp(MIN_REPLAY_SECONDS, MAX_REPLAY_SECONDS)
+        })
+    }
+}
+
+// 範囲外のさかのぼる長さが書かれていても、設定全体を失わせない。
+// 考え方は deserialize_recording_bitrate と同じ。
+fn deserialize_replay_seconds<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = i64::deserialize(deserializer)?;
+    let clamped = raw.clamp(i64::from(MIN_REPLAY_SECONDS), i64::from(MAX_REPLAY_SECONDS));
+    if clamped != raw {
+        warn!(
+            "設定のリプレイバッファのさかのぼる長さ {} 秒は範囲外なので {} 秒として扱う",
+            raw, clamped
+        );
+    }
+    // clamp 済みなので u32 に収まる
+    Ok(clamped as u32)
 }
 
 // RECORDING_AUDIO_BITRATES_KBPS のうち `kbps` に最も近いもの。
@@ -2410,6 +2454,8 @@ volume = 80.0
                 hardware_encoder: false,
                 audio_enabled: false,
                 audio_bitrate_kbps: 128,
+                replay_enabled: true,
+                replay_seconds: 120,
             },
             ..AppSettings::default()
         };
@@ -2476,6 +2522,58 @@ volume = 80.0
             assert_eq!(settings.recording.audio_bitrate_kbps, expected, "{written}");
             assert_eq!(settings.ui.volume, 80.0);
         }
+    }
+
+    #[test]
+    fn app_settings_recording_section_from_the_audio_version_keeps_replay_off() {
+        // 第 2 段（音声）の版が書いた [recording] にはリプレイバッファの項目が無い。
+        // 既定（OFF、30 秒）で読み、他の値は失わない
+        let config =
+            format!("{FULL_CONFIG}\n[recording]\naudio_enabled = false\naudio_bitrate_kbps = 96\n");
+
+        let settings: AppSettings = toml::from_str(&config).expect("読めなければならない");
+
+        assert!(!settings.recording.replay_enabled);
+        assert_eq!(settings.recording.replay_seconds, 30);
+        assert!(!settings.recording.audio_enabled);
+        assert_eq!(settings.recording.audio_bitrate_kbps, 96);
+    }
+
+    #[test]
+    fn app_settings_out_of_range_replay_seconds_is_clamped_without_losing_settings() {
+        for (written, expected) in [
+            (0, 5),
+            (-10, 5),
+            (4, 5),
+            (5, 5),
+            (300, 300),
+            (301, 300),
+            (86_400, 300),
+        ] {
+            let config = format!("{FULL_CONFIG}\n[recording]\nreplay_seconds = {written}\n");
+
+            let settings: AppSettings =
+                toml::from_str(&config).expect("範囲外の長さでも読めなければならない");
+
+            assert_eq!(settings.recording.replay_seconds, expected, "{written}");
+            assert_eq!(settings.ui.volume, 80.0);
+        }
+    }
+
+    #[test]
+    fn recording_settings_replay_seconds_for_recording_follows_the_switch() {
+        let mut recording = RecordingSettings {
+            replay_seconds: 60,
+            ..RecordingSettings::default()
+        };
+        assert_eq!(recording.replay_seconds_for_recording(), None);
+        recording.replay_enabled = true;
+        assert_eq!(recording.replay_seconds_for_recording(), Some(60));
+        // 読み込み後に差し替えられた範囲外の値も、渡す前に丸める
+        recording.replay_seconds = 1_000;
+        assert_eq!(recording.replay_seconds_for_recording(), Some(300));
+        recording.replay_seconds = 1;
+        assert_eq!(recording.replay_seconds_for_recording(), Some(5));
     }
 
     #[test]

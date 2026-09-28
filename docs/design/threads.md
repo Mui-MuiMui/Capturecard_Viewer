@@ -18,7 +18,7 @@
 | 効果音再生 | 再生ごと | rodio による再生 |
 | スクリーンショットの保存 | 撮影ごと | JPEG / PNG エンコードとファイル書き出し、設定によってはクリップボードへの転送 |
 | 効果音ファイルの読み込み | 適用・テスト再生ごと | 設定の効果音ファイルを読み、デコードできるかを確かめる |
-| 録画（`recorder`） | 録画中に 1 本 | `VideoTap` のリングからフレームを、`AudioTap` のリングから音声を取り、RGB → NV12 と 48kHz 2ch の 16bit PCM への変換、Media Foundation の Sink Writer への書き込み（H.264 / AAC のエンコードと MP4 へのまとめ）を行う。COM は MTA で初期化する。デバイスには触らない。開始で起こし、停止で `Finalize` まで終えたら自分で抜ける。`JoinHandle` は `Recorder` が持ち、落とすとき（`on_exit` を含む）に join する（`docs/design/recording.md`） |
+| 録画（`recorder`） | 録画中、またはリプレイバッファが ON のあいだ 1 本 | `VideoTap` のリングからフレームを、`AudioTap` のリングから音声を取り、RGB → NV12 と 48kHz 2ch の 16bit PCM への変換を行う。リプレイバッファが OFF なら Media Foundation の Sink Writer へ書き込み（H.264 / AAC のエンコードと MP4 へのまとめ）、ON ならエンコーダ MFT で H.264 / AAC にしてエンコード済みのリングに持ち、録画を始めたらリングからエンコードなしの Sink Writer へ書く。COM は MTA で初期化する。デバイスには触らない。録画を始めるかリプレイバッファを ON にしたときに `Recorder`（UI スレッドの窓口）が起こし、録画もリプレイバッファも無くなったら `Recorder` が `Shutdown` を送って止める。**自分からは抜けない**（抜ける直前に送られたコマンドが宙に浮くため）。録画もリプレイバッファも動いていない間（リプレイバッファを用意できずに止まっているとき）はコマンドを待つだけで起きない。`JoinHandle` は `Recorder` が持ち、止めるとき（`on_exit` を含む）に join する（`docs/design/recording.md`） |
 | 更新の確認（`update-check`） | 確認ごと（同時に 1 本まで） | GitHub の Release API へ問い合わせる。起動時に 1 回と「その他」タブの「更新を確認」。上限 5 秒。副作用が無いので `on_exit` で join しない（`docs/design/update.md`） |
 | 更新の適用（`update-apply`） | 「更新する」ごと（同時に 1 本まで） | 新しい版の exe を exe と同じフォルダの `.new` へ落とし、SHA-256 を照合して差し替える。`on_exit` で join しない（キャンセルを立てるだけ。書きかけの `.new` は次の起動で消す。`docs/design/update.md` の「適用」） |
 | 更新の後片付け（`update-cleanup`） | 起動時に 1 回（残りがあるときだけ） | 前回の更新の `.old` と書きかけの `.new` を消す。前の版のプロセスが終わるまで 0.5 秒おきに 20 回まで試す。`on_exit` で join しない |
@@ -51,7 +51,7 @@
 
 効果音ファイルの読み込み（`screenshot::load_sound_data`）も同じ流儀で UI スレッドから外してある（`app::screenshot_sound`、Issue #214）。適用（`apply_settings`）とテスト再生のたびにスレッドを起こし、結果は mpsc で `update()` の先頭の `drain_sound_load_results()` へ返す。ログ、トーストへの報告、テスト再生の音を鳴らすのは受け取った UI スレッド側。デバイスに触らないので「使い捨てのスレッド」の禁止には当たらないが、`JoinHandle` は `CaptureCardViewer::sound_load_threads` に持ち、`on_exit` で join する（結果は取り込まない）。**要求には番号を振り、最後の要求の結果だけを受け入れる**（`ScreenshotManager::begin_load` / `finish_load`、テスト再生は `begin_test_play` / `finish_test_play`）。要求ごとにスレッドを起こすので、先に出した要求が後から終わりうるため。読み込みを待っている間の撮影は直前の音、それも無ければ内蔵音で鳴らす（`select_shot_sound`）。映像が止まって `update()` の間隔が広がっている間もテスト再生がすぐ鳴るよう、読み込みスレッドは結果を送ったあと `RepaintWaker` で UI スレッドを起こす。
 
-録画スレッド（`recording::Recorder`）も同じ流儀で結果を返す。開始・保存・失敗は mpsc の `RecordingEvent` で送り、ログ（`error!`）とトースト（`report_error(ErrorSource::Recording, ..)`）は `update()` の先頭の `drain_recording_events()` が出す。**録画スレッドから直接 `error!` を出さない。** 録画スレッドが自分でログに残すのは、使ったエンコーダの名前やハードウェアからソフトウェアへ倒したことのような、失敗ではない経過だけ。`on_exit` では**デバイスワーカーを止める前に**録画を止め、`Finalize` が終わるまで待つ（`Recorder::stop_and_wait`）。待たないと再生できない MP4 が残る。**録画スレッドはリングから取った `Arc<VideoFrame>` を NV12 へ直したらすぐ手放し、手放してから `WriteSample` する。** 持ったまま書くと、表示側の `FrameSink` が置き換えたフレームの Vec を回収できず、1 枚ごとに確保し直すことになる（`docs/design/recording.md`）。
+録画スレッド（`recording::Recorder`）も同じ流儀で結果を返す。開始・保存・失敗は mpsc の `RecordingEvent` で送り、ログ（`error!`）とトースト（`report_error(ErrorSource::Recording, ..)`）は `update()` の先頭の `drain_recording_events()` が出す。**録画スレッドから直接 `error!` を出さない。** 録画スレッドが自分でログに残すのは、使ったエンコーダの名前やハードウェアからソフトウェアへ倒したことのような、失敗ではない経過だけ。`on_exit` では**デバイスワーカーを止める前に**録画を止め、`Finalize` が終わるまで待つ（`Recorder::shutdown`。リプレイバッファも止める）。待たないと再生できない MP4 が残る。**録画スレッドはリングから取った `Arc<VideoFrame>` を NV12 へ直したらすぐ手放し、手放してから `WriteSample` する。** 持ったまま書くと、表示側の `FrameSink` が置き換えたフレームの Vec を回収できず、1 枚ごとに確保し直すことになる（`docs/design/recording.md`）。
 
 ## ロック順序
 

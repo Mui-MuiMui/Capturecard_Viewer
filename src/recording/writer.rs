@@ -94,7 +94,7 @@ pub(super) struct WriterError {
 }
 
 impl WriterError {
-    fn at(stage: WriterStage) -> impl FnOnce(windows::core::Error) -> Self {
+    pub(super) fn at(stage: WriterStage) -> impl FnOnce(windows::core::Error) -> Self {
         move |error| Self { stage, error }
     }
 }
@@ -371,7 +371,7 @@ fn registered_name(clsid: GUID) -> Option<String> {
 }
 
 /// 属性の文字列を取り出す。無ければ `None`。
-fn allocated_string(attributes: &IMFAttributes, key: &GUID) -> Option<String> {
+pub(super) fn allocated_string(attributes: &IMFAttributes, key: &GUID) -> Option<String> {
     let mut value = PWSTR::null();
     let mut length = 0u32;
     unsafe { attributes.GetAllocatedString(key, &mut value, &mut length) }.ok()?;
@@ -384,7 +384,7 @@ fn allocated_string(attributes: &IMFAttributes, key: &GUID) -> Option<String> {
     text.filter(|text| !text.is_empty())
 }
 
-fn new_attributes(capacity: u32) -> windows::core::Result<IMFAttributes> {
+pub(super) fn new_attributes(capacity: u32) -> windows::core::Result<IMFAttributes> {
     let mut attributes: Option<IMFAttributes> = None;
     unsafe { MFCreateAttributes(&mut attributes, capacity) }?;
     attributes.ok_or_else(windows::core::Error::empty)
@@ -408,7 +408,7 @@ fn sink_writer_attributes(hardware: bool) -> Result<IMFAttributes, WriterError> 
 }
 
 /// 2 つの 32 ビット値を 1 つの属性に詰める（`MFSetAttributeSize` / `MFSetAttributeRatio` と同じ形）。
-fn pack(high: u32, low: u32) -> u64 {
+pub(super) fn pack(high: u32, low: u32) -> u64 {
     (u64::from(high) << 32) | u64::from(low)
 }
 
@@ -428,7 +428,7 @@ fn set_common_video_attributes(
 }
 
 /// 出力（H.264 High、平均ビットレートの指定だけ）。
-fn output_media_type(params: &WriterParams) -> windows::core::Result<IMFMediaType> {
+pub(super) fn output_media_type(params: &WriterParams) -> windows::core::Result<IMFMediaType> {
     let media_type = unsafe { MFCreateMediaType() }?;
     set_common_video_attributes(&media_type, params)?;
     unsafe {
@@ -461,7 +461,7 @@ fn set_color_attributes(
 }
 
 /// 入力（NV12、行の詰め物なし）。
-fn input_media_type(params: &WriterParams) -> windows::core::Result<IMFMediaType> {
+pub(super) fn input_media_type(params: &WriterParams) -> windows::core::Result<IMFMediaType> {
     let media_type = unsafe { MFCreateMediaType() }?;
     set_common_video_attributes(&media_type, params)?;
     set_color_attributes(&media_type, params)?;
@@ -473,7 +473,11 @@ fn input_media_type(params: &WriterParams) -> windows::core::Result<IMFMediaType
 }
 
 /// システムメモリに置いたサンプルを 1 つ作る。映像（NV12）と音声（PCM）で共通。
-fn memory_sample(data: &[u8], pts: i64, duration: i64) -> windows::core::Result<IMFSample> {
+pub(super) fn memory_sample(
+    data: &[u8],
+    pts: i64,
+    duration: i64,
+) -> windows::core::Result<IMFSample> {
     let length = data.len() as u32;
     let buffer = unsafe { MFCreateMemoryBuffer(length) }?;
     let mut target: *mut u8 = ptr::null_mut();
@@ -493,7 +497,7 @@ fn memory_sample(data: &[u8], pts: i64, duration: i64) -> windows::core::Result<
 const PCM_BYTES_PER_SECOND: u32 = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS as u32 * 2;
 
 /// 音声の出力（AAC 48kHz 2ch）。ビットレートは `AVG_BYTES_PER_SECOND`（kbps × 1000 ÷ 8）で渡す。
-fn audio_output_media_type(bitrate_kbps: u32) -> windows::core::Result<IMFMediaType> {
+pub(super) fn audio_output_media_type(bitrate_kbps: u32) -> windows::core::Result<IMFMediaType> {
     let media_type = unsafe { MFCreateMediaType() }?;
     unsafe {
         media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
@@ -511,7 +515,7 @@ fn audio_output_media_type(bitrate_kbps: u32) -> windows::core::Result<IMFMediaT
 
 /// 音声の入力（16bit PCM 48kHz 2ch）。Microsoft の AAC エンコーダが受け取るのは
 /// 16bit PCM の 44.1kHz / 48kHz、1 / 2 / 6ch だけなので、録画スレッドで寄せてから渡す。
-fn audio_input_media_type() -> windows::core::Result<IMFMediaType> {
+pub(super) fn audio_input_media_type() -> windows::core::Result<IMFMediaType> {
     let media_type = unsafe { MFCreateMediaType() }?;
     unsafe {
         media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;

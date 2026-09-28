@@ -1,19 +1,19 @@
 //! 「録画」タブ（`docs/design/recording.md` の「設定 `[recording]`」）。
 //!
-//! 保存先・ファイル名の書式・映像のビットレート・ハードウェアエンコーダ・音声（録るか、ビットレート）。
-//! リプレイバッファ（③）の項目は、効く段になってから足す。
+//! 保存先・ファイル名の書式・映像のビットレート・ハードウェアエンコーダ・音声（録るか、ビットレート）・
+//! リプレイバッファ（ON / OFF、さかのぼる長さ）。
 //! フォルダの選択はここでは開かず、`SettingsEvent::PickRecordingFolder` で上へ返す
 //! （`docs/design/settings-dialog.md`）。
 
 use chrono::Local;
 use eframe::egui;
 
-use super::{warning_label, SettingsEvent};
+use super::{notice_label, warning_label, NoticeKind, SettingsEvent};
 use crate::i18n::{self, Text};
 use crate::recording::{render_file_name, RECORDING_EXTENSION};
 use crate::settings::{
-    AppSettings, MAX_RECORDING_BITRATE_KBPS, MIN_RECORDING_BITRATE_KBPS,
-    RECORDING_AUDIO_BITRATES_KBPS,
+    AppSettings, MAX_RECORDING_BITRATE_KBPS, MAX_REPLAY_SECONDS, MIN_RECORDING_BITRATE_KBPS,
+    MIN_REPLAY_SECONDS, RECORDING_AUDIO_BITRATES_KBPS,
 };
 
 /// 「録画」タブを描画する。書き換えるのはドラフトだけ。
@@ -119,5 +119,36 @@ pub(super) fn show_recording_settings_tab(
         });
         ui.add_space(5.0);
         ui.small(Text::RecordingAudioHint.get());
+    });
+
+    ui.add_space(15.0);
+
+    // リプレイバッファ（さかのぼり録画、#182）。長さの横には「長くするほどメモリを使う」を添える
+    ui.group(|ui| {
+        ui.strong(Text::RecordingReplayGroup.get());
+        ui.add_space(5.0);
+        ui.checkbox(
+            &mut settings.recording.replay_enabled,
+            Text::RecordingReplayEnabled.get(),
+        );
+        ui.add_enabled_ui(settings.recording.replay_enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(Text::RecordingReplaySecondsLabel.get());
+                ui.add(
+                    egui::Slider::new(
+                        &mut settings.recording.replay_seconds,
+                        MIN_REPLAY_SECONDS..=MAX_REPLAY_SECONDS,
+                    )
+                    .suffix(" s"),
+                );
+            });
+            notice_label(
+                ui,
+                NoticeKind::Warning,
+                Text::RecordingReplayMemoryNotice.get(),
+            );
+        });
+        ui.add_space(5.0);
+        ui.small(Text::RecordingReplayHint.get());
     });
 }

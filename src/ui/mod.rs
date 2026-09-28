@@ -556,6 +556,8 @@ mod tests {
                 hardware_encoder: false,
                 audio_enabled: false,
                 audio_bitrate_kbps: 96,
+                replay_enabled: true,
+                replay_seconds: 90,
             },
             ui: UiSettings {
                 volume: 80.0,

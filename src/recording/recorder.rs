@@ -1,9 +1,23 @@
-//! 録画スレッドの窓口（`Recorder`）と、録画スレッドの本体。
+//! 録画スレッドの窓口（`Recorder`）と、UI スレッドとやり取りする型（コマンド・イベント・観測値）。
+//! 録画スレッドの本体は `super::recorder_loop`。
 //!
-//! **窓口は UI スレッドの `CaptureCardViewer` が持つ。** 開始で録画スレッドを 1 本起こし、
-//! 停止で `Finalize` まで終えたらスレッドは自分で抜ける。`JoinHandle` は捨てず、
-//! `Recorder` を落とすときに join する（`on_exit` も同じ）。待たないと `Finalize` の
-//! 途中でプロセスが落ち、再生できない MP4 が残る。
+//! **窓口は UI スレッドの `CaptureCardViewer` が持つ。** 録画スレッドの寿命は
+//! 「録画中、またはリプレイバッファが ON のあいだ」（`docs/design/threads.md`）。
+//! 録画を始めるか、リプレイバッファを ON にしたときに 1 本起こし、どちらも無くなったら
+//! 窓口が止めて join する。`JoinHandle` は捨てない（`on_exit` も同じ）。待たないと
+//! `Finalize` の途中でプロセスが落ち、再生できない MP4 が残る。
+//!
+//! **スレッドを止めると決めるのは窓口（UI スレッド）だけ。** 録画スレッドが自分で抜けると、
+//! 抜ける直前に送られたコマンドが宙に浮くため。
+//!
+//! 録画には 2 つの経路がある（`docs/design/recording.md` の「①②の経路と③の経路」）。
+//!
+//! - リプレイバッファが OFF: `super::session::Session`。Sink Writer がエンコードも行う（①②）
+//! - リプレイバッファが ON: `super::replay::ReplayPipeline`。エンコーダ MFT を常に回して
+//!   エンコード済みのリングに持ち、録画を始めたらリングからエンコードなしの Sink Writer へ書く
+//!
+//! どちらを使うかは録画スレッドが決める。窓口は録画の開始・停止とリプレイバッファの設定を
+//! 送るだけで、経路を知らない。
 //!
 //! やり取りは mpsc。UI → 録画が `RecordingCommand`、録画 → UI が `RecordingEvent`。
 //! **録画スレッドから直接 `error!` を出さない。** 失敗を画面に出せるのは UI スレッド
@@ -14,49 +28,24 @@
 //! 書いた枚数などの観測値は `RecordingTelemetry`（Atomic）で共有し、UI が統計 OSD を
 //! 描くときに読む。
 
-use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use log::{debug, info, warn};
+use log::{debug, warn};
 
-use super::audio::{AudioChunk, AudioStats, AudioTrack};
-use super::convert::{even_size, rgb_to_nv12, Nv12Matrix};
-use super::file_name::unique_path;
-use super::pts::{units_from, PtsClock, AUDIO_SAMPLE_RATE, UNITS_PER_SECOND};
-use super::storage::{free_bytes, is_low, megabytes, DISK_CHECK_INTERVAL};
-use super::writer::{SinkWriter, WriterError, WriterParams, WriterStage};
+use super::audio::AudioStats;
+use super::pts::{AUDIO_SAMPLE_RATE, UNITS_PER_SECOND};
+use super::replay::ReplayConfig;
 use super::{EncoderInfo, RecordingError};
 use crate::audio::AudioTap;
-use crate::com::{ComApartment, ComModel, MfPlatform};
-use crate::video::{VideoFrame, VideoTap, VideoTapConsumer, VIDEO_TAP_CAPACITY};
+use crate::video::VideoTap;
 
-/// コマンドを待つ間隔。コマンドとリングの両方を見るため、数 ms で起きてリングを空にする。
-///
-/// リングの `Arc` が `FrameSink` の Vec の回収を妨げないよう、取り出しは速いほうがよい
-/// （`FrameSink` は 2 世代前の Vec を回収するので、60fps なら 33ms の猶予がある）。
-/// `thread::sleep` では待たない。
-const POLL_INTERVAL: Duration = Duration::from_millis(4);
-
-/// エンコーダが受け取ってまだエンコードしていない枚数がこれを超えたら、NV12 へ直す前に捨てる。
-/// スロットリングを切ってあるので、放っておくとエンコーダの遅れの分だけメモリが溜まる。
-const MAX_ENCODER_BACKLOG: u64 = 30;
-
-/// 映像が無いときに使う公称 fps
-const FALLBACK_FPS: u32 = 60;
-
-/// 音声を Sink Writer へ渡す最小の長さ（出力フレーム数、約 21ms）。数 ms ごとの小さな
-/// 塊で `WriteSample` を増やさないため。止めるときは残りをまとめて渡す
-const MIN_AUDIO_CHUNK_FRAMES: usize = 1024;
-
-/// Sink Writer を作る前（最初の映像のフレームが届く前）に溜めておく音声の上限
-/// （出力フレーム数、5 秒）。超えたら古いものから捨てる。塊は PTS を持っているので、
-/// 先頭を捨てても後ろの時刻はずれない
-const MAX_PENDING_AUDIO_FRAMES: usize = AUDIO_SAMPLE_RATE as usize * 5;
+/// 観測値の「リプレイバッファを通していない」
+const NO_REPLAY: u64 = u64::MAX;
 
 /// 録画を始めるのに要るもの。UI スレッドが設定から組み立てる。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,9 +65,13 @@ pub struct RecordingRequest {
 }
 
 /// UI スレッド → 録画スレッド。
-enum RecordingCommand {
+pub(super) enum RecordingCommand {
     Start(RecordingRequest),
     Stop,
+    /// リプレイバッファの設定。`None` なら OFF
+    Replay(Option<ReplayConfig>),
+    /// 録画を閉じ、リプレイバッファを止めて抜ける
+    Shutdown,
 }
 
 /// 録画を閉じたときの結果。
@@ -92,14 +85,16 @@ pub struct RecordingSummary {
     pub frames_dropped: u64,
     /// 録画中に `FrameSink` が Vec を回収できなかった回数
     pub recycle_misses: u64,
+    /// リプレイバッファからさかのぼった長さ。リプレイバッファを通していなければ `None`
+    pub replay_lead: Option<Duration>,
 }
 
 /// 録画スレッド → UI スレッド。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordingEvent {
-    /// 保存先と空き容量を確かめ、リングを差し込んだ。映像を待っている
+    /// 保存先と空き容量を確かめ、録画を始めた。映像を待っている
     Started,
-    /// 最初のフレームで Sink Writer を作った。使っているエンコーダ
+    /// 使っているエンコーダ
     EncoderSelected(EncoderInfo),
     /// 止めて `Finalize` まで終えた
     Stopped(RecordingSummary),
@@ -108,14 +103,20 @@ pub enum RecordingEvent {
         error: RecordingError,
         summary: Option<RecordingSummary>,
     },
+    /// リプレイバッファを続けられない（エンコーダを用意できない など）。録画していないときだけ
+    /// 送る。設定が変わるまで作り直さず、その間の録画はリプレイバッファを通さない経路で行う
+    ReplayFailed(RecordingError),
 }
 
-/// 録画スレッドと UI スレッドで共有する観測値。
-#[derive(Debug, Default)]
-struct RecordingTelemetry {
-    frames_written: AtomicU64,
+/// 録画スレッドと UI スレッドで共有する観測値。**書くのは録画スレッドだけ**、UI は読むだけ。
+#[derive(Debug)]
+pub(super) struct RecordingTelemetry {
+    pub(super) frames_written: AtomicU64,
     /// エンコーダの遅れで捨てた枚数
-    frames_skipped: AtomicU64,
+    pub(super) frames_skipped: AtomicU64,
+    /// 差し込み口が録画に回せなかった枚数の、録画を始めたときの値。リプレイバッファは
+    /// 差し込み口を録画をまたいで差したままにするので、録画中の値はここからの差で出す
+    dropped_baseline: AtomicU64,
     /// 音声の起点を揃えるために足した無音（出力フレーム数、48kHz）。
     /// 音声が来ていない間に埋めた分と、止めるときに映像の終わりまで埋めた分も含む
     audio_silence_frames: AtomicU64,
@@ -123,17 +124,63 @@ struct RecordingTelemetry {
     audio_trimmed_units: AtomicU64,
     /// 音声のリングが溢れて捨てたコールバックの回数
     audio_overflows: AtomicU64,
+    /// リプレイバッファからさかのぼった長さ（ms）。通していなければ `NO_REPLAY`
+    replay_lead_ms: AtomicU64,
+    /// リプレイバッファのリングが持っている映像の長さ（ms）
+    replay_held_ms: AtomicU64,
+    /// リプレイバッファのリングから古い GOP を捨てた回数
+    replay_discarded_gops: AtomicU64,
+}
+
+impl Default for RecordingTelemetry {
+    fn default() -> Self {
+        Self {
+            frames_written: AtomicU64::new(0),
+            frames_skipped: AtomicU64::new(0),
+            dropped_baseline: AtomicU64::new(0),
+            audio_silence_frames: AtomicU64::new(0),
+            audio_trimmed_units: AtomicU64::new(0),
+            audio_overflows: AtomicU64::new(0),
+            replay_lead_ms: AtomicU64::new(NO_REPLAY),
+            replay_held_ms: AtomicU64::new(0),
+            replay_discarded_gops: AtomicU64::new(0),
+        }
+    }
 }
 
 impl RecordingTelemetry {
-    /// 音声の観測値を書き出す。**書くのは録画スレッドだけ**、UI は読むだけ。
-    fn publish_audio(&self, stats: &AudioStats) {
+    /// 1 回の録画の値を 0 に戻す。`dropped_baseline` は差し込み口の捨てた枚数のいまの値。
+    pub(super) fn begin_recording(&self, dropped_baseline: u64) {
+        self.frames_written.store(0, Ordering::Relaxed);
+        self.frames_skipped.store(0, Ordering::Relaxed);
+        self.dropped_baseline
+            .store(dropped_baseline, Ordering::Relaxed);
+        self.publish_audio(&AudioStats::default());
+        self.replay_lead_ms.store(NO_REPLAY, Ordering::Relaxed);
+    }
+
+    /// 音声の観測値を書き出す。
+    pub(super) fn publish_audio(&self, stats: &AudioStats) {
         self.audio_silence_frames
             .store(stats.silence_frames, Ordering::Relaxed);
         self.audio_trimmed_units
             .store(stats.trimmed_units, Ordering::Relaxed);
         self.audio_overflows
             .store(stats.overflows, Ordering::Relaxed);
+    }
+
+    /// リプレイバッファからさかのぼった長さを書き出す（ファイルを作ったとき）。
+    pub(super) fn set_replay_lead(&self, lead: Duration) {
+        self.replay_lead_ms
+            .store(lead.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// リプレイバッファのリングの状態を書き出す。`held_units` は 100ns。
+    pub(super) fn publish_ring(&self, held_units: i64, discarded_gops: u64) {
+        let held_ms = u64::try_from(held_units).unwrap_or(0) / (UNITS_PER_SECOND as u64 / 1000);
+        self.replay_held_ms.store(held_ms, Ordering::Relaxed);
+        self.replay_discarded_gops
+            .store(discarded_gops, Ordering::Relaxed);
     }
 }
 
@@ -148,13 +195,17 @@ pub struct RecordingAudioStats {
     pub overflows: u64,
 }
 
-/// 録画スレッドの窓口。UI スレッドが持つ。
-pub struct Recorder {
-    commands: Sender<RecordingCommand>,
-    events: Receiver<RecordingEvent>,
-    thread: Option<JoinHandle<()>>,
-    telemetry: Arc<RecordingTelemetry>,
-    tap: VideoTap,
+/// リプレイバッファのリングの状態。ログに残す（画面には出さない。#182 の決定）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReplayRingStats {
+    /// 持っている映像の長さ
+    pub held: Duration,
+    /// 古い GOP を捨てた回数
+    pub discarded_gops: u64,
+}
+
+/// 録画中の UI 側の控え。
+struct ActiveRecording {
     started_at: Instant,
     stop_requested: bool,
     encoder: Option<EncoderInfo>,
@@ -162,123 +213,52 @@ pub struct Recorder {
     audio: bool,
 }
 
-impl Recorder {
-    /// 録画スレッドを起こして録画を始める。スレッドを起こせなければ失敗。
-    /// `audio_tap` は音声の差し込み口。`request.audio_bitrate_kbps` が `None` なら差し込まない。
-    pub fn start(
-        request: RecordingRequest,
-        tap: VideoTap,
-        audio_tap: AudioTap,
-    ) -> Result<Self, RecordingError> {
+/// 動いている録画スレッド。
+struct RecorderThread {
+    commands: Sender<RecordingCommand>,
+    events: Receiver<RecordingEvent>,
+    handle: Option<JoinHandle<()>>,
+    telemetry: Arc<RecordingTelemetry>,
+}
+
+impl RecorderThread {
+    fn spawn(video_tap: VideoTap, audio_tap: AudioTap) -> Result<Self, RecordingError> {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let telemetry = Arc::new(RecordingTelemetry::default());
-        let audio = request.audio_bitrate_kbps.is_some();
-        let thread = {
-            let tap = tap.clone();
+        let handle = {
             let telemetry = Arc::clone(&telemetry);
             thread::Builder::new()
                 .name("recorder".to_string())
-                .spawn(move || run(command_rx, event_tx, tap, audio_tap, telemetry))
+                .spawn(move || {
+                    super::recorder_loop::run(command_rx, event_tx, video_tap, audio_tap, telemetry)
+                })
                 .map_err(|e| RecordingError::Platform {
                     reason: e.to_string(),
                 })?
         };
-        // 受け手はいま起こしたスレッドなので、送れないことは無い
-        let _ = command_tx.send(RecordingCommand::Start(request));
         Ok(Self {
             commands: command_tx,
             events: event_rx,
-            thread: Some(thread),
+            handle: Some(handle),
             telemetry,
-            tap,
-            started_at: Instant::now(),
-            stop_requested: false,
-            encoder: None,
-            audio,
         })
     }
 
-    /// 停止を頼む。録画スレッドは残りを書いて `Finalize` し、`Stopped` を返して終わる。
-    pub fn request_stop(&mut self) {
-        if !self.stop_requested {
-            self.stop_requested = true;
-            // スレッドが既に終わっていれば送れないが、それで構わない
-            let _ = self.commands.send(RecordingCommand::Stop);
-        }
-    }
-
-    /// 停止を頼んだあと（`Finalize` を待っている間）か。
-    pub fn is_stopping(&self) -> bool {
-        self.stop_requested
-    }
-
-    /// 開始からの経過時間。
-    pub fn elapsed(&self) -> Duration {
-        self.started_at.elapsed()
-    }
-
-    /// 届いているイベントを 1 つ取り出す。待たない。
-    pub fn try_recv(&mut self) -> Option<RecordingEvent> {
-        let event = self.events.try_recv().ok()?;
-        if let RecordingEvent::EncoderSelected(info) = &event {
-            self.encoder = Some(info.clone());
-        }
-        Some(event)
-    }
-
-    /// 停止を頼み、録画スレッドが `Finalize` を終えて抜けるまで待ち、届いたイベントを返す。
-    /// 終了時（`on_exit`）に使う。**上限は置かない。** 置くと `Finalize` の途中で
-    /// プロセスが落ち、再生できない MP4 が残る。
-    pub fn stop_and_wait(mut self) -> Vec<RecordingEvent> {
-        self.request_stop();
+    /// 止めるよう頼み、抜けるまで待って、届いたイベントを返す。**上限は置かない。**
+    /// 置くと `Finalize` の途中でプロセスが落ち、再生できない MP4 が残る。
+    fn shutdown(mut self) -> Vec<RecordingEvent> {
+        // 既に抜けていれば送れないが、それで構わない
+        let _ = self.commands.send(RecordingCommand::Shutdown);
         // 送り手は録画スレッドが持っていて、抜けるときに落ちる。落ちるまで受け取り続ける
-        let events: Vec<RecordingEvent> = self.events.iter().collect();
-        // ここで `Drop` が join する
+        let events = self.events.iter().collect();
+        self.join();
         events
     }
 
-    /// 使っているエンコーダ。Sink Writer を作るまで（最初のフレームが届くまで）は `None`。
-    pub fn encoder(&self) -> Option<&EncoderInfo> {
-        self.encoder.as_ref()
-    }
-
-    /// 書いた枚数。
-    pub fn frames_written(&self) -> u64 {
-        self.telemetry.frames_written.load(Ordering::Relaxed)
-    }
-
-    /// 捨てた枚数（リングが満杯、エンコーダの遅れ）。
-    pub fn frames_dropped(&self) -> u64 {
-        self.tap.dropped() + self.telemetry.frames_skipped.load(Ordering::Relaxed)
-    }
-
-    /// 音声の状態（足した無音・削った入力・リングの溢れ）。音声を録らない設定なら `None`。
-    pub fn audio_stats(&self) -> Option<RecordingAudioStats> {
-        if !self.audio {
-            return None;
-        }
-        let telemetry = &self.telemetry;
-        Some(RecordingAudioStats {
-            silence_ms: audio_frames_to_ms(telemetry.audio_silence_frames.load(Ordering::Relaxed)),
-            trimmed_ms: telemetry.audio_trimmed_units.load(Ordering::Relaxed)
-                / (UNITS_PER_SECOND as u64 / 1000),
-            overflows: telemetry.audio_overflows.load(Ordering::Relaxed),
-        })
-    }
-}
-
-/// 出力フレーム数（48kHz）を ms に直す。
-fn audio_frames_to_ms(frames: u64) -> u64 {
-    frames.saturating_mul(1000) / u64::from(AUDIO_SAMPLE_RATE)
-}
-
-impl Drop for Recorder {
-    /// **スレッドを切り離さない。** 停止を頼んでから、`Finalize` が終わるまで待つ。
-    fn drop(&mut self) {
-        self.request_stop();
-        if let Some(thread) = self.thread.take() {
-            if thread.join().is_err() {
+    fn join(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            if handle.join().is_err() {
                 // release は panic = "abort" なのでここには来ない
                 warn!("録画スレッドがパニックした");
             }
@@ -286,526 +266,248 @@ impl Drop for Recorder {
     }
 }
 
-/// 録画スレッドの入口。
-fn run(
-    commands: Receiver<RecordingCommand>,
-    events: Sender<RecordingEvent>,
-    tap: VideoTap,
-    audio_tap: AudioTap,
-    telemetry: Arc<RecordingTelemetry>,
-) {
-    let request = match commands.recv() {
-        Ok(RecordingCommand::Start(request)) => request,
-        // 窓口が先に落ちた
-        Ok(RecordingCommand::Stop) | Err(_) => return,
-    };
-    // 順序は COM → MF。落とすのは逆順（ローカル変数は宣言の逆順に落ちる）
-    let _com = match ComApartment::enter(ComModel::MultiThreaded) {
-        Ok(com) => com,
-        Err(e) => {
-            fail(&events, platform_error(e));
-            return;
-        }
-    };
-    let _mf = match MfPlatform::start() {
-        Ok(mf) => mf,
-        Err(e) => {
-            fail(&events, platform_error(e));
-            return;
-        }
-    };
-    Session::new(request, tap, audio_tap, telemetry, events).run(&commands);
-}
-
-fn platform_error(error: windows::core::Error) -> RecordingError {
-    RecordingError::Platform {
-        reason: error.to_string(),
+impl Drop for RecorderThread {
+    /// **スレッドを切り離さない。** 止めるよう頼んでから、抜けるまで待つ。
+    fn drop(&mut self) {
+        let _ = self.commands.send(RecordingCommand::Shutdown);
+        self.join();
     }
 }
 
-fn fail(events: &Sender<RecordingEvent>, error: RecordingError) {
-    let _ = events.send(RecordingEvent::Failed {
-        error,
-        summary: None,
-    });
-}
-
-/// 録画を閉じた結果。
-enum Finished {
-    /// 1 枚も書いていない（ファイルは作っていない）
-    NoFile,
-    /// `Finalize` まで済んだ
-    Saved(RecordingSummary),
-    /// `Finalize` に失敗した。ファイルは残してある
-    FinalizeFailed(RecordingError, Option<RecordingSummary>),
-}
-
-/// 1 回の録画。録画スレッドの中だけにある。
-struct Session {
-    request: RecordingRequest,
-    tap: VideoTap,
+/// 録画スレッドの窓口。UI スレッドが 1 つ持つ。
+pub struct Recorder {
+    video_tap: VideoTap,
     audio_tap: AudioTap,
-    /// 音声トラック。音声を録らない設定なら `None`
-    audio: Option<AudioTrack>,
-    /// Sink Writer へまだ渡していない音声（Sink Writer を作る前の分）
-    audio_pending: VecDeque<AudioChunk>,
-    audio_pending_frames: usize,
-    telemetry: Arc<RecordingTelemetry>,
-    events: Sender<RecordingEvent>,
-    consumer: Option<VideoTapConsumer>,
-    clock: PtsClock,
-    writer: Option<SinkWriter>,
-    path: Option<PathBuf>,
-    /// NV12 の変換先。使い回す（録画スレッドは確保してよいが、毎フレーム確保し直す理由も無い）
-    nv12: Vec<u8>,
-    frames_skipped: u64,
-    last_disk_check: Instant,
+    thread: Option<RecorderThread>,
+    /// 最後に送ったリプレイバッファの設定。`None` なら OFF
+    replay: Option<ReplayConfig>,
+    recording: Option<ActiveRecording>,
 }
 
-impl Session {
-    fn new(
-        request: RecordingRequest,
-        tap: VideoTap,
-        audio_tap: AudioTap,
-        telemetry: Arc<RecordingTelemetry>,
-        events: Sender<RecordingEvent>,
-    ) -> Self {
-        let fps = request.nominal_fps.unwrap_or(FALLBACK_FPS);
-        let now = Instant::now();
+impl Recorder {
+    /// 窓口を作る。スレッドはまだ起こさない。
+    pub fn new(video_tap: VideoTap, audio_tap: AudioTap) -> Self {
         Self {
-            request,
-            tap,
+            video_tap,
             audio_tap,
-            audio: None,
-            audio_pending: VecDeque::new(),
-            audio_pending_frames: 0,
-            telemetry,
-            events,
-            consumer: None,
-            clock: PtsClock::new(now, fps),
-            writer: None,
-            path: None,
-            nv12: Vec::new(),
-            frames_skipped: 0,
-            last_disk_check: now,
+            thread: None,
+            replay: None,
+            recording: None,
         }
     }
 
-    fn fps(&self) -> u32 {
-        self.request.nominal_fps.unwrap_or(FALLBACK_FPS).max(1)
+    /// 録画を始める。スレッドが無ければ起こす。起こせなければ失敗。
+    /// 録画中（`Finalize` を待っている間も含む）は何もしない。
+    pub fn start(&mut self, request: RecordingRequest) -> Result<(), RecordingError> {
+        if self.recording.is_some() {
+            debug!("録画中の開始要求は無視する");
+            return Ok(());
+        }
+        let audio = request.audio_bitrate_kbps.is_some();
+        self.send(RecordingCommand::Start(request))?;
+        self.recording = Some(ActiveRecording {
+            started_at: Instant::now(),
+            stop_requested: false,
+            encoder: None,
+            audio,
+        });
+        Ok(())
     }
 
-    fn run(mut self, commands: &Receiver<RecordingCommand>) {
-        if let Err(error) = self.prepare() {
-            fail(&self.events, error);
+    /// 停止を頼む。録画スレッドは残りを書いて `Finalize` し、`Stopped` を返す。
+    pub fn request_stop(&mut self) {
+        let Some(recording) = self.recording.as_mut() else {
             return;
-        }
-        // リングを差し込んだ時刻が PTS の基準 t0
-        self.consumer = Some(self.tap.attach(VIDEO_TAP_CAPACITY));
-        let t0 = Instant::now();
-        self.clock = PtsClock::new(t0, self.fps());
-        self.last_disk_check = t0;
-        // 音声も同じ t0 を基準にする。差し込むのは t0 の直後なので、t0 より前に
-        // 届いたサンプルはリングに入らない（コールバック 1 回ぶんの端数は削る）
-        if self.request.audio_bitrate_kbps.is_some() {
-            self.audio = Some(AudioTrack::attach(self.audio_tap.clone(), t0));
-        }
-        info!(
-            "録画を始めた（保存先: {}、ファイル名: {}.mp4、{}kbps、ハードウェアエンコーダ: {}、音声: {}）",
-            self.request.folder.display(),
-            self.request.file_stem,
-            self.request.video_bitrate_kbps,
-            if self.request.hardware_encoder {
-                "使う"
-            } else {
-                "使わない"
-            },
-            match self.request.audio_bitrate_kbps {
-                Some(kbps) => format!("AAC {kbps}kbps"),
-                None => "録らない".to_string(),
+        };
+        if !recording.stop_requested {
+            recording.stop_requested = true;
+            if let Some(thread) = &self.thread {
+                // 既に抜けていれば送れないが、それで構わない
+                let _ = thread.commands.send(RecordingCommand::Stop);
             }
-        );
-        let _ = self.events.send(RecordingEvent::Started);
+        }
+    }
 
-        loop {
-            match commands.recv_timeout(POLL_INTERVAL) {
-                Ok(RecordingCommand::Stop) | Err(RecvTimeoutError::Disconnected) => break,
-                Ok(RecordingCommand::Start(_)) => debug!("録画中の開始要求は無視する"),
-                Err(RecvTimeoutError::Timeout) => {}
+    /// リプレイバッファの設定を渡す。前に渡したものと同じなら何もしない。
+    /// ON にしたらスレッドを起こし、その時点から溜め始める。OFF にして録画もしていなければ
+    /// スレッドを止める。
+    pub fn set_replay(&mut self, config: Option<ReplayConfig>) -> Result<(), RecordingError> {
+        if config == self.replay {
+            return Ok(());
+        }
+        if config.is_some() || self.thread.is_some() {
+            self.send(RecordingCommand::Replay(config.clone()))?;
+        }
+        // 送れてから控える。送れなければ（スレッドを起こせない）次の `apply_settings` で送り直す
+        self.replay = config;
+        self.shutdown_if_idle();
+        Ok(())
+    }
+
+    /// 録画中か（`Finalize` を待っている間も含む）。
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    /// 停止を頼んだあと（`Finalize` を待っている間）か。
+    pub fn is_stopping(&self) -> bool {
+        self.recording
+            .as_ref()
+            .is_some_and(|recording| recording.stop_requested)
+    }
+
+    /// 開始からの経過時間。録画していなければ 0。
+    pub fn elapsed(&self) -> Duration {
+        self.recording
+            .as_ref()
+            .map_or(Duration::ZERO, |recording| recording.started_at.elapsed())
+    }
+
+    /// 届いているイベントを 1 つ取り出す。待たない。録画もリプレイバッファも無くなって
+    /// いれば、ここでスレッドを止める。
+    pub fn try_recv(&mut self) -> Option<RecordingEvent> {
+        let received = self.thread.as_ref()?.events.try_recv();
+        match received {
+            Ok(event) => {
+                self.note(&event);
+                Some(event)
             }
-            // 映像を先に書く。Sink Writer は最初の映像のフレームで作るので、
-            // 音声はそれまで溜めておき、作られたあとで渡す
-            if let Err(error) = self
-                .drain()
-                .and_then(|()| self.pump_audio(MIN_AUDIO_CHUNK_FRAMES))
-            {
-                self.end_with_error(error);
-                return;
+            Err(TryRecvError::Empty) => {
+                self.shutdown_if_idle();
+                None
             }
-            if self.last_disk_check.elapsed() >= DISK_CHECK_INTERVAL {
-                self.last_disk_check = Instant::now();
-                let free = free_bytes(&self.request.folder);
-                if is_low(free) {
-                    let free_mb = free.map(megabytes).unwrap_or(0);
-                    self.end_with_error(RecordingError::DiskLow { free_mb });
-                    return;
+            Err(TryRecvError::Disconnected) => {
+                // 自分からは抜けないので、パニック以外では来ない
+                if let Some(mut thread) = self.thread.take() {
+                    thread.join();
                 }
-            }
-        }
-
-        // 止める。リングを抜いてから、残っている分を書き切る
-        self.tap.detach();
-        if let Some(audio) = &self.audio {
-            audio.detach();
-        }
-        if let Err(error) = self.drain().and_then(|()| self.finish_audio()) {
-            self.end_with_error(error);
-            return;
-        }
-        match self.finish() {
-            Finished::Saved(summary) => {
-                let _ = self.events.send(RecordingEvent::Stopped(summary));
-            }
-            // 1 枚も届かなかった。ファイルは作っていない
-            Finished::NoFile => fail(&self.events, RecordingError::NoVideo),
-            Finished::FinalizeFailed(error, summary) => {
-                let _ = self.events.send(RecordingEvent::Failed { error, summary });
+                self.recording = None;
+                None
             }
         }
     }
 
-    /// 保存先を作り、空き容量を確かめる。
-    fn prepare(&self) -> Result<(), RecordingError> {
-        check_folder(&self.request.folder)?;
-        std::fs::create_dir_all(&self.request.folder).map_err(|e| RecordingError::Folder {
-            path: self.request.folder.clone(),
-            reason: e.to_string(),
-        })?;
-        let free = free_bytes(&self.request.folder);
-        if is_low(free) {
-            return Err(RecordingError::DiskLow {
-                free_mb: free.map(megabytes).unwrap_or(0),
-            });
+    /// 録画を止め、リプレイバッファも止めて、録画スレッドが `Finalize` を終えて抜けるまで待ち、
+    /// 届いたイベントを返す。終了時（`on_exit`）に使う。
+    pub fn shutdown(&mut self) -> Vec<RecordingEvent> {
+        self.recording = None;
+        self.replay = None;
+        match self.thread.take() {
+            Some(thread) => thread.shutdown(),
+            None => Vec::new(),
         }
-        Ok(())
     }
 
-    /// リングに溜まっている分を書く。
-    fn drain(&mut self) -> Result<(), RecordingError> {
-        while let Some((frame, received_at)) = self.consumer.as_mut().and_then(|c| c.pop()) {
-            self.process(frame, received_at)?;
-        }
-        Ok(())
+    /// 使っているエンコーダ。決まるまでは `None`。
+    pub fn encoder(&self) -> Option<&EncoderInfo> {
+        self.recording.as_ref()?.encoder.as_ref()
     }
 
-    /// 1 枚を処理する。**`Arc` は NV12 へ直したらすぐ手放し、手放してから書く**
-    /// （`FrameSink` の Vec の回収を妨げないため）。
-    fn process(
-        &mut self,
-        frame: Arc<VideoFrame>,
-        received_at: Instant,
-    ) -> Result<(), RecordingError> {
-        let Some(pts) = self.clock.pts_for(received_at) else {
-            // 録画を始める前に受け取ったフレーム
-            return Ok(());
+    /// 書いた枚数。
+    pub fn frames_written(&self) -> u64 {
+        self.telemetry()
+            .map_or(0, |t| t.frames_written.load(Ordering::Relaxed))
+    }
+
+    /// 捨てた枚数（リングが満杯、エンコーダの遅れ）。
+    pub fn frames_dropped(&self) -> u64 {
+        let Some(telemetry) = self.telemetry() else {
+            return 0;
         };
-        let (width, height) = even_size(frame.width, frame.height);
-        if width == 0 || height == 0 {
-            return Ok(());
-        }
-        let size = (width as u32, height as u32);
-
-        match &self.writer {
-            None => self.open_writer(size)?,
-            Some(writer) if writer.size() != size => {
-                return Err(RecordingError::SizeChanged {
-                    from: writer.size(),
-                    to: size,
-                });
-            }
-            Some(writer) if writer.backlog() > MAX_ENCODER_BACKLOG => {
-                // エンコーダが追いつかない。表示は落とさず、録画だけがコマ落ちする
-                self.frames_skipped += 1;
-                self.telemetry
-                    .frames_skipped
-                    .store(self.frames_skipped, Ordering::Relaxed);
-                return Ok(());
-            }
-            Some(_) => {}
-        }
-
-        let matrix = Nv12Matrix::for_size(width, height);
-        let converted = rgb_to_nv12(
-            &frame.data,
-            frame.width,
-            frame.height,
-            width,
-            height,
-            matrix,
-            &mut self.nv12,
-        );
-        drop(frame);
-        if !converted {
-            // 画素が足りないフレーム。`FrameSink` が作るフレームでは起きない
-            return Ok(());
-        }
-        self.write_current(pts)
+        let baseline = telemetry.dropped_baseline.load(Ordering::Relaxed);
+        self.video_tap.dropped().saturating_sub(baseline)
+            + telemetry.frames_skipped.load(Ordering::Relaxed)
     }
 
-    /// 変換済みの NV12 を書く。最初の 1 枚をハードウェアで書けなければ、
-    /// ファイルを消してソフトウェアで作り直し、同じ 1 枚を書き直す。
-    fn write_current(&mut self, pts: i64) -> Result<(), RecordingError> {
-        let duration = self.clock.sample_duration();
-        let Some(writer) = self.writer.as_mut() else {
-            return Ok(());
-        };
-        let result = writer.write_nv12(&self.nv12, pts, duration);
-        let first_sample = writer.samples_written() == 0;
-        let hardware = writer.hardware();
-        match result {
-            Ok(()) => {}
-            Err(error) if first_sample && hardware => {
-                warn!(
-                    "ハードウェアのエンコーダで最初のフレームを書けないので、ソフトウェアで作り直す: {}",
-                    error
-                );
-                let size = writer.size();
-                self.discard_writer();
-                self.create_writer(size, false)?;
-                let writer =
-                    self.writer
-                        .as_mut()
-                        .ok_or_else(|| RecordingError::EncoderUnavailable {
-                            reason: error.to_string(),
-                        })?;
-                writer
-                    .write_nv12(&self.nv12, pts, duration)
-                    .map_err(|e| write_error(&e))?;
-            }
-            Err(error) => return Err(write_error(&error)),
+    /// 音声の状態（足した無音・削った入力・リングの溢れ）。音声を録らない設定なら `None`。
+    pub fn audio_stats(&self) -> Option<RecordingAudioStats> {
+        if !self.recording.as_ref()?.audio {
+            return None;
         }
-        self.telemetry
-            .frames_written
-            .fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    }
-
-    /// 最初のフレームの大きさで Sink Writer を作る。ハードウェアで作れなければ
-    /// ソフトウェアで作り直す。
-    fn open_writer(&mut self, size: (u32, u32)) -> Result<(), RecordingError> {
-        if self.request.hardware_encoder {
-            match self.create_writer(size, true) {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    warn!(
-                        "ハードウェアのエンコーダで Sink Writer を作れないので、ソフトウェアで作り直す: {}",
-                        error
-                    );
-                }
-            }
-        }
-        self.create_writer(size, false)
-    }
-
-    /// Sink Writer を作る。失敗したら作りかけのファイルを消す。
-    fn create_writer(&mut self, size: (u32, u32), hardware: bool) -> Result<(), RecordingError> {
-        let path = unique_path(&self.request.folder, &self.request.file_stem);
-        let params = WriterParams {
-            width: size.0,
-            height: size.1,
-            fps: self.fps(),
-            bitrate_kbps: self.request.video_bitrate_kbps,
-            hardware,
-            audio_bitrate_kbps: self.request.audio_bitrate_kbps,
-        };
-        match SinkWriter::create(&path, params) {
-            Ok(writer) => {
-                let encoder = writer.encoder_info();
-                info!(
-                    "録画のファイルを作った: {}（{}x{}、{}fps、{}kbps、エンコーダ: {}、ハードウェア: {}）",
-                    path.display(),
-                    size.0,
-                    size.1,
-                    params.fps,
-                    params.bitrate_kbps,
-                    encoder.name.as_deref().unwrap_or("（名前を取得できない）"),
-                    match encoder.hardware {
-                        Some(true) => "はい",
-                        Some(false) => "いいえ",
-                        None => "不明",
-                    }
-                );
-                let _ = self.events.send(RecordingEvent::EncoderSelected(encoder));
-                self.writer = Some(writer);
-                self.path = Some(path);
-                Ok(())
-            }
-            Err(error) => {
-                remove_partial_file(&path);
-                Err(create_error(&self.request.folder, &error))
-            }
-        }
-    }
-
-    /// 書いたものを捨てる（ハードウェアからソフトウェアへ作り直すとき）。
-    fn discard_writer(&mut self) {
-        self.writer = None;
-        if let Some(path) = self.path.take() {
-            remove_partial_file(&path);
-        }
-    }
-
-    /// 閉じる。
-    fn finish(&mut self) -> Finished {
-        let Some(writer) = self.writer.take() else {
-            return Finished::NoFile;
-        };
-        let summary = self.summary();
-        let finalized = writer.finalize();
-        if let Some(audio) = &self.audio {
-            audio.stats().log(self.clock.duration());
-        }
-        match (finalized, summary) {
-            (Ok(()), Some(summary)) => Finished::Saved(summary),
-            // Sink Writer はあるのにパスが無いことは無い
-            (Ok(()), None) => Finished::NoFile,
-            // ファイルは消さない（再生できないかもしれないことを伝える）
-            (Err(error), summary) => Finished::FinalizeFailed(write_error(&error), summary),
-        }
-    }
-
-    /// 音声トラックのリングから取り出して PCM にし、溜まった分を Sink Writer へ渡す。
-    /// `min_frames` に満たない分は次の呼び出しへ回す。音声を録らない設定なら何もしない。
-    fn pump_audio(&mut self, min_frames: usize) -> Result<(), RecordingError> {
-        let Some(audio) = self.audio.as_mut() else {
-            return Ok(());
-        };
-        audio.pump(Instant::now());
-        self.telemetry.publish_audio(&audio.stats());
-        let chunk = audio.take_chunk(min_frames);
-        if let Some(chunk) = chunk {
-            self.queue_audio(chunk);
-        }
-        self.write_pending_audio()
-    }
-
-    /// 止めるときの音声。残りを取り出し、映像より短ければ映像の終わりまで無音で埋めて
-    /// すべて渡す（音声トラックの長さを映像と揃えるため）。
-    fn finish_audio(&mut self) -> Result<(), RecordingError> {
-        let video_end = units_from(self.clock.duration());
-        let has_writer = self.writer.is_some();
-        let Some(audio) = self.audio.as_mut() else {
-            return Ok(());
-        };
-        audio.pump(Instant::now());
-        if has_writer {
-            audio.finish(video_end);
-        }
-        self.telemetry.publish_audio(&audio.stats());
-        let chunk = audio.take_chunk(0);
-        if let Some(chunk) = chunk {
-            self.queue_audio(chunk);
-        }
-        self.write_pending_audio()
-    }
-
-    /// 渡す音声を列へ積む。Sink Writer を作る前は溜め、上限を超えたら古いものから捨てる。
-    fn queue_audio(&mut self, chunk: AudioChunk) {
-        self.audio_pending_frames += chunk.frames();
-        self.audio_pending.push_back(chunk);
-        while self.audio_pending_frames > MAX_PENDING_AUDIO_FRAMES {
-            match self.audio_pending.pop_front() {
-                Some(dropped) => self.audio_pending_frames -= dropped.frames(),
-                None => break,
-            }
-        }
-    }
-
-    /// 溜めた音声を Sink Writer へ書く。Sink Writer がまだ無ければ溜めたままにする。
-    fn write_pending_audio(&mut self) -> Result<(), RecordingError> {
-        let Some(writer) = self.writer.as_mut() else {
-            return Ok(());
-        };
-        while let Some(chunk) = self.audio_pending.pop_front() {
-            self.audio_pending_frames -= chunk.frames();
-            writer
-                .write_pcm(&chunk.samples, chunk.pts, chunk.duration)
-                .map_err(|e| write_error(&e))?;
-        }
-        Ok(())
-    }
-
-    /// 途中で止める。リングを抜き、書いていればファイルを閉じてから知らせる。
-    fn end_with_error(mut self, error: RecordingError) {
-        self.tap.detach();
-        if let Some(audio) = &self.audio {
-            audio.detach();
-        }
-        let summary = match self.finish() {
-            Finished::NoFile => None,
-            Finished::Saved(summary) => Some(summary),
-            // 閉じるのにも失敗した。最初の理由を優先して伝える
-            Finished::FinalizeFailed(_, summary) => summary,
-        };
-        let _ = self.events.send(RecordingEvent::Failed { error, summary });
-    }
-
-    fn summary(&self) -> Option<RecordingSummary> {
-        let path = self.path.clone()?;
-        Some(RecordingSummary {
-            path,
-            duration: self.clock.duration(),
-            frames_written: self.telemetry.frames_written.load(Ordering::Relaxed),
-            frames_dropped: self.tap.dropped() + self.frames_skipped,
-            recycle_misses: self.tap.recycle_misses(),
+        let telemetry = self.telemetry()?;
+        Some(RecordingAudioStats {
+            silence_ms: audio_frames_to_ms(telemetry.audio_silence_frames.load(Ordering::Relaxed)),
+            trimmed_ms: telemetry.audio_trimmed_units.load(Ordering::Relaxed)
+                / (UNITS_PER_SECOND as u64 / 1000),
+            overflows: telemetry.audio_overflows.load(Ordering::Relaxed),
         })
     }
-}
 
-/// 保存先に使えるパスか。**空や相対パスは拒む。** カレントディレクトリ基準で解決すると、
-/// 起動元によって保存先が変わる（`Program Files` を指すこともある。`docs/design/assets.md`）。
-/// 設定ダイアログの欄は空にも相対パスにもできるので、ここで弾く。
-fn check_folder(folder: &Path) -> Result<(), RecordingError> {
-    if folder.is_absolute() {
-        Ok(())
-    } else {
-        Err(RecordingError::FolderNotAbsolute {
-            path: folder.to_path_buf(),
+    /// リプレイバッファからさかのぼった長さ。録画中でリプレイバッファを通していて、
+    /// 先頭が決まったときだけ。
+    pub fn replay_lead(&self) -> Option<Duration> {
+        self.recording.as_ref()?;
+        let lead = self.telemetry()?.replay_lead_ms.load(Ordering::Relaxed);
+        (lead != NO_REPLAY).then(|| Duration::from_millis(lead))
+    }
+
+    /// リプレイバッファのリングの状態。リプレイバッファが OFF なら `None`。
+    pub fn replay_ring(&self) -> Option<ReplayRingStats> {
+        self.replay.as_ref()?;
+        let telemetry = self.telemetry()?;
+        Some(ReplayRingStats {
+            held: Duration::from_millis(telemetry.replay_held_ms.load(Ordering::Relaxed)),
+            discarded_gops: telemetry.replay_discarded_gops.load(Ordering::Relaxed),
         })
     }
-}
 
-/// Sink Writer を作れなかった理由を、利用者に出す種別へ直す。
-fn create_error(folder: &Path, error: &WriterError) -> RecordingError {
-    match error.stage {
-        // ファイルを作れない（保存先に書けない、パスが長すぎる など）
-        WriterStage::Create => RecordingError::Folder {
-            path: folder.to_path_buf(),
-            reason: error.error.to_string(),
-        },
-        _ => RecordingError::EncoderUnavailable {
-            reason: error.error.to_string(),
-        },
+    fn telemetry(&self) -> Option<&RecordingTelemetry> {
+        self.thread.as_ref().map(|thread| thread.telemetry.as_ref())
+    }
+
+    /// コマンドを送る。スレッドが無ければ起こす。
+    fn send(&mut self, command: RecordingCommand) -> Result<(), RecordingError> {
+        if self.thread.is_none() {
+            self.thread = Some(RecorderThread::spawn(
+                self.video_tap.clone(),
+                self.audio_tap.clone(),
+            )?);
+        }
+        match &self.thread {
+            Some(thread) => thread
+                .commands
+                .send(command)
+                .map_err(|_| RecordingError::Platform {
+                    reason: "録画スレッドが止まっている".to_string(),
+                }),
+            None => Ok(()),
+        }
+    }
+
+    /// 届いたイベントを控えに反映する。
+    fn note(&mut self, event: &RecordingEvent) {
+        match event {
+            RecordingEvent::EncoderSelected(info) => {
+                if let Some(recording) = self.recording.as_mut() {
+                    recording.encoder = Some(info.clone());
+                }
+            }
+            RecordingEvent::Stopped(_) | RecordingEvent::Failed { .. } => self.recording = None,
+            RecordingEvent::Started | RecordingEvent::ReplayFailed(_) => {}
+        }
+    }
+
+    /// 録画もリプレイバッファも無ければスレッドを止める。止まるまで待つが、
+    /// 何もしていないスレッドなのですぐ返る。
+    fn shutdown_if_idle(&mut self) {
+        if self.recording.is_some() || self.replay.is_some() {
+            return;
+        }
+        if let Some(thread) = self.thread.take() {
+            for event in thread.shutdown() {
+                // 録画は無いので、届くのはリプレイバッファの失敗くらい。もう使わない
+                debug!(
+                    "止めた録画スレッドから届いていたイベントを捨てる: {:?}",
+                    event
+                );
+            }
+        }
     }
 }
 
-fn write_error(error: &WriterError) -> RecordingError {
-    RecordingError::WriteFailed {
-        reason: error.error.to_string(),
-    }
-}
-
-/// 作りかけのファイルを消す。消せなくても続きは無いので、理由はログに残すだけ。
-fn remove_partial_file(path: &Path) {
-    match std::fs::remove_file(path) {
-        Ok(()) => debug!("作りかけの録画ファイルを消した: {}", path.display()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => warn!(
-            "作りかけの録画ファイルを消せない: {}: {}",
-            path.display(),
-            e
-        ),
-    }
+/// 出力フレーム数（48kHz）を ms に直す。
+fn audio_frames_to_ms(frames: u64) -> u64 {
+    frames.saturating_mul(1000) / u64::from(AUDIO_SAMPLE_RATE)
 }
 
 #[cfg(test)]
@@ -822,21 +524,258 @@ mod tests {
     }
 
     #[test]
-    fn check_folder_accepts_an_absolute_path() {
-        assert_eq!(check_folder(Path::new(r"C:\Users\tester\Videos")), Ok(()));
+    fn recording_telemetry_publish_ring_converts_to_ms() {
+        let telemetry = RecordingTelemetry::default();
+        telemetry.publish_ring(25 * UNITS_PER_SECOND + 5_000, 7);
+        assert_eq!(telemetry.replay_held_ms.load(Ordering::Relaxed), 25_000);
+        assert_eq!(telemetry.replay_discarded_gops.load(Ordering::Relaxed), 7);
+        // 負の長さは 0
+        telemetry.publish_ring(-1, 0);
+        assert_eq!(telemetry.replay_held_ms.load(Ordering::Relaxed), 0);
     }
 
     #[test]
-    fn check_folder_rejects_empty_and_relative_paths() {
-        // 空や相対パスはカレントディレクトリ基準になり、保存先が起動元で変わる
-        for folder in ["", "videos", r".\videos", r"..\videos"] {
-            assert_eq!(
-                check_folder(Path::new(folder)),
-                Err(RecordingError::FolderNotAbsolute {
-                    path: PathBuf::from(folder)
-                }),
-                "{folder}"
-            );
+    fn recording_telemetry_begin_recording_clears_the_previous_recording() {
+        let telemetry = RecordingTelemetry::default();
+        telemetry.frames_written.store(10, Ordering::Relaxed);
+        telemetry.set_replay_lead(Duration::from_secs(20));
+        telemetry.begin_recording(5);
+        assert_eq!(telemetry.frames_written.load(Ordering::Relaxed), 0);
+        assert_eq!(telemetry.dropped_baseline.load(Ordering::Relaxed), 5);
+        assert_eq!(telemetry.replay_lead_ms.load(Ordering::Relaxed), NO_REPLAY);
+    }
+
+    #[test]
+    fn recorder_without_replay_or_recording_has_no_thread() {
+        let mut recorder = Recorder::new(VideoTap::new(), AudioTap::new());
+        assert!(recorder.set_replay(None).is_ok());
+        assert!(recorder.thread.is_none());
+        assert!(!recorder.is_recording());
+        assert_eq!(recorder.replay_lead(), None);
+        assert_eq!(recorder.replay_ring(), None);
+        assert!(recorder.try_recv().is_none());
+    }
+
+    /// フェイクの映像（720p60 のカラーバーにフレーム番号を焼き込んだもの）と音声（正弦波）を流す。
+    fn start_fakes(
+        frames: &crate::video::VideoFrames,
+        audio_tap: &AudioTap,
+    ) -> (
+        crate::video::FakeVideoCapture,
+        crate::audio::FakeAudioCapture,
+    ) {
+        use crate::audio::{AudioControls, FakeAudioCapture, FakeAudioOptions, PassthroughRequest};
+        use crate::repaint::RepaintWaker;
+        use crate::video::{FakeVideoCapture, FakeVideoOptions, SharedColorConversion};
+        let mut video = FakeVideoCapture::new(
+            frames.clone(),
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::new(),
+            FakeVideoOptions {
+                device_count: 1,
+                disconnect_after: None,
+                failures_before_success: 0,
+            },
+        );
+        video
+            .start_capture(
+                Some("Fake Camera 1"),
+                Some((1280, 720)),
+                Some("YUY2"),
+                Some(60),
+            )
+            .expect("フェイクの映像を開ける");
+        let mut audio = FakeAudioCapture::new(
+            Arc::new(AudioControls::default()),
+            audio_tap.clone(),
+            FakeAudioOptions {
+                input_count: 1,
+                failures_before_success: 0,
+                stream_error_after: None,
+            },
+        );
+        audio
+            .start_passthrough(&PassthroughRequest {
+                input_device_name: Some("Fake Audio Input 1"),
+                output_device_name: Some("Fake Audio Output 1"),
+                sample_rate: None,
+                channels: None,
+                input_capabilities: None,
+                output_capabilities: None,
+                buffer_ms: 50,
+            })
+            .expect("フェイクの音声を開ける");
+        (video, audio)
+    }
+
+    /// 届いたイベントを集めながら `duration` だけ待つ。
+    fn poll_for(recorder: &mut Recorder, duration: Duration) -> Vec<RecordingEvent> {
+        let until = Instant::now() + duration;
+        let mut events = Vec::new();
+        while Instant::now() < until {
+            events.extend(std::iter::from_fn(|| recorder.try_recv()));
+            thread::sleep(Duration::from_millis(50));
         }
+        events
+    }
+
+    /// フェイクを流してリプレイバッファを `seconds` 秒で ON にし（`None` なら OFF のまま）、
+    /// `wait` 待ってから `record` だけ録画して止める。保存した結果と、読み戻した長さ（100ns）を返す。
+    fn record_with_replay(
+        seconds: Option<u32>,
+        wait: Duration,
+        record: Duration,
+    ) -> (RecordingSummary, i64) {
+        use crate::com::{ComApartment, ComModel, MfPlatform};
+        use windows::core::HSTRING;
+        use windows::Win32::Media::MediaFoundation::{
+            MFCreateSourceReaderFromURL, MF_PD_DURATION, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+            MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
+        };
+
+        let frames = crate::video::VideoFrames::new();
+        let audio_tap = AudioTap::new();
+        let (mut video, mut audio) = start_fakes(&frames, &audio_tap);
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作れること");
+        let mut recorder = Recorder::new(frames.tap(), audio_tap);
+        recorder
+            .set_replay(seconds.map(|seconds| ReplayConfig {
+                seconds,
+                video_bitrate_kbps: 4000,
+                hardware_encoder: false,
+                audio_bitrate_kbps: Some(160),
+                nominal_fps: Some(60),
+            }))
+            .expect("リプレイバッファを始められる");
+        // OFF のままならスレッドは起きない（OFF のときの負荷は①②と同じ）
+        assert_eq!(recorder.thread.is_some(), seconds.is_some());
+        let events = poll_for(&mut recorder, wait);
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, RecordingEvent::ReplayFailed(_))),
+            "{events:?}"
+        );
+
+        recorder
+            .start(RecordingRequest {
+                folder: dir.path().to_path_buf(),
+                file_stem: "replay".to_string(),
+                video_bitrate_kbps: 4000,
+                hardware_encoder: false,
+                nominal_fps: Some(60),
+                audio_bitrate_kbps: Some(160),
+            })
+            .expect("録画を始められる");
+        poll_for(&mut recorder, record);
+        let lead = recorder.replay_lead();
+        assert_eq!(lead.is_some(), seconds.is_some());
+        recorder.request_stop();
+        let events = poll_for(&mut recorder, Duration::from_secs(3));
+        let summary = events
+            .iter()
+            .find_map(|event| match event {
+                RecordingEvent::Stopped(summary) => Some(summary.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("保存できた: {events:?}"));
+        // 統計 OSD の値は ms で丸めてある
+        assert_eq!(
+            summary.replay_lead.map(|lead| lead.as_millis()),
+            lead.map(|lead| lead.as_millis())
+        );
+        // リプレイバッファが ON のままなら、止めてもスレッドは動き続ける。OFF なら止まる
+        poll_for(&mut recorder, Duration::from_millis(200));
+        assert_eq!(recorder.thread.is_some(), seconds.is_some());
+        recorder.shutdown();
+        video.stop_capture();
+        audio.stop_capture();
+
+        let _com = ComApartment::enter(ComModel::MultiThreaded).expect("COM を初期化できる");
+        let _mf = MfPlatform::start().expect("MF を起こせる");
+        let reader =
+            unsafe { MFCreateSourceReaderFromURL(&HSTRING::from(summary.path.as_path()), None) }
+                .expect("書いた MP4 を開ける");
+        let value = unsafe {
+            reader.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
+        }
+        .expect("長さを読める");
+        let duration = unsafe { value.Anonymous.Anonymous.Anonymous.uhVal } as i64;
+        assert!(unsafe {
+            reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32, 0)
+        }
+        .is_ok());
+        // 先頭の映像のサンプルは 0 から始まる（最初から再生できる）
+        let (mut flags, mut time, mut sample) = (0u32, -1i64, None);
+        unsafe {
+            reader.ReadSample(
+                MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+                0,
+                None,
+                Some(&mut flags),
+                Some(&mut time),
+                Some(&mut sample),
+            )
+        }
+        .expect("読める");
+        assert!(sample.is_some());
+        // リングからの書き出しは先頭のキーフレームを 0 にする。①②の経路は録画の開始から
+        // 最初のフレームが届くまでの分（1 枚ぶん程度）だけ後ろから始まる
+        let limit = if seconds.is_some() { 10_000 } else { 1_000_000 };
+        assert!(time.abs() < limit, "先頭の時刻 {time}");
+        (summary, duration)
+    }
+
+    #[test]
+    #[ignore = "Media Foundation の H.264 / AAC エンコーダが必要。30 秒ほどかかる"]
+    fn recorder_replay_buffer_prepends_the_seconds_before_the_start() {
+        // 実行: cargo test -- --ignored recorder_replay_buffer_prepends_the_seconds_before_the_start
+        //
+        // 30 秒で ON にして 20 秒待ち、5 秒録画する。溜まっているのは 20 秒ぶんなので、
+        // ファイルは 20 秒 + 5 秒 ≒ 25 秒（先頭はフェイクの最初のキーフレーム）
+        let (summary, duration) =
+            record_with_replay(Some(30), Duration::from_secs(20), Duration::from_secs(5));
+        let lead = summary.replay_lead.expect("さかのぼった");
+        assert!(lead > Duration::from_secs(18), "さかのぼり {lead:?}");
+        assert!(
+            (230_000_000..=270_000_000).contains(&duration),
+            "長さ {duration}（{summary:?}）"
+        );
+    }
+
+    #[test]
+    #[ignore = "Media Foundation の H.264 / AAC エンコーダが必要。20 秒ほどかかる"]
+    fn recorder_replay_buffer_keeps_only_the_configured_seconds() {
+        // 実行: cargo test -- --ignored recorder_replay_buffer_keeps_only_the_configured_seconds
+        //
+        // 5 秒で ON にして 12 秒待ち、3 秒録画する。さかのぼるのは「いま − 5 秒」以降の
+        // 最初のキーフレームからなので 3〜5 秒（キーフレームは 2 秒ごと）
+        let (summary, duration) =
+            record_with_replay(Some(5), Duration::from_secs(12), Duration::from_secs(3));
+        let lead = summary.replay_lead.expect("さかのぼった");
+        assert!(
+            (Duration::from_secs(3)..=Duration::from_millis(5_200)).contains(&lead),
+            "さかのぼり {lead:?}"
+        );
+        assert!(
+            (55_000_000..=85_000_000).contains(&duration),
+            "長さ {duration}（{summary:?}）"
+        );
+    }
+
+    #[test]
+    #[ignore = "Media Foundation の H.264 / AAC エンコーダが必要。10 秒ほどかかる"]
+    fn recorder_without_replay_records_only_after_the_start() {
+        // 実行: cargo test -- --ignored recorder_without_replay_records_only_after_the_start
+        //
+        // リプレイバッファが OFF なら①②の経路（Sink Writer がエンコードも行う）で録る。
+        // 開始前の 5 秒は入らず、ファイルは録画した 3 秒ぶん
+        let (summary, duration) =
+            record_with_replay(None, Duration::from_secs(5), Duration::from_secs(3));
+        assert_eq!(summary.replay_lead, None);
+        assert!(
+            (25_000_000..=40_000_000).contains(&duration),
+            "長さ {duration}（{summary:?}）"
+        );
     }
 }

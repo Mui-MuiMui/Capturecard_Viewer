@@ -425,6 +425,9 @@ mod tests {
         commit_draft(&mut shared, &draft, &original);
 
         assert_eq!(shared.recording, draft.recording);
+        // リプレイバッファの ON / OFF とさかのぼる長さも同じセクションで反映される
+        assert!(shared.recording.replay_enabled);
+        assert_eq!(shared.recording.replay_seconds, 90);
     }
 
     #[test]
@@ -434,6 +437,8 @@ mod tests {
         let draft = draft_from_imported(imported.clone(), &AppSettings::default());
 
         assert_eq!(draft.recording, imported.recording);
+        assert!(draft.recording.replay_enabled);
+        assert_eq!(draft.recording.replay_seconds, 90);
     }
 
     #[test]

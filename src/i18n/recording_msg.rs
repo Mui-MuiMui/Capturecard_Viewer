@@ -84,6 +84,19 @@ pub fn recording_platform_failed(reason: impl Display) -> String {
     }
 }
 
+/// リプレイバッファを続けられない。`reason` は `RecordingError` の文言。
+/// 設定を変えるまで作り直さず、その間の録画はさかのぼらずに行う。
+pub fn recording_replay_failed(reason: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "リプレイバッファ（さかのぼり録画）を使えない。録画はさかのぼらずに行う: {reason}"
+        ),
+        Language::English => format!(
+            "The replay buffer is unavailable. Recordings will not include earlier footage: {reason}"
+        ),
+    }
+}
+
 // ---- ファイル名の書式（recording::file_name） ----
 
 pub fn recording_file_name_forbidden_character(character: &char) -> String {
@@ -136,6 +149,15 @@ pub fn stats_recording(elapsed: impl Display, written: u64, dropped: u64) -> Str
     match language() {
         Language::Japanese => format!("録画 {elapsed} / 書いた {written} / 捨てた {dropped}"),
         Language::English => format!("REC {elapsed} / written {written} / dropped {dropped}"),
+    }
+}
+
+/// 統計 OSD の録画の 1 行目に添える、リプレイバッファからさかのぼった長さ（秒）。
+/// リプレイバッファを通した録画でだけ出す（ON であることだけでは出さない。#182 の決定）。
+pub fn stats_recording_replay(seconds: u64) -> String {
+    match language() {
+        Language::Japanese => format!(" / さかのぼり {seconds} 秒"),
+        Language::English => format!(" / replay {seconds} s"),
     }
 }
 
@@ -227,6 +249,25 @@ mod tests {
         assert_eq!(
             english,
             "Audio: silence +120 ms / trimmed -8 ms / overflows 2"
+        );
+    }
+
+    #[test]
+    fn stats_recording_replay_is_a_suffix_for_the_recording_line() {
+        let text = with_language(Language::Japanese, || stats_recording_replay(28));
+        assert_eq!(text, " / さかのぼり 28 秒");
+        let english = with_language(Language::English, || stats_recording_replay(0));
+        assert_eq!(english, " / replay 0 s");
+    }
+
+    #[test]
+    fn recording_replay_failed_contains_the_reason_in_both_languages() {
+        let text = with_language(Language::Japanese, || recording_replay_failed("理由"));
+        assert!(text.ends_with("理由"), "{text}");
+        let english = with_language(Language::English, || recording_replay_failed("reason"));
+        assert!(
+            english.is_ascii() && english.ends_with("reason"),
+            "{english}"
         );
     }
 }

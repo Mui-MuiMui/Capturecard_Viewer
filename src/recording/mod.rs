@@ -1,11 +1,18 @@
 //! 録画。映像を H.264、音声を AAC にして、Media Foundation の Sink Writer で MP4 へ書き出す。
 //!
-//! 設計は `docs/design/recording.md`。いまは第 2 段（映像と音声）まで。
-//! リプレイバッファ（③）はまだ無い。
+//! 設計は `docs/design/recording.md`。第 3 段（リプレイバッファ）まで。
 //!
 //! | ファイル | 役割 |
 //! |---|---|
-//! | `recorder.rs` | 録画スレッドの窓口 `Recorder`（UI スレッドが持つ）と、録画スレッドの本体 |
+//! | `recorder.rs` | 録画スレッドの窓口 `Recorder`（UI スレッドが持ち、スレッドの寿命を決める）と、コマンド・イベント・観測値の型 |
+//! | `recorder_loop.rs` | 録画スレッドの本体。コマンドの受け口と、リプレイバッファを通すかの経路の切り替え |
+//! | `session.rs` | リプレイバッファを通さない録画（①②）。Sink Writer がエンコードも行う。失敗の扱いの共通部分 |
+//! | `replay.rs` | リプレイバッファ（③）。エンコーダ MFT を回してエンコード済みのリングに持つ |
+//! | `replay_recording.rs` | リプレイバッファを通す録画。リングからエンコードなしの Sink Writer へ書く |
+//! | `replay_ring.rs` | エンコード済みのリングと、書き出す位置・捨てる境界・PTS の付け替え（純粋関数） |
+//! | `encoder.rs` | エンコーダ MFT（H.264 / AAC、同期型と非同期型） |
+//! | `passthrough.rs` | エンコードなしの Sink Writer |
+//! | `bitstream.rs` | H.264 の IDR と SPS / PPS の読み取り、AAC の `MF_MT_USER_DATA`（純粋関数） |
 //! | `writer.rs` | Sink Writer の組み立てと書き込み、使っているエンコーダの名前 |
 //! | `convert.rs` | RGB → NV12 の画素変換（純粋関数） |
 //! | `audio.rs` | 音声トラック。`AudioTap` のリングから取り出し、48kHz 2ch の 16bit PCM へ寄せて PTS を付ける |
@@ -19,17 +26,27 @@
 //! スレッドを作らない」には当たらない。
 
 mod audio;
+mod bitstream;
 mod convert;
+mod encoder;
 mod file_name;
+mod passthrough;
 mod pts;
 mod recorder;
+mod recorder_loop;
+mod replay;
+mod replay_recording;
+mod replay_ring;
+mod session;
 mod storage;
 mod writer;
 
 pub use file_name::{render_file_name, resolve_file_stem, RECORDING_EXTENSION};
 pub use recorder::{
     Recorder, RecordingAudioStats, RecordingEvent, RecordingRequest, RecordingSummary,
+    ReplayRingStats,
 };
+pub use replay::ReplayConfig;
 
 use std::fmt;
 use std::path::PathBuf;

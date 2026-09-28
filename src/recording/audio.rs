@@ -50,7 +50,7 @@ impl AudioChunk {
 }
 
 /// 閉じたときにログへ残す値。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct AudioStats {
     /// 作った出力フレームの累計（48kHz）
     pub(super) frames: u64,
@@ -68,6 +68,20 @@ pub(super) struct AudioStats {
 }
 
 impl AudioStats {
+    /// `base` からの差。リプレイバッファ（③）は音声トラックを録画をまたいで使い続けるので、
+    /// 1 回の録画の値は録画を始めたときの値からの差で出す。ドリフトの区間はそのまま使う
+    /// （揃え直すたびに始め直す区間で、録画の始まりとは関係しない）。
+    pub(super) fn since(&self, base: &AudioStats) -> AudioStats {
+        AudioStats {
+            frames: self.frames.saturating_sub(base.frames),
+            silence_frames: self.silence_frames.saturating_sub(base.silence_frames),
+            trimmed_samples: self.trimmed_samples.saturating_sub(base.trimmed_samples),
+            trimmed_units: self.trimmed_units.saturating_sub(base.trimmed_units),
+            overflows: self.overflows.saturating_sub(base.overflows),
+            drift: self.drift,
+        }
+    }
+
     /// ログへ 1 行で残す。録画スレッドが閉じたときに呼ぶ（失敗ではないので `info`）。
     ///
     /// **途切れずに続いた区間での「映像の時計（PC）での経過」と「音声のサンプル数 ÷ レート」の差**
@@ -462,6 +476,39 @@ mod tests {
         assert_eq!(track.format, Some((44_100, 1)));
         assert_eq!(track.next_index, 960 + 441);
         assert!(track.stats().drift.is_some());
+    }
+
+    #[test]
+    fn audio_stats_since_subtracts_the_counters_and_keeps_the_drift() {
+        let base = AudioStats {
+            frames: 48_000,
+            silence_frames: 4_800,
+            trimmed_samples: 10,
+            trimmed_units: 1_000,
+            overflows: 1,
+            drift: None,
+        };
+        let now = AudioStats {
+            frames: 96_000,
+            silence_frames: 9_600,
+            trimmed_samples: 30,
+            trimmed_units: 3_000,
+            overflows: 4,
+            drift: Some((10_000_000, 9_999_000)),
+        };
+        assert_eq!(
+            now.since(&base),
+            AudioStats {
+                frames: 48_000,
+                silence_frames: 4_800,
+                trimmed_samples: 20,
+                trimmed_units: 2_000,
+                overflows: 3,
+                drift: Some((10_000_000, 9_999_000)),
+            }
+        );
+        // 差し込み直しで溢れた回数が 0 に戻っていても、負にはしない
+        assert_eq!(base.since(&now).overflows, 0);
     }
 
     #[test]

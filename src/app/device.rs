@@ -134,6 +134,10 @@ impl CaptureCardViewer {
                 initial,
             });
 
+            // リプレイバッファの ON / OFF とさかのぼる長さは、次の録画からではなくすぐ効かせる。
+            // 変わったときだけ録画スレッドへ伝わる（`sync_replay_buffer`）
+            self.sync_replay_buffer(&settings.recording);
+
             // 色空間とレンジはデバイスの開き直しを伴わない。共有の Atomic へ
             // 書くだけで次のフレームから効くので、UI スレッドから直接入れる。
             // 2 秒ごとに同じ値をログへ出さないよう差分で判定する

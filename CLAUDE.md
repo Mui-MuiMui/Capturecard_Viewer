@@ -50,7 +50,7 @@ cargo build --release
 | `src/app/capabilities.rs` | デバイス一覧のキャッシュと、デバイス能力・対応設定の取得要求（ワーカーへ流すところまで） |
 | `src/app/screenshot.rs` | 撮影、保存スレッドの管理、結果の取り込み |
 | `src/app/screenshot_sound.rs` | 効果音ファイルの読み込みスレッドの管理と結果の取り込み（適用・テスト再生） |
-| `src/app/recording.rs` | 録画の開始・停止（`toggle_recording`、右クリックメニューとホットキーが呼ぶ）、録画スレッドから届いた `RecordingEvent` の取り込み（ログ・トースト・`report_error`）、終了時の停止と `Finalize` の待ち合わせ、録画中の印と統計 OSD の録画の行。フィールド（`recorder`）は `app/mod.rs` |
+| `src/app/recording.rs` | 録画の開始・停止（`toggle_recording`、右クリックメニューとホットキーが呼ぶ）、リプレイバッファの設定を録画スレッドへ渡す（`sync_replay_buffer`、`apply_settings` が呼ぶ）、録画スレッドから届いた `RecordingEvent` の取り込み（ログ・トースト・`report_error`）、終了時の停止と `Finalize` の待ち合わせ、録画中の印と統計 OSD の録画の行。フィールド（`recorder`）は `app/mod.rs` |
 | `src/app/settings_dialog.rs` | 設定ダイアログの操作の受け止め、インポート / エクスポート / 初期化、プリセットの適用 |
 | `src/app/settings_store.rs` | 設定のデバウンス保存と即時保存 |
 | `src/app/update.rs` | 更新の確認と適用のスレッドの管理と結果の取り込み（`UpdateState`）、通知ダイアログの操作、前回の更新の残りの後片付け、終了時の新しい exe の起動 |
@@ -83,7 +83,15 @@ cargo build --release
 | `src/audio/fake.rs` | 実機なしで動くフェイクの音声デバイス `FakeAudioCapture`。正弦波の入力と書き込みを捨てる出力のスレッド |
 | `src/audio/tap.rs` | 録画へ音声を回す差し込み口 `AudioTap`。録画中だけ、入力コールバックが f32 へ直した値を入力の形のまま 1 秒ぶんのリングへ積む（待たない `try_lock`、空きが足りなければそのコールバックの分を捨てて数える）。累計のサンプル数・最後に積んだ時刻・入力の形・開き直しの番号・途切れた位置を Atomic で持つ |
 | `src/recording/mod.rs` | 録画の入口。`RecordingError`（文言は `Display` から `crate::i18n`）、`EncoderInfo`、経過時間の書式（`format_elapsed`）、外から使う経路（`crate::recording::...`）の `pub use` |
-| `src/recording/recorder.rs` | 録画スレッドの窓口 `Recorder`（UI スレッドが持つ。落とすと停止を頼んで join する）と録画スレッドの本体（リングの差し込み、最初のフレームで Sink Writer を作る、それまでの音声を溜めて渡す、止めるときに音声を映像の終わりまで揃える、ハードウェアからソフトウェアへの作り直し、大きさの変化・空き容量・書き込みの失敗で止める）。`RecordingCommand` / `RecordingEvent` / `RecordingSummary` |
+| `src/recording/recorder.rs` | 録画スレッドの窓口 `Recorder`（UI スレッドが 1 つ持つ）。録画かリプレイバッファが ON のときにスレッドを起こし、どちらも無くなったら止めて join する（スレッドは自分から抜けない）。`RecordingCommand` / `RecordingEvent` / `RecordingSummary` / `RecordingTelemetry`（録画中の値は録画を始めたときからの差） |
+| `src/recording/recorder_loop.rs` | 録画スレッドの本体。コマンドの受け口と、リプレイバッファを通すかの経路の切り替え（`ReplayState`）。差し込み口を使っている録画の間に変えられたリプレイバッファの設定を、録画が終わってから反映する |
+| `src/recording/session.rs` | リプレイバッファを通さない 1 回の録画 `Session`（①②の経路。リングの差し込み、最初のフレームで Sink Writer を作る、それまでの音声を溜めて渡す、止めるときに音声を映像の終わりまで揃える、ハードウェアからソフトウェアへの作り直し、大きさの変化・空き容量・書き込みの失敗で止める）。失敗の扱いの共通部分（`prepare_folder` / `check_disk` / `create_error` / `Finished`） |
+| `src/recording/replay.rs` | リプレイバッファ `ReplayPipeline`（③）と `ReplayConfig`。差し込み口を差したまま、エンコーダ MFT で H.264 / AAC にしてエンコード済みのリングへ積む。大きさが変わったらエンコーダを作り直してリングを空にする |
+| `src/recording/replay_recording.rs` | リプレイバッファを通す 1 回の録画 `ReplayRecording`。先頭のキーフレームからエンコードなしの Sink Writer へ書く。リングの中身は数 ms ごとに少しずつ書き（`catch_up`）、追いついたらライブのサンプルを直接書く |
+| `src/recording/replay_ring.rs` | エンコード済みのリング `EncodedRing` と、書き出すキーフレームの選び方（`replay_start`）・捨てる境界（`keep_from` / `gops_to_drop`）・PTS の付け替え（`Cut`）。判定は純粋関数 |
+| `src/recording/encoder.rs` | エンコーダ MFT `EncoderMft`（H.264 はハードウェアの非同期型 → ソフトウェアの同期型の順に試す、AAC は同期型）。非同期型は `METransformNeedInput` / `METransformHaveOutput` を待たずに取る。エンコードなしの Sink Writer へ渡すメディアタイプ（`stream_type`） |
+| `src/recording/passthrough.rs` | エンコードなしの Sink Writer `PassthroughWriter`（入力 = 出力の H.264 / AAC を MP4 へまとめるだけ） |
+| `src/recording/bitstream.rs` | H.264 の Annex B の読み取り（IDR か、SPS / PPS）と、AAC の `MF_MT_USER_DATA` の予備の組み立て。純粋関数 |
 | `src/recording/writer.rs` | Media Foundation の Sink Writer（`IMFSinkWriter`）の組み立て（H.264 と AAC の 2 ストリーム）と NV12 / 16bit PCM の書き込み、`Finalize`、エンコーダの遅れ（`backlog`）、使っているエンコーダの名前（`encoder_info`） |
 | `src/recording/convert.rs` | RGB → NV12 の画素変換（BT.709 / BT.601 リミテッド、色差は 2x2 の平均）。純粋関数 |
 | `src/recording/pts.rs` | 映像の PTS（受け取った時刻 − 録画の開始、単調増加）と、音声の PTS の計算（出力フレーム数 → 100ns、`AudioTap` の時刻と累計からの逆算、途切れたときの揃え方、無音で埋める先、ドリフトの測定）。純粋関数 |
@@ -109,7 +117,7 @@ cargo build --release
 | `src/ui/video_mode.rs` | デバイスを切り替えたときに選び直すビデオの既定値（`select_default_video_mode`） |
 | `src/ui/device_tab.rs` | 「デバイス設定」タブの描画 |
 | `src/ui/screenshot_tab.rs` | 「スクリーンショット設定」タブの描画 |
-| `src/ui/recording_tab.rs` | 「録画」タブの描画（保存先、ファイル名の書式と例、映像のビットレート、ハードウェアエンコーダ、音声の有無とビットレート） |
+| `src/ui/recording_tab.rs` | 「録画」タブの描画（保存先、ファイル名の書式と例、映像のビットレート、ハードウェアエンコーダ、音声の有無とビットレート、リプレイバッファの ON / OFF とさかのぼる長さ） |
 | `src/ui/hotkeys_tab.rs` | 「ホットキー」タブの描画と、割り当ての重複判定 |
 | `src/ui/hotkey_capture.rs` | ホットキー入力ダイアログ。確定の判定と描画 |
 | `src/ui/hotkey_keys.rs` | 入力ダイアログが使うキーの対応表（`hotkey_key_name`、`hotkey::parse` と同じ範囲）、割り当てさせない組み合わせ（`is_clipboard_command_chord`）、ホットキー文字列の組み立て |
@@ -140,7 +148,7 @@ cargo build --release
 
 `src/audio/` の子モジュールで**状態を持つのは `capture.rs` の `AudioCapture`、`fake.rs` の `FakeAudioCapture` と、スレッドをまたいで共有する `AudioControls` / `ResampleTelemetry` / `AudioTap` だけ。** 残りは純粋関数か、cpal のストリームを組み立てて返すだけにする。**外から使う経路（`crate::audio::...`）は `audio/mod.rs` の `pub use` に集める**（`ui/mod.rs` と同じ理由で、誰も使わない再輸出は警告になる）。子モジュール同士で使うものには `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
-`src/recording/` の子モジュールで**状態を持つのは `recorder.rs` の `Recorder`（UI スレッドの窓口）と、録画スレッドの中だけにある 1 回の録画（`Session`）と音声トラック（`audio.rs` の `AudioTrack`）、`writer.rs` の `SinkWriter` だけ。** 変換・PTS・ファイル名・空き容量の判定は純粋関数にする。**録画スレッドから `error!` を出さず、失敗は `RecordingEvent` で UI スレッドへ返す**（`docs/design/threads.md`）。外から使う経路は `recording/mod.rs` の `pub use` に集める。
+`src/recording/` の子モジュールで**状態を持つのは `recorder.rs` の `Recorder`（UI スレッドの窓口）と、録画スレッドの中だけにあるもの（`recorder_loop.rs` の `Worker`、1 回の録画 `Session` / `ReplayRecording`、リプレイバッファ `ReplayPipeline` とそのリング `EncodedRing`、音声トラック `AudioTrack`、`SinkWriter` / `PassthroughWriter` / `EncoderMft`）だけ。** 変換・PTS・ファイル名・空き容量の判定、リングのどこから書くか・どこで捨てるかは純粋関数にする。**録画スレッドから `error!` を出さず、失敗は `RecordingEvent` で UI スレッドへ返す**（`docs/design/threads.md`）。外から使う経路は `recording/mod.rs` の `pub use` に集める。
 
 ## 設計の理由はどこにあるか
 
@@ -162,7 +170,7 @@ cargo build --release
 | `docs/design/logging.md` | ログの出力先とレベル、`catch_unwind` が効かないこと |
 | `docs/design/assets.md` | アイコンと効果音の埋め込み、パスの解決 |
 | `docs/design/i18n.md` | 画面に出す文字列を `src/i18n/` に集める仕組み、入れるもの・入れないもの、文字列を足すときの手順 |
-| `docs/design/recording.md` | 録画（#120）とリプレイバッファ（#182）の設計。**第 1 段（映像、#281）と第 2 段（音声、#282）を実装済み。リプレイバッファ（③）は未実装。** 録画スレッド、コールバックからロックなしで渡すリング、Media Foundation の Sink Writer、PTS とドリフト、失敗の扱い、`[recording]`、段階分け |
+| `docs/design/recording.md` | 録画（#120）とリプレイバッファ（#182）の設計。**第 1 段（映像、#281）、第 2 段（音声、#282）、リプレイバッファ（③、#182）を実装済み。** 録画スレッドとその寿命、コールバックからロックなしで渡すリング、Media Foundation の Sink Writer、エンコーダ MFT とエンコード済みのリング、PTS とドリフト、失敗の扱い、`[recording]`、段階分け |
 | `docs/design/update.md` | 更新の確認（GitHub の Release API、native-tls、確認のスレッド、`[update]`、通知ダイアログ）と適用（資産、書き込みの確認、SHA-256 の照合、`.old` / `.new` での差し替えと戻し方、再起動） |
 
 目指す構造と現状との差分は `docs/ARCHITECTURE.md`。**同じ話が両方にある場合は `docs/ARCHITECTURE.md` を正とする。** デバイス起因の不具合を調べるときは `.claude/skills/device-debug/SKILL.md` の手順（ログの読み方、正常時の所要時間の目安、症状ごとの確認順）に従う。
