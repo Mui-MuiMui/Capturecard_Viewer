@@ -68,6 +68,20 @@ pub(super) struct EncodedSample {
     pub(super) data: Arc<[u8]>,
 }
 
+/// 同じ `METransformHaveOutput` に対して、出力の形の選び直しを続けてよい回数
+const MAX_STREAM_CHANGES: usize = 4;
+
+/// `ProcessOutput` を 1 回呼んだ結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputResult {
+    /// 出力を 1 つ取り出した（エンコーダがサンプルを返さなかった場合も含む）
+    Produced,
+    /// 入力が足りない
+    NeedMoreInput,
+    /// 出力の形が変わったので選び直した。サンプルは出ていない
+    StreamChanged,
+}
+
 /// 映像か音声か。キーフレームの見分け方と、出力のバッファの見積もりが違う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MediaKind {
@@ -313,10 +327,17 @@ impl EncoderMft {
         if self.events.is_some() {
             while self.pending_output > 0 {
                 self.pending_output -= 1;
-                self.process_output()?;
+                // 出力の形が変わったと返されたら、形を選び直して同じ `METransformHaveOutput` に
+                // 対して取り出し直す（次の通知は来ない）。選び直しが続くエンコーダで
+                // 抜けられなくならないよう、回数に上限を置く
+                for _ in 0..MAX_STREAM_CHANGES {
+                    if self.process_output()? != OutputResult::StreamChanged {
+                        break;
+                    }
+                }
             }
         } else {
-            while self.process_output()? {}
+            while self.process_output()? != OutputResult::NeedMoreInput {}
         }
         Ok(())
     }
@@ -380,8 +401,8 @@ impl EncoderMft {
         }
     }
 
-    /// `ProcessOutput` を 1 回呼ぶ。出力が無ければ（入力が足りない）偽。
-    fn process_output(&mut self) -> Result<bool, EncoderError> {
+    /// `ProcessOutput` を 1 回呼ぶ。
+    fn process_output(&mut self) -> Result<OutputResult, EncoderError> {
         let sample = if self.provides_samples {
             None
         } else {
@@ -405,9 +426,11 @@ impl EncoderMft {
                     self.produced += 1;
                     self.ready.push(encoded);
                 }
-                Ok(true)
+                Ok(OutputResult::Produced)
             }
-            Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => Ok(false),
+            Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                Ok(OutputResult::NeedMoreInput)
+            }
             Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
                 // 出力の形が変わった（ハードウェアの H.264 エンコーダが最初に求めることがある）。
                 // エンコーダが示す形を選び直して続ける
@@ -421,7 +444,7 @@ impl EncoderMft {
                 .map_err(EncoderError::Encode)?;
                 self.refresh_output_info().map_err(EncoderError::Encode)?;
                 info!("エンコーダの出力の形が変わったので選び直した");
-                Ok(true)
+                Ok(OutputResult::StreamChanged)
             }
             Err(error) => Err(EncoderError::Encode(error)),
         }

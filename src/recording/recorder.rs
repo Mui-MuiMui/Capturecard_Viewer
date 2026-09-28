@@ -335,10 +335,11 @@ impl Recorder {
         if config == self.replay {
             return Ok(());
         }
-        self.replay = config.clone();
         if config.is_some() || self.thread.is_some() {
-            self.send(RecordingCommand::Replay(config))?;
+            self.send(RecordingCommand::Replay(config.clone()))?;
         }
+        // 送れてから控える。送れなければ（スレッドを起こせない）次の `apply_settings` で送り直す
+        self.replay = config;
         self.shutdown_if_idle();
         Ok(())
     }

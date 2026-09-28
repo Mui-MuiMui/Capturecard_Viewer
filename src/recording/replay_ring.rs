@@ -7,9 +7,12 @@
 //! - **映像は常にキーフレームから始める。** 古いものはキーフレーム境界（GOP 単位）で捨てる。
 //!   キーフレームの間隔（2 秒）が、さかのぼれる長さの粒度になる
 //! - **持つのは「設定の秒数 + 1 GOP」まで。** それより古い GOP は、次のキーフレームが
-//!   境界より新しくなるまで残る。最後の GOP は捨てない（映像が途絶えている間も、
-//!   直前の GOP から書き出せるように）
-//! - 音声（AAC）はどのフレームからでも復号できるので、時刻で切る
+//!   境界より新しくなるまで残る。最後の GOP は捨てない（いま積んでいる GOP を途中で
+//!   捨てると、続きのフレームを復号できなくなる）。映像が途絶えて最後の GOP が
+//!   「いま − N 秒」より古くなったら、録画は次のキーフレームから始める（古い GOP から
+//!   書き出すと、途絶えていた長い空白までファイルに入るため）
+//! - 音声（AAC）はどのフレームからでも復号できるので、映像とは関係なく境界の時刻で切る
+//!   （映像が途絶えている間も音声が溜まり続けないように）
 //!
 //! 判定と計算（どのキーフレームから書くか、捨てる境界、PTS の付け替え）は純粋関数にしてある。
 
@@ -69,8 +72,11 @@ impl EncodedRing {
     }
 
     /// `keep_from`（リプレイバッファの基準からの 100ns）より古いものを捨てる。
-    /// 映像は GOP 単位、音声は時刻で切る。音声は残した映像の先頭より後ろも残す
-    /// （書き出すときに映像の先頭と揃えるため）。
+    /// 映像は GOP 単位、音声は `keep_from` で切る。
+    ///
+    /// 音声を映像の先頭に合わせて残さないのは、映像が途絶えると最後の GOP が古いまま残り、
+    /// 音声の境界が進まずに溜まり続けるため。書き出すのは「いま − N 秒」（`keep_from` より新しい）
+    /// 以降のキーフレームからなので、それより古い音声は使わない。
     pub(super) fn trim(&mut self, keep_from: i64) {
         let keyframes: Vec<i64> = self.keyframes().collect();
         let drop = gops_to_drop(&keyframes, keep_from);
@@ -85,14 +91,10 @@ impl EncodedRing {
             }
             self.discarded_gops += drop as u64;
         }
-        let audio_from = match self.video.front() {
-            Some(first) => keep_from.min(first.pts),
-            None => keep_from,
-        };
         while self
             .audio
             .front()
-            .is_some_and(|sample| sample.pts < audio_from)
+            .is_some_and(|sample| sample.pts < keep_from)
         {
             if let Some(sample) = self.audio.pop_front() {
                 self.bytes -= sample.data.len();
@@ -367,19 +369,35 @@ mod tests {
     }
 
     #[test]
-    fn encoded_ring_trim_cuts_audio_at_the_boundary_or_the_video_start() {
+    fn encoded_ring_trim_cuts_audio_at_the_boundary() {
         let mut ring = ring_with_video(10);
         for index in 0..20 {
             ring.push_audio(sample(index * SECOND / 2, true, 1));
         }
         ring.trim(5 * SECOND);
         // 映像の先頭（6 秒）より前でも、境界（5 秒）以降の音声は残す
-        let first_audio = ring
-            .samples_from(i64::MIN)
+        assert_eq!(first_audio_pts(&ring), Some(5 * SECOND));
+    }
+
+    #[test]
+    fn encoded_ring_trim_keeps_cutting_audio_while_video_is_stalled() {
+        // 映像は最初の 2 秒（キーフレーム 1 つ）で途絶え、音声だけが 100 秒続いた
+        let mut ring = ring_with_video(2);
+        for index in 0..200 {
+            ring.push_audio(sample(index * SECOND / 2, true, 1));
+        }
+        ring.trim(60 * SECOND);
+        // 最後の GOP（0 秒）は残るが、音声はそれに引きずられずに境界で切る
+        assert_eq!(ring.start_point(i64::MIN), Some(0));
+        assert_eq!(first_audio_pts(&ring), Some(60 * SECOND));
+        assert_eq!(ring.bytes(), 4 * 10 + 80);
+    }
+
+    fn first_audio_pts(ring: &EncodedRing) -> Option<i64> {
+        ring.samples_from(i64::MIN)
             .into_iter()
             .find(|(track, _)| *track == Track::Audio)
-            .map(|(_, sample)| sample.pts);
-        assert_eq!(first_audio, Some(5 * SECOND));
+            .map(|(_, sample)| sample.pts)
     }
 
     #[test]
