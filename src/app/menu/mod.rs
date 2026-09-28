@@ -64,18 +64,18 @@ pub(super) enum MenuLayout {
 /// 内訳は `items::menu_items_flat` の並びと対応させてあるので、あちらの
 /// 項目を増減したときはこちらも直すこと。
 ///
-/// 行: 音量ラベル / 音量スライダー / ミュート / アスペクト比を維持 /
+/// 行: 音量ラベル / 音量スライダー / ミュート / 録画を開始（停止） / アスペクト比を維持 /
 /// 最前面表示 / フルスクリーン表示 / タイトルバーを隠す / 画面ドラッグ移動 /
 /// 情報表示 / デバイスの自動再接続 / ウィンドウサイズをリセット /
-/// デバイス再接続 / 詳細設定... / 終了 の 14 行。**プリセットが 1 つでも
+/// デバイス再接続 / 詳細設定... / 終了 の 15 行。**プリセットが 1 つでも
 /// あれば「プリセット」の行が 1 つ増える。** プリセットの有無は起動後にいつ
 /// 変わるか分からないため固定の行数には含めず、`estimate_flat_menu_height`
 /// の引数で足す。
-/// セパレータ: ミュートの下 / 自動再接続の下（ウィンドウサイズをリセットの上）/
-/// デバイス再接続の下 / 詳細設定の下 の 4 本。プリセットの行はセパレータを
+/// セパレータ: ミュートの下 / 録画の下 / 自動再接続の下（ウィンドウサイズをリセットの上）/
+/// デバイス再接続の下 / 詳細設定の下 の 5 本。プリセットの行はセパレータを
 /// 増やさない（デバイス再接続の直後に挟まるだけ）。
-const FLAT_MENU_ROW_COUNT: usize = 14;
-const FLAT_MENU_SEPARATOR_COUNT: usize = 4;
+const FLAT_MENU_ROW_COUNT: usize = 15;
+const FLAT_MENU_SEPARATOR_COUNT: usize = 5;
 
 /// 平らな一覧の高さを、描画前に見積もる。
 ///
@@ -90,7 +90,7 @@ const FLAT_MENU_SEPARATOR_COUNT: usize = 4;
 ///
 /// `has_presets` はプリセットが 1 つ以上あるかどうか。あれば行数に 1 を
 /// 足す（`items::preset_submenu` が平らな一覧にも「プリセット」の行を
-/// 描くため）。ここを固定 14 行のままにすると、プリセットがある状態で
+/// 描くため）。ここを固定の行数のままにすると、プリセットがある状態で
 /// ちょうど境界の高さのとき、実際には収まらない `Flat` を選んでしまう
 fn estimate_flat_menu_height(spacing: &egui::style::Spacing, has_presets: bool) -> f32 {
     let row_count = FLAT_MENU_ROW_COUNT + usize::from(has_presets);
@@ -115,6 +115,17 @@ fn context_menu_layout(available_height: f32, flat_height: f32) -> MenuLayout {
     }
 }
 
+/// 右クリックメニューの録画の項目の状態。`app::recording` が作る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RecordingMenuState {
+    /// 録画していない。「録画を開始」
+    Idle,
+    /// 録画中。「録画を停止（00:12:34）」。中身は開始からの経過時間
+    Recording(std::time::Duration),
+    /// 停止を頼んで `Finalize` を待っている。押せない
+    Finishing,
+}
+
 /// 右クリックメニューの描画に要る状態のスナップショット。
 ///
 /// **描画へ渡すのはこれだけで、`CaptureCardViewer` も共有設定の
@@ -125,6 +136,8 @@ fn context_menu_layout(available_height: f32, flat_height: f32) -> MenuLayout {
 /// `CaptureCardViewer::menu_view` が**ロックを 1 度だけ取って**まとめて読む。
 /// 描画の途中で読むと、1 フレームの中でロックを何度も取り直すことになる。
 struct MenuView {
+    /// 録画の項目の状態
+    recording: RecordingMenuState,
     volume: f32,
     muted: bool,
     maintain_aspect_ratio: bool,
@@ -285,6 +298,7 @@ impl CaptureCardViewer {
         }
 
         MenuView {
+            recording: self.recording_menu_state(),
             volume: self.volume,
             muted: self.muted,
             maintain_aspect_ratio: self.maintain_aspect_ratio,
@@ -357,6 +371,7 @@ impl CaptureCardViewer {
             }
             MenuAction::ResetWindowSize => self.reset_window_size(ctx),
             MenuAction::ReconnectDevices => self.reconnect_devices(),
+            MenuAction::ToggleRecording => self.toggle_recording(),
             MenuAction::ApplyPreset(name) => self.apply_preset_by_name(&name),
             MenuAction::OpenSettings => self.show_settings = true,
             MenuAction::Quit => {

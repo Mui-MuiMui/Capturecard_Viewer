@@ -126,6 +126,7 @@ impl CaptureCardViewer {
                     self.show_hotkey_dialog = true;
                 }
                 ui::SettingsEvent::PickScreenshotFolder => self.pick_screenshot_folder(),
+                ui::SettingsEvent::PickRecordingFolder => self.pick_recording_folder(),
                 ui::SettingsEvent::PickSoundFile => self.pick_sound_file(),
                 ui::SettingsEvent::Capability(event) => self.apply_capability_event(event),
             }
@@ -182,6 +183,19 @@ impl CaptureCardViewer {
             return;
         };
         draft.screenshot.save_folder = folder;
+    }
+
+    /// 録画の保存先をファイルダイアログで選ぶ。入れるのはドラフトで、反映は「適用」「OK」。
+    fn pick_recording_folder(&mut self) {
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            debug!("録画の保存先の選択がキャンセルされた");
+            return;
+        };
+        let Some(draft) = self.settings_dialog.draft_mut() else {
+            warn!("ドラフトが無い状態で録画の保存先の選択が要求された");
+            return;
+        };
+        draft.recording.folder = folder;
     }
 
     /// スクリーンショットの効果音をファイルダイアログで選ぶ。

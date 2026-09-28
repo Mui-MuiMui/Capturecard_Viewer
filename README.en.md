@@ -87,6 +87,7 @@ The settings window → **Hotkeys tab** lets you assign a key to each of the fol
 | Volume up | Raises the volume by 10% (up to 200%) | unassigned |
 | Volume down | Lowers the volume by 10% | unassigned |
 | Toggle mute | Toggles mute on and off | unassigned |
+| Start / stop recording | Starts or stops recording the video (see "Recording"). Pressing it while minimized does nothing | unassigned |
 
 - Press Set... on a row to open the capture dialog. **It accepts a key the instant it opens: press anything other than a modifier key and it captures that combination and closes automatically.** There is no "start capturing" or OK button. Use Clear in the list to remove an assignment.
 - Hotkeys are temporarily suspended while the dialog is open, so pressing an assigned key does not run its action. **You can press the key already assigned to the action you are editing to assign it again.** A key assigned to another action is not accepted (see the next item).
@@ -110,6 +111,7 @@ Turning on "Show stats" in the context menu (under View when collapsed) overlays
 | Decode | Time spent on the RGB conversion of the most recent frame, plus how many frames took the fast path versus the generic path |
 | Resolution / format | Pixel size and input format of the frames actually arriving |
 | Last frame | Time elapsed since the last frame arrived |
+| Recording | Only while recording: elapsed time, frames written and dropped, and the encoder in use (hardware / software) |
 
 ### Settings
 
@@ -117,8 +119,9 @@ Turning on "Show stats" in the context menu (under View when collapsed) overlays
 2. Select video and audio devices in the **Devices** tab.
     - The device lists (both video and audio) are cached and refreshed every 5 seconds.
 3. Configure the destination, save location, file format, and sound effect in the **Screenshots** tab.
-4. Configure the per-action hotkeys in the **Hotkeys** tab.
-5. Manage presets, choose the interface language, and export, import or reset the settings in the **Other** tab.
+4. Configure the recording folder, file name, bitrate, and hardware encoder in the **Recording** tab.
+5. Configure the per-action hotkeys in the **Hotkeys** tab.
+6. Manage presets, choose the interface language, and export, import or reset the settings in the **Other** tab.
 
 Edits in the settings window are kept as a draft and do not affect the running application until you press a button.
 
@@ -154,7 +157,7 @@ Presets are managed in the **Other** tab of the settings window and switched fro
 | Overwrite | Replaces that preset with the video and audio settings you are editing |
 | Delete | Removes it from the list |
 
-- **A preset holds only the video and audio settings from the Devices tab** — device name, format, resolution, FPS, color space, color range, picture adjustments (brightness / contrast / saturation), input and output devices, sample rate, channel count, audio buffer length and audio passthrough. Screenshot settings, hotkeys, window settings and the language are not included: having the save folder or your hotkeys change underneath you when switching presets would be hard to make sense of.
+- **A preset holds only the video and audio settings from the Devices tab** — device name, format, resolution, FPS, color space, color range, picture adjustments (brightness / contrast / saturation), input and output devices, sample rate, channel count, audio buffer length and audio passthrough. Screenshot settings, recording settings, hotkeys, window settings and the language are not included: having the save folder or your hotkeys change underneath you when switching presets would be hard to make sense of.
 - **Automatic device reconnection is not included either.** Whatever you set from the right-click menu stays as it is.
 - Names must be unique, and a name made only of whitespace is rejected.
 - **Adding, overwriting, deleting and loading all act on the draft**, like every other edit. They reach the running application when you press Apply or OK, and Cancel discards all of them.
@@ -205,6 +208,21 @@ At startup the application asks GitHub Releases whether a newer version exists a
 JPEG keeps files small but blurs text and thin lines. Choose PNG when you want to keep game UI or subtitles exactly as rendered; PNG is lossless but produces files several times larger.
 
 Setting the destination to the clipboard (or to both) puts the captured frame straight onto the clipboard, ready to paste into Discord or a chat window. The clipboard copy is uncompressed, so the file format and JPEG quality settings apply only to the file that is written. When only the clipboard is selected, no file is created.
+
+### Recording
+
+Saves the video on screen as H.264 MP4. **For now only the video is recorded, without audio** (audio recording will come in a later version).
+
+- **Start / stop**: "Start recording" in the right-click menu. While recording, the same item reads "Stop recording (00:12:34)". The "Start / stop recording" hotkey works too
+- **Recording indicator**: a red dot and the elapsed time at the top-right of the video, shown even with the stats overlay off and in fullscreen
+- **Save location**: the Videos folder (configurable)
+- **File name**: `Recording_YYYY-MM-DD_HH-MM-SS.mp4` (the format is configurable; `_2`, `_3`, ... is appended when the name is taken)
+- **Bitrate**: 8000 kbps (1000-50000 kbps)
+- **Encoder**: the GPU hardware encoder (Intel / NVIDIA / AMD) when available, otherwise the Windows software encoder. The encoder in use is shown in the stats overlay
+
+The recording looks exactly like the preview, including the color space, color range, and brightness / contrast / saturation adjustments. If the video size (resolution) changes while recording, the file so far is closed and recording stops. Recording also stops before the disk fills up, when less than 500 MB is left. Both show the reason at the bottom of the window. If the USB connection drops briefly and comes back at the same resolution, recording continues into the same file.
+
+**If the application is killed while recording, that file cannot be played** (an MP4 gets its index written when the file is closed). Closing the application normally stops the recording first, so the file plays.
 
 ## Where settings are stored
 

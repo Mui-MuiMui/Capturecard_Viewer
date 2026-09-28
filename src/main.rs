@@ -10,12 +10,14 @@ use eframe::egui;
 
 mod app;
 mod audio;
+mod com;
 mod hotkey;
 mod i18n;
 mod keyboard_hook;
 mod logging;
 mod overlay;
 mod platform;
+mod recording;
 mod repaint;
 mod screenshot;
 mod settings;

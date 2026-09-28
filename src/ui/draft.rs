@@ -55,6 +55,8 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
     }
     target.audio = draft.audio.clone();
     target.screenshot = draft.screenshot.clone();
+    // 録画もダイアログ（「録画」タブ）の中だけで変わる。録画中に変えた値は次の録画から効く
+    target.recording = draft.recording.clone();
     // ホットキーの割り当ても、反応する条件も、ダイアログの中だけで変わる
     target.hotkeys = draft.hotkeys.clone();
     target.hotkey_settings = draft.hotkey_settings.clone();
@@ -411,6 +413,34 @@ mod tests {
         assert_eq!(shared.screenshot.format, ScreenshotFormat::Png);
         assert_eq!(shared.screenshot.jpeg_quality, 60);
         assert_eq!(shared.screenshot.destination, ScreenshotDestination::Both);
+    }
+
+    #[test]
+    fn commit_draft_replaces_recording_section() {
+        // 録画はダイアログの中だけで変わるので、セクションごと差し替える
+        let mut shared = AppSettings::default();
+        let original = AppSettings::default();
+        let draft = sample_settings();
+
+        commit_draft(&mut shared, &draft, &original);
+
+        assert_eq!(shared.recording, draft.recording);
+    }
+
+    #[test]
+    fn draft_from_imported_takes_recording_section() {
+        // commit_draft が反映する項目なので、読み込んだ値を採る
+        let imported = sample_settings();
+        let draft = draft_from_imported(imported.clone(), &AppSettings::default());
+
+        assert_eq!(draft.recording, imported.recording);
+    }
+
+    #[test]
+    fn draft_from_defaults_resets_recording_section() {
+        let draft = draft_from_defaults(&sample_settings());
+
+        assert_eq!(draft.recording, AppSettings::default().recording);
     }
 
     #[test]

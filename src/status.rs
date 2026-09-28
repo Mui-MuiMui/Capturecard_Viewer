@@ -71,6 +71,12 @@ pub enum ErrorSource {
     /// 起動時の確認と「その他」タブの「更新を確認」の両方。確認できたら
     /// `ErrorCenter::clear` で取り下げる
     Update,
+    /// 録画（`docs/design/recording.md` の「失敗の扱い」）。
+    ///
+    /// 録画スレッドは直接ログにもトーストにも出さず、`RecordingEvent` で返す。
+    /// 受け取った UI スレッド（`app::recording`）が記録する。録画を始められたら
+    /// `ErrorCenter::clear` で取り下げる
+    Recording,
 }
 
 impl ErrorSource {
@@ -83,6 +89,7 @@ impl ErrorSource {
             ErrorSource::Hotkey => Text::HeadlineHotkey,
             ErrorSource::Settings => Text::HeadlineSettings,
             ErrorSource::Update => Text::HeadlineUpdate,
+            ErrorSource::Recording => Text::HeadlineRecording,
         };
         text.get()
     }
@@ -96,12 +103,13 @@ impl ErrorSource {
             ErrorSource::Hotkey => 3,
             ErrorSource::Settings => 4,
             ErrorSource::Update => 5,
+            ErrorSource::Recording => 6,
         }
     }
 }
 
 /// `ErrorSource` の種類数。`ErrorCenter` の配列長。
-const SOURCE_COUNT: usize = 6;
+const SOURCE_COUNT: usize = 7;
 
 /// 記録した失敗 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]

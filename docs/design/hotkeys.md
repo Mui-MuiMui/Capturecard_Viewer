@@ -21,7 +21,7 @@ toggle_fullscreen = "Ctrl+F11"
 - 知らないアクション名は読み飛ばしてログに残す。エラーにすると設定ファイル全体が読めなくなる
 - **読み込みは `#[serde(from = "RawAppSettings")]` を通る。** どの経路で読んでも移行が走るようにするためで、`AppSettings` に項目を足すときは `RawAppSettings` と `From` にも足すこと
 
-アクションを増やすときは `HotkeyAction` に variant を足し、`ALL` / `as_str` / `label` / `runs_while_minimized` の 4 か所と、`folded_repeats`、`src/app/hotkeys.rs` の `run_hotkey_action` と `background_hotkey_runner` を埋める（後ろの 4 つは「最小化中の扱い」を参照）。**`as_str` の文字列は設定ファイルに書かれるので、一度出した名前は変えない。** 実行は右クリックメニューや映像上の操作と同じメソッドを呼ぶこと（`set_always_on_top` / `adjust_volume` / `reconnect_devices` / `toggle_fullscreen`）。独自に書くと、同じ操作なのに設定の保存やオーバーレイ表示の有無が経路で変わる。
+アクションを増やすときは `HotkeyAction` に variant を足し、`ALL` / `as_str` / `label` / `runs_while_minimized` / `discarded_while_minimized` の 5 か所と、`folded_repeats`、`src/app/hotkeys.rs` の `run_hotkey_action` と `background_hotkey_runner` を埋める（後ろの 4 つは「最小化中の扱い」を参照）。**`as_str` の文字列は設定ファイルに書かれるので、一度出した名前は変えない。** 実行は右クリックメニューや映像上の操作と同じメソッドを呼ぶこと（`set_always_on_top` / `adjust_volume` / `reconnect_devices` / `toggle_fullscreen`）。独自に書くと、同じ操作なのに設定の保存やオーバーレイ表示の有無が経路で変わる。
 
 登録（リスナーが照合に使う表へ載せること。OS へは何も登録しない）は `HotkeyManager::apply` が差分だけ行う。2 秒ごとに呼ばれるため、無条件に登録し直すとその瞬間の入力を取りこぼす。登録できなかったものは `errors()` に残り、設定画面に理由が出る。**直るまで毎回試し直すが、ログに出すのは理由が変わったときだけ**（同じ失敗が 2 秒ごとに積もらないように）。
 
@@ -31,12 +31,13 @@ toggle_fullscreen = "Ctrl+F11"
 
 最小化すると eframe が再描画要求を捨てるため `update()` が呼ばれなくなる（`docs/design/video-pipeline.md` の「再描画をいつ要求するか」）。押下を検出するのはリスナースレッドなので最小化中も止まらないが、**実行は `update()` の `handle_hotkeys` が行っていたため、復帰するまで持ち越されていた**（#133）。接続の再試行と切断の監視はデバイスワーカーへ移して解決済みで（`docs/design/device-worker.md`）、残っていたのがこのアクション実行。
 
-アクションを 2 種に分けて扱う。分かれ目は `HotkeyAction::runs_while_minimized()`。
+アクションを 3 種に分けて扱う。分かれ目は `HotkeyAction::runs_while_minimized()` と `HotkeyAction::discarded_while_minimized()`。
 
 | 種別 | アクション | 最小化中の扱い |
 |---|---|---|
 | 画面が要らない | デバイス再接続 / 音量を上げる・下げる / ミュート切替 | その場で実行する |
 | 画面が要る | スクリーンショット / フルスクリーン切替 / 最前面表示の切替 | 復帰するまで溜める |
+| 復帰しても実行しない | 録画の開始・停止 | リスナーが押下を溜めずに捨てる（`HotkeyAction::discarded_while_minimized`） |
 
 ### 画面が要らないものはリスナーからワーカーへ流す
 
@@ -56,6 +57,7 @@ toggle_fullscreen = "Ctrl+F11"
 - トグル（フルスクリーン / 最前面表示 / ミュート）は**奇数回なら 1 回、偶数回なら実行しない**。2 回押して戻したつもりが復帰時に切り替わる、という食い違いを避ける
 - スクリーンショットは何回押されていても 1 枚。撮るのは復帰後の映像なので、何枚撮っても同じ絵になる
 - 音量の上げ下げは押した回数ぶん効かせる（最小化中はワーカーが実行するので、ここへ来るのは通常のフレームで溜まった分だけ）
+- **録画の開始・停止は最小化中の押下を溜めない**（0 回に畳まれるのと同じ）。リスナーの `record_press` が `PressRouting::DiscardedWhileMinimized` として捨てる。録画の窓口は UI スレッドにあり最小化中は届かないが、フルスクリーンのように溜めて奇数回で 1 回にすると、最小化中に 1 回押しただけで復帰した瞬間に録画が始まり、押した人の意図とずれる（`docs/design/recording.md` の「操作」）。`folded_repeats` を 0 にする形は採らない。最小化していない通常のフレームの押下まで 0 回になり、区別できないため
 
 **デバウンス（200ms）はリスナー側で行う**（`ListenerState::record_press`）。以前は `take_pressed`、つまり実行の時点で計っていたが、最小化中は実行が UI スレッドを通らないため、押しっぱなしのキーリピートを落とせない。記録の時点で計れば、どちらの経路でも同じ間引きが効く。
 

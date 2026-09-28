@@ -21,11 +21,12 @@ flowchart LR
     dev -.->|VideoFrames / Atomic| ui
 ```
 
-**チャネルを通さない共有が 4 つある。** どれもデバイスを開く処理を挟まないので、コマンドの列に並べる理由がない。
+**チャネルを通さない共有が 5 つある。** どれもデバイスを開く処理を挟まないので、コマンドの列に並べる理由がない。
 
 | 共有するもの | 型 | 触る側 |
 |---|---|---|
 | 映像フレーム | `video::VideoFrames`（`Arc<Mutex<FrameBuffer>>`） | フレームコールバックが書き、UI スレッドが読む |
+| 録画へ回す映像フレーム | `video::VideoTap`（`VideoFrames` の隣。`Arc<VideoFrame>` の SPSC リング） | 録画スレッドが録画中だけリングを差し込み、フレームコールバックが画面へ置いたのと同じ `Arc` を積む（待たない `try_lock`、満杯なら捨てて数える）。ワーカーは触らない（`docs/design/recording.md`）。音声の `AudioTap` は第 2 段で足す |
 | 色空間・レンジ・明るさ・コントラスト・彩度 | `Arc<video::SharedColorConversion>`（Atomic） | UI スレッドが書き、フレームコールバックが読む |
 | 音量・ミュート・パススルー | `Arc<audio::AudioControls>`（Atomic） | UI スレッドが書き、出力コールバックが読む |
 | 音声のリサンプル補正の水位・補正係数 | `Arc<audio::ResampleTelemetry>`（Atomic） | 出力コールバックが水位を書き、デバイスワーカーが `tick` の中で補正係数を書く。**入出力の形が揃っている（identity）ストリームでは作らない**（`AudioCapture::resample_telemetry()` が `None` を返す） |
@@ -105,7 +106,7 @@ flowchart LR
 | `src/video/directshow/devices.rs` | 列挙（`ICreateDevEnum` の `CLSID_VideoInputDeviceCategory`、表示名は `IPropertyBag` の `FriendlyName`）、対応形式（`IAMStreamConfig::GetStreamCaps`）、開く形式の選び方（`choose_candidate`、純粋関数） |
 | `src/video/directshow/graph.rs` | `CaptureGraph`。`IGraphBuilder` / `ICaptureGraphBuilder2` の組み立て、`SetFormat`、`RenderStream`、`Run`、`Stop` と破棄。グラフのイベント（`IMediaEventEx`）を待たずに読み、デバイスの喪失を拾う（`poll_device_lost`） |
 | `src/video/directshow/filter.rs` | サンプルを受ける自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`、`windows` クレートの `#[implement]`） |
-| `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放、COM の初期化（`ComApartment`） |
+| `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
 | `src/app/backend/system.rs` | `SystemVideo`。Media Foundation と DirectShow を 1 つの `VideoBackend` に束ねる |
 
 #### 一覧と名前
@@ -134,7 +135,7 @@ flowchart LR
 #### スレッドと COM
 
 - **グラフの生成・開始・停止・破棄はすべてデバイスワーカースレッドで行う。** `DirectShowCapture` はワーカーの中で `SystemBackends::create` が作り、COM のオブジェクト（`IMoniker` / `IGraphBuilder` / フィルター）はワーカーから出ない
-- **COM はワーカースレッドで 1 回、STA で初期化する**（`DirectShowCapture::new` の `ComApartment::enter`）。同じスレッドで nokhwa と cpal がどちらも STA で初期化しており、ここだけ MTA にすると後から初期化する側が `RPC_E_CHANGED_MODE` で失敗する（nokhwa はそれを起動の失敗として扱う）。`DirectShowCapture` が落ちるとき（ワーカーの終了時）に、グラフを手放してから初期化を戻す
+- **COM はワーカースレッドで 1 回、STA で初期化する**（`DirectShowCapture::new` の `ComApartment::enter`。`ComApartment` は `src/com.rs`）。同じスレッドで nokhwa と cpal がどちらも STA で初期化しており、ここだけ MTA にすると後から初期化する側が `RPC_E_CHANGED_MODE` で失敗する（nokhwa はそれを起動の失敗として扱う）。`DirectShowCapture` が落ちるとき（ワーカーの終了時）に、グラフを手放してから初期化を戻す
 - グラフが動くと、上流のフィルター（キャプチャーのフィルター。間に変換フィルターが入ればそれ）が**自分のストリーミングスレッドから**レンダラーの `IMemInputPin::Receive` を呼ぶ。nokhwa のフレームコールバックスレッドにあたり、`docs/design/threads.md` の一覧にも載せてある。**ここではロックもアロケーションもしない。** `FrameSink` は `Mutex` で包まず、ストリーミングスレッドだけが触る前提の「待たない旗」（`StreamSlot`）で守る。接続し直しの最中に重なったら、そのサンプルを捨てて待たない
 - 基準時計は外す（`IMediaFilter::SetSyncSource(NULL)`）。付けたままだと途中に入った変換フィルターがタイムスタンプまで待つことがあり、その分だけ遅れる
 - 閉じるときは `IMediaControl::Stop`（上流のストリーミングスレッドが止まるまで戻らない）→ 各フィルターを `RemoveFilter`（ピンの接続が切れ、フィルター・ピン・グラフの参照の循環がほどける）→ 手放す、の順

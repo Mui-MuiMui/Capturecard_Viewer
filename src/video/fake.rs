@@ -458,6 +458,34 @@ mod tests {
     }
 
     #[test]
+    fn fake_video_frames_reach_the_recording_tap_while_attached() {
+        // 録画のリング（`VideoTap`）を差し込んでおけば、フェイクの生成スレッドが
+        // 実機と同じ `FrameSink` を通して積む
+        let (mut capture, frames) = capture(TWO_DEVICES);
+        let tap = frames.tap();
+        let mut consumer = tap.attach(super::super::tap::VIDEO_TAP_CAPACITY);
+        capture
+            .start_capture(Some("Fake Camera 1"), Some((640, 480)), None, Some(60))
+            .expect("フェイクは開ける");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let tapped = loop {
+            if let Some(entry) = consumer.pop() {
+                break Some(entry);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        capture.stop_capture();
+        tap.detach();
+
+        let (frame, _) = tapped.expect("リングにフレームが積まれる");
+        assert_eq!((frame.width, frame.height), (640, 480));
+    }
+
+    #[test]
     fn fake_video_fail_scenario_fails_then_succeeds() {
         let (mut capture, _) = capture(FakeVideoOptions {
             failures_before_success: 2,

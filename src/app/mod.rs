@@ -12,6 +12,7 @@ mod error_report;
 mod hotkeys;
 mod menu;
 mod monitor;
+mod recording;
 mod retry;
 mod screenshot;
 mod screenshot_sound;
@@ -36,6 +37,7 @@ use crate::hotkey::{HotkeyAction, HotkeyManager};
 use crate::i18n::Language;
 use crate::overlay::TransientOverlay;
 use crate::platform;
+use crate::recording::Recorder;
 use crate::repaint::{next_repaint_delay, should_wake_on_event, RepaintCondition, RepaintWaker};
 use crate::screenshot::ScreenshotManager;
 use crate::settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace};
@@ -187,6 +189,10 @@ pub struct CaptureCardViewer {
     // 更新の確認。結果のチャネル、確認のスレッド、「その他」タブに出す状態、
     // 起動時の通知ダイアログをまとめて持つ（`app::update`）
     update_check: UpdateState,
+    // 録画スレッドの窓口。録画していない間は `None`。**`on_exit` ではデバイスワーカーを
+    // 止める前に止めて join する**（最後のフレームまでファイルに入れるため）。
+    // 操作とイベントの取り込みは `app::recording`
+    recorder: Option<Recorder>,
 
     // OS の表示言語から推定した言語。設定の言語が「自動」のときに使う。
     //
@@ -294,6 +300,7 @@ impl Default for CaptureCardViewer {
             screenshot_save_threads: Vec::new(),
             sound_load_threads: Vec::new(),
             update_check: UpdateState::new(),
+            recorder: None,
 
             os_language,
         };
@@ -413,6 +420,8 @@ impl eframe::App for CaptureCardViewer {
         self.drain_screenshot_results();
         // 別スレッドで読み込んだ効果音を取り込む。テスト再生はここで鳴る
         self.drain_sound_load_results();
+        // 録画スレッドから届いた結果（開始・保存・失敗）を取り込む
+        self.drain_recording_events();
         // 別スレッドで行った更新の確認の結果を取り込む
         self.drain_update_results();
         // 別スレッドで行っている更新（ダウンロードと差し替え）の進み具合を取り込む。
@@ -468,49 +477,13 @@ impl eframe::App for CaptureCardViewer {
             self.last_volume_sent = self.volume;
         }
 
-        // ウィンドウサイズと位置を監視して設定に保存
+        // ウィンドウサイズと位置を監視して設定に記録する（書き出しはデバウンス）
         let viewport = ctx.input(|i| i.viewport().clone());
-        let current_size = viewport.inner_rect.map(|r| (r.width(), r.height()));
-        let current_pos = viewport.outer_rect.map(|r| (r.left(), r.top()));
+        self.record_window_geometry(&viewport);
 
         // 最小化しているか。Windows では egui-winit が毎フレーム入れてくれる。
         // 取れない環境では「最小化していない」に倒す（描きすぎる側は安全）
         let minimized = viewport.minimized.unwrap_or(false);
-
-        // サイズまたは位置が変更された場合、設定を更新。
-        // フルスクリーン中は画面全体の矩形しか取れないため記録しない。
-        // こうすることで、フルスクリーンへ入る直前のジオメトリが設定に残り、
-        // フルスクリーンのまま終了しても次回はウィンドウ表示で復元される
-        let mut window_geometry_changed = false;
-        if Self::should_record_window_geometry(self.is_fullscreen, viewport.fullscreen) {
-            if let Ok(mut settings) = self.settings.lock() {
-                let mut changed = false;
-
-                if let Some((width, height)) = current_size {
-                    if settings.ui.last_window_size != Some((width, height)) {
-                        settings.ui.last_window_size = Some((width, height));
-                        changed = true;
-                    }
-                }
-
-                if let Some((x, y)) = current_pos {
-                    if settings.ui.last_window_pos != Some((x, y)) {
-                        settings.ui.last_window_pos = Some((x, y));
-                        changed = true;
-                    }
-                }
-
-                window_geometry_changed = changed;
-            } else {
-                warn!("ウィンドウの位置・大きさの記録で settings のロックを取得できない");
-            }
-        }
-
-        // ここでは書き出さない。ウィンドウのドラッグ中は毎フレーム値が変わるため、
-        // 変わるたびに保存すると最大 60 回/秒のディスク書き込みになる
-        if window_geometry_changed {
-            self.mark_settings_dirty();
-        }
 
         // メインUI
         // F11によるフルスクリーン切り替えを削除（スクリーンショット用に解放）
@@ -532,6 +505,8 @@ impl eframe::App for CaptureCardViewer {
         // フェイクデバイスで動いている間の常設の帯（#252）。統計と重ならない
         // 位置へずらすため、統計オーバーレイのあとで描く
         self.draw_fake_devices_banner(ctx, stats_bottom);
+        // 録画中の印（右上の赤い丸と経過時間）。情報表示を切っていても出す
+        self.draw_recording_indicator(ctx);
 
         // 設定ダイアログ
         if self.show_settings {
@@ -748,6 +723,10 @@ impl eframe::App for CaptureCardViewer {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // **デバイスワーカーより先に**録画を止め、`Finalize` まで待つ。
+        // 待たないと再生できない MP4 が残る
+        self.stop_recording_for_exit();
+
         // デバイスワーカーにストリームを閉じさせ、終わるまで待つ。
         // 待たないと、閉じる途中でプロセスごと落ちる
         self.device.shutdown();

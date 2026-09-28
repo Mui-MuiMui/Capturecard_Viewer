@@ -8,7 +8,8 @@
 //!   キーと文言の表は `text.rs`
 //! - 引数を取る文字列は `msg.rs` の関数で組み立てる
 //!   （`i18n::volume_percent(80)`）。言語ごとに語順が変わるため、呼び出し側で
-//!   断片を `format!` でつながない。更新の確認と適用で使うものは `update_msg.rs`
+//!   断片を `format!` でつながない。更新の確認と適用で使うものは `update_msg.rs`、
+//!   録画で使うものは `recording_msg.rs`
 //!
 //! **ログの文言（`log!` 系）はここに入れない。** 不具合報告で読むのは開発側で、
 //! 言語を切り替えても同じ文面で残っているほうが追いやすいため。
@@ -19,10 +20,12 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
 mod msg;
+mod recording_msg;
 mod text;
 mod update_msg;
 
 pub use msg::*;
+pub use recording_msg::*;
 pub use text::Text;
 pub use update_msg::*;
 

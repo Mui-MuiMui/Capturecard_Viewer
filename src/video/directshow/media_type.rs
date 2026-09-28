@@ -1,4 +1,5 @@
-//! DirectShow のメディアタイプ（`AM_MEDIA_TYPE`）の読み書きと、COM の初期化。
+//! DirectShow のメディアタイプ（`AM_MEDIA_TYPE`）の読み書きと解放。
+//! COM の初期化（`ComApartment`）は録画でも使うので `crate::com` にある。
 //!
 //! メディアタイプの中身を読んで「何の形式で、幅と高さはいくつか」に直す
 //! 判定は純粋関数（`sample_format_from_header` / `fps_from_interval`）に
@@ -8,16 +9,12 @@ use std::mem::{size_of, ManuallyDrop};
 use std::ptr;
 
 use windows::core::GUID;
-use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
 use windows::Win32::Media::MediaFoundation::{
     FORMAT_VideoInfo, FORMAT_VideoInfo2, MEDIATYPE_Video, AM_MEDIA_TYPE, MEDIASUBTYPE_I420,
     MEDIASUBTYPE_IYUV, MEDIASUBTYPE_MJPG, MEDIASUBTYPE_NV12, MEDIASUBTYPE_RGB24, MEDIASUBTYPE_YUY2,
     MEDIASUBTYPE_YUYV, MEDIASUBTYPE_YV12, VIDEOINFOHEADER, VIDEOINFOHEADER2,
 };
-use windows::Win32::System::Com::{
-    CoInitializeEx, CoTaskMemAlloc, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
-    COINIT_DISABLE_OLE1DDE,
-};
+use windows::Win32::System::Com::{CoTaskMemAlloc, CoTaskMemFree};
 
 /// DirectShow の時間の単位（100ns）で 1 秒
 const UNITS_PER_SECOND: i64 = 10_000_000;
@@ -301,48 +298,6 @@ impl OwnedMediaType {
         out.cbFormat = self.format.len() as u32;
         out.pbFormat = block;
         true
-    }
-}
-
-/// このスレッドで COM を使えるようにしておく印。落とすと初期化を戻す。
-///
-/// **シングルスレッドアパートメント（STA）で初期化する。** 同じワーカー
-/// スレッドの上で nokhwa（Media Foundation）と cpal（WASAPI）がどちらも STA で
-/// 初期化しており、ここだけ MTA にすると、後から初期化する側が
-/// `RPC_E_CHANGED_MODE` で失敗する（nokhwa はそれを起動の失敗として扱う）。
-pub(super) struct ComApartment {
-    /// `CoUninitialize` で戻す必要があるか。既に別のモデルで初期化されていて
-    /// `RPC_E_CHANGED_MODE` が返ったときだけ偽
-    initialized: bool,
-    /// スレッドに紐づくので、ほかのスレッドへ持ち出させない
-    _not_send: std::marker::PhantomData<*mut ()>,
-}
-
-impl ComApartment {
-    /// このスレッドの COM を初期化する。既に同じモデルで初期化済みでもよい
-    /// （回数が数えられるだけで、`Drop` で 1 回戻す）。
-    pub(super) fn enter() -> Result<Self, windows::core::Error> {
-        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
-        if hr == RPC_E_CHANGED_MODE {
-            // 別のモデル（MTA）で初期化済み。COM は使えるので、戻さずに使う
-            return Ok(Self {
-                initialized: false,
-                _not_send: std::marker::PhantomData,
-            });
-        }
-        hr.ok()?;
-        Ok(Self {
-            initialized: true,
-            _not_send: std::marker::PhantomData,
-        })
-    }
-}
-
-impl Drop for ComApartment {
-    fn drop(&mut self) {
-        if self.initialized {
-            unsafe { CoUninitialize() };
-        }
     }
 }
 

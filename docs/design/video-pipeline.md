@@ -8,6 +8,14 @@
 
 キャプチャーデバイス → nokhwa `Buffer` → フレームコールバックで YUY2→RGB 変換 → `FrameBuffer` → `update_video_texture` で egui テクスチャ化 → 描画
 
+録画中はここから分岐する: `FrameBuffer` へ置いて `RepaintWaker` で UI を起こした**あとに**、同じ `Arc<VideoFrame>` を `VideoTap` のリングへ積む → 録画スレッドが RGB → NV12 → Sink Writer（H.264 / MP4）。
+
+- **画面へ出す経路の後ろに置き、表示の遅延に足さない。** コールバックが増やすのは `Arc` の複製 1 回と待たない `try_lock` 1 回だけで、画素は複製しない。リングが満杯なら積まずに捨てて数える
+- 録画していない間はリングが無く、コールバックは旗（`AtomicBool`）を 1 つ読むだけ
+- 変換後の RGB を渡すので、色空間・レンジ・映像調整が乗った画面と同じ見た目で録画される。書き出す NV12 は常に標準の組（HD は BT.709、SD は BT.601、リミテッドレンジ）で、その印を H.264 に付ける
+- リングの容量は 3 と小さい。リングの `Arc` が `FrameSink` の Vec の回収を妨げるので、録画スレッドは取り出したらすぐ NV12 へ直して手放す。回収に失敗した回数は録画中だけ数え、止めたときにログへ出す
+- 詳しくは `docs/design/recording.md` の「コールバックから渡す経路」
+
 フレームコールバックの本体（YUY2→RGB 変換、`FrameBuffer` への格納、`RepaintWaker` で UI を起こす）は `video/frame_sink.rs` の `FrameSink` にある。nokhwa のコールバックは `Buffer` から幅・高さ・バイト列を取り出して渡すだけで、フェイクの映像デバイス（`video/fake.rs`）と DirectShow のデバイス（`video/directshow/`、自前のレンダラーの `Receive`）も同じ `FrameSink` を通る。DirectShow の経路だけは YUY2 以外の形式も受ける（`docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」）。
 
 ### `FrameSink` が受け取れる形式
