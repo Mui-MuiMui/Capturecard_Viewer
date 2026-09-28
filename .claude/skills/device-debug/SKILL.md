@@ -288,21 +288,24 @@ UI 操作を伴う確認は `docs/MANUAL-TEST.md` のチェックリスト。デ
 
 ## 実機で再現を試すとき
 
-release exe を起動して確かめる場合は、**先に設定ファイルを退避し、終了後に差分がないことを確認する。**
+release exe を起動して確かめる場合は、**環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で作業用のフォルダを指し、`%AppData%` の設定ファイルに触らない。** アプリはウィンドウのサイズと位置を設定に書き戻すため、起動しただけで設定ファイルは変わりうる。今の設定で再現させたいなら、先にそのフォルダへ写しておく。値は絶対パスにする（相対パスは使われず `%AppData%` へ倒れる）。
 
 ```bash
-cp "$APPDATA/capturecard_viewer/config/default-config.toml" /tmp/ccv-config-backup.toml
+mkdir -p .agent-config && cp "$APPDATA/capturecard_viewer/config/default-config.toml" .agent-config/
 ```
 
 ```bash
-taskkill //IM capturecard_viewer.exe //F
+CAPTURECARD_VIEWER_CONFIG_DIR="$(pwd -W)/.agent-config" CAPTURECARD_VIEWER_LOG=debug ./target/release/capturecard_viewer.exe &
+cat /proc/$!/winpid > .agent-config/pid
 ```
+
+終えるときは、起動したプロセスだけを PID で止める。**`taskkill //IM capturecard_viewer.exe` は使わない。** 同名の全プロセスが止まり、別の worktree やエージェントが起動したものまで巻き込む。
 
 ```bash
-diff /tmp/ccv-config-backup.toml "$APPDATA/capturecard_viewer/config/default-config.toml"
+taskkill //PID "$(cat .agent-config/pid)" //F
 ```
 
-アプリはウィンドウのサイズと位置を設定に書き戻すため、**起動しただけで設定ファイルは変わりうる。** 調査で意図的に設定を書き換えた場合は、必ず退避したものへ戻す。
+ログもそのフォルダの `logs/` に出る。`.agent-config/` は `.gitignore` に入っている。
 
 ログは直近 10 回分しか残らない。**再現のために何度も起動すると、目的の回のログが押し出される。** 先に対象のログを別の場所へコピーする。
 
@@ -314,7 +317,7 @@ diff /tmp/ccv-config-backup.toml "$APPDATA/capturecard_viewer/config/default-con
 CAPTURECARD_VIEWER_FAKE_DEVICES=2 CAPTURECARD_VIEWER_LOG=debug ./target/release/capturecard_viewer.exe
 ```
 
-設定ファイルは「実機で再現を試すとき」と同じく**先に退避する。** 退避して空の状態で起動すると、「Fake Camera 1」「Fake Audio Input 1」が既定のデバイスとして選ばれ、設定へ書き戻される。**実機のデバイス名が書かれた設定のまま起動すると、フェイクはその名前を「見つからない」として再試行し続ける**（実機と同じ振る舞いで、別のデバイスへは倒さない）。その場合は設定画面でフェイクのデバイスを選ぶ。
+設定ファイルは「実機で再現を試すとき」と同じく**`CAPTURECARD_VIEWER_CONFIG_DIR` で作業用のフォルダを指す。** 空のフォルダを指して起動すると、「Fake Camera 1」「Fake Audio Input 1」が既定のデバイスとして選ばれ、設定へ書き戻される。**実機のデバイス名が書かれた設定のまま起動すると、フェイクはその名前を「見つからない」として再試行し続ける**（実機と同じ振る舞いで、別のデバイスへは倒さない）。その場合は設定画面でフェイクのデバイスを選ぶ。
 
 フェイクで起動できていれば、ログの先頭近くに `warn` で次の行が出る。**これが無ければ環境変数が効いていない**（値が 0・空・数字でない場合はフェイクを使わず実機で起動する）。
 

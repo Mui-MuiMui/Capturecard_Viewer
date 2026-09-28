@@ -58,13 +58,13 @@ git checkout -b <type>/<説明> origin/dev
 - **範囲外の発見には手を出さない。** 最終報告の「起票を提案する Issue」に 1 行で書く
 - 一時ファイルは worktree の中か `/tmp` に置き、終わったら消す。リポジトリ本体や `%AppData%` に置かない
 - **force push しない。既存のコミットを書き換えない**（amend / rebase を含む）。理由は `naming-conventions` skill の「履歴を作り直さない」
-- **アプリを実行するときは設定ファイルを退避し、終了後に戻す。** 起動しただけで上書きされる
+- **アプリを実行するときは、環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で worktree の中の `.agent-config/` を指す。** 設定ファイルとログがそこに置かれ、`%AppData%` の設定には触らない。起動しただけで設定は書き戻されるので、`%AppData%` のまま起動すると他のエージェントと同じファイルを取り合う。**環境変数を付けずに起動しない。** `.agent-config/` は `.gitignore` に入っている。終わったら消す
 
 ```bash
-mv "$APPDATA/capturecard_viewer/config/default-config.toml" "$APPDATA/capturecard_viewer/config/default-config.toml.agent-bak"
-# 実行と確認
-mv "$APPDATA/capturecard_viewer/config/default-config.toml.agent-bak" "$APPDATA/capturecard_viewer/config/default-config.toml"
+CAPTURECARD_VIEWER_CONFIG_DIR="$(pwd -W)/.agent-config" CAPTURECARD_VIEWER_FAKE_DEVICES=2 ./target/release/capturecard_viewer.exe
 ```
+
+- 値は絶対パスにする（`pwd -W` は `C:/...` の形を返す）。相対パスは使われず、WARN を出して `%AppData%` へ倒れる。効いていればログ（`.agent-config/logs/`）の先頭近くに `CAPTURECARD_VIEWER_CONFIG_DIR が指定されているので…` の WARN が出る
 
 ## 4. コミットする
 

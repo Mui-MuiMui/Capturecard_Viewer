@@ -14,6 +14,7 @@
 %AppData%\capturecard_viewer\logs\capturecard_viewer-YYYYMMDD-HHMMSS.log
 ```
 
+- 環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で設定の置き場所を差し替えたときは、そのフォルダの `logs\` に出る（`docs/design/settings.md` の「置き場所の差し替え」）。使っている設定ファイルのパスは起動の行の次に出る
 - **1 回の起動につき 1 ファイル。** 起動時に新しいものから 10 個だけ残して古い世代を削除する。同じ秒に 2 つ起動した場合は `_1` から始まる連番が付き、互いのログが混ざらない
 - レベルは環境変数 `CAPTURECARD_VIEWER_LOG`（`error` / `warn` / `info` / `debug` / `trace`、既定 `info`）。解釈できない値は `info` に倒れる。設定ファイルには持たせていない
 - `panic = "abort"` で終了時のフラッシュが走らないため、1 行ごとにフラッシュしている
