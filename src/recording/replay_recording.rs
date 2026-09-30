@@ -31,7 +31,7 @@ use super::passthrough::PassthroughWriter;
 use super::pts::UNITS_PER_SECOND;
 use super::recorder::{RecordingRequest, RecordingSummary, RecordingTelemetry};
 use super::replay_ring::{Cut, EncodedRing, Placement, Track, Written};
-use super::session::{create_error, remove_partial_file, write_error, Finished};
+use super::session::{check_disk, create_error, remove_partial_file, write_error, Finished};
 use super::storage::disk_check_due;
 use super::RecordingError;
 
@@ -173,10 +173,14 @@ impl ReplayRecording {
         Ok(())
     }
 
-    /// リングの中身を最後まで書く（終了時）。
+    /// リングの中身を最後まで書く（終了時）。書いている間も `tick` と同じく空き容量を見て、
+    /// 境界を切ったら止める（呼び出し側がそこまでを `Finalize` する）。
     pub(super) fn catch_up_all(&mut self, ring: &EncodedRing) -> Result<(), RecordingError> {
         while self.is_flushing() {
             self.catch_up(ring)?;
+            if self.due_disk_check(Instant::now()) {
+                check_disk(&self.request.folder)?;
+            }
         }
         Ok(())
     }
