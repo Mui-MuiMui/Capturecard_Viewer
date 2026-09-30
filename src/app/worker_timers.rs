@@ -55,9 +55,12 @@ impl WorkerState {
     /// 音声のクロックドリフト補正。水位を見て、レート比の補正係数を
     /// `RESAMPLE_CORRECTION_INTERVAL` ごとに動かす。
     ///
-    /// **揃っている組み合わせ（identity）では何もしない。** `resample_telemetry`
-    /// は変換が要る場合しか作らないので、まだ音声を開いていない場合も含めて
-    /// ここで早期に諦める。
+    /// **見るのは前回からの観測の窓の平均**（`take_window`、Issue #308）。
+    /// 瞬間の水位は入出力の塊の位相で目標の ±20% ほど揺れるので、1 点で
+    /// 決めると補正の向きが読んだ瞬間で変わる。
+    ///
+    /// 入出力の形が揃っている組み合わせも対象（Issue #308）。まだ音声を
+    /// 開いていなければ `resample_telemetry` が無いので、ここで早期に諦める。
     fn adjust_resample_correction(&mut self, now: Instant) {
         let Some(telemetry) = self.audio.resample_telemetry() else {
             return;
@@ -72,16 +75,30 @@ impl WorkerState {
         }
         self.last_resample_correction = Some(now);
 
-        let water_level = telemetry.water_level();
+        let window = telemetry.take_window();
         let target_level = telemetry.target_level();
-        // ここへ来る時点で identity ではないと分かっているので false 固定。
-        // 純粋関数側の identity 判定は主にテストのための引数
-        let ratio = audio::decide_resample_correction(false, water_level, target_level);
+        let ratio = audio::decide_resample_correction(window, target_level);
         telemetry.set_correction(ratio);
+        // 観測が無い（出力コールバックが回っていない、最初の水位を溜めている）
+        // 間は補正も警告もしない
+        let Some(water_level) = window.mean() else {
+            return;
+        };
+        if window.underran() && water_level > target_level {
+            // 速める補正をアンダーランで見送った（`decide_resample_correction`）。
+            // バッファ長が短すぎるかを判断する材料になる
+            debug!(
+                "アンダーランが起きたので音声のリサンプル比を速める補正を見送った（水位の平均 {} / 目標 {}）",
+                water_level, target_level
+            );
+        }
         if (ratio - 1.0).abs() > f32::EPSILON {
             debug!(
-                "音声のリサンプル比を補正した: {:.5}（水位 {} / 目標 {}）",
-                ratio, water_level, target_level
+                "音声のリサンプル比を補正した: {:.5}（水位の平均 {} / 目標 {}、{} 回の観測）",
+                ratio,
+                water_level,
+                target_level,
+                window.count()
             );
         }
 
@@ -99,7 +116,7 @@ impl WorkerState {
         if should_warn {
             self.last_resample_warn = Some(now);
             warn!(
-                "音声リングバッファの水位が目標から大きく外れている（水位 {}、目標 {}）。補正の上限（±0.1%）で追いつかない可能性がある",
+                "音声リングバッファの水位が目標から大きく外れている（水位の平均 {}、目標 {}）。補正の上限（±0.1%）で追いつかない可能性がある",
                 water_level, target_level
             );
         }
