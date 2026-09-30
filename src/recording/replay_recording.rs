@@ -32,7 +32,7 @@ use super::pts::UNITS_PER_SECOND;
 use super::recorder::{RecordingRequest, RecordingSummary, RecordingTelemetry};
 use super::replay_ring::{Cut, EncodedRing, Placement, Track, Written};
 use super::session::{create_error, remove_partial_file, write_error, Finished};
-use super::storage::DISK_CHECK_INTERVAL;
+use super::storage::disk_check_due;
 use super::RecordingError;
 
 /// 止めてから、止めた時刻より前のサンプルが出てくるのを待つ上限。
@@ -80,6 +80,8 @@ pub(super) struct ReplayRecording {
     has_audio: bool,
     stop_deadline: Option<Instant>,
     last_disk_check: Instant,
+    /// 前に空き容量を見てから書いたバイト数
+    written_since_disk_check: u64,
     baseline: Baseline,
     frames_skipped: u64,
     telemetry: Arc<RecordingTelemetry>,
@@ -109,6 +111,7 @@ impl ReplayRecording {
             has_audio,
             stop_deadline: None,
             last_disk_check: now,
+            written_since_disk_check: 0,
             baseline,
             frames_skipped: 0,
             telemetry,
@@ -248,6 +251,7 @@ impl ReplayRecording {
                         .map_err(|e| write_error(&e))?,
                 }
                 self.written.note(track, sample.pts);
+                self.written_since_disk_check += sample.data.len() as u64;
                 Ok(())
             }
             Placement::After => {
@@ -290,10 +294,13 @@ impl ReplayRecording {
         passed || now >= deadline
     }
 
-    /// 空き容量を見る時期か。見るなら時刻を進める。
+    /// 空き容量を見る時期か。見るなら時刻と書いたバイト数を数え直す。リングの中身を
+    /// 書き出している間は 5 秒で数百 MB 書きうるので、書いたバイト数でも見る（#313）。
     pub(super) fn due_disk_check(&mut self, now: Instant) -> bool {
-        if now.duration_since(self.last_disk_check) >= DISK_CHECK_INTERVAL {
+        let elapsed = now.duration_since(self.last_disk_check);
+        if disk_check_due(elapsed, self.written_since_disk_check) {
             self.last_disk_check = now;
+            self.written_since_disk_check = 0;
             true
         } else {
             false

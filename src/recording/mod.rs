@@ -75,6 +75,8 @@ pub enum RecordingError {
     FolderNotAbsolute { path: PathBuf },
     /// 保存先の空き容量が足りない（開始時、または録画中に 500MB を切った）
     DiskLow { free_mb: u64 },
+    /// リプレイバッファを通す録画で、リングを書き出すと 500MB を切る。始めていない（#313）
+    ReplayDiskShort { free_mb: u64, required_mb: u64 },
     /// 書き込みに失敗した。ファイルは再生できないかもしれない
     WriteFailed { reason: String },
     /// H.264 / AAC のエンコーダを用意できない（音声を録らない設定なら H.264 だけ）
@@ -97,6 +99,10 @@ impl fmt::Display for RecordingError {
                 i18n::recording_folder_not_absolute(path.display())
             }
             RecordingError::DiskLow { free_mb } => i18n::recording_disk_low(*free_mb),
+            RecordingError::ReplayDiskShort {
+                free_mb,
+                required_mb,
+            } => i18n::recording_replay_disk_short(*free_mb, *required_mb),
             RecordingError::WriteFailed { reason } => i18n::recording_write_failed(reason),
             RecordingError::EncoderUnavailable { reason } => {
                 i18n::recording_encoder_unavailable(reason)

@@ -19,7 +19,7 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::time::Instant;
 
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use super::audio::{AudioChunk, AudioTrack};
 use super::convert::{even_size, rgb_to_nv12, Nv12Matrix};
@@ -27,8 +27,11 @@ use super::encoder::{EncodedSample, EncoderError, EncoderMft};
 use super::pts::{units_since, PtsClock, AUDIO_CHANNELS, UNITS_PER_SECOND};
 use super::recorder::{RecordingEvent, RecordingRequest, RecordingTelemetry};
 use super::replay_recording::{Baseline, Counters, ReplayRecording};
-use super::replay_ring::{keep_from, replay_cut, EncodedRing, Track};
+use super::replay_ring::{
+    keep_from, replay_cut, ring_byte_limit, should_force_keyframe, ByteTrim, EncodedRing, Track,
+};
 use super::session::{check_disk, fail, prepare_folder, FALLBACK_FPS, MIN_AUDIO_CHUNK_FRAMES};
+use super::storage::{free_bytes, is_short, megabytes, replay_required_bytes};
 use super::writer::{memory_sample, WriterParams};
 use super::RecordingError;
 use crate::audio::AudioTap;
@@ -91,6 +94,9 @@ pub(super) struct ReplayPipeline {
     hardware_failed: bool,
     nv12: Vec<u8>,
     ring: EncodedRing,
+    /// エンコーダが最後に出したキーフレームの時刻と、最後にキーフレームを強制した時刻（#313）
+    last_keyframe: Option<i64>,
+    last_forced: Option<i64>,
     recording: Option<ReplayRecording>,
     telemetry: Arc<RecordingTelemetry>,
     events: Sender<RecordingEvent>,
@@ -140,6 +146,8 @@ impl ReplayPipeline {
             hardware_failed: false,
             nv12: Vec::new(),
             ring: EncodedRing::default(),
+            last_keyframe: None,
+            last_forced: None,
             recording: None,
             telemetry,
             events,
@@ -165,6 +173,17 @@ impl ReplayPipeline {
     /// そこから書き出す。無ければ次のキーフレームを待つ。
     pub(super) fn start_recording(&mut self, request: RecordingRequest) {
         if let Err(error) = prepare_folder(&request.folder) {
+            fail(&self.events, error);
+            return;
+        }
+        // リングは始めてすぐまとめて書き出すので、書き切っても 500MB 残るかを先に見る（#313）
+        let free = free_bytes(&request.folder);
+        let required = replay_required_bytes(self.ring.bytes() as u64);
+        if is_short(free, required) {
+            let error = RecordingError::ReplayDiskShort {
+                free_mb: free.map(megabytes).unwrap_or(0),
+                required_mb: megabytes(required),
+            };
             fail(&self.events, error);
             return;
         }
@@ -251,9 +270,12 @@ impl ReplayPipeline {
             let now_units = units_since(self.t0, now);
             self.ring
                 .trim(keep_from(now_units, self.retain_seconds, GOP_UNITS));
+            self.cap_ring_bytes();
         }
         self.telemetry
             .publish_ring(self.ring.held_units(), self.ring.discarded_gops());
+        self.telemetry
+            .publish_ring_size(self.ring.bytes(), self.ring.overflows());
 
         let Some(recording) = self.recording.as_mut() else {
             return Ok(());
@@ -324,6 +346,7 @@ impl ReplayPipeline {
             // **`Arc` は NV12 へ直したらすぐ手放す**（`FrameSink` の Vec の回収を妨げないため）
             drop(frame);
             if converted {
+                self.force_keyframe_if_overdue(pts);
                 self.encode_video(pts)?;
             }
         }
@@ -451,7 +474,58 @@ impl ReplayPipeline {
         }
         self.video_encoder = None;
         self.ring.clear();
+        self.last_keyframe = None;
+        self.last_forced = None;
         self.size = Some(size);
+    }
+
+    /// 最後のキーフレームから GOP の 2 倍が過ぎたら、次に渡すフレームをキーフレームにするよう
+    /// エンコーダに頼む（#313。キーフレームの間隔の指定を無視するエンコーダに備える）。
+    fn force_keyframe_if_overdue(&mut self, pts: i64) {
+        if !should_force_keyframe(pts, self.last_keyframe, self.last_forced, GOP_UNITS) {
+            return;
+        }
+        let Some(encoder) = self.video_encoder.as_ref() else {
+            return;
+        };
+        let accepted = encoder.force_keyframe();
+        // 映像が途絶えて戻ったときにも通るので warn にはしない。初めての強制だけ info にする
+        // （間隔を守らないエンコーダだと 4 秒ごとに繰り返すため）
+        let level = if self.last_forced.is_none() {
+            log::Level::Info
+        } else {
+            log::Level::Debug
+        };
+        log::log!(
+            level,
+            "最後のキーフレームから {:.1} 秒経ったので、キーフレームを強制する（映像の途絶の後か、エンコーダがキーフレームの間隔を守らない。受け付けた: {}）",
+            (pts - self.last_keyframe.unwrap_or(pts)) as f64 / UNITS_PER_SECOND as f64,
+            if accepted { "はい" } else { "いいえ" }
+        );
+        self.last_forced = Some(pts);
+    }
+
+    /// リングが上限の大きさを超えていたら古いほうから捨てる（#313。時間で切れないときの保険）。
+    fn cap_ring_bytes(&mut self) {
+        let limit = ring_byte_limit(
+            self.retain_seconds,
+            self.config.video_bitrate_kbps,
+            self.config.audio_bitrate_kbps,
+            GOP_UNITS,
+        );
+        match self.ring.cap_bytes(limit) {
+            ByteTrim::Keep => {}
+            ByteTrim::DropGops(gops) => debug!(
+                "リプレイバッファのリングが上限（{} KB）を超えたので、古い GOP を {} 個捨てた",
+                limit / 1024,
+                gops
+            ),
+            ByteTrim::Clear => warn!(
+                "リプレイバッファのリングが上限（{} KB）を超えたが、キーフレームが 1 つしか無いので映像を空にした（{} 回目）",
+                limit / 1024,
+                self.ring.overflows()
+            ),
+        }
     }
 
     fn take_video_output(&mut self) {
@@ -466,6 +540,9 @@ impl ReplayPipeline {
 
     /// エンコードした映像を 1 つ受け取る。リングへ積み、録画中ならファイルへ書く。
     fn on_video(&mut self, sample: EncodedSample) {
+        if sample.keyframe {
+            self.last_keyframe = Some(sample.pts);
+        }
         self.ring.push_video(sample.clone());
         let Some(recording) = self.recording.as_mut() else {
             return;

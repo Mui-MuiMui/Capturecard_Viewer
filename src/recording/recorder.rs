@@ -130,6 +130,10 @@ pub(super) struct RecordingTelemetry {
     replay_held_ms: AtomicU64,
     /// リプレイバッファのリングから古い GOP を捨てた回数
     replay_discarded_gops: AtomicU64,
+    /// リプレイバッファのリングが持っているデータの大きさ（バイト、映像と音声の合計。#313）
+    replay_ring_bytes: AtomicU64,
+    /// リングが上限の大きさを超え、キーフレームが 1 つしか無いので空にした回数（#313）
+    replay_ring_overflows: AtomicU64,
 }
 
 impl Default for RecordingTelemetry {
@@ -144,6 +148,8 @@ impl Default for RecordingTelemetry {
             replay_lead_ms: AtomicU64::new(NO_REPLAY),
             replay_held_ms: AtomicU64::new(0),
             replay_discarded_gops: AtomicU64::new(0),
+            replay_ring_bytes: AtomicU64::new(0),
+            replay_ring_overflows: AtomicU64::new(0),
         }
     }
 }
@@ -181,6 +187,15 @@ impl RecordingTelemetry {
         self.replay_held_ms.store(held_ms, Ordering::Relaxed);
         self.replay_discarded_gops
             .store(discarded_gops, Ordering::Relaxed);
+    }
+
+    /// リプレイバッファのリングの大きさ（バイト）と、上限を超えて空にした回数を書き出す。
+    /// 画面には出さない（#313）。
+    pub(super) fn publish_ring_size(&self, bytes: usize, overflows: u64) {
+        self.replay_ring_bytes
+            .store(bytes as u64, Ordering::Relaxed);
+        self.replay_ring_overflows
+            .store(overflows, Ordering::Relaxed);
     }
 }
 
@@ -532,6 +547,9 @@ mod tests {
         // 負の長さは 0
         telemetry.publish_ring(-1, 0);
         assert_eq!(telemetry.replay_held_ms.load(Ordering::Relaxed), 0);
+        telemetry.publish_ring_size(1_234, 2);
+        assert_eq!(telemetry.replay_ring_bytes.load(Ordering::Relaxed), 1_234);
+        assert_eq!(telemetry.replay_ring_overflows.load(Ordering::Relaxed), 2);
     }
 
     #[test]
