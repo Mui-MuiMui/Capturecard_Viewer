@@ -196,7 +196,7 @@ impl WorkerState {
             return;
         };
         // 追いかけるのは出力だけ。入力が未指定なら音声を開かない
-        // （`worker_connect::audio_input_is_selected`、#304）ので、入力を
+        // （`worker_audio_connect::audio_input_is_selected`、#304）ので、入力を
         // 「既定のデバイス」のまま開いている状態は無い
         let (_, configured_output, ..) = config.audio.clone();
         if configured_output.is_some() {

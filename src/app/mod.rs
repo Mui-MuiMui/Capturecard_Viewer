@@ -24,6 +24,7 @@ mod video_overlay;
 mod view;
 mod window;
 mod worker;
+mod worker_audio_connect;
 mod worker_audio_timers;
 mod worker_connect;
 mod worker_loop;
