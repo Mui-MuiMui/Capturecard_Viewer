@@ -210,6 +210,7 @@ pub fn check_latest_release(overrides: &CheckOverrides) -> Result<CheckOutcome, 
 fn fetch_release_json(url: &str) -> Result<String, UpdateError> {
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(REQUEST_TIMEOUT))
+        .https_only(https_only_for(url))
         .tls_config(tls_config())
         .user_agent(USER_AGENT)
         .build();
@@ -226,6 +227,16 @@ fn fetch_release_json(url: &str) -> Result<String, UpdateError> {
         .body_mut()
         .read_to_string()
         .map_err(update_error_from)
+}
+
+/// ureq に `https_only` を付けるか。`https://` で始まる URL なら付け、リダイレクトで
+/// `http://` へ落ちる経路を塞ぐ（Issue #365）。
+///
+/// 通常の問い合わせ先と資産の URL は必ず `https://` なので、いつも付く。付かないのは
+/// テスト用の問い合わせ先（`CAPTURECARD_VIEWER_UPDATE_API_URL`）で
+/// `http://127.0.0.1:8000/` のように最初から `http://` を指したときだけ。
+pub(super) fn https_only_for(url: &str) -> bool {
+    overrides::strip_prefix_ignore_case(url, "https://").is_some()
 }
 
 /// HTTP の TLS の設定。問い合わせと資産のダウンロード（`apply`）で共有する。
@@ -348,6 +359,18 @@ pub fn should_notify_on_startup(settings: &UpdateSettings, latest: &Version) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn https_only_for_https_urls_only() {
+        assert!(https_only_for(LATEST_RELEASE_API_URL));
+        assert!(https_only_for(
+            "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.1/SHA256SUMS.txt"
+        ));
+        assert!(https_only_for("HTTPS://example.com/"));
+        assert!(!https_only_for("http://127.0.0.1:8000/latest.json"));
+        assert!(!https_only_for("HTTP://127.0.0.1:8000/"));
+        assert!(!https_only_for(""));
+    }
 
     fn v(text: &str) -> Version {
         Version::parse(text).expect("テスト用の版は読めなければならない")
