@@ -135,6 +135,15 @@ pub fn update_replace_kept_new(old: impl Display, source: impl Display) -> Strin
     }
 }
 
+/// 差し替えようとしたら、元の名前に exe が無かったとき（前回の更新で `.old` と
+/// `.new` だけが残った状態からの再試行）。`update_replace_kept_nothing` の理由に入る。
+pub fn update_exe_missing(exe: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("{exe} が無い"),
+        Language::English => format!("{exe} does not exist"),
+    }
+}
+
 /// 置き換えに失敗し、元の exe も新しい exe も元の名前へ置けなかったとき。
 /// `old` は元の exe、`new` は照合済みの新しい exe の場所。
 pub fn update_replace_kept_nothing(
