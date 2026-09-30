@@ -17,6 +17,36 @@ pub struct VideoFrame {
     pub data: Vec<u8>,
 }
 
+/// RGB の画素データの長さが `幅 × 高さ × 3` と比べてどうか（`frame_len_status`）。
+///
+/// UI スレッドは `egui::ColorImage::from_rgb` へ渡すが、これは長さが合わないと
+/// assert で落ちる（release は `panic = "abort"` なのでプロセスが終わる、#309）。
+/// `FrameSink` が積む前に揃え、UI 側も描く前に確かめる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameLenStatus {
+    /// ちょうど合っている
+    Exact,
+    /// 長い。先頭の `expected` バイトへ切り詰めれば使える
+    TooLong { expected: usize },
+    /// 短い。使えない。`幅 × 高さ × 3` が `usize` に収まらないときもこれ
+    /// （`expected` は `usize::MAX`）
+    TooShort { expected: usize },
+}
+
+/// `len` バイトの RGB の画素データが `width` x `height` のフレームに合うかを判定する。
+pub fn frame_len_status(len: usize, width: usize, height: usize) -> FrameLenStatus {
+    let Some(expected) = width.checked_mul(height).and_then(|n| n.checked_mul(3)) else {
+        return FrameLenStatus::TooShort {
+            expected: usize::MAX,
+        };
+    };
+    match len.cmp(&expected) {
+        std::cmp::Ordering::Equal => FrameLenStatus::Exact,
+        std::cmp::Ordering::Greater => FrameLenStatus::TooLong { expected },
+        std::cmp::Ordering::Less => FrameLenStatus::TooShort { expected },
+    }
+}
+
 /// フレーム間隔から求めたばらつきの指標。単位はミリ秒。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IntervalStats {
@@ -329,6 +359,42 @@ mod tests {
             height: TEST_HEIGHT,
             data: vec![marker; TEST_FRAME_LEN],
         })
+    }
+
+    #[test]
+    fn frame_len_status_exact_length_is_exact() {
+        assert_eq!(frame_len_status(2 * 2 * 3, 2, 2), FrameLenStatus::Exact);
+        // 0x0 の空フレームも長さ 0 なら合っている（`from_rgb` も通る）
+        assert_eq!(frame_len_status(0, 0, 0), FrameLenStatus::Exact);
+    }
+
+    #[test]
+    fn frame_len_status_longer_data_can_be_truncated() {
+        // nokhwa の YUYV → RGB は入力の長さから出力の長さを決めるので、
+        // 幅が奇数や行に詰め物があると長い Vec が来る
+        assert_eq!(
+            frame_len_status(2 * 2 * 3 + 1, 2, 2),
+            FrameLenStatus::TooLong { expected: 12 }
+        );
+    }
+
+    #[test]
+    fn frame_len_status_shorter_data_is_unusable() {
+        assert_eq!(
+            frame_len_status(2 * 2 * 3 - 1, 2, 2),
+            FrameLenStatus::TooShort { expected: 12 }
+        );
+    }
+
+    #[test]
+    fn frame_len_status_overflowing_size_is_too_short() {
+        // 幅 × 高さ × 3 が usize に収まらない大きさは、どんな長さでも足りない扱い
+        assert_eq!(
+            frame_len_status(usize::MAX, usize::MAX, 2),
+            FrameLenStatus::TooShort {
+                expected: usize::MAX
+            }
+        );
     }
 
     /// 期待値との差が許容範囲に収まっているか調べる。
