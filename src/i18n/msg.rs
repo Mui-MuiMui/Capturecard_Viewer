@@ -235,6 +235,17 @@ pub fn sound_file_undecodable(path: impl Display, source: impl Display) -> Strin
     }
 }
 
+pub fn sound_output_unavailable(source: impl Display) -> String {
+    match language() {
+        Language::Japanese => {
+            format!("音声の出力先を開けないため、効果音が鳴らない: {source}")
+        }
+        Language::English => {
+            format!("Cannot open the audio output, so the screenshot sound does not play: {source}")
+        }
+    }
+}
+
 // ---- ホットキー（hotkey::HotkeyError / keyboard_hook::KeyboardHookError） ----
 
 pub fn hotkey_unsupported_key(key: impl Display) -> String {
@@ -337,6 +348,13 @@ pub fn underrun_count(count: u32) -> String {
     match language() {
         Language::Japanese => format!("アンダーラン: {count} 回"),
         Language::English => format!("Underruns: {count}"),
+    }
+}
+
+pub fn dropped_frame_count(count: u32) -> String {
+    match language() {
+        Language::Japanese => format!("満杯で捨てた: {count} フレーム"),
+        Language::English => format!("Dropped (buffer full): {count} frames"),
     }
 }
 

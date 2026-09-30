@@ -300,6 +300,17 @@ pub fn format_underrun_count(count: Option<u32>) -> String {
     }
 }
 
+/// 「接続状態」タブへ出す、入力がリングバッファの満杯で捨てたフレーム数の行。
+///
+/// `DeviceSnapshot.audio_dropped_frames` をそのまま渡す。音声を開いていない
+/// （`None`）ときは `format_underrun_count` と同じく「-」を出す（Issue #350）。
+pub fn format_dropped_frame_count(count: Option<u32>) -> String {
+    match count {
+        Some(count) => i18n::dropped_frame_count(count),
+        None => Text::DroppedFramesUnknown.get().to_string(),
+    }
+}
+
 /// 映像か音声、片方の接続状態。設定ダイアログの「接続状態」タブへ渡す。
 ///
 /// **デバイスワーカーが書き出した観測値（`DeviceSnapshot`）から作る。**
@@ -671,6 +682,19 @@ mod tests {
         // 音声を開いていない間に 0 と出すと、開いていて一度も途切れて
         // いない状態と読み分けられない
         assert_eq!(format_underrun_count(None), "アンダーラン: -");
+    }
+
+    #[test]
+    fn format_dropped_frame_count_shows_the_number_or_a_dash() {
+        assert_eq!(
+            format_dropped_frame_count(Some(0)),
+            "満杯で捨てた: 0 フレーム"
+        );
+        assert_eq!(
+            format_dropped_frame_count(Some(480)),
+            "満杯で捨てた: 480 フレーム"
+        );
+        assert_eq!(format_dropped_frame_count(None), "満杯で捨てた: -");
     }
 
     #[test]

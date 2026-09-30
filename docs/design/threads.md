@@ -15,7 +15,7 @@
 | cpal の入力コールバック／出力コールバック | 各 1（再生中） | cpal が作る。リングバッファの読み書き |
 | フェイクの映像生成（`fake-video`） / 音声入力・出力（`fake-audio-in` / `fake-audio-out`） | 映像 1、音声 各 1（開いている間） | 環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` で起動したときだけ、上の 2 行の代わりに立つ。ワーカーが開くときに起こし、閉じるときに join する（`docs/design/device-worker.md` の「フェイクデバイス（#142）」） |
 | ホットキーリスナー | 1 | `HotkeyManager::new` で起動し、`Drop` で join する。低レベルキーボードフックを持ち、そのメッセージループを回す |
-| 効果音再生 | 再生ごと | rodio による再生 |
+| 効果音再生 | 再生ごと | rodio による再生。出力先を開けたかを mpsc で UI スレッドへ返す（ログは出さない） |
 | スクリーンショットの保存 | 撮影ごと | JPEG / PNG エンコードとファイル書き出し、設定によってはクリップボードへの転送 |
 | 効果音ファイルの読み込み | 適用・テスト再生ごと | 設定の効果音ファイルを読み、デコードできるかを確かめる |
 | 録画（`recorder`） | 録画中、またはリプレイバッファが ON のあいだ 1 本 | `VideoTap` のリングからフレームを、`AudioTap` のリングから音声を取り、RGB → NV12 と 48kHz 2ch の 16bit PCM への変換を行う。リプレイバッファが OFF なら Media Foundation の Sink Writer へ書き込み（H.264 / AAC のエンコードと MP4 へのまとめ）、ON ならエンコーダ MFT で H.264 / AAC にしてエンコード済みのリングに持ち、録画を始めたらリングからエンコードなしの Sink Writer へ書く。COM は MTA で初期化する。デバイスには触らない。録画を始めるかリプレイバッファを ON にしたときに `Recorder`（UI スレッドの窓口）が起こし、録画もリプレイバッファも無くなったら `Recorder` が `Shutdown` を送って止める。**自分からは抜けない**（抜ける直前に送られたコマンドが宙に浮くため）。録画もリプレイバッファも動いていない間（リプレイバッファを用意できずに止まっているとき）はコマンドを待つだけで起きない。`JoinHandle` は `Recorder` が持ち、止めるとき（`on_exit` を含む）に join する（`docs/design/recording.md`） |
@@ -49,7 +49,9 @@
 
 スクリーンショットの出力結果も同じ形で戻す。保存スレッドは成功（何をしたか）も失敗（理由）も mpsc で送るだけで、ログ出力と画面への表示は `update()` の先頭の `drain_screenshot_results()` が行う。**保存スレッドから直接 `error!` を出さない。** 失敗を画面に出せるのは UI スレッドだけなので、判断の場所を 1 つにしてある。出力先ごとの結果を 1 つの文へ畳むのは純粋関数の `summarize_screenshot_delivery`。
 
-効果音ファイルの読み込み（`screenshot::load_sound_data`）も同じ流儀で UI スレッドから外してある（`app::screenshot_sound`、Issue #214）。適用（`apply_settings`）とテスト再生のたびにスレッドを起こし、結果は mpsc で `update()` の先頭の `drain_sound_load_results()` へ返す。ログ、トーストへの報告、テスト再生の音を鳴らすのは受け取った UI スレッド側。デバイスに触らないので「使い捨てのスレッド」の禁止には当たらないが、`JoinHandle` は `CaptureCardViewer::sound_load_threads` に持ち、`on_exit` で join する（結果は取り込まない）。**要求には番号を振り、最後の要求の結果だけを受け入れる**（`ScreenshotManager::begin_load` / `finish_load`、テスト再生は `begin_test_play` / `finish_test_play`）。要求ごとにスレッドを起こすので、先に出した要求が後から終わりうるため。読み込みを待っている間の撮影は直前の音、それも無ければ内蔵音で鳴らす（`select_shot_sound`）。映像が止まって `update()` の間隔が広がっている間もテスト再生がすぐ鳴るよう、読み込みスレッドは結果を送ったあと `RepaintWaker` で UI スレッドを起こす。
+効果音ファイルの読み込み（`screenshot::load_sound_data`）も同じ流儀で UI スレッドから外してある（`app::screenshot_sound`、Issue #214）。適用（`apply_settings`）とテスト再生のたびにスレッドを起こし、結果は mpsc で `update()` の先頭の `drain_sound_results()` へ返す。ログ、トーストへの報告、テスト再生の音を鳴らすのは受け取った UI スレッド側。デバイスに触らないので「使い捨てのスレッド」の禁止には当たらないが、`JoinHandle` は `CaptureCardViewer::sound_load_threads` に持ち、`on_exit` で join する（結果は取り込まない）。**要求には番号を振り、最後の要求の結果だけを受け入れる**（`ScreenshotManager::begin_load` / `finish_load`、テスト再生は `begin_test_play` / `finish_test_play`）。要求ごとにスレッドを起こすので、先に出した要求が後から終わりうるため。読み込みを待っている間の撮影は直前の音、それも無ければ内蔵音で鳴らす（`select_shot_sound`）。映像が止まって `update()` の間隔が広がっている間もテスト再生がすぐ鳴るよう、読み込みスレッドは結果を送ったあと `RepaintWaker` で UI スレッドを起こす。
+
+効果音の再生（`screenshot::play_sound_data`、撮影とテスト再生の両方が `app::screenshot_sound` の `play_sound` を通す）も 1 回ごとにスレッドを起こし、**出力先（既定の出力デバイス）を開けたかどうかを同じチャネルで UI スレッドへ返す**（`SoundMessage::Output`、Issue #321）。再生スレッドからはログを出さない。開けなかったら UI スレッドが `warn!` と `report_error(ErrorSource::Screenshot, ..)` を出す。**同じ理由が続く間は 1 度だけ報告する**（`CaptureCardViewer::sound_output_failure` と `should_report_sound_output`）。保存に成功すると `ErrorSource::Screenshot` の記録が消えるため、`ErrorCenter` の間引きだけでは撮影のたびにトーストが出てしまう。開けたら記録を落とし、次に開けなくなったらまた知らせる。開けなかったときだけ `RepaintWaker` で起こす。デコードできないデータは選んだ時点で知らせてあるので（`docs/design/assets.md`）、再生スレッドでは黙って無音にする。音のデータは `ScreenshotManager` が `Arc<[u8]>` で持ち、撮影時は `screenshot_manager` のロックの中で `Arc` を複製するだけにして（`shot_sound`）、ロックを離してから再生スレッドを起こす。数十 MB の wav でも撮影のたびに中身を写さない。再生スレッドの `JoinHandle` は持たない（終了時に鳴り終わりを待つ理由が無い）。
 
 録画スレッド（`recording::Recorder`）も同じ流儀で結果を返す。開始・保存・失敗は mpsc の `RecordingEvent` で送り、ログ（`error!`）とトースト（`report_error(ErrorSource::Recording, ..)`）は `update()` の先頭の `drain_recording_events()` が出す。**録画スレッドから直接 `error!` を出さない。** 録画スレッドが自分でログに残すのは、使ったエンコーダの名前やハードウェアからソフトウェアへ倒したことのような、失敗ではない経過だけ。`on_exit` では**デバイスワーカーを止める前に**録画を止め、`Finalize` が終わるまで待つ（`Recorder::shutdown`。リプレイバッファも止める）。待たないと再生できない MP4 が残る。**録画スレッドはリングから取った `Arc<VideoFrame>` を NV12 へ直したらすぐ手放し、手放してから `WriteSample` する。** 持ったまま書くと、表示側の `FrameSink` が置き換えたフレームの Vec を回収できず、1 枚ごとに確保し直すことになる（`docs/design/recording.md`）。
 
@@ -60,7 +62,7 @@
 | 共有するもの | 型 | 誰と共有しているか |
 |---|---|---|
 | `settings` | `Arc<Mutex<AppSettings>>` | 実質 UI スレッドだけ。値を取り出したらすぐ手放す |
-| `screenshot_manager` | `Arc<Mutex<ScreenshotManager>>` | 実質 UI スレッドだけ（効果音の再生は内部で spawn する） |
+| `screenshot_manager` | `Arc<Mutex<ScreenshotManager>>` | 実質 UI スレッドだけ（撮影時は音の `Arc` を複製するだけで離し、再生スレッドはロックの外で起こす） |
 | `frames` | `video::VideoFrames`（内部が `Arc<Mutex<FrameBuffer>>`） | フレームコールバックスレッド ⇄ UI スレッド ⇄ ワーカー |
 | 録画の差し込み口 | `video::VideoTap`（`VideoFrames` の隣。内部が `Mutex<Option<Producer>>`） | フレームコールバックスレッド（`try_lock` だけで待たない）⇄ 録画スレッド（差し込み・抜き取りの瞬間だけ待つ）。他のロックと重ねて取らない |
 | 録画の音声の差し込み口 | `audio::AudioTap`（内部が `Mutex<Option<Producer>>`） | 入力コールバックスレッド（`try_lock` だけで待たない。パススルーのリングバッファの `try_lock` と同じコールバックの中で取るが、どちらも待たないので順序の問題にならない）⇄ 録画スレッド（差し込み・抜き取りの瞬間だけ待つ）。他のロックと重ねて取らない |
