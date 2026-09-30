@@ -222,35 +222,25 @@ fn download_and_verify(
 
     let mut file = File::create(&paths.new).map_err(|e| file_error(&paths.new, e))?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; CHUNK_BYTES];
-    let mut downloaded: u64 = 0;
     let mut reported: Option<ApplyProgress> = None;
-    loop {
-        check_cancelled(cancel)?;
-        let read = match reader.read(&mut buffer) {
-            Ok(read) => read,
-            Err(error) => {
-                check_cancelled(cancel)?;
-                return Err(read_error(&plan.exe)(error));
-            }
-        };
-        if read == 0 {
-            break;
-        }
-        downloaded += read as u64;
-        if downloaded > MAX_EXE_BYTES {
-            return Err(ApplyError::TooLarge);
-        }
-        hasher.update(&buffer[..read]);
-        file.write_all(&buffer[..read])
-            .map_err(|e| file_error(&paths.new, e))?;
+    let downloaded = read_in_chunks(
+        &mut reader,
+        &plan.exe,
+        MAX_EXE_BYTES,
+        cancel,
+        |chunk, downloaded| {
+            hasher.update(chunk);
+            file.write_all(chunk)
+                .map_err(|e| file_error(&paths.new, e))?;
 
-        let now = ApplyProgress::Downloading { downloaded, total };
-        if should_report(reported, now) {
-            progress(now);
-            reported = Some(now);
-        }
-    }
+            let now = ApplyProgress::Downloading { downloaded, total };
+            if should_report(reported, now) {
+                progress(now);
+                reported = Some(now);
+            }
+            Ok(())
+        },
+    )?;
     // 改名する前にディスクへ書き切る。途中で電源が落ちても、
     // 照合を通った中身が元の名前に来るようにする
     file.sync_all().map_err(|e| file_error(&paths.new, e))?;
@@ -393,7 +383,29 @@ fn fetch_text(
         return Err(ApplyError::TooLarge);
     }
     let mut bytes = Vec::new();
+    read_in_chunks(&mut reader, source, limit, cancel, |chunk, _| {
+        bytes.extend_from_slice(chunk);
+        Ok(())
+    })?;
+    check_cancelled(cancel)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// `reader` を `CHUNK_BYTES` ずつ読み終えるまで読み、1 回ごとに `on_chunk` へ
+/// 読んだ分とそれまでの合計を渡す。読んだ合計を返す。
+///
+/// 1 回読む前にキャンセルを見る。読み取りが失敗したときも、その間にキャンセル
+/// されていれば `Cancelled` を返す（受け取りが止まって上限で失敗した場合など）。
+/// 合計が `limit` を超えたら、`on_chunk` へ渡す前に `TooLarge` で止める。
+fn read_in_chunks(
+    reader: &mut dyn Read,
+    source: &AssetSource,
+    limit: u64,
+    cancel: &ApplyControl,
+    mut on_chunk: impl FnMut(&[u8], u64) -> Result<(), ApplyError>,
+) -> Result<u64, ApplyError> {
     let mut buffer = vec![0u8; CHUNK_BYTES];
+    let mut total: u64 = 0;
     loop {
         check_cancelled(cancel)?;
         let read = match reader.read(&mut buffer) {
@@ -404,15 +416,14 @@ fn fetch_text(
             }
         };
         if read == 0 {
-            break;
+            return Ok(total);
         }
-        if (bytes.len() + read) as u64 > limit {
+        total += read as u64;
+        if total > limit {
             return Err(ApplyError::TooLarge);
         }
-        bytes.extend_from_slice(&buffer[..read]);
+        on_chunk(&buffer[..read], total)?;
     }
-    check_cancelled(cancel)?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn download_error_from(error: ureq::Error) -> ApplyError {
