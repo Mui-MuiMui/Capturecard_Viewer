@@ -9,7 +9,8 @@ name: Release
 on:
   push:
     tags:
-      # 小文字の v で始まるタグだけを対象にする。1.0.6 以前の Ver1.0.6 形式では動かない
+      # 小文字の v で始まるタグだけを対象にする。1.0.6 以前の Ver1.0.6 形式では動かない。
+      # 形の検査（pre-release かどうかの判定を含む）は下の「タグと CHANGELOG の整合性」で行う
       - "v*"
 
 # 同じタグに対する実行が重なっても、走り始めたものは打ち切らない。
@@ -45,19 +46,37 @@ jobs:
         with:
           toolchain: stable
 
-      - name: cargo のキャッシュを復元する
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # cargo のキャッシュ（Swatinem/rust-cache）は使わない。配布して自動更新で全員へ届く exe に、
+      # 復元した target/ の依存物がそのままリンクされるのを避けるため（キャッシュポイズニングの予防）。
+      # SHA256SUMS.txt は同じジョブでその exe から作るので、照合では混入を検出できない。
+      # リリースは頻度が低いので、毎回クリーンビルドになって時間が伸びることは受け入れる
+      # （docs/RELEASE.md の「5. ワークフローの結果を確認する」）。ci.yml のキャッシュはそのまま使う
 
       # ビルドの前に落とす。タグを打ち直せば済む間違いを、Release を作る前に止めるため。
       - name: タグと CHANGELOG の整合性を確認してリリースノートを作る
         run: |
+          # タグの形の判定。タグの文字列だけで決まる（ローカルで関数に切り出して試せる）。
+          #   受け付ける:   $tag -cmatch '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?\z'
+          #   pre-release: 受け付けたうえで $tag に '-' を含む（v1.4.0-rc.1 など）
+          # 末尾を \z で固定するので v1.4.0foo / v1.4.0+build / v1.4.0- / V1.4.0 は落とす。
+          # pre-release の部分に '-' を許すのは semver が識別子の中の '-' を許すため（1.4.0-rc-1）。
+          # $ ではなく \z にするのは、.NET の $ が末尾の改行の手前にも一致するため。\d ではなく
+          # [0-9] にするのは、.NET の \d が全角数字などにも一致するため。
+          # pre-release は拒否せず、--prerelease --latest=false を付けて出す。/releases/latest が
+          # rc を返すと、アプリは rc を弾く（update::is_newer_stable）ので正式版の更新も知らせなく
+          # なるため（docs/RELEASE.md の「pre-release を出す」）
           $tag = ${env:TAG}
-          if ($tag -notmatch '^v\d+\.\d+\.\d+') {
-            throw "タグ名 $tag が v<バージョン> の形式ではない"
+          if ($tag -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?\z') {
+            throw "タグ名 $tag が v<バージョン> の形式ではない（例: v1.4.0、v1.4.0-rc.1）"
           }
           $version = $tag.Substring(1)
+          $prerelease = $version.Contains('-')
+          "PRERELEASE=$($prerelease.ToString().ToLowerInvariant())" | Out-File -FilePath ${env:GITHUB_ENV} -Append -Encoding utf8
+          Write-Host "pre-release: $prerelease"
 
-          # Cargo.toml を正として突き合わせる。--locked を付けているので、
+          # Cargo.toml を正として突き合わせる。pre-release なら Cargo.toml の version も
+          # 1.4.0-rc.1 の形にしておく（タグから v を外した文字列と完全に一致させる）。
+          # --locked を付けているので、
           # Cargo.lock を更新し忘れたコミットにタグを打った場合もここで落ちる
           $manifest = (cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
           if ($version -ne $manifest) {
@@ -129,9 +148,15 @@ jobs:
           "EXE=$exe" | Out-File -FilePath ${env:GITHUB_ENV} -Append -Encoding utf8
           "SUMS=$sums" | Out-File -FilePath ${env:GITHUB_ENV} -Append -Encoding utf8
 
-      # 第三者の Action を増やさないよう、ランナーに入っている gh CLI を使う
+      # 第三者の Action を増やさないよう、ランナーに入っている gh CLI を使う。
+      # pre-release のタグは pre-release の印を付け、Latest にしない（/releases/latest から外れる）
       - name: GitHub Release を作る
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create ${env:TAG} ${env:EXE} ${env:SUMS} --title ${env:TAG} --notes-file release-notes.md --verify-tag
+          $releaseArgs = @(${env:TAG}, ${env:EXE}, ${env:SUMS}, '--title', ${env:TAG}, '--notes-file', 'release-notes.md', '--verify-tag')
+          if (${env:PRERELEASE} -eq 'true') {
+            $releaseArgs += @('--prerelease', '--latest=false')
+          }
+          gh release create @releaseArgs
+          if ($LASTEXITCODE -ne 0) { throw "gh release create が失敗した（終了コード $LASTEXITCODE）" }

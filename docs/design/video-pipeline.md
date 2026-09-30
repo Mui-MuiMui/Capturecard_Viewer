@@ -35,6 +35,7 @@
 - 各面の行に詰め物（ストライドの余り）は無いものとして読む。足りないフレームは捨てる。**DirectShow の非圧縮 YUV では `biWidth` が行の長さ（ストライド）を表し、有効な範囲が狭いときは `rcSource` / `rcTarget` で示す決まり**なので、`biWidth` を幅として読めば Y 面の行の余りは出ない。YUY2 の経路も同じ前提。`rcTarget` で切り出す、あるいは `biWidth` と食い違うストライドのサンプルを検出する仕組みは入れていない（実機で必要になったら足す）
 - DirectShow で形式が未指定のときは、この表の上から順（YUY2・NV12・I420・YV12・MJPEG・RGB24）に選ぶ。係数表の効く形式を先にしてある（`SampleKind` の並び）
 - YV12 は I420 の U 面と V 面が逆に並んだもの。GUID も別なので、I420 には混ぜずに別の形式として扱う
+- **`FrameBuffer` へ積む `VideoFrame` は、画素データの長さが必ず `幅 × 高さ × 3` ちょうど。** UI スレッドの `egui::ColorImage::from_rgb` は長さが違うと assert で落ちる（release は `panic = "abort"`）。自前の変換はこの長さで書くが、`push_decoded` が受ける nokhwa のデコーダの出力は入力の長さから決まる（幅が奇数の YUYV、行に詰め物のあるバッファで合わなくなる）ので、入口で `frame_len_status` を見て長ければ切り詰め、短ければ捨てる（#309）。`update_video_texture` も合わないフレームは描かずに前のテクスチャを保つ（二重の守り）
 
 `FrameBuffer` はフレームを `Arc<VideoFrame>` で保持し、取り出し側へは `Arc` の複製を渡す。**画素データを複製しないので、取り出しても 1080p で 6MB の memcpy は発生しない。**
 
