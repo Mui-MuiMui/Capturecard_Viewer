@@ -95,7 +95,7 @@
 | 置き場所 | 用途 | 更新のきっかけ |
 |---|---|---|
 | `ui::CapabilityCache`（`SettingsDialogState` の中） | 設定ダイアログの選択肢とスピナー、「再取得」ボタン | ダイアログが `request` / `retry` を積み、`dispatch_capability_requests` がワーカーへ流す。結果は `drain_device_events` が入れる |
-| `WorkerState::audio_capabilities` | `start_passthrough` へ渡す（渡さないとその場で列挙する） | 開く直前に無ければその場で取る（`ensure_audio_capabilities`）。接続に失敗したら捨てて取り直す |
+| `WorkerState::audio_capabilities` | `start_passthrough` へ渡す（渡さないとその場で列挙する） | 開く直前に無ければその場で取る（`ensure_audio_capabilities`）。接続に失敗したら、失敗した向きの分を捨てて取り直す |
 
 ビデオの `ui::CapabilityCache` を型引数付きに一般化し、オーディオもそこへ乗せてある。入力と出力で別のキャッシュを持つ（同名のデバイスが両方にあっても混ざらないため）。
 
@@ -103,7 +103,7 @@
 - **音声を開く `start_passthrough` は、その一覧を `PassthroughRequest` で受け取る。** 渡さないとその場で列挙する
 - ワーカーが問い合わせた結果は、要求元がダイアログでなくても `DeviceEvent::AudioCapabilities` で UI 側へも返す。ダイアログを開いた時点で選択肢が揃っているようにするため
 - **「届くまで接続を見送る」仕組みは持たない。** 以前は UI スレッドで開いていたため `audio_capabilities_ready` と `AUDIO_CAPABILITY_WAIT_LIMIT`（3 秒）で待っていた。ワーカーは止まってよいので、素直にその場で取る
-- 接続に失敗したらワーカー側の控えを捨てる。デバイスを挿し直したときに古い一覧で失敗し続けるのを防ぐ
+- 接続に失敗したらワーカー側の控えを捨てる。デバイスを挿し直したときに古い一覧で失敗し続けるのを防ぐ。**捨てるのは失敗した向き（`AudioError` の `direction`、`failed_direction`）の分だけ**（#323）。問い合わせの間はワーカーが止まる（映像の監視・再試行・コマンドも待たされる）ので、キャプチャーカードを抜いたまま再試行している間に正常な出力まで毎回取り直さない。向きを持たない失敗を足すなら両方を捨てる
 ## ミュートは音量と別に持つ
 
 `AudioCapture` の `muted`（`Arc<AtomicBool>`）と設定の `ui.muted` で表す。**音量 0% で代用しない。** 代用すると、解除したときに戻すべき値が残らない。出力コールバックは `output_is_audible(passthrough_enabled, muted)` の 1 つの判定だけを見る。パススルーの無効とミュートは理由も操作経路も別だが、コールバックから見ればどちらも「無音を書く」に落ちるため。

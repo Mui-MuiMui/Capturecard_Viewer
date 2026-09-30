@@ -25,8 +25,9 @@ pub struct AudioCapabilities {
 
 impl AudioCapabilities {
     /// 対応設定を直接組み立てる。実機は `query_capabilities` が作るので、
-    /// これを使うのはデバイスを列挙しないフェイク（`super::fake`）だけ
-    pub(super) fn new(
+    /// これを使うのはデバイスを列挙しないフェイク（`super::fake`）と、
+    /// ワーカーのテストのモック（`app::backend::mock`）だけ
+    pub(crate) fn new(
         configs: Vec<SupportedStreamConfigRange>,
         default_sample_rate: u32,
         default_channels: u16,
