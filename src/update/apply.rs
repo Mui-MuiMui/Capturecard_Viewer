@@ -227,7 +227,13 @@ fn download_and_verify(
     let mut reported: Option<ApplyProgress> = None;
     loop {
         check_cancelled(cancel)?;
-        let read = reader.read(&mut buffer).map_err(read_error(&plan.exe))?;
+        let read = match reader.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) => {
+                check_cancelled(cancel)?;
+                return Err(read_error(&plan.exe)(error));
+            }
+        };
         if read == 0 {
             break;
         }
