@@ -31,7 +31,7 @@ accepted = [
     # 大半の依存がこのどちらか
     "MIT",
     "Apache-2.0",
-    # exr / lebe / nanorand / ogg / symphonia 系、encoding_rs の一部
+    # mozjpeg-sys、encoding_rs の一部
     "BSD-3-Clause",
     # clipboard-win / error-code
     "BSL-1.0",
@@ -42,7 +42,8 @@ accepted = [
     "IJG",
     # libloading
     "ISC",
-    # option-ext（dirs-sys 経由）。ファイル単位のコピーレフトで、
+    # option-ext（dirs-sys 経由）、symphonia 系（rodio の効果音のデコード）、
+    # audio_thread_priority（cpal の realtime フィーチャ）。ファイル単位のコピーレフトで、
     # 改変せずそのまま使う限り MIT での配布と両立する
     "MPL-2.0",
     # epaint が同梱する絵文字フォント
