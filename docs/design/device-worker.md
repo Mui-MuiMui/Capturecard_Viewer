@@ -30,7 +30,7 @@ flowchart LR
 | 録画へ回す音声 | `audio::AudioTap`（`Arc` の中に f32 の SPSC リングの差し込み口と Atomic の観測値） | 録画スレッドが録画中だけリングを差し込み、入力コールバック（`process_input`）が f32 へ直した値を入力の形のまま積む（待たない `try_lock`、空きが足りなければそのコールバックの分を捨てて数える）。コールバックは累計のサンプル数と最後に積んだ時刻も書く。**ワーカーはストリームを開くたびに `begin_stream` で入力のレート・チャンネル数と開き直しの番号を書く**（コールバックが動き出す前）。`AudioControls` と同じく開き直しても引き継ぐ共有物で、`BackendShared` に載せて `AudioCapture` / `FakeAudioCapture` へ渡す（`docs/design/recording.md`） |
 | 色空間・レンジ・明るさ・コントラスト・彩度 | `Arc<video::SharedColorConversion>`（Atomic） | UI スレッドが書き、フレームコールバックが読む |
 | 音量・ミュート・パススルー | `Arc<audio::AudioControls>`（Atomic） | UI スレッドが書き、出力コールバックが読む |
-| 音声のリサンプル補正の水位・補正係数 | `Arc<audio::ResampleTelemetry>`（Atomic） | 出力コールバックが水位を書き、デバイスワーカーが `tick` の中で補正係数を書く。**入出力の形が揃っている（identity）ストリームでは作らない**（`AudioCapture::resample_telemetry()` が `None` を返す） |
+| 音声のリサンプル補正の水位・補正係数 | `Arc<audio::ResampleTelemetry>`（Atomic） | 出力コールバックが水位（直近の値と観測の窓）を書き、デバイスワーカーが `tick` の中で窓を読み出して補正係数を書く。**入出力の形が揃っているストリームでも作る**（#308。`AudioCapture::resample_telemetry()` が `None` を返すのは音声を開いていないときだけ。理由は `docs/design/audio.md` の「クロックドリフトは揃っている組み合わせでも補正する」） |
 
 **映像フレームを `DeviceEvent` で送らないこと。** 接続やデバイス列挙の後ろで待たされ、遅延が増える。
 
@@ -191,8 +191,8 @@ flowchart LR
 | Fake Camera 1, 3, … | 75% のカラーバー 8 本（白・黄・シアン・緑・マゼンタ・赤・青・黒）。YUY2 |
 | Fake Camera 2, 4, … | ベタ塗り。2 番が青、4 番が赤、6 番が緑、8 番が黄。YUY2 |
 | Fake Audio Input 1, 2, … | 48kHz 2ch の正弦波。1 番が 440Hz、2 番が 880Hz、… |
-| Fake Audio Output 1 | 48kHz 2ch。入力と形が揃うので変換しない |
-| Fake Audio Output 2 | 44.1kHz 1ch。入力と揃わないので変換し、ドリフト補正の対象になる |
+| Fake Audio Output 1 | 48kHz 2ch。入力と形が揃うので変換しない（ドリフト補正は掛かる） |
+| Fake Audio Output 2 | 44.1kHz 1ch。入力と揃わないので変換する（ドリフト補正も掛かる） |
 
 - 映像の台数と音声の入力の台数が `CAPTURECARD_VIEWER_FAKE_DEVICES` の値（1〜8。超えたら 8）。出力は常に 2 台。0・空・数字でない値はフェイクを使わない（打ち間違えでフェイクになるより、実機のまま起動するほうが害が小さい）
 - 映像の対応形式は YUY2 の 1920x1080 / 1280x720 / 640x480 × 60 / 30fps。一覧に無い解像度は画素数が最も近いものへ、fps は実機と同じく 15〜120 へ丸める。解像度が未指定なら実機と同じ 1280x720 60fps
