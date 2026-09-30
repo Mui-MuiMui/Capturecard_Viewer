@@ -48,6 +48,29 @@ enum FailureNotice {
     Quiet,
 }
 
+/// 何が保存を始めたか。失敗をどこまで知らせるかが変わる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SaveTrigger {
+    /// 設定ダイアログの「適用」「OK」。失敗は毎回知らせる
+    Explicit,
+    /// デバウンス保存・終了時の保存・起動時の書き戻し。同じ理由は間引く
+    Automatic,
+}
+
+impl FailureNotice {
+    /// 保存を始めたものに合わせて、知らせ方を決め直す。
+    ///
+    /// ユーザーが押した保存は、同じ理由の失敗が続いていても知らせる。
+    /// 押した結果が何も出ないと、保存できたのか分からないため。
+    /// 失敗の回数（再試行の間隔）はどちらでも同じように数える。
+    fn for_trigger(self, trigger: SaveTrigger) -> Self {
+        match trigger {
+            SaveTrigger::Explicit => FailureNotice::Report,
+            SaveTrigger::Automatic => self,
+        }
+    }
+}
+
 impl SaveFailureStreak {
     /// 失敗を数え、知らせるべきかを返す。
     fn record_failure(&mut self, reason: &str) -> FailureNotice {
@@ -105,9 +128,22 @@ impl CaptureCardViewer {
         self.settings_dirty_since = Some(Instant::now());
     }
 
-    /// 保留の有無にかかわらず、いま設定をディスクへ書き出す。
-    /// 書き出せたかを返す。
+    /// ユーザーの操作（設定ダイアログの「適用」「OK」）で、いま設定を
+    /// ディスクへ書き出す。書き出せたかを返す。
+    ///
+    /// 失敗は同じ理由が続いていても毎回ログとトーストで知らせる。
+    /// 押した結果が何も出ないと、保存できたのか分からないため。
     pub(super) fn save_settings_now(&mut self) -> bool {
+        self.save_settings(SaveTrigger::Explicit)
+    }
+
+    /// 自動保存（デバウンス保存と終了時の保存）で、いま設定をディスクへ
+    /// 書き出す。書き出せたかを返す。同じ理由の失敗は初回だけ知らせる。
+    pub(super) fn save_settings_automatically(&mut self) -> bool {
+        self.save_settings(SaveTrigger::Automatic)
+    }
+
+    fn save_settings(&mut self, trigger: SaveTrigger) -> bool {
         // ロックが取れなかった場合は保留のままにして、次の機会に書き出す。
         // 複製してからロックを放すのは、ファイル I/O の間に UI やワーカーの
         // 読み出しを待たせないため
@@ -119,15 +155,19 @@ impl CaptureCardViewer {
             }
         };
         let result = snapshot.save();
-        self.note_settings_save_result(result)
+        self.note_settings_save_result(result, trigger)
     }
 
     /// 保存の結果を取り込む。書き出せたかを返す。
     ///
     /// 起動時の書き戻し（`app/mod.rs` の `CaptureCardViewer::default`）も
-    /// ここを通す。そちらは settings のロックを握ったまま保存するため、
-    /// `save_settings_now` を呼べない。
-    pub(super) fn note_settings_save_result(&mut self, result: Result<(), SettingsError>) -> bool {
+    /// `SaveTrigger::Automatic` でここを通す。そちらは settings のロックを
+    /// 握ったまま保存するため、`save_settings_automatically` を呼べない。
+    pub(super) fn note_settings_save_result(
+        &mut self,
+        result: Result<(), SettingsError>,
+        trigger: SaveTrigger,
+    ) -> bool {
         match result {
             Ok(()) => {
                 self.settings_dirty_since = None;
@@ -142,9 +182,15 @@ impl CaptureCardViewer {
             }
             Err(e) => {
                 let reason = e.to_string();
-                match self.settings_save_failures.record_failure(&reason) {
+                let notice = self.settings_save_failures.record_failure(&reason);
+                match notice.for_trigger(trigger) {
                     FailureNotice::Report => {
                         error!("設定の保存に失敗した: {}", reason);
+                        if trigger == SaveTrigger::Explicit {
+                            // ErrorCenter は同じ文言を 60 秒間引くので、記録を
+                            // 消してから記録し直し、押すたびにトーストを出す
+                            self.errors.clear(ErrorSource::Settings);
+                        }
                         self.report_error(ErrorSource::Settings, reason);
                     }
                     FailureNotice::Quiet => debug!(
@@ -198,7 +244,7 @@ impl CaptureCardViewer {
             return;
         }
 
-        self.save_settings_now();
+        self.save_settings_automatically();
     }
 }
 
@@ -341,6 +387,31 @@ mod tests {
         // 直ったあとに同じ理由で失敗したら、また知らせる
         assert_eq!(
             streak.record_failure("ディスクが一杯"),
+            FailureNotice::Report
+        );
+    }
+
+    #[test]
+    fn failure_notice_explicit_save_is_always_reported() {
+        // 「適用」「OK」で保存した場合は、同じ理由が続いていても知らせる
+        assert_eq!(
+            FailureNotice::Quiet.for_trigger(SaveTrigger::Explicit),
+            FailureNotice::Report
+        );
+        assert_eq!(
+            FailureNotice::Report.for_trigger(SaveTrigger::Explicit),
+            FailureNotice::Report
+        );
+    }
+
+    #[test]
+    fn failure_notice_automatic_save_keeps_the_streak_decision() {
+        assert_eq!(
+            FailureNotice::Quiet.for_trigger(SaveTrigger::Automatic),
+            FailureNotice::Quiet
+        );
+        assert_eq!(
+            FailureNotice::Report.for_trigger(SaveTrigger::Automatic),
             FailureNotice::Report
         );
     }

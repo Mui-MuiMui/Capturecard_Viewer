@@ -47,6 +47,7 @@
 
 - **再試行の間隔は 2 → 4 → 8 → 16 → 32 → 60 秒で頭打ち**（`save_retry_delay`）。直ったあとも 1 分以内に書ける
 - **同じ理由の失敗は初回だけ `error!` と `report_error(ErrorSource::Settings, ..)`。** 以降は `debug!` に落とす。理由が変わったら知らせ直す（手の打ち方が変わるため）
+- **間引くのは自動保存（デバウンス保存・終了時の保存・起動時の書き戻し）だけ。** 設定ダイアログの「適用」「OK」（`save_settings_now`）の失敗は、同じ理由でも毎回 `error!` とトーストで知らせる。押した結果が何も出ないと保存できたのか分からないため。`ErrorCenter` の 60 秒の間引きも、記録を消してから記録し直して外す。自動保存は `save_settings_automatically` を通す
 - 保存できたら回数を戻し、失敗を知らせていたなら `errors.clear(ErrorSource::Settings)` で取り下げる。書き出し・読み込みの失敗も同じ発生源だが、直近の 1 件しか持たないので区別しない
 - `AppSettings::save()` 自身はログを出さず `SettingsError` を返す。起動時の書き戻しも `note_settings_save_result` を通す
 

@@ -31,7 +31,7 @@ mod worker_timers;
 use self::menu::MenuLayout;
 use self::screenshot::ScreenshotResult;
 use self::screenshot_sound::SoundLoadResult;
-use self::settings_store::SaveFailureStreak;
+use self::settings_store::{SaveFailureStreak, SaveTrigger};
 use self::update::UpdateState;
 use self::window::needs_drag_move_guard;
 use self::worker::{DeviceSnapshot, DeviceWorker};
@@ -370,7 +370,7 @@ impl Default for CaptureCardViewer {
         // ロックを放してから結果を取り込む。失敗したらログとトーストで知らせ、
         // 保留として残して再試行させる（`app::settings_store`）
         if let Some(result) = startup_save {
-            app.note_settings_save_result(result);
+            app.note_settings_save_result(result, SaveTrigger::Automatic);
         }
 
         // 保存済みのビデオデバイスの能力を先に取りに行く。
@@ -763,7 +763,7 @@ impl eframe::App for CaptureCardViewer {
         // 例外は、読めなかった設定ファイルを退避できずディスクに残している場合。
         // ここで書き出すと、起動時の書き戻しを止めた意味が無くなる
         if self.autosave.is_allowed() {
-            self.save_settings_now();
+            self.save_settings_automatically();
         } else {
             warn!("読めなかった設定ファイルを残しているため、終了時の保存を行わない");
         }
