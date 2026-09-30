@@ -50,7 +50,8 @@ pub struct ReplayConfig {
     pub hardware_encoder: bool,
     /// 音声（AAC）のビットレート。`None` なら音声を持たない
     pub audio_bitrate_kbps: Option<u32>,
-    /// 公称 fps。映像が無ければ `None`（60 として扱う）
+    /// 公称 fps。映像が無ければ `None`（始めるときは 60 として扱い、動いている間に届いたら
+    /// 「変化なし」として扱う。`same_encoders`）
     pub nominal_fps: Option<u32>,
 }
 
@@ -60,11 +61,16 @@ impl ReplayConfig {
     }
 
     /// エンコーダの作り直しが要らない違いか（さかのぼる長さだけが違う）。
+    /// `self` がいま動いているもの、`other` が新しく届いたもの。
+    ///
+    /// **新しい方の公称 fps が `None`（映像が途絶えて閉じた）なら fps は変わっていないとみなす**
+    /// （#306）。途絶のたびに 60 扱いで作り直すと、切断の直前という残したい分がリングから消える。
+    /// 映像が戻って本当に fps が変わったときだけ作り直す。
     pub(super) fn same_encoders(&self, other: &ReplayConfig) -> bool {
         self.video_bitrate_kbps == other.video_bitrate_kbps
             && self.hardware_encoder == other.hardware_encoder
             && self.audio_bitrate_kbps == other.audio_bitrate_kbps
-            && self.fps() == other.fps()
+            && (other.nominal_fps.is_none() || self.fps() == other.fps())
     }
 }
 
@@ -648,7 +654,7 @@ mod tests {
             seconds: 300,
             ..config()
         }));
-        // 映像が無い（None）ときは 60fps として扱う
+        // 映像が無い（None）が届いても fps は変わっていないとみなす（#306）
         assert!(base.same_encoders(&ReplayConfig {
             nominal_fps: None,
             ..config()
@@ -673,5 +679,36 @@ mod tests {
         ] {
             assert!(!base.same_encoders(&changed), "{changed:?}");
         }
+    }
+
+    // #306: 30fps で開いているときに映像が途絶えても（公称 fps が None になっても）
+    // 作り直さない。映像が戻って本当に fps が変わったときだけ作り直す
+    #[test]
+    fn replay_config_treats_missing_fps_as_unchanged() {
+        let at_30 = ReplayConfig {
+            nominal_fps: Some(30),
+            ..config()
+        };
+        let lost = ReplayConfig {
+            nominal_fps: None,
+            ..config()
+        };
+        assert!(at_30.same_encoders(&lost), "途絶で作り直さない");
+        assert!(
+            at_30.same_encoders(&at_30),
+            "同じ fps で戻ったら作り直さない"
+        );
+        assert!(
+            !at_30.same_encoders(&config()),
+            "30 → 60 に変わったら作り直す"
+        );
+        // 映像が無いまま始めた（60 として作った）ものは、映像が来て fps が分かったら作り直す
+        assert!(!lost.same_encoders(&at_30));
+        assert!(lost.same_encoders(&lost));
+        // fps 以外が変わっていれば、fps が None でも作り直す
+        assert!(!at_30.same_encoders(&ReplayConfig {
+            video_bitrate_kbps: 12_000,
+            ..lost.clone()
+        }));
     }
 }
