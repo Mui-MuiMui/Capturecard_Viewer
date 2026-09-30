@@ -144,7 +144,7 @@ pub(super) fn folded_repeats(action: HotkeyAction, presses: u32) -> u32 {
 // ことがあり、そこに寄りかかると TOML 側の都合で保存できなくなる。
 //
 // 読むほうは `Deserialize` を実装していない。知らないアクション名が書かれて
-// いても設定ファイル全体を失わないよう、`settings::migrate_hotkeys` が
+// いても設定ファイル全体を失わないよう、`settings::hotkeys::migrate_hotkeys` が
 // 文字列のまま受けて `from_key` で振り分ける。
 impl Serialize for HotkeyAction {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

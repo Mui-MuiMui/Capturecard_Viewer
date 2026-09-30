@@ -13,7 +13,7 @@
 - 同じフレームで複数の発生源が失敗したら**後勝ち**。`TransientOverlay` は 1 件しか持たない。優先度は付けていない。消えたほうもログと「接続状態」タブに残り、次の再試行でまた記録されるため
 - **フェイクデバイスで動いていることの知らせ（#252）はトーストにしない。** 映像の上端に常設の帯として描く（`view.rs` の `draw_fake_devices_banner`）。トーストに入れると、起動直後に保存済みの実機名で接続に失敗したトーストに上書きされて見えなかった。優先度や待ち行列をトーストに足して解決せず、置き場を分けた。失敗ではないので `ErrorCenter` も通さない
 - 接続に成功したら `errors.clear(..)` を呼ぶ。**呼ばないと繋がったあとも古い失敗が画面に残る**
-- **下位モジュールは自分のエラー enum を返す。** `video/` は `VideoError`、`audio/` は `AudioError`、`screenshot.rs` は `ScreenshotError`、`hotkey/` は `HotkeyError`、`settings.rs` は `SettingsError`、`recording/` は `RecordingError`。文字列で返していたころは「デバイスが見つからない」と「ストリームを開けない」を呼び出し側が区別できなかった。バリアントにはデバイス名・向き・下位のエラー文を持たせる
+- **下位モジュールは自分のエラー enum を返す。** `video/` は `VideoError`、`audio/` は `AudioError`、`screenshot.rs` は `ScreenshotError`、`hotkey/` は `HotkeyError`、`settings/` は `SettingsError`、`recording/` は `RecordingError`。文字列で返していたころは「デバイスが見つからない」と「ストリームを開けない」を呼び出し側が区別できなかった。バリアントにはデバイス名・向き・下位のエラー文を持たせる
 - **文言はそのエラー型の `Display` が出す。** 文言を `status.rs` へ集めると、バリアントを増やすたびに離れた場所の `match` を足すことになり、実際に英語の文言（"Failed to build input stream: ..."）が残っていた。バリアントから文言への対応は中身のすぐ隣（`Display`）に置き、文字列の実体は多言語対応のために `crate::i18n` に置く（`docs/design/i18n.md`）
 - **`status.rs` が持つのは定型文（`ErrorSource::headline`）との連結と表示用の組み立てだけ。** 発生源ごとの文言をここで `match` しない
 - **設定のデバイスが Windows 側にも見えていないときの案内（#236）は、新しい発生源を作らず失敗の理由の前に添える。** `ErrorSource::Video` / `Audio` の 1 件として間引きも「接続状態」タブもそのまま効く。判定の条件は `docs/design/reconnect.md` の「列挙の結果をログへ出し、Windows 側にも無ければ知らせる」
