@@ -35,6 +35,11 @@ impl PtsClock {
         }
     }
 
+    /// `received_at` が `t0` 以降か（PTS を付けられるか）。時計は進めない。
+    pub(super) fn accepts(&self, received_at: Instant) -> bool {
+        received_at >= self.t0
+    }
+
     /// `received_at` に受け取ったフレームの PTS。`t0` より前なら `None`（捨てる）。
     ///
     /// 直前以下の値になったら直前 + 1 にする。MP4 のサンプルは時刻が増えていく
