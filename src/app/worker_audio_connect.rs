@@ -11,7 +11,7 @@ use super::retry::backoff_delay;
 use super::worker::{DeviceConfig, DeviceEvent};
 use super::worker_connect::failure_message;
 use super::worker_loop::WorkerState;
-use crate::audio::{self, AudioDirection};
+use crate::audio::{self, AudioDirection, AudioError};
 use crate::i18n;
 use log::{debug, info, warn};
 use std::time::Instant;
@@ -25,6 +25,25 @@ use std::time::Instant;
 /// 空文字も名前として扱わない（手で書き換えた設定ファイルで起こりうる）。
 pub(super) fn audio_input_is_selected(input: Option<&str>) -> bool {
     input.is_some_and(|name| !name.is_empty())
+}
+
+/// 音声を開けなかった理由が、入力と出力のどちらで起きたか（#323）。
+///
+/// 接続に失敗したとき、取得済みの対応設定をこの向きの分だけ捨てるために使う。
+/// 今ある失敗はどれも向きを持つ。**向きを持たない失敗を足すときは、呼び出し側で
+/// 両方を捨てる扱いにすること。** どちらの一覧が古いのか分からないまま片方だけ
+/// 残すと、挿し直した側の古い一覧で失敗し続ける。
+pub(super) fn failed_direction(error: &AudioError) -> AudioDirection {
+    match error {
+        AudioError::DeviceEnumerationFailed { direction, .. }
+        | AudioError::DeviceNotFound { direction, .. }
+        | AudioError::NoDefaultDevice(direction)
+        | AudioError::DefaultConfigFailed { direction, .. }
+        | AudioError::SupportedConfigsFailed { direction, .. }
+        | AudioError::UnsupportedSampleFormat { direction, .. }
+        | AudioError::StreamBuildFailed { direction, .. }
+        | AudioError::StreamPlayFailed { direction, .. } => *direction,
+    }
 }
 
 impl WorkerState {
@@ -140,11 +159,15 @@ impl WorkerState {
                 )));
                 self.last_audio_failure = Some(reason);
                 // **取得済みの対応設定を捨てて取り直す。** デバイスが挿し直された
-                // 場合、古い一覧でしか開けない設定を選び続けて失敗が繰り返される
-                self.audio_capabilities
-                    .remove(&(AudioDirection::Input, input_key));
-                self.audio_capabilities
-                    .remove(&(AudioDirection::Output, output_key));
+                // 場合、古い一覧でしか開けない設定を選び続けて失敗が繰り返される。
+                // 捨てるのは失敗した向きだけ（#323）。問い合わせの間はワーカーが
+                // 止まるので、正常な側まで毎回取り直すと映像の監視も待たされる
+                let stale = failed_direction(&e);
+                let key = match stale {
+                    AudioDirection::Input => input_key,
+                    AudioDirection::Output => output_key,
+                };
+                self.audio_capabilities.remove(&(stale, key));
                 debug!(
                     "音声デバイスへの再試行は {} ms 後",
                     backoff_delay(self.audio_retry.attempts()).as_millis()
@@ -251,6 +274,84 @@ mod tests {
         state.tick(base + Duration::from_millis(4_100));
         assert_eq!(audio.with(|state| state.start_calls), 5);
         assert!(audio.with(|state| state.running));
+    }
+
+    /// 1 回失敗させてから繋がるまでに、対応設定を問い合わせた向きの列。
+    fn capability_queries_across_one_failure(failure: AudioDirection) -> Vec<AudioDirection> {
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        audio.with(|state| {
+            state.capabilities_ok = true;
+            state.failures_before_success = 1;
+            state.failure_direction = Some(failure);
+        });
+        let (mut state, _events) = mock_state(&video, &audio);
+        apply_config(&mut state, config_for(None, Some("入力 A")), true);
+        let base = Instant::now();
+        state.tick(base);
+        // バックオフより十分に後
+        state.tick(base + Duration::from_secs(60));
+        assert_eq!(audio.with(|state| state.start_calls), 2);
+        assert!(audio.with(|state| state.running));
+        audio.with(|state| state.capability_queries.clone())
+    }
+
+    #[test]
+    fn worker_requeries_only_the_input_side_after_an_input_failure() {
+        assert_eq!(
+            capability_queries_across_one_failure(AudioDirection::Input),
+            vec![
+                AudioDirection::Input,
+                AudioDirection::Output,
+                AudioDirection::Input
+            ]
+        );
+    }
+
+    #[test]
+    fn worker_requeries_only_the_output_side_after_an_output_failure() {
+        assert_eq!(
+            capability_queries_across_one_failure(AudioDirection::Output),
+            vec![
+                AudioDirection::Input,
+                AudioDirection::Output,
+                AudioDirection::Output
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_direction_follows_the_error() {
+        let cases = [
+            (
+                AudioError::DeviceNotFound {
+                    direction: AudioDirection::Input,
+                    name: "キャプチャーボード".to_string(),
+                },
+                AudioDirection::Input,
+            ),
+            (
+                AudioError::NoDefaultDevice(AudioDirection::Output),
+                AudioDirection::Output,
+            ),
+            (
+                AudioError::StreamBuildFailed {
+                    direction: AudioDirection::Output,
+                    source: "失敗".to_string(),
+                },
+                AudioDirection::Output,
+            ),
+            (
+                AudioError::StreamPlayFailed {
+                    direction: AudioDirection::Input,
+                    source: "失敗".to_string(),
+                },
+                AudioDirection::Input,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(failed_direction(&error), expected, "{error:?}");
+        }
     }
 
     #[test]
