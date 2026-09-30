@@ -66,10 +66,11 @@ pub(super) fn build_input_stream_with<T>(
 where
     T: cpal::SizedSample,
 {
+    let channels = usize::from(config.channels);
     device.build_input_stream(
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
-            process_input(data, &producer, &tap, &to_f32);
+            process_input(data, channels, &producer, &tap, &to_f32);
         },
         move |e| {
             error!("入力ストリームのエラー: {}", e);
@@ -129,14 +130,19 @@ where
 /// リングバッファへ積む。録画中なら同じ値を録画のリング（`AudioTap`）にも積む。
 ///
 /// **cpal の入力コールバックとフェイクの入力（`super::fake`）の両方から
-/// 呼ぶ。** リングバッファが溢れた分は捨てる。ロックは `try_lock` だけで、
-/// 取れなければそのコールバック分を捨てる（待たない）。パススルーと録画は
-/// 別々に判定し、片方を取れなくてももう片方には積む。
+/// 呼ぶ。** ロックは `try_lock` だけで、取れなければそのコールバック分を
+/// 捨てる（待たない）。パススルーと録画は別々に判定し、片方を取れなくても
+/// もう片方には積む。
+///
+/// **パススルーのリングバッファへはフレーム（`channels` サンプル）単位でだけ
+/// 積む。** 溢れる分はフレームごと捨てる。1 サンプル単位で捨てると、捨てた
+/// 位置から後ろが 1 つずれて左右が入れ替わったまま戻らない（`docs/design/audio.md`）。
 ///
 /// 録画へは入力の形のまま積む。音量・ミュート・パススルーの無効は出力
 /// コールバックの判定なので、録画には効かない（`docs/design/recording.md`）。
 pub(super) fn process_input<T: Copy>(
     data: &[T],
+    channels: usize,
     producer: &Mutex<AudioProducer>,
     tap: &AudioTap,
     to_f32: impl Fn(T) -> f32,
@@ -146,10 +152,19 @@ pub(super) fn process_input<T: Copy>(
     if passthrough.is_none() && recording.is_none() {
         return;
     }
+    // リングバッファへ積むサンプル数。空きに入るフレームの数だけで、半端な
+    // フレームは積まない。空きは出力側が読むと増えるだけで減らないので、
+    // ここで数えた分は必ず入る
+    let mut room = passthrough.as_ref().map_or(0, |prod| {
+        whole_frame_samples(prod.free_len().min(data.len()), channels)
+    });
     for &sample in data {
         let value = to_f32(sample);
-        if let Some(prod) = passthrough.as_mut() {
-            let _ = prod.push(value);
+        if room > 0 {
+            if let Some(prod) = passthrough.as_mut() {
+                let _ = prod.push(value);
+                room -= 1;
+            }
         }
         if let Some(writer) = recording.as_mut() {
             writer.push(value);
@@ -179,12 +194,12 @@ pub(super) fn process_output<T: Clone>(
     if let Ok(mut cons) = consumer.try_lock() {
         // クロックドリフト補正の水位。この呼び出し分を消費する前の値を書く
         converter.record_water_level(cons.len());
-        let mut pop = || cons.pop();
+        let mut read = |dst: &mut [f32]| pop_whole_frame(&mut cons, dst);
         let starved = render_output_samples(
             data,
             volume,
             audible,
-            || converter.next_sample(&mut pop),
+            || converter.next_sample(&mut read),
             &to_sample,
         );
         if starved {
@@ -200,6 +215,27 @@ pub(super) fn process_output<T: Clone>(
         // ときと同じなので、同じく 1 回数える
         count_underrun(underruns);
     }
+}
+
+/// `samples` サンプルのうち、丸ごと入るフレームのサンプル数（`channels` の倍数へ
+/// 切り捨てる）。`channels` が 0 なら 1 として扱う（剰余で落とさないため）。
+fn whole_frame_samples(samples: usize, channels: usize) -> usize {
+    let channels = channels.max(1);
+    samples / channels * channels
+}
+
+/// リングバッファから入力フレームを 1 つ取り出す（`PassthroughConverter::next_sample`
+/// へ渡す読み口）。**フレームが丸ごと届いていなければ何も読まずに `false`。**
+///
+/// 入力コールバックが積むのはフレーム単位だが、公開は 1 サンプルずつなので、
+/// 出力側からはフレームの途中までが見えることがある。途中まで読むと以降が
+/// 1 つずれるので、残りが届くまで読まずに残す。
+fn pop_whole_frame(consumer: &mut AudioConsumer, dst: &mut [f32]) -> bool {
+    if consumer.len() < dst.len() {
+        return false;
+    }
+    // 揃っていることは確かめたので、ここで取り出せる数は `dst.len()` になる
+    consumer.pop_slice(dst) == dst.len()
 }
 
 /// 出力に音を書き込んでよいか。
@@ -462,7 +498,7 @@ mod tests {
         let underruns = AtomicU32::new(0);
         let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2);
 
-        process_input(&[1.0f32, -0.5], &producer, &AudioTap::new(), |sample| {
+        process_input(&[1.0f32, -0.5], 2, &producer, &AudioTap::new(), |sample| {
             sample
         });
         let mut data = [9.0f32; 2];
@@ -487,9 +523,13 @@ mod tests {
         let underruns = AtomicU32::new(0);
         let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2);
 
-        process_input(&[1.0f32, 1.0, 1.0], &producer, &AudioTap::new(), |sample| {
-            sample
-        });
+        process_input(
+            &[1.0f32, 1.0, 1.0, 1.0],
+            2,
+            &producer,
+            &AudioTap::new(),
+            |sample| sample,
+        );
         let mut data = [9.0f32; 2];
         process_output(
             &mut data,
@@ -501,8 +541,116 @@ mod tests {
         );
 
         assert_eq!(data, [0.0, 0.0]);
-        // ミュート中も同じだけ取り出す（残りは 1 つ）
+        // ミュート中も同じだけ取り出す（残りは 1 フレーム）
+        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+    }
+
+    #[test]
+    fn process_input_drops_whole_frames_when_the_ring_is_full() {
+        // Issue #307。容量 3 のリングへ 2ch を 2 フレーム積む。入るのは 1 フレーム
+        // だけで、2 フレーム目は丸ごと捨てる。修正前は 2 フレーム目の左だけが入り、
+        // 以降が [2.0, 3.0] のように 1 つずれたフレームとして読まれていた
+        let (producer, consumer) = ring(3);
+        let controls = AudioControls::default();
+        let underruns = AtomicU32::new(0);
+        let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2);
+        let tap = AudioTap::new();
+        let mut data = [9.0f32; 2];
+
+        process_input(&[1.0f32, -1.0, 2.0, -2.0], 2, &producer, &tap, |s| s);
+        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        process_output(
+            &mut data,
+            &consumer,
+            &controls,
+            &mut converter,
+            &underruns,
+            |s| s,
+        );
+        assert_eq!(data, [1.0, -1.0]);
+
+        process_input(&[3.0f32, -3.0], 2, &producer, &tap, |s| s);
+        process_output(
+            &mut data,
+            &consumer,
+            &controls,
+            &mut converter,
+            &underruns,
+            |s| s,
+        );
+        assert_eq!(data, [3.0, -3.0]);
+    }
+
+    #[test]
+    fn process_input_never_leaves_a_partial_frame_in_the_ring() {
+        // 空きが 3 サンプルでも、積むのは 2ch の 1 フレーム（2 サンプル）まで
+        let (producer, consumer) = ring(5);
+        process_input(&[0.1f32, -0.1], 2, &producer, &AudioTap::new(), |s| s);
+
+        process_input(
+            &[0.2f32, -0.2, 0.3, -0.3],
+            2,
+            &producer,
+            &AudioTap::new(),
+            |s| s,
+        );
+
+        let mut read = [0.0f32; 5];
+        let count = consumer.lock().expect("ロックできる").pop_slice(&mut read);
+        assert_eq!(&read[..count], &[0.1, -0.1, 0.2, -0.2]);
+    }
+
+    #[test]
+    fn process_output_identity_waits_for_the_rest_of_a_partial_frame() {
+        // Issue #307。入力コールバックは 1 サンプルずつ公開するので、出力側からは
+        // フレームの左だけが見えることがある。修正前は左を読んで残りを無音にし、
+        // 次のコールバックで右から読み始めて左右が入れ替わったままになっていた
+        let (producer, consumer) = ring(8);
+        let controls = AudioControls::default();
+        let underruns = AtomicU32::new(0);
+        let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2);
+        let mut data = [9.0f32; 2];
+
+        // 左だけが公開された瞬間を作る
+        let _ = producer.lock().expect("ロックできる").push(1.0);
+        process_output(
+            &mut data,
+            &consumer,
+            &controls,
+            &mut converter,
+            &underruns,
+            |s| s,
+        );
+        assert_eq!(data, [0.0, 0.0]);
+        assert_eq!(underruns.load(Ordering::Relaxed), 1);
+        // 左は読まずに残っている
         assert_eq!(consumer.lock().expect("ロックできる").len(), 1);
+
+        let mut prod = producer.lock().expect("ロックできる");
+        for value in [-1.0, 0.5, -0.5] {
+            let _ = prod.push(value);
+        }
+        drop(prod);
+        let mut data = [9.0f32; 4];
+        process_output(
+            &mut data,
+            &consumer,
+            &controls,
+            &mut converter,
+            &underruns,
+            |s| s,
+        );
+        assert_eq!(data, [1.0, -1.0, 0.5, -0.5]);
+    }
+
+    #[test]
+    fn whole_frame_samples_rounds_down_to_frames() {
+        assert_eq!(whole_frame_samples(5, 2), 4);
+        assert_eq!(whole_frame_samples(6, 2), 6);
+        assert_eq!(whole_frame_samples(1, 2), 0);
+        assert_eq!(whole_frame_samples(7, 6), 6);
+        // 0ch は 1ch として扱い、剰余で落ちない
+        assert_eq!(whole_frame_samples(3, 0), 3);
     }
 
     #[test]
@@ -512,7 +660,7 @@ mod tests {
         let tap = AudioTap::new();
         let mut attachment = tap.attach(8);
 
-        process_input(&[16_384i16, -32_768], &producer, &tap, i16_to_f32);
+        process_input(&[16_384i16, -32_768], 2, &producer, &tap, i16_to_f32);
 
         let mut read = [0.0f32; 4];
         let count = attachment.consumer.pop_slice(&mut read);
@@ -528,7 +676,7 @@ mod tests {
 
         // パススルーのリングを別の誰かが握っていても、録画には積む
         let held = producer.lock().expect("ロックできる");
-        process_input(&[0.25f32, 0.5], &producer, &tap, |sample| sample);
+        process_input(&[0.25f32, 0.5], 2, &producer, &tap, |sample| sample);
         drop(held);
 
         let mut read = [0.0f32; 4];
