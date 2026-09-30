@@ -36,8 +36,9 @@
 
 `AppSettings::save()` は、同じフォルダの `default-config.toml.tmp` へ書いて `sync_all` でディスクへ書き切り、`rename` で本来のファイルと置き換える（`src/settings/store.rs` の `write_atomically`、Issue #317）。confy の `store_path` を本来のファイルへ直接使っていたころは、`truncate` で開いてから書くため、書き込み中の強制終了や電源断で 0 バイトか書きかけのファイルが残った。rename なら、ディスクに残るのは古い内容か新しい内容のどちらかになる。
 
+- 「その他」タブの「設定を書き出す」（`export_to`）も同じ処理を通す。一時ファイルはユーザーが選んだ書き出し先と同じフォルダに置く（Issue #361）
 - 一時ファイルを同じフォルダに置くのは、rename が同じボリュームの中でだけ置き換えとして働くため
-- 一時ファイルへの書き込みには confy の `store_path` をそのまま使う。書式を読み込み（confy）と書き出し（`export_to`）に揃えるため。このクレートが直接使う toml（1.x）と confy が内部で使う toml（0.8）は版が違う
+- 一時ファイルへの書き込みには confy の `store_path` をそのまま使う。書式を読み込み（confy）に揃えるため。このクレートが直接使う toml（1.x）と confy が内部で使う toml（0.8）は版が違う
 - 失敗したら一時ファイルを消す。元のファイルは手付かずで残る
 - 読み込みは confy の `load_path` のまま
 
