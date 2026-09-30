@@ -48,7 +48,7 @@ pub use directshow::{
     DirectShowCapture,
 };
 pub use fake::{FakeVideoCapture, FakeVideoOptions};
-pub use frame_buffer::{FrameStats, VideoFrame, VideoFrames};
+pub use frame_buffer::{frame_len_status, FrameLenStatus, FrameStats, VideoFrame, VideoFrames};
 pub use tap::{VideoTap, VideoTapConsumer, VIDEO_TAP_CAPACITY};
 
 use std::fmt;
