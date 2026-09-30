@@ -2,7 +2,7 @@
 //!
 //! エンコードと書き出し（クリップボードへの転送も）は撮影ごとに起こす
 //! スレッドが行い、UI スレッドは結果をチャネルで受け取るだけにする。
-//! 効果音の再生は `crate::screenshot::ScreenshotManager` の担当で、
+//! 効果音の再生は `crate::screenshot_sound::ScreenshotManager` の担当で、
 //! 効果音ファイルの読み込みは `app::screenshot_sound` の担当。
 
 use super::CaptureCardViewer;

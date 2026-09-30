@@ -39,7 +39,7 @@ use log::{debug, warn};
 
 use super::audio::AudioStats;
 use super::pts::{AUDIO_SAMPLE_RATE, UNITS_PER_SECOND};
-use super::replay::ReplayConfig;
+use super::replay_config::ReplayConfig;
 use super::{EncoderInfo, RecordingError};
 use crate::audio::AudioTap;
 use crate::video::VideoTap;

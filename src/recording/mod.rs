@@ -29,16 +29,20 @@ mod audio;
 mod bitstream;
 mod convert;
 mod encoder;
+mod encoder_setup;
 mod file_name;
 mod passthrough;
 mod pts;
 mod recorder;
 mod recorder_loop;
 mod replay;
+mod replay_config;
 mod replay_recording;
 mod replay_ring;
 mod session;
 mod storage;
+#[cfg(test)]
+mod test_support;
 mod writer;
 
 pub use file_name::{render_file_name, resolve_file_stem, RECORDING_EXTENSION};
@@ -46,7 +50,7 @@ pub use recorder::{
     Recorder, RecordingAudioStats, RecordingEvent, RecordingRequest, RecordingSummary,
     ReplayRingStats,
 };
-pub use replay::ReplayConfig;
+pub use replay_config::ReplayConfig;
 
 use std::fmt;
 use std::path::PathBuf;

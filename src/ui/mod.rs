@@ -12,7 +12,8 @@
 //! |---|---|
 //! | `capability.rs` | デバイス能力のキャッシュと、そこから作る選択肢まわりの表示 |
 //! | `state.rs` | `SettingsDialogState`（ドラフトの保持と操作の受け止め） |
-//! | `draft.rs` | ドラフトの反映・読み込み・初期化 |
+//! | `draft.rs` | ドラフトの反映（`commit_draft`） |
+//! | `draft_import.rs` | 読み込みと初期化でドラフトを作る（`draft_from_imported` / `draft_from_defaults`） |
 //! | `preset.rs` | プリセットの保存・読み込み・削除（描画を含まない） |
 //! | `video_mode.rs` | デバイス切り替え時に選び直すビデオの既定値 |
 //! | `device_tab.rs` | 「デバイス設定」タブ |
@@ -27,6 +28,7 @@
 mod capability;
 mod device_tab;
 mod draft;
+mod draft_import;
 mod hotkey_capture;
 mod hotkey_keys;
 mod hotkeys_tab;
@@ -47,7 +49,7 @@ mod video_mode;
 // `commit_draft` や `select_default_video_mode` のような項目は、使う側が
 // 子モジュールの経路（`self::draft::commit_draft`）で参照する
 pub use self::capability::{AudioCapabilityCache, VideoCapabilityKey};
-pub use self::draft::{draft_from_defaults, draft_from_imported};
+pub use self::draft_import::{draft_from_defaults, draft_from_imported};
 pub use self::hotkey_capture::{show_hotkey_capture_dialog, HotkeyDialogEvent};
 pub use self::preset::PresetRowAction;
 pub use self::state::{resolve_action, SettingsDialogState, SettingsDialogView};

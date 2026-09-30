@@ -21,6 +21,7 @@ mod platform;
 mod recording;
 mod repaint;
 mod screenshot;
+mod screenshot_sound;
 mod settings;
 mod status;
 mod ui;

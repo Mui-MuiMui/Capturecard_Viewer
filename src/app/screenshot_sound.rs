@@ -10,7 +10,8 @@
 
 use super::screenshot::drop_finished_threads;
 use super::CaptureCardViewer;
-use crate::screenshot::{self, ScreenshotError};
+use crate::screenshot::ScreenshotError;
+use crate::screenshot_sound;
 use crate::status::ErrorSource;
 use log::{debug, warn};
 use std::path::{Path, PathBuf};
@@ -85,7 +86,7 @@ impl CaptureCardViewer {
         // 起こさないとテスト再生の音が次の再描画まで鳴らない
         let waker = self.repaint_waker.clone();
         let handle = std::thread::spawn(move || {
-            let (data, error) = screenshot::load_sound_data(&path);
+            let (data, error) = screenshot_sound::load_sound_data(&path);
             // ログは受け取った UI スレッド側で出す（保存スレッドと同じ）
             if result_tx
                 .send(SoundMessage::Loaded(SoundLoadResult {
@@ -115,7 +116,7 @@ impl CaptureCardViewer {
     pub(super) fn play_sound(&self, data: Arc<[u8]>, volume: f32) {
         let tx = self.sound_tx.clone();
         let waker = self.repaint_waker.clone();
-        screenshot::play_sound_data(data, volume, move |outcome| {
+        screenshot_sound::play_sound_data(data, volume, move |outcome| {
             let failed = outcome.is_err();
             // 受信側が無いのはアプリが終了したときだけ。結果は捨ててよい
             if tx.send(SoundMessage::Output(outcome)).is_ok() && failed {
