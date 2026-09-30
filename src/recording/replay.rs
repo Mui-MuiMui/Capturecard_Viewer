@@ -304,10 +304,7 @@ impl ReplayPipeline {
             if self.video_encoder.is_none() {
                 self.open_video_encoder(size)?;
             }
-            let accepts = match self.video_encoder.as_mut() {
-                Some(encoder) => encoder.accepts_input().map_err(encoder_error)?,
-                None => false,
-            };
+            let accepts = self.video_accepts_input()?;
             if !accepts {
                 // エンコーダが追いつかない。表示は落とさず、録画（リング）だけがコマ落ちする
                 if let Some(recording) = self.recording.as_mut() {
@@ -332,9 +329,56 @@ impl ReplayPipeline {
         }
         // 非同期型は入力と関係なく出力が届く
         if let Some(encoder) = self.video_encoder.as_mut() {
-            encoder.pull().map_err(encoder_error)?;
+            if let Err(error) = encoder.pull() {
+                let fall_back = should_fall_back(encoder.is_hardware(), encoder.has_produced());
+                // 作り直したソフトウェアのエンコーダにはまだ何も渡していないので、取り出す物は無い
+                self.fall_back_to_software(fall_back, error)?;
+            }
         }
         self.take_video_output();
+        Ok(())
+    }
+
+    /// 映像のエンコーダがいま入力を受け取れるか。非同期型の失敗（`MEError`）はここで
+    /// 届くのが普通なので、ハードウェアで最初の 1 枚から失敗していればソフトウェアで作り直して
+    /// 問い直す（#312）。
+    fn video_accepts_input(&mut self) -> Result<bool, RecordingError> {
+        let Some(encoder) = self.video_encoder.as_mut() else {
+            return Ok(false);
+        };
+        match encoder.accepts_input() {
+            Ok(accepts) => Ok(accepts),
+            Err(error) => {
+                let fall_back = should_fall_back(encoder.is_hardware(), encoder.has_produced());
+                self.fall_back_to_software(fall_back, error)?;
+                match self.video_encoder.as_mut() {
+                    Some(encoder) => encoder.accepts_input().map_err(encoder_error),
+                    None => Ok(false),
+                }
+            }
+        }
+    }
+
+    /// 映像のエンコーダの失敗を受けて、ソフトウェアで作り直すか、失敗として返すかを決める。
+    /// `fall_back` は `should_fall_back` の結果。作り直したら `Ok`。
+    fn fall_back_to_software(
+        &mut self,
+        fall_back: bool,
+        error: EncoderError,
+    ) -> Result<(), RecordingError> {
+        if !fall_back {
+            return Err(encoder_error(error));
+        }
+        // ①と同じく、ハードウェアで最初の 1 枚から失敗したらソフトウェアで作り直す
+        warn!(
+            "ハードウェアのエンコーダで最初のフレームをエンコードできないので、ソフトウェアで作り直す: {}",
+            error
+        );
+        self.hardware_failed = true;
+        self.video_encoder = None;
+        if let Some(size) = self.size {
+            self.open_video_encoder(size)?;
+        }
         Ok(())
     }
 
@@ -348,24 +392,12 @@ impl ReplayPipeline {
         let Some(encoder) = self.video_encoder.as_mut() else {
             return Ok(());
         };
-        match encoder.encode(&sample) {
-            Ok(()) => {}
-            Err(error) if encoder.is_hardware() && !encoder.has_produced() => {
-                // ①と同じく、ハードウェアで最初の 1 枚から失敗したらソフトウェアで作り直す
-                warn!(
-                    "ハードウェアのエンコーダで最初のフレームをエンコードできないので、ソフトウェアで作り直す: {}",
-                    error
-                );
-                self.hardware_failed = true;
-                self.video_encoder = None;
-                if let Some(size) = self.size {
-                    self.open_video_encoder(size)?;
-                }
-                if let Some(encoder) = self.video_encoder.as_mut() {
-                    encoder.encode(&sample).map_err(encoder_error)?;
-                }
+        if let Err(error) = encoder.encode(&sample) {
+            let fall_back = should_fall_back(encoder.is_hardware(), encoder.has_produced());
+            self.fall_back_to_software(fall_back, error)?;
+            if let Some(encoder) = self.video_encoder.as_mut() {
+                encoder.encode(&sample).map_err(encoder_error)?;
             }
-            Err(error) => return Err(encoder_error(error)),
         }
         self.take_video_output();
         Ok(())
@@ -627,6 +659,17 @@ impl Drop for ReplayPipeline {
     }
 }
 
+/// 映像のエンコーダの失敗をソフトウェアで作り直して続けるか。ハードウェアで、まだ 1 枚も
+/// 出していないときだけ（①と同じ条件）。ソフトウェアの失敗と、1 枚でも出した後の失敗は
+/// 作り直しても直らない見込みなので、リプレイバッファの失敗として返す。
+///
+/// **`encode` / `accepts_input` / `pull` の 3 か所すべてでこれを通す**（#312）。非同期型の
+/// 失敗は `ProcessInput` ではなく次のイベントの取り出し（`MEError`）で届くのが普通なので、
+/// `encode` の枝だけでは効かない。
+fn should_fall_back(is_hardware: bool, has_produced: bool) -> bool {
+    is_hardware && !has_produced
+}
+
 fn encoder_error(error: EncoderError) -> RecordingError {
     RecordingError::EncoderUnavailable {
         reason: error.to_string(),
@@ -679,6 +722,24 @@ mod tests {
         ] {
             assert!(!base.same_encoders(&changed), "{changed:?}");
         }
+    }
+
+    // #312: ハードウェアで 1 枚も出していないときだけソフトウェアへ作り直す
+    #[test]
+    fn should_fall_back_only_before_the_first_hardware_output() {
+        assert!(
+            should_fall_back(true, false),
+            "ハードウェアで最初の 1 枚から失敗"
+        );
+        assert!(
+            !should_fall_back(true, true),
+            "1 枚出した後の失敗は作り直さない"
+        );
+        assert!(
+            !should_fall_back(false, false),
+            "ソフトウェアの失敗は作り直さない"
+        );
+        assert!(!should_fall_back(false, true));
     }
 
     // #306: 30fps で開いているときに映像が途絶えても（公称 fps が None になっても）
