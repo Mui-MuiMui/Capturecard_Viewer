@@ -184,6 +184,69 @@ pub fn import_from(path: &Path) -> Result<AppSettings, SettingsError> {
     })
 }
 
+// 設定ファイルが空（0 バイトか空白だけ）か。
+//
+// 全ての設定構造体に `#[serde(default)]` が付いているため、空の文字列は
+// TOML として読めてしまい、全項目が既定値の設定になる。保存の途中で
+// 強制終了や電源断が起きて中身が消えたファイルもこの形になるので、
+// 読めたことにせず「壊れている」として退避する（Issue #317）。
+// ユーザーが意図して空のファイルを置く理由は無い。
+fn is_blank_config(contents: &[u8]) -> bool {
+    contents.iter().all(|b| b.is_ascii_whitespace())
+}
+
+// 保存で使う一時ファイルのパス。同じフォルダの `<元のファイル名>.tmp`。
+//
+// 同じフォルダに置くのは、rename が同じボリュームの中でだけ置き換えとして
+// 働くため。別のフォルダ（%TEMP% など）に置くとボリュームをまたぎうる。
+fn temp_path_for(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    path.with_file_name(format!("{}.tmp", file_name))
+}
+
+// 設定を一時ファイルへ書き、ディスクへ書き切ってから本来のファイルと置き換える。
+//
+// confy の `store_path` を本来のファイルへ直接使うと、`truncate` で開いてから
+// 書き込むため、途中で止まると 0 バイトか書きかけのファイルが残る（Issue #317）。
+// 置き換えを rename にすれば、ディスクに残るのは古い内容か新しい内容の
+// どちらかになる。Windows の `std::fs::rename` は置き換え先があっても
+// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` で差し替える。
+//
+// 一時ファイルへの書き込みには confy の `store_path` をそのまま使う。書式を
+// 読み込み（confy）と書き出し（`export_to`）に揃えるため。このクレートが
+// 直接使う toml と confy が内部で使う toml は版が違う。
+fn write_atomically(path: &Path, settings: &AppSettings) -> Result<(), SettingsError> {
+    let temp_path = temp_path_for(path);
+
+    let written = confy::store_path(&temp_path, settings)
+        .map_err(|e| e.to_string())
+        // rename の前にディスクへ書き切る。書き切る前に置き換えると、
+        // 電源断のあとに中身の無いファイルへ置き換わっていることがある
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&temp_path)
+                .and_then(|file| file.sync_all())
+                .map_err(|e| e.to_string())
+        })
+        .and_then(|()| std::fs::rename(&temp_path, path).map_err(|e| e.to_string()));
+
+    if let Err(source) = written {
+        // 置き換えられなかった一時ファイルは残さない。元のファイルは
+        // 手付かずのまま。消せなくても次の保存で上書きされるので、失敗は捨てる
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(SettingsError::SaveFailed {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    Ok(())
+}
+
 impl AppSettings {
     // 設定と、その読み込み結果を返す。
     //
@@ -206,7 +269,24 @@ impl AppSettings {
                 return (Self::default(), LoadOutcome::BrokenFileLeftBehind);
             }
         };
-        match confy::load_path(&path) {
+        Self::load_from(&path)
+    }
+
+    // 指定したパスの設定ファイルを読む。`load` の本体。
+    //
+    // パスを引数にしているのは、一時フォルダのファイルでテストするため。
+    fn load_from(path: &Path) -> (Self, LoadOutcome) {
+        // 読めないファイルはここで判定せず、confy の失敗として扱う
+        let blank = std::fs::read(path)
+            .map(|contents| is_blank_config(&contents))
+            .unwrap_or(false);
+        let loaded = if blank {
+            Err("設定ファイルが空（0 バイトか空白だけ）".to_string())
+        } else {
+            confy::load_path(path).map_err(|e| e.to_string())
+        };
+
+        match loaded {
             Ok(settings) => (settings, LoadOutcome::Loaded),
             Err(e) => {
                 error!("設定ファイルを読み込めないため既定値で起動する: {}", e);
@@ -217,7 +297,7 @@ impl AppSettings {
                 // 失敗したという事実は LoadOutcome として呼び出し側へ渡し、
                 // 理由はログに残す。ここは起動直後で UI がまだ無いため、
                 // ユーザーへ伝える手段がログしかない。
-                let backup = backup_broken_config(&path);
+                let backup = backup_broken_config(path);
                 match &backup {
                     Ok(Some(backup_path)) => warn!(
                         "読み込めなかった設定ファイルを {} へ退避した",
@@ -236,26 +316,19 @@ impl AppSettings {
         }
     }
 
-    // 保存できたかを返す。
+    // 設定ファイルへ保存する。
     //
     // 結果を捨てないのは、デバウンスして書き出す側が失敗を検知して
     // 再試行できるようにするため。失敗を握り潰すと、書けなかった変更が
     // 保存済みとして扱われて消える。
-    pub fn save(&self) -> bool {
-        let path = match crate::config_path::config_file_path() {
-            Ok(path) => path,
-            Err(e) => {
-                error!("設定の保存に失敗した: {}", e);
-                return false;
-            }
-        };
-        match confy::store_path(&path, self) {
-            Ok(()) => true,
-            Err(e) => {
-                error!("設定の保存に失敗した: {}", e);
-                false
-            }
-        }
+    //
+    // **ここではログを出さない。** 失敗が続く間は同じ理由が繰り返し届くため、
+    // 何を・いつログとトーストに出すかは呼び出し側（`app::settings_store`）が
+    // 失敗の続き具合を見て決める。
+    pub fn save(&self) -> Result<(), SettingsError> {
+        let path =
+            crate::config_path::config_file_path().map_err(SettingsError::LocationUnavailable)?;
+        write_atomically(&path, self)
     }
 }
 
@@ -416,6 +489,147 @@ mod tests {
         let backup = backup_broken_config(&path).expect("失敗しないこと");
 
         assert!(backup.is_none());
+    }
+
+    #[test]
+    fn is_blank_config_empty_and_whitespace_are_blank() {
+        assert!(is_blank_config(b""));
+        assert!(is_blank_config(b"  \r\n\t\n"));
+    }
+
+    #[test]
+    fn is_blank_config_any_content_is_not_blank() {
+        // 1 文字でも中身があれば TOML の解釈に任せる（コメントだけでも読める）
+        assert!(!is_blank_config(b"# comment"));
+        assert!(!is_blank_config(b"[video]"));
+    }
+
+    #[test]
+    fn temp_path_for_appends_tmp_in_the_same_folder() {
+        // rename を同じボリュームの中で済ませるため、同じフォルダに置く
+        let path = Path::new(r"C:\config\default-config.toml");
+
+        assert_eq!(
+            temp_path_for(path),
+            PathBuf::from(r"C:\config\default-config.toml.tmp")
+        );
+    }
+
+    #[test]
+    fn load_from_empty_file_backs_it_up_and_falls_back_to_defaults() {
+        // Issue #317。保存の途中で止まって 0 バイトになったファイルは、
+        // `#[serde(default)]` のせいで「読めた」ことになり、退避されずに
+        // 全設定が既定値へ戻っていた。壊れたファイルとして退避すること
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("default-config.toml");
+        fs::write(&path, "").expect("空のファイルを作れること");
+
+        let (settings, outcome) = AppSettings::load_from(&path);
+
+        assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
+        assert!(dir.path().join("default-config.toml.bak").exists());
+        assert!(!path.exists(), "空のファイルが元の場所に残っている");
+        assert_eq!(
+            settings.video.device_name,
+            AppSettings::default().video.device_name
+        );
+    }
+
+    #[test]
+    fn load_from_whitespace_only_file_is_treated_as_broken() {
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("default-config.toml");
+        fs::write(&path, "\r\n  \r\n").expect("書けること");
+
+        let (_, outcome) = AppSettings::load_from(&path);
+
+        assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
+        assert!(dir.path().join("default-config.toml.bak").exists());
+    }
+
+    #[test]
+    fn load_from_valid_file_is_loaded_without_backup() {
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("default-config.toml");
+        fs::write(&path, FULL_CONFIG).expect("書けること");
+        let expected: AppSettings = toml::from_str(FULL_CONFIG).expect("読めること");
+
+        let (settings, outcome) = AppSettings::load_from(&path);
+
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert_eq!(settings.video.device_name, expected.video.device_name);
+        assert!(!dir.path().join("default-config.toml.bak").exists());
+    }
+
+    #[test]
+    fn write_atomically_replaces_the_file_and_leaves_no_temp_file() {
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("default-config.toml");
+        fs::write(&path, "[video]\nfps = 15\n").expect("古い内容を書けること");
+        let settings: AppSettings = toml::from_str(FULL_CONFIG).expect("読めること");
+
+        write_atomically(&path, &settings).expect("保存できること");
+
+        assert!(!temp_path_for(&path).exists(), "一時ファイルが残っている");
+        let (reloaded, outcome) = AppSettings::load_from(&path);
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert_eq!(reloaded.video.device_name, settings.video.device_name);
+        assert_eq!(reloaded.video.fps, settings.video.fps);
+        assert_eq!(reloaded.hotkeys, settings.hotkeys);
+    }
+
+    #[test]
+    fn write_atomically_creates_a_missing_file() {
+        // 初回起動のようにファイルがまだ無い場合も書けること
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("default-config.toml");
+
+        write_atomically(&path, &AppSettings::default()).expect("保存できること");
+
+        assert!(path.exists());
+        assert!(!temp_path_for(&path).exists());
+    }
+
+    #[test]
+    fn write_atomically_failure_keeps_the_original_and_removes_the_temp_file() {
+        // 置き換え先がディレクトリで rename できない場合。元の場所は手付かずで、
+        // 一時ファイルも残らないこと
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("default-config.toml");
+        fs::create_dir(&path).expect("ディレクトリを作れること");
+
+        let err = write_atomically(&path, &AppSettings::default()).expect_err("失敗すること");
+
+        assert!(
+            matches!(&err, SettingsError::SaveFailed { path: p, .. } if p == &path),
+            "保存の失敗として返ること: {err:?}"
+        );
+        assert!(path.is_dir(), "元の場所が変わっている");
+        assert!(!temp_path_for(&path).exists(), "一時ファイルが残っている");
+    }
+
+    #[test]
+    fn write_atomically_read_only_target_keeps_the_original() {
+        // 置き換え先が読み取り専用の場合。Windows の rename は読み取り専用の
+        // ファイルを置き換えられないので失敗し、元の内容が残ること
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("default-config.toml");
+        fs::write(&path, "[video]\nfps = 15\n").expect("古い内容を書けること");
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions.clone()).unwrap();
+
+        let result = write_atomically(&path, &AppSettings::default());
+
+        // 後片付けのために読み取り専用を外しておく
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&path, permissions).unwrap();
+        if cfg!(windows) {
+            assert!(result.is_err(), "読み取り専用のファイルを置き換えた");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "[video]\nfps = 15\n");
+        }
+        assert!(!temp_path_for(&path).exists(), "一時ファイルが残っている");
     }
 
     #[test]

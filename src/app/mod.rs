@@ -31,6 +31,7 @@ mod worker_timers;
 use self::menu::MenuLayout;
 use self::screenshot::ScreenshotResult;
 use self::screenshot_sound::SoundLoadResult;
+use self::settings_store::SaveFailureStreak;
 use self::update::UpdateState;
 use self::window::needs_drag_move_guard;
 use self::worker::{DeviceSnapshot, DeviceWorker};
@@ -133,6 +134,9 @@ pub struct CaptureCardViewer {
     // 自動保存（デバウンス保存と終了時保存）を許してよいか。
     // 読めなかった設定ファイルを退避できなかった場合は止める
     autosave: AutoSavePolicy,
+    // 保存の失敗が何回続いているか。再試行の間隔と、ログ・トーストの間引きに
+    // 使う（`app::settings_store`）
+    settings_save_failures: SaveFailureStreak,
 
     // 映像表示関連
     video_texture: Option<egui::TextureHandle>,
@@ -285,6 +289,7 @@ impl Default for CaptureCardViewer {
             last_settings_applied: Instant::now(),
             settings_dirty_since: None,
             autosave: AutoSavePolicy::from_load_outcome(load_outcome),
+            settings_save_failures: SaveFailureStreak::default(),
             video_texture: None,
             last_frame_generation: 0,
             last_new_frame_at: None,
@@ -335,6 +340,7 @@ impl Default for CaptureCardViewer {
         // 起動後に設定の初期化・読み込みで入力が未設定に戻った場合も、
         // ワーカーは既定の入力を開かず、入力が選ばれるのを待つ（#304）。
         // 設定画面のコンボボックスに「デフォルト」の選択肢は足さない（#153）
+        let mut startup_save = None;
         {
             if let Ok(mut s) = app.settings.lock() {
                 // タイトルバーなしで保存されているのに画面ドラッグ移動が切れている
@@ -351,7 +357,7 @@ impl Default for CaptureCardViewer {
                 // ここで上書きすると、ディスクに残っている壊れたファイルが既定値で
                 // 潰れ、ユーザーが設定を取り戻す最後の手段が消える。
                 if load_outcome.may_write_defaults_on_startup() {
-                    s.save();
+                    startup_save = Some(s.save());
                 } else {
                     warn!(
                         "読めなかった設定ファイルが残っているため、設定の自動保存を止める。設定画面の「適用」か「OK」で保存すると再開する"
@@ -360,6 +366,11 @@ impl Default for CaptureCardViewer {
             } else {
                 warn!("起動時のデバイス自動選択で settings のロックを取得できない");
             }
+        }
+        // ロックを放してから結果を取り込む。失敗したらログとトーストで知らせ、
+        // 保留として残して再試行させる（`app::settings_store`）
+        if let Some(result) = startup_save {
+            app.note_settings_save_result(result);
         }
 
         // 保存済みのビデオデバイスの能力を先に取りに行く。

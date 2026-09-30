@@ -308,6 +308,14 @@ pub fn settings_import_failed(path: impl Display, source: impl Display) -> Strin
     }
 }
 
+/// 保存先（`%AppData%` の設定ファイル）の置き場所が分からない。
+pub fn settings_location_unavailable(source: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("保存先が分からない: {source}"),
+        Language::English => format!("Cannot determine where to save: {source}"),
+    }
+}
+
 // ---- 接続状態（status.rs） ----
 
 pub fn resample_ratio(ratio: f32) -> String {
