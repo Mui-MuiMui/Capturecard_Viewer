@@ -963,6 +963,7 @@ $hash = (Get-FileHash "$w\release\$exe" -Algorithm SHA256).Hash.ToLowerInvariant
 - [ ] 上の PowerShell の `$exe` を 1.2.0 の旧名 `"capturecard_viewer-v9.9.9-windows-x64.exe"` にして作り直しても、更新は通る。差し替わった exe の名前は `C:\work\app\capturecard_viewer.exe` のまま
 - [ ] 更新中も映像と音声は止まらない（ローカルのファイルでは一瞬で終わるので、次のリリースで確かめる）
 - [ ] `SHA256SUMS.txt` の取得中でもキャンセルが効く。`latest.json` の `SHA256SUMS.txt` の `browser_download_url` を `http://127.0.0.1:8765/SHA256SUMS.txt` に書き換え、別の PowerShell で下の「応答のヘッダーだけ返して止まるサーバー」を動かしてから起動する。「更新する」→「キャンセル」でダイアログが閉じ、**30 秒以内に**設定 > その他 の「更新する」がまた押せるようになる（以前は 10 分押せなかった。Issue #319）。`.new` は作られない
+- [ ] exe の取得が止まった場合もキャンセルが効く。`SHA256SUMS.txt` の URL を元のローカルのファイルへ戻し、exe の `browser_download_url` を `http://127.0.0.1:8765/capturecard_viewer.exe` に書き換えて、同じサーバーを動かしてから起動する。「更新する」→「キャンセル」でダイアログが閉じ、**すぐに（数秒以内に）**設定 > その他 の「更新する」がまた押せるようになる（以前は 10 分押せなかった。Issue #357）。`.new` は残らない。キャンセルせずに待つと、30 秒で「時間内に受け取れなかった」旨の失敗が出る
 
 ```powershell
 $l = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 8765); $l.Start()
