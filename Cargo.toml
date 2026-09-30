@@ -24,7 +24,10 @@ confy = "0.6"
 # ログのファサード。出力先の実装は src/logging.rs にある
 log = "0.4.34"
 serde = { version = "1.0", features = ["derive"] }
-image = "0.24"
+# スクリーンショットの保存（PNG / JPEG）、埋め込みアイコン（ICO）の読み込み、
+# DirectShow の MJPEG の展開に使う。既定のフィーチャは AVIF のエンコーダ（rav1e）
+# など使わない形式まで引き込むので切り、使う形式だけを足す
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico"] }
 chrono = { version = "0.4", features = ["serde"] }
 rodio = "0.17"
 dirs = "5.0"
