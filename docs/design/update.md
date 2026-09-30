@@ -112,6 +112,7 @@ GitHub の Release から新しい版を見つけて知らせ、人が「更新�
 
 - **どちらかが無ければ `ApplyError::NoAssets`。** 1.1.0 以前の Release は zip しか無いので、ここに当たる。「この版には自動更新用のファイルがありません。リリースページから手動で更新してください」を出し、ダイアログの「リリースページを開く」に倒す
 - 資産の URL は `https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/<tag>/<資産名>` と**完全に一致する**ものしか落とさない（`UnexpectedAssetUrl`）。`release_page_url` と同じ理由で、頭の一致では `..` で別の場所を指せる。GitHub はここから別のホストへリダイレクトし、ureq がそれを辿る
+- **`https://` の URL を取るときは ureq に `https_only` を付け、`http://` へのリダイレクトを辿らない**（`https_only_for`、Issue #365）。問い合わせにも資産にも効く。付かないのはテスト用の問い合わせ先で最初から `http://` を指したときだけ
 - テスト用の問い合わせ先（`CAPTURECARD_VIEWER_UPDATE_API_URL`）を使っているときだけ、`file://` と任意の `http(s)://` を受け付ける（「試すための環境変数」）
 
 ### 手順

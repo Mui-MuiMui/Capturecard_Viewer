@@ -10,7 +10,7 @@
 
 use super::apply::{ApplyControl, ApplyError, CancelWatch};
 use super::assets::AssetSource;
-use super::{tls_config, USER_AGENT};
+use super::{https_only_for, tls_config, USER_AGENT};
 use log::debug;
 use std::fs::File;
 use std::io::{self, Read};
@@ -81,6 +81,7 @@ pub(super) fn open_source(
                 .timeout_connect(Some(CONNECT_TIMEOUT))
                 .timeout_recv_response(Some(CONNECT_TIMEOUT))
                 .timeout_recv_body(Some(limits.body))
+                .https_only(https_only_for(url))
                 .tls_config(tls_config())
                 .user_agent(USER_AGENT)
                 .build();
