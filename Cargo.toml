@@ -59,7 +59,7 @@ tempfile = "3.27"
 toml = "1.1"
 
 [build-dependencies]
-embed-resource = "2.4"
+embed-resource = "3.0"
 
 [target.'cfg(windows)'.dependencies]
 # ウィンドウ位置の復元時にモニタの作業領域を列挙する（src/platform.rs の monitor_work_areas）。
