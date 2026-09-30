@@ -32,7 +32,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::capabilities::AudioCapabilities;
-use super::capture::{ring_buffer_samples, PassthroughRequest};
+use super::capture::{ring_buffer_samples, target_water_level, PassthroughRequest};
 use super::controls::AudioControls;
 use super::convert::PassthroughConverter;
 use super::resample::{ResampleStatus, ResampleTelemetry};
@@ -62,9 +62,6 @@ const TICK: Duration = Duration::from_millis(10);
 /// 1 回に処理する最大の長さ。スレッドが長く止まったあとに一度に
 /// 取り返そうとしないための上限で、超えた分は捨てる
 const MAX_CHUNK: Duration = Duration::from_millis(200);
-/// 出力を入力より遅れて始める時間。実機（`AudioCapture::start_passthrough`）が
-/// 入力を開始してから出力を開始するまでの待ちと同じ
-const OUTPUT_START_DELAY: Duration = Duration::from_millis(50);
 
 /// フェイクの音声デバイスの振る舞い。環境変数から組み立てる
 /// （`app::backend::fake`）。
@@ -252,7 +249,10 @@ impl FakeAudioCapture {
 
         let buffer_size =
             ring_buffer_samples(input_rate, input_channels as usize, request.buffer_ms);
-        let (producer, consumer) = HeapRb::<f32>::new(buffer_size * 2).split();
+        let capacity = buffer_size * 2;
+        // 出力が最初に待つ水位と、クロックドリフト補正が保つ水位（本物と同じ）
+        let target_level = target_water_level(capacity, input_channels as usize);
+        let (producer, consumer) = HeapRb::<f32>::new(capacity).split();
         let producer = Arc::new(Mutex::new(producer));
         let consumer = Arc::new(Mutex::new(consumer));
 
@@ -260,12 +260,15 @@ impl FakeAudioCapture {
         let stream_error = Arc::new(AtomicBool::new(false));
         let underruns = Arc::new(AtomicU32::new(0));
 
+        // 出力は目標水位まで溜まってから取り出し始める。本物と同じく、入力と
+        // 出力のスレッドは同時に起こしてよい
         let converter =
-            PassthroughConverter::new(input_rate, input_channels, output_rate, output_channels);
+            PassthroughConverter::new(input_rate, input_channels, output_rate, output_channels)
+                .with_prebuffer(target_level);
         let resample_telemetry = if converter.is_identity() {
             None
         } else {
-            Some(Arc::new(ResampleTelemetry::new(buffer_size)))
+            Some(Arc::new(ResampleTelemetry::new(target_level)))
         };
         let converter = converter.with_telemetry(resample_telemetry.clone());
 
@@ -471,20 +474,7 @@ fn spawn_named(
 /// `TICK` ごとに起き、開始からの経過時間ぶんに足りない数のフレームを
 /// `on_frames` へ渡す。起きる間隔が揺れても、平均のレートはずれない。
 /// `stop` の送り手が落とされたら抜ける。
-fn run_paced(
-    stop: &Receiver<()>,
-    sample_rate: u32,
-    start_delay: Duration,
-    mut on_frames: impl FnMut(usize),
-) {
-    if !start_delay.is_zero()
-        && !matches!(
-            stop.recv_timeout(start_delay),
-            Err(RecvTimeoutError::Timeout)
-        )
-    {
-        return;
-    }
+fn run_paced(stop: &Receiver<()>, sample_rate: u32, mut on_frames: impl FnMut(usize)) {
     let max_frames = (f64::from(sample_rate) * MAX_CHUNK.as_secs_f64()) as u64;
     let started = Instant::now();
     let mut done: u64 = 0;
@@ -537,7 +527,7 @@ impl SineInput {
             (f64::from(self.sample_rate) * MAX_CHUNK.as_secs_f64()) as usize * channels.max(1);
         let mut buffer = vec![0.0f32; capacity];
         let mut phase = 0.0;
-        run_paced(&stop, self.sample_rate, Duration::ZERO, |frames| {
+        run_paced(&stop, self.sample_rate, |frames| {
             let len = (frames * channels).min(buffer.len());
             let chunk = &mut buffer[..len];
             fill_sine(
@@ -569,7 +559,7 @@ impl DiscardOutput {
         let capacity =
             (f64::from(self.sample_rate) * MAX_CHUNK.as_secs_f64()) as usize * channels.max(1);
         let mut buffer = vec![0.0f32; capacity];
-        run_paced(&stop, self.sample_rate, OUTPUT_START_DELAY, |frames| {
+        run_paced(&stop, self.sample_rate, |frames| {
             let len = (frames * channels).min(buffer.len());
             process_output(
                 &mut buffer[..len],
@@ -728,6 +718,30 @@ mod tests {
         assert_ne!(telemetry.water_level(), target, "出力が水位を書いていない");
         // 溢れていないこと（容量は目標の 2 倍）
         assert!(telemetry.water_level() <= target * 2);
+    }
+
+    #[test]
+    fn fake_audio_output_starts_after_the_ring_reaches_the_target_level() {
+        // Issue #308。出力は、リングバッファが目標水位（バッファ長ぶん）まで溜まってから
+        // 取り出し始める。修正前は入力の開始から 50ms 待って出力を始めていたので、
+        // 200ms にしても水位は 50ms 前後（目標の 25%）で落ち着いていた
+        let mut capture = capture(1, 0);
+        let mut request = request(None, Some("Fake Audio Output 2"));
+        request.buffer_ms = 200;
+        capture.start_passthrough(&request).expect("開ける");
+        let telemetry = Arc::clone(capture.resample_telemetry().expect("変換の経路"));
+        let target = telemetry.target_level();
+
+        // 目標まで溜まるのに 200ms かかる。落ち着くまでもう少し待つ
+        std::thread::sleep(Duration::from_millis(800));
+        let level = telemetry.water_level();
+        capture.stop_capture();
+
+        assert!(
+            level >= target / 2,
+            "水位が目標の半分に届いていない（水位 {level} / 目標 {target}）"
+        );
+        assert!(level <= target * 2);
     }
 
     #[test]

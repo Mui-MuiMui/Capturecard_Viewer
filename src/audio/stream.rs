@@ -192,8 +192,14 @@ pub(super) fn process_output<T: Clone>(
         controls.muted.load(Ordering::Relaxed),
     );
     if let Ok(mut cons) = consumer.try_lock() {
-        // クロックドリフト補正の水位。この呼び出し分を消費する前の値を書く
-        converter.record_water_level(cons.len());
+        // この呼び出し分を消費する前の水位を渡す（クロックドリフト補正の観測と、
+        // 最初の水位に達したかの判定）
+        if !converter.observe_water_level(cons.len()) {
+            // 最初の水位に達するまでは取り出さずに無音を書く。わざと待っているので
+            // アンダーランには数えない
+            data.fill(to_sample(0.0));
+            return;
+        }
         let mut read = |dst: &mut [f32]| pop_whole_frame(&mut cons, dst);
         let starved = render_output_samples(
             data,
@@ -682,6 +688,45 @@ mod tests {
         let mut read = [0.0f32; 4];
         assert_eq!(attachment.consumer.pop_slice(&mut read), 2);
         assert!(producer.lock().expect("ロックできる").is_empty());
+    }
+
+    #[test]
+    fn process_output_writes_silence_until_the_ring_reaches_the_prebuffer() {
+        // Issue #308。最初の水位（ここでは 2 フレーム）まではリングバッファから
+        // 取り出さずに無音を書く。わざと待っているのでアンダーランには数えない
+        let (producer, consumer) = ring(16);
+        let controls = AudioControls::default();
+        let underruns = AtomicU32::new(0);
+        let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2).with_prebuffer(4);
+        let tap = AudioTap::new();
+        let mut data = [9.0f32; 2];
+
+        process_input(&[1.0f32, -1.0], 2, &producer, &tap, |s| s);
+        process_output(
+            &mut data,
+            &consumer,
+            &controls,
+            &mut converter,
+            &underruns,
+            |s| s,
+        );
+        assert_eq!(data, [0.0, 0.0]);
+        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        assert_eq!(underruns.load(Ordering::Relaxed), 0);
+
+        // 目標に達したら、溜まった先頭から出す
+        process_input(&[0.5f32, -0.5], 2, &producer, &tap, |s| s);
+        process_output(
+            &mut data,
+            &consumer,
+            &controls,
+            &mut converter,
+            &underruns,
+            |s| s,
+        );
+        assert_eq!(data, [1.0, -1.0]);
+        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        assert_eq!(underruns.load(Ordering::Relaxed), 0);
     }
 
     #[test]

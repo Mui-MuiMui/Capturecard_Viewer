@@ -105,6 +105,11 @@ pub struct PassthroughConverter {
     /// クロックドリフト補正の共有状態。`None` なら補正しない（無補正の
     /// `1.0` を使い続ける）
     telemetry: Option<Arc<ResampleTelemetry>>,
+    /// 最初の水位（サンプル数）。出力はリングバッファがここまで溜まるまで
+    /// 取り出さずに無音を書く（`observe_water_level`）。0 なら待たない
+    prebuffer_target: usize,
+    /// 最初の水位に達したか。一度立てたら下ろさない
+    primed: bool,
 }
 
 impl PassthroughConverter {
@@ -142,6 +147,8 @@ impl PassthroughConverter {
             channel: 0,
             starved: false,
             telemetry: None,
+            prebuffer_target: 0,
+            primed: true,
         }
     }
 
@@ -157,12 +164,32 @@ impl PassthroughConverter {
         self.identity
     }
 
-    /// 出力コールバックが呼ぶ。リングバッファの水位を書く。
-    /// 補正の対象外（`telemetry` が無い）ストリームでは何もしない。
-    pub fn record_water_level(&self, level: usize) {
+    /// 最初の水位を決める。出力コールバックは、リングバッファが `target` サンプル
+    /// まで溜まるまで取り出さずに無音を書く（`observe_water_level`）。
+    ///
+    /// **これが音声の遅延になる**（`docs/design/audio.md` の「最初の水位」）。
+    /// 0 なら待たない。録画用の変換器（`convert_buffered`）とテストはこちらのまま。
+    pub fn with_prebuffer(mut self, target: usize) -> Self {
+        self.prebuffer_target = target;
+        self.primed = target == 0;
+        self
+    }
+
+    /// 出力コールバックが毎回、この呼び出しで取り出す前のリングバッファの水位を
+    /// 渡す。水位をクロックドリフト補正（`telemetry`）へ書き、リングバッファから
+    /// 取り出してよいかを返す。
+    ///
+    /// 最初の水位（`with_prebuffer`）に達するまでは `false`。**一度達したら、
+    /// 後でアンダーランが起きても待ち直さない。** 待ち直すと、一瞬の途切れが
+    /// そのたびにバッファ長ぶんの無音になる。
+    pub fn observe_water_level(&mut self, level: usize) -> bool {
         if let Some(telemetry) = &self.telemetry {
             telemetry.record_water_level(level);
         }
+        if !self.primed {
+            self.primed = level >= self.prebuffer_target;
+        }
+        self.primed
     }
 
     /// 出力サンプルを 1 つ取り出す。入力が足りなければ `None`。
@@ -602,6 +629,49 @@ mod tests {
         let out = drain_converter(&mut converter, &[0.0, 1.0, 2.0, 3.0]);
 
         assert_eq!(out, vec![0.0, 0.75, 1.5, 2.25]);
+    }
+
+    #[test]
+    fn observe_water_level_waits_until_the_prebuffer_target() {
+        // Issue #308。最初の水位に達するまでは取り出させない
+        let mut converter = PassthroughConverter::new(48000, 2, 48000, 2).with_prebuffer(100);
+
+        assert!(!converter.observe_water_level(0));
+        assert!(!converter.observe_water_level(99));
+        // ちょうど目標で取り出し始める
+        assert!(converter.observe_water_level(100));
+    }
+
+    #[test]
+    fn observe_water_level_does_not_wait_again_after_an_underrun() {
+        // 一度達したら、水位が下がっても（アンダーランしても）待ち直さない。
+        // 待ち直すと一瞬の途切れがバッファ長ぶんの無音になる
+        let mut converter = PassthroughConverter::new(48000, 2, 48000, 2).with_prebuffer(100);
+        assert!(converter.observe_water_level(150));
+
+        assert!(converter.observe_water_level(0));
+        assert!(converter.observe_water_level(10));
+    }
+
+    #[test]
+    fn observe_water_level_without_a_prebuffer_reads_immediately() {
+        // 最初の水位を決めていない（録画用・テスト）なら待たない
+        let mut converter = PassthroughConverter::new(48000, 2, 44100, 2);
+        assert!(converter.observe_water_level(0));
+        let mut converter = PassthroughConverter::new(48000, 2, 44100, 2).with_prebuffer(0);
+        assert!(converter.observe_water_level(0));
+    }
+
+    #[test]
+    fn observe_water_level_records_the_level_for_drift_correction() {
+        // 待っている間も水位は書く（「接続状態」タブで溜まっていく様子が見える）
+        let telemetry = Arc::new(ResampleTelemetry::new(100));
+        let mut converter = PassthroughConverter::new(48000, 2, 44100, 2)
+            .with_telemetry(Some(Arc::clone(&telemetry)))
+            .with_prebuffer(100);
+
+        assert!(!converter.observe_water_level(40));
+        assert_eq!(telemetry.water_level(), 40);
     }
 
     #[test]

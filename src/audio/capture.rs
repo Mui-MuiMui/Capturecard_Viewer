@@ -49,7 +49,7 @@ pub struct PassthroughRequest<'a> {
 ///
 /// 返すのは「目標水位ぶん」のサンプル数で、実際のリングバッファはこの 2 倍を
 /// 確保する。入力が先行しても後れても同じだけ余裕を持たせるためで、
-/// クロックドリフト補正の目標水位（`ResampleTelemetry::new`）もこの値になる。
+/// 目標水位（`target_water_level`）はその半分をフレームの境界へ揃えた値になる。
 ///
 /// フェイクの音声（`super::fake`）も同じ長さで確保する。
 ///
@@ -62,6 +62,28 @@ pub(super) fn ring_buffer_samples(sample_rate: u32, channels: usize, buffer_ms: 
         .saturating_mul(buffer_ms as usize)
         / 1000;
     samples.max(1)
+}
+
+/// 目標水位（サンプル数）を決める。リングバッファの容量（`capacity`）の半分を、
+/// フレーム（`channels` サンプル）の境界へ切り捨てた値。
+///
+/// 出力は最初にリングバッファがここまで溜まるまで取り出さずに待ち
+/// （`PassthroughConverter::with_prebuffer`）、クロックドリフト補正もこの水位を
+/// 保つように動く（`ResampleTelemetry::new`）。**つまりこれが音声の遅延になる。**
+/// 容量は `ring_buffer_samples` の 2 倍なので、設定のバッファ長ぶんに当たる。
+///
+/// - 容量の半分に置くのは、入力が先行しても後れても同じだけ余裕を持たせるため。
+///   20ms のような短い設定でも半分は空いているので、入力の塊（10ms 前後）が
+///   溢れずに入る
+/// - フレームの境界へ揃えるのは、リングバッファがフレーム単位でしか増減しない
+///   ため（`docs/design/audio.md`）。44.1kHz 2ch の 25ms のように半分が奇数に
+///   なる長さでも、届かない水位を目標にしない
+/// - 少なくとも 1 フレーム、多くても容量まで
+pub(super) fn target_water_level(capacity: usize, channels: usize) -> usize {
+    let channels = channels.max(1);
+    (capacity / 2 / channels * channels)
+        .max(channels)
+        .min(capacity)
 }
 
 pub struct AudioCapture {
@@ -277,17 +299,19 @@ impl AudioCapture {
         let sample_rate = input_config.sample_rate().0;
         let channels = input_config.channels() as usize;
         let buffer_size = ring_buffer_samples(sample_rate, channels, buffer_ms);
+        let capacity = buffer_size * 2;
+        // 出力が最初に待つ水位と、クロックドリフト補正が保つ水位。これが遅延になる
+        let target_level = target_water_level(capacity, channels);
 
-        let ring = HeapRb::<f32>::new(buffer_size * 2);
+        let ring = HeapRb::<f32>::new(capacity);
         let (producer, consumer) = ring.split();
 
         let producer = Arc::new(Mutex::new(producer));
         let consumer = Arc::new(Mutex::new(consumer));
 
         debug!(
-            "リングバッファを作成した（{} サンプル、{} ms 相当 × 2）",
-            buffer_size * 2,
-            buffer_ms
+            "リングバッファを作成した（{} サンプル、{} ms 相当 × 2、目標水位 {} サンプル）",
+            capacity, buffer_ms, target_level
         );
 
         // このストリーム専用のエラー旗。開き直すたびに作り直す
@@ -357,7 +381,8 @@ impl AudioCapture {
 
         // 入出力の形が違う場合の変換器。**ここで作る（ストリームの構築時）。**
         // 補間に使うバッファを先に確保しておかないと、出力コールバックの中で
-        // アロケーションが起きる
+        // アロケーションが起きる。出力はリングバッファが目標水位まで溜まって
+        // から取り出し始める（入力と出力を同時に始めてよいのはこのため）
         let make_converter = || {
             PassthroughConverter::new(
                 input_config.sample_rate().0,
@@ -365,9 +390,10 @@ impl AudioCapture {
                 output_config.sample_rate().0,
                 output_config.channels(),
             )
+            .with_prebuffer(target_level)
         };
         // クロックドリフト補正は変換が要る組み合わせだけが対象。目標水位は
-        // リングバッファのちょうど半分（`buffer_size` ぶん）に置く
+        // リングバッファの半分（`target_water_level`）に置く
         let resample_telemetry = if make_converter().is_identity() {
             debug!("入出力の形が同じなので、サンプルはそのまま流す");
             None
@@ -378,7 +404,7 @@ impl AudioCapture {
                 input_config.channels(),
                 output_config.channels()
             );
-            Some(Arc::new(ResampleTelemetry::new(buffer_size)))
+            Some(Arc::new(ResampleTelemetry::new(target_level)))
         };
 
         let output_stream = match output_config.sample_format() {
@@ -430,7 +456,8 @@ impl AudioCapture {
             source: e.to_string(),
         })?;
 
-        // ストリーム開始
+        // ストリーム開始。**入力が溜まるのを sleep で待たない。** 出力コールバックが
+        // 目標水位まで無音を書いて待つので、ここでは続けて開始するだけでよい
         debug!("音声ストリームを開始する");
         input_stream
             .play()
@@ -438,7 +465,6 @@ impl AudioCapture {
                 direction: AudioDirection::Input,
                 source: e.to_string(),
             })?;
-        std::thread::sleep(std::time::Duration::from_millis(50));
         output_stream
             .play()
             .map_err(|e| AudioError::StreamPlayFailed {
@@ -592,5 +618,45 @@ mod tests {
         // HeapRb::new(0) になり 1 サンプルも運べないストリームができる
         assert_eq!(ring_buffer_samples(48_000, 2, 0), 1);
         assert_eq!(ring_buffer_samples(0, 2, 50), 1);
+    }
+
+    #[test]
+    fn target_water_level_is_half_the_capacity() {
+        // 48kHz ステレオの 50ms。容量 9600 の半分 = 4800（設定のバッファ長ぶん）
+        let capacity = ring_buffer_samples(48_000, 2, 50) * 2;
+        assert_eq!(target_water_level(capacity, 2), 4800);
+        // 200ms なら 4 倍
+        let capacity = ring_buffer_samples(48_000, 2, 200) * 2;
+        assert_eq!(target_water_level(capacity, 2), 19_200);
+    }
+
+    #[test]
+    fn target_water_level_for_the_shortest_setting_leaves_half_the_ring_free() {
+        // 20ms（下限）。容量 40ms の半分の 20ms を目標にし、残りの 20ms で
+        // 入力の塊（10ms 前後）を受け止める
+        let capacity = ring_buffer_samples(48_000, 2, 20) * 2;
+        assert_eq!(capacity, 3840);
+        assert_eq!(target_water_level(capacity, 2), 1920);
+    }
+
+    #[test]
+    fn target_water_level_is_aligned_to_whole_frames() {
+        // 44.1kHz ステレオの 25ms は 2205 サンプルで、フレームの途中になる。
+        // リングバッファはフレーム単位でしか増減しないので 2204 へ切り捨てる
+        let capacity = ring_buffer_samples(44_100, 2, 25) * 2;
+        assert_eq!(capacity, 4410);
+        assert_eq!(target_water_level(capacity, 2), 2204);
+        // 6ch でも同じ
+        assert_eq!(target_water_level(100, 6), 48);
+    }
+
+    #[test]
+    fn target_water_level_stays_between_one_frame_and_the_capacity() {
+        // 容量がフレーム 1 つぶんしか無くても、目標は 1 フレーム（0 にすると待たない）
+        assert_eq!(target_water_level(2, 2), 2);
+        // 容量がフレームに満たない（設定側で起きないが）ときは容量を超えない
+        assert_eq!(target_water_level(1, 2), 1);
+        // 0ch は 1ch として扱い、ゼロ除算しない
+        assert_eq!(target_water_level(10, 0), 5);
     }
 }
