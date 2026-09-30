@@ -198,12 +198,19 @@ impl PassthroughConverter {
     /// 最初の水位（`with_prebuffer`）に達するまでは `false`。**一度達したら、
     /// 後でアンダーランが起きても待ち直さない。** 待ち直すと、一瞬の途切れが
     /// そのたびにバッファ長ぶんの無音になる。
+    ///
+    /// 補正を決める観測の窓（`ResampleTelemetry::add_to_window`）へ足すのは、
+    /// 最初の水位に達してから。溜めている途中の低い水位を混ぜると、目標に
+    /// 着いた直後に不要な減速の補正が掛かる。
     pub fn observe_water_level(&mut self, level: usize) -> bool {
-        if let Some(telemetry) = &self.telemetry {
-            telemetry.record_water_level(level);
-        }
         if !self.primed {
             self.primed = level >= self.prebuffer_target;
+        }
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.record_water_level(level);
+            if self.primed {
+                telemetry.add_to_window(level);
+            }
         }
         self.primed
     }
@@ -734,6 +741,25 @@ mod tests {
 
         assert!(!converter.observe_water_level(40));
         assert_eq!(telemetry.water_level(), 40);
+    }
+
+    #[test]
+    fn observe_water_level_adds_to_the_window_only_after_the_prebuffer() {
+        // 溜めている途中の低い水位を補正の窓へ混ぜない。混ぜると目標に着いた
+        // 直後に「水位が低い」と読んで減速の補正が掛かる
+        let telemetry = Arc::new(ResampleTelemetry::new(100));
+        let mut converter = PassthroughConverter::new(48000, 2, 44100, 2)
+            .with_telemetry(Some(Arc::clone(&telemetry)))
+            .with_prebuffer(100);
+
+        converter.observe_water_level(20);
+        converter.observe_water_level(60);
+        converter.observe_water_level(100);
+        converter.observe_water_level(110);
+
+        let window = telemetry.take_window();
+        assert_eq!(window.count(), 2);
+        assert_eq!(window.mean(), Some(105));
     }
 
     #[test]
