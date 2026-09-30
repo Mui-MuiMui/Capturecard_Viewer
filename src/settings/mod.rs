@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(settings.screenshot.sound_volume, 100.0);
         assert_eq!(settings.screenshot.format, ScreenshotFormat::Jpeg);
         assert_eq!(settings.screenshot.jpeg_quality, 90);
-        // 既存ユーザーの設定にも保存されている値。screenshot::resolve_sound_path が
+        // 既存ユーザーの設定にも保存されている値。screenshot_sound::resolve_sound_path が
         // exe の置き場所を基準に解決する前提になっている
         assert_eq!(
             settings.screenshot.sound_file,
