@@ -49,7 +49,7 @@ cargo build --release
 | `src/app/retry.rs` | `ConnectRetry` とバックオフ。「いつ試してよいか」だけを持つ。ワーカーが持つ |
 | `src/app/capabilities.rs` | デバイス一覧のキャッシュと、デバイス能力・対応設定の取得要求（ワーカーへ流すところまで） |
 | `src/app/screenshot.rs` | 撮影、保存スレッドの管理、結果の取り込み |
-| `src/app/screenshot_sound.rs` | 効果音ファイルの読み込みスレッドの管理と結果の取り込み（適用・テスト再生） |
+| `src/app/screenshot_sound.rs` | 効果音ファイルの読み込みスレッドの管理と結果の取り込み（適用・テスト再生）、効果音の再生と出力先を開けなかったときの報告 |
 | `src/app/recording.rs` | 録画の開始・停止（`toggle_recording`、右クリックメニューとホットキーが呼ぶ）、リプレイバッファの設定を録画スレッドへ渡す（`sync_replay_buffer`、`apply_settings` が呼ぶ）、録画スレッドから届いた `RecordingEvent` の取り込み（ログ・トースト・`report_error`）、終了時の停止と `Finalize` の待ち合わせ、録画中の印と統計 OSD の録画の行。フィールド（`recorder`）は `app/mod.rs` |
 | `src/app/settings_dialog.rs` | 設定ダイアログの操作の受け止め、インポート / エクスポート / 初期化、プリセットの適用 |
 | `src/app/settings_store.rs` | 設定のデバウンス保存と即時保存 |
