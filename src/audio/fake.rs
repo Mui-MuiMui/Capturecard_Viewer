@@ -547,7 +547,7 @@ impl SineInput {
                 self.frequency_hz,
                 &mut phase,
             );
-            process_input(chunk, &self.producer, &self.tap, |sample| sample);
+            process_input(chunk, channels, &self.producer, &self.tap, |sample| sample);
         });
         debug!("フェイクの音声入力のスレッドを終えた");
     }
