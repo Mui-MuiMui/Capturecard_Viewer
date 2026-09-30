@@ -72,10 +72,12 @@ pub(super) fn f32_to_i32(sample: f32) -> i32 {
 /// 厳密には一致しないこと）は、リングバッファの水位に応じてレート比を
 /// ±0.1% の範囲でわずかに動かして吸収する（`ResampleTelemetry`、
 /// `decide_resample_correction`）。水位の観測とレート比の書き換えは別スレッド
-/// （デバイスワーカー、`app::worker_loop`）が数秒ごとに行うので、ここは
-/// 読み出すだけ。
+/// （デバイスワーカー、`app::worker_timers`）が数秒ごとに行うので、ここは
+/// 読み出すだけ。**入出力の形が揃っていても、補正の共有状態を紐づけたら
+/// 補間の経路（step 1.0 × 補正係数）を通る**（`copies_frames`）。
 pub struct PassthroughConverter {
-    /// 入出力が同じ形なので変換が要らない。リングバッファの値をそのまま出す
+    /// 入出力が同じ形（レートもチャンネル数も同じ）。補正の共有状態が無ければ
+    /// リングバッファの値をそのまま出す（`copies_frames`）
     identity: bool,
     in_channels: usize,
     out_channels: usize,
@@ -92,7 +94,7 @@ pub struct PassthroughConverter {
     /// 入力が尽きても読んだフレームは捨てず、続きから読む
     loaded: u8,
     /// 組み立て済みの出力フレーム。長さは `out_channels`。
-    /// identity 経路では、リングバッファから読んだ入力フレームをそのまま置く
+    /// そのまま出す経路（`copies_frames`）では、リングバッファから読んだ入力フレームを置く
     frame: Vec<f32>,
     /// `frame` の中で次に返すチャンネル
     channel: usize,
@@ -129,9 +131,9 @@ impl PassthroughConverter {
             f64::from(input_sample_rate) / f64::from(output_sample_rate)
         };
 
-        // 揃っている場合は補間も再配置も要らない。**この経路を残すのは、
-        // 揃えて開けた場合（`select_aligned_configs`）に従来どおり
-        // リングバッファの値をそのまま出すため。**
+        // 揃っている場合は補間も再配置も要らない。**補正の共有状態を紐づけない
+        // 変換器（録画用の `convert_buffered`）は、この場合リングの値をそのまま出す。**
+        // 出力コールバックの変換器は補正を紐づけるので、揃っていても補間を通る
         let identity = in_channels == out_channels && input_sample_rate == output_sample_rate;
 
         Self {
@@ -152,16 +154,30 @@ impl PassthroughConverter {
         }
     }
 
-    /// クロックドリフト補正の共有状態を紐づける。`None` なら補正しない
-    /// （入出力の形が揃っている場合はこちらのまま使う）。
+    /// クロックドリフト補正の共有状態を紐づける。`None` なら補正しない。
+    ///
+    /// **紐づけると、入出力の形が揃っていても補間の経路を通る**（Issue #308）。
+    /// 公称レートが同じでも入出力は別の時計で動くので、揃っている組み合わせにも
+    /// 補正が要る。step は 1.0 のままで、補正係数だけがレート比を動かす。
+    /// 係数が 1.0 のうちは補間の位置が 0 に留まり、入力の値がそのまま出る。
     pub fn with_telemetry(mut self, telemetry: Option<Arc<ResampleTelemetry>>) -> Self {
         self.telemetry = telemetry;
         self
     }
 
-    /// 変換が要らない組み合わせか。ログとテストのための問い合わせ。
+    /// 入出力の形が揃っている組み合わせか。ログとテストのための問い合わせ。
+    /// 揃っていても、補正の共有状態を紐づけていれば補間を通る（`copies_frames`）。
     pub fn is_identity(&self) -> bool {
         self.identity
+    }
+
+    /// リングバッファの入力フレームを補間せずにそのまま出すか。
+    ///
+    /// 形が揃っていて、かつクロックドリフト補正を紐づけていないときだけ。
+    /// 録画用の変換器（`convert_buffered`、録画スレッドが持つ）がこれに当たる。
+    /// 録画は補正を使わないので、揃っていれば従来どおり素通しにする。
+    fn copies_frames(&self) -> bool {
+        self.identity && self.telemetry.is_none()
     }
 
     /// 最初の水位を決める。出力コールバックは、リングバッファが `target` サンプル
@@ -202,8 +218,8 @@ impl PassthroughConverter {
     pub fn next_sample(&mut self, read_frame: &mut impl FnMut(&mut [f32]) -> bool) -> Option<f32> {
         // 出力フレームの先頭でだけ入力を読む。途中で読むとチャンネルがずれる
         if self.channel == 0 {
-            self.starved = if self.identity {
-                // 揃っている組み合わせでは入力フレームがそのまま出力フレームになる
+            self.starved = if self.copies_frames() {
+                // 揃っていて補正もしないなら、入力フレームがそのまま出力フレームになる
                 !read_frame(&mut self.frame)
             } else {
                 // 尽きても読み込み済みのフレームと位置は残し、次の呼び出しで続きから読む
@@ -234,7 +250,7 @@ impl PassthroughConverter {
     pub fn convert_buffered(&mut self, input: &mut VecDeque<f32>, output: &mut Vec<f32>) {
         // レート比が 0 以下だと入力を読まずに出力し続けてしまう。形は録画側が
         // 0 を弾いてから渡すので来ないが、無限に回らないよう止める
-        if !self.identity && self.step <= 0.0 {
+        if !self.copies_frames() && self.step <= 0.0 {
             return;
         }
         while input.len() >= self.input_needed_for_next_frame() {
@@ -251,7 +267,7 @@ impl PassthroughConverter {
 
     /// 次の出力フレームを組み立てるのに読む入力サンプル数。出力フレームの境界で呼ぶ。
     fn input_needed_for_next_frame(&self) -> usize {
-        if self.identity {
+        if self.copies_frames() {
             return self.in_channels;
         }
         // 読み込み前なら補間の両端のうち足りない分。読み込み後は、位置が `next` を
@@ -629,6 +645,52 @@ mod tests {
         let out = drain_converter(&mut converter, &[0.0, 1.0, 2.0, 3.0]);
 
         assert_eq!(out, vec![0.0, 0.75, 1.5, 2.25]);
+    }
+
+    #[test]
+    fn passthrough_converter_same_shape_with_telemetry_is_bit_exact_while_uncorrected() {
+        // Issue #308。揃っている組み合わせも補正のために補間の経路へ載せる。
+        // 補正係数が 1.0 のうちは補間の位置が 0 に留まり、入力の値がそのまま出る
+        let telemetry = Arc::new(ResampleTelemetry::new(10));
+        let mut converter =
+            PassthroughConverter::new(48000, 2, 48000, 2).with_telemetry(Some(telemetry));
+        assert!(converter.is_identity());
+        let input = [0.1, -0.1, 0.2, -0.2, 0.3, -0.3, 0.4, -0.4];
+
+        let out = drain_converter(&mut converter, &input);
+
+        // 補間の右端を先読みするぶん、最後の 1 フレームはまだ出ない
+        assert_eq!(out, input[..6].to_vec());
+    }
+
+    #[test]
+    fn passthrough_converter_same_shape_with_telemetry_follows_the_correction() {
+        // 補正係数が 1.0 より小さければ、揃っていても出力フレームあたりの入力の
+        // 消費が減る（入力が遅いときにリングを枯らさない）。修正前は揃っている
+        // 組み合わせに補正の経路が無く、係数を書いても効かなかった
+        let telemetry = Arc::new(ResampleTelemetry::new(10));
+        telemetry.set_correction(0.5);
+        let mut converter =
+            PassthroughConverter::new(48000, 1, 48000, 1).with_telemetry(Some(telemetry));
+
+        let out = drain_converter(&mut converter, &[0.0, 1.0, 2.0]);
+
+        // 実効の step は 0.5。入力 3 フレームから、間を補間した 4 フレームが出る
+        assert_eq!(out, vec![0.0, 0.5, 1.0, 1.5]);
+    }
+
+    #[test]
+    fn passthrough_converter_same_shape_without_telemetry_still_copies_frames() {
+        // 録画用の変換器は補正を紐づけないので、揃っていれば従来どおり素通し。
+        // 補間の右端を待たずに、届いたフレームをすぐ出す
+        let mut converter = PassthroughConverter::new(48000, 2, 48000, 2);
+        let mut input: VecDeque<f32> = [0.5, -0.5].into_iter().collect();
+        let mut output = Vec::new();
+
+        converter.convert_buffered(&mut input, &mut output);
+
+        assert_eq!(output, vec![0.5, -0.5]);
+        assert!(input.is_empty());
     }
 
     #[test]

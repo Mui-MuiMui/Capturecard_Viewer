@@ -55,9 +55,8 @@ impl WorkerState {
     /// 音声のクロックドリフト補正。水位を見て、レート比の補正係数を
     /// `RESAMPLE_CORRECTION_INTERVAL` ごとに動かす。
     ///
-    /// **揃っている組み合わせ（identity）では何もしない。** `resample_telemetry`
-    /// は変換が要る場合しか作らないので、まだ音声を開いていない場合も含めて
-    /// ここで早期に諦める。
+    /// 入出力の形が揃っている組み合わせも対象（Issue #308）。まだ音声を
+    /// 開いていなければ `resample_telemetry` が無いので、ここで早期に諦める。
     fn adjust_resample_correction(&mut self, now: Instant) {
         let Some(telemetry) = self.audio.resample_telemetry() else {
             return;
@@ -74,9 +73,7 @@ impl WorkerState {
 
         let water_level = telemetry.water_level();
         let target_level = telemetry.target_level();
-        // ここへ来る時点で identity ではないと分かっているので false 固定。
-        // 純粋関数側の identity 判定は主にテストのための引数
-        let ratio = audio::decide_resample_correction(false, water_level, target_level);
+        let ratio = audio::decide_resample_correction(water_level, target_level);
         telemetry.set_correction(ratio);
         if (ratio - 1.0).abs() > f32::EPSILON {
             debug!(

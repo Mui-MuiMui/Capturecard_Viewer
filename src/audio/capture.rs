@@ -98,9 +98,9 @@ pub struct AudioCapture {
     /// 録画へ回す差し込み口。`controls` と同じく開き直しても差し替えない。
     /// 入力の形と開き直しの番号は、ストリームを開くたびに書く
     tap: AudioTap,
-    /// クロックドリフト補正の共有状態。変換が要らない（identity）、または
-    /// まだ音声を開いていなければ `None`。デバイスワーカーが `tick` の中で
-    /// 数秒ごとに読み書きする（`app::worker_loop`）
+    /// クロックドリフト補正の共有状態。まだ音声を開いていなければ `None`。
+    /// 入出力の形が揃っていても作る（Issue #308）。デバイスワーカーが `tick` の中で
+    /// 数秒ごとに読み書きする（`app::worker_timers`）
     resample_telemetry: Option<Arc<ResampleTelemetry>>,
     // 稼働中のストリームでエラーが起きたことを表す旗。
     //
@@ -392,11 +392,11 @@ impl AudioCapture {
             )
             .with_prebuffer(target_level)
         };
-        // クロックドリフト補正は変換が要る組み合わせだけが対象。目標水位は
-        // リングバッファの半分（`target_water_level`）に置く
-        let resample_telemetry = if make_converter().is_identity() {
-            debug!("入出力の形が同じなので、サンプルはそのまま流す");
-            None
+        // クロックドリフト補正は**入出力の形が揃っていても行う**（Issue #308）。
+        // 公称レートが同じでも、キャプチャーカードと出力デバイスは別の時計で動く。
+        // 目標水位はリングバッファの半分（`target_water_level`）に置く
+        if make_converter().is_identity() {
+            debug!("入出力の形が同じなので変換しない（クロックドリフト補正だけ行う）");
         } else {
             info!(
                 "入出力の形が違うので変換する - レート比: {:.4}、チャンネル: {} -> {}",
@@ -404,8 +404,8 @@ impl AudioCapture {
                 input_config.channels(),
                 output_config.channels()
             );
-            Some(Arc::new(ResampleTelemetry::new(target_level)))
-        };
+        }
+        let resample_telemetry = Some(Arc::new(ResampleTelemetry::new(target_level)));
 
         let output_stream = match output_config.sample_format() {
             SampleFormat::F32 => build_output_stream_with::<f32>(
@@ -502,9 +502,8 @@ impl AudioCapture {
         self.active.clone()
     }
 
-    /// クロックドリフト補正の共有状態。変換が要らない（identity）、または
-    /// まだ音声を開いていなければ `None`。デバイスワーカーが `tick` の中で
-    /// 水位を読み、補正係数を書く
+    /// クロックドリフト補正の共有状態。まだ音声を開いていなければ `None`。
+    /// デバイスワーカーが `tick` の中で水位を読み、補正係数を書く
     pub fn resample_telemetry(&self) -> Option<&Arc<ResampleTelemetry>> {
         self.resample_telemetry.as_ref()
     }

@@ -27,15 +27,13 @@ const RESAMPLE_MAX_CORRECTION: f32 = 0.001;
 /// 水位が目標より高い（溜まっている）ときは 1.0 より大きくして出力側の
 /// 消費を早め、低い（枯れかけている）ときは 1.0 より小さくして消費を遅らせる。
 ///
-/// - `is_identity`（入出力の形が揃っている）が真なら常に `1.0`
+/// 入出力の形が揃っている組み合わせも対象にする（Issue #308）。公称レートが
+/// 同じでも入出力は別の時計で動くので、揃っていることは補正を省く理由にならない。
+///
 /// - 相対誤差が `RESAMPLE_DEAD_ZONE_RATIO` 未満なら `1.0`（目標付近では変えない）
 /// - 相対誤差が `RESAMPLE_SATURATION_RATIO` 以上は `RESAMPLE_MAX_CORRECTION` に頭打ち
-pub(crate) fn decide_resample_correction(
-    is_identity: bool,
-    water_level: usize,
-    target_level: usize,
-) -> f32 {
-    if is_identity || target_level == 0 {
+pub(crate) fn decide_resample_correction(water_level: usize, target_level: usize) -> f32 {
+    if target_level == 0 {
         return 1.0;
     }
 
@@ -57,8 +55,9 @@ pub(crate) fn decide_resample_correction(
 /// 毎回書き、補正係数はデバイスワーカーが数秒ごとに書く（`AudioControls` の
 /// 音量と同じ、ビット表現のまま出し入れする流儀）。
 ///
-/// **入出力の形が揃っている（identity）ストリームでは作らない。** 補正の
-/// しようがないので、水位を追う意味がない。
+/// **入出力の形が揃っているストリームでも作る**（Issue #308）。以前は
+/// 「補正のしようがない」として作らなかったが、揃っていても補間の経路
+/// （step 1.0 × 補正係数）に載せれば補正できる。
 #[derive(Debug)]
 pub struct ResampleTelemetry {
     /// リングバッファの水位（サンプル数、インターリーブ）
@@ -123,30 +122,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decide_resample_correction_identity_stays_at_one() {
-        // 揃っている組み合わせでは、水位がどれだけずれていても補正しない
-        assert_eq!(decide_resample_correction(true, 10_000, 500), 1.0);
-    }
-
-    #[test]
     fn decide_resample_correction_zero_target_returns_identity() {
         // 理論上は到達しない（target_level は buffer_size から作る）が、
         // ゼロ除算を避ける防御として 1.0 に倒す
-        assert_eq!(decide_resample_correction(false, 100, 0), 1.0);
+        assert_eq!(decide_resample_correction(100, 0), 1.0);
     }
 
     #[test]
     fn decide_resample_correction_near_target_does_not_change() {
-        assert_eq!(decide_resample_correction(false, 500, 500), 1.0);
+        assert_eq!(decide_resample_correction(500, 500), 1.0);
         // 目標の 1% 未満のずれはデッドゾーン内
-        assert_eq!(decide_resample_correction(false, 504, 500), 1.0);
-        assert_eq!(decide_resample_correction(false, 496, 500), 1.0);
+        assert_eq!(decide_resample_correction(504, 500), 1.0);
+        assert_eq!(decide_resample_correction(496, 500), 1.0);
     }
 
     #[test]
     fn decide_resample_correction_buffer_too_full_speeds_up() {
         // 水位が目標を上回る（溜まっている）ときは 1.0 より大きくして早く消費する
-        let ratio = decide_resample_correction(false, 600, 500);
+        let ratio = decide_resample_correction(600, 500);
         assert!(ratio > 1.0, "{ratio}");
         assert!(ratio <= 1.0 + RESAMPLE_MAX_CORRECTION, "{ratio}");
     }
@@ -154,7 +147,7 @@ mod tests {
     #[test]
     fn decide_resample_correction_buffer_too_empty_slows_down() {
         // 水位が目標を下回る（枯れかけている）ときは 1.0 より小さくして消費を遅らせる
-        let ratio = decide_resample_correction(false, 400, 500);
+        let ratio = decide_resample_correction(400, 500);
         assert!(ratio < 1.0, "{ratio}");
         assert!(ratio >= 1.0 - RESAMPLE_MAX_CORRECTION, "{ratio}");
     }
@@ -163,11 +156,11 @@ mod tests {
     fn decide_resample_correction_saturates_at_the_bound() {
         // 目標から大きく外れていても ±0.1% を超えない
         assert_eq!(
-            decide_resample_correction(false, 10_000, 500),
+            decide_resample_correction(10_000, 500),
             1.0 + RESAMPLE_MAX_CORRECTION
         );
         assert_eq!(
-            decide_resample_correction(false, 1, 500),
+            decide_resample_correction(1, 500),
             1.0 - RESAMPLE_MAX_CORRECTION
         );
     }
@@ -175,8 +168,8 @@ mod tests {
     #[test]
     fn decide_resample_correction_scales_between_dead_zone_and_saturation() {
         // デッドゾーンと頭打ちの間では、ずれの大きさに応じて滑らかに動く
-        let small = decide_resample_correction(false, 525, 500); // 相対誤差 5%
-        let large = decide_resample_correction(false, 550, 500); // 相対誤差 10%（頭打ち）
+        let small = decide_resample_correction(525, 500); // 相対誤差 5%
+        let large = decide_resample_correction(550, 500); // 相対誤差 10%（頭打ち）
         assert!(small > 1.0 && small < large, "{small} {large}");
         assert_eq!(large, 1.0 + RESAMPLE_MAX_CORRECTION);
     }

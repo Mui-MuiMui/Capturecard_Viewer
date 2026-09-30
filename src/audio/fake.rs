@@ -265,11 +265,8 @@ impl FakeAudioCapture {
         let converter =
             PassthroughConverter::new(input_rate, input_channels, output_rate, output_channels)
                 .with_prebuffer(target_level);
-        let resample_telemetry = if converter.is_identity() {
-            None
-        } else {
-            Some(Arc::new(ResampleTelemetry::new(target_level)))
-        };
+        // 入出力の形が揃っていても補正する（本物と同じ、Issue #308）
+        let resample_telemetry = Some(Arc::new(ResampleTelemetry::new(target_level)));
         let converter = converter.with_telemetry(resample_telemetry.clone());
 
         // 録画へ入力の形と開き直しを知らせる。入力のスレッドを起こす前に書く（本物と同じ）
@@ -669,13 +666,15 @@ mod tests {
         assert_eq!(active.output_device, "Fake Audio Output 1");
         assert_eq!(active.input_summary(), "48000Hz 2ch");
         assert_eq!(active.output_summary(), "48000Hz 2ch");
-        // 揃っているので補正の対象にならない（実機と同じ）
-        assert!(capture.resample_telemetry().is_none());
-        assert!(capture.resample_status().is_none());
+        // 揃っていてもクロックドリフト補正の対象になる（実機と同じ、Issue #308）
+        let status = capture.resample_status().expect("揃っていても補正の対象");
+        assert_eq!(status.target_level, 4800);
+        assert_eq!(status.ratio, 1.0);
         assert!(capture.underrun_count().is_some());
 
         capture.stop_capture();
         assert!(capture.active().is_none());
+        assert!(capture.resample_status().is_none());
         assert!(capture.underrun_count().is_none());
     }
 
