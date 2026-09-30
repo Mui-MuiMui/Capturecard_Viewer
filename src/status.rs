@@ -60,11 +60,12 @@ pub enum ErrorSource {
     /// 登録できないものが 1 つでも残っていれば通知し、すべて登録できたら
     /// `ErrorCenter::clear` で取り下げる
     Hotkey,
-    /// 設定ダイアログの「その他」タブから行う設定ファイルの書き出しと読み込み。
+    /// 設定ファイルの読み書き。`%AppData%` の設定ファイルの保存と、
+    /// 設定ダイアログの「その他」タブから行う書き出しと読み込み。
     ///
-    /// **`%AppData%` の設定ファイルの保存はここに含めない。** そちらは
-    /// ユーザーが場所を選ぶものではなく、失敗してもログに残す扱いのまま。
-    /// ここで扱うのはユーザーが選んだファイルに対する操作だけ
+    /// 保存の失敗を記録するのは `app::settings_store`。同じ理由の失敗が
+    /// 続く間は初回だけ記録し、保存できたら `ErrorCenter::clear` で取り下げる
+    /// （Issue #317）
     Settings,
     /// 更新の確認（GitHub の Release への問い合わせ）。
     ///
@@ -296,6 +297,17 @@ pub fn format_underrun_count(count: Option<u32>) -> String {
     match count {
         Some(count) => i18n::underrun_count(count),
         None => Text::UnderrunUnknown.get().to_string(),
+    }
+}
+
+/// 「接続状態」タブへ出す、入力がリングバッファの満杯で捨てたフレーム数の行。
+///
+/// `DeviceSnapshot.audio_dropped_frames` をそのまま渡す。音声を開いていない
+/// （`None`）ときは `format_underrun_count` と同じく「-」を出す（Issue #350）。
+pub fn format_dropped_frame_count(count: Option<u32>) -> String {
+    match count {
+        Some(count) => i18n::dropped_frame_count(count),
+        None => Text::DroppedFramesUnknown.get().to_string(),
     }
 }
 
@@ -670,6 +682,19 @@ mod tests {
         // 音声を開いていない間に 0 と出すと、開いていて一度も途切れて
         // いない状態と読み分けられない
         assert_eq!(format_underrun_count(None), "アンダーラン: -");
+    }
+
+    #[test]
+    fn format_dropped_frame_count_shows_the_number_or_a_dash() {
+        assert_eq!(
+            format_dropped_frame_count(Some(0)),
+            "満杯で捨てた: 0 フレーム"
+        );
+        assert_eq!(
+            format_dropped_frame_count(Some(480)),
+            "満杯で捨てた: 480 フレーム"
+        );
+        assert_eq!(format_dropped_frame_count(None), "満杯で捨てた: -");
     }
 
     #[test]

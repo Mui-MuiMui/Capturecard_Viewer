@@ -248,10 +248,6 @@ impl AudioBackend for AudioCapture {
         AudioCapture::list_output_devices(self)
     }
 
-    fn default_input_device_name(&self) -> Option<String> {
-        AudioCapture::default_input_device_name(self)
-    }
-
     fn default_output_device_name(&self) -> Option<String> {
         AudioCapture::default_output_device_name(self)
     }
@@ -288,6 +284,10 @@ impl AudioBackend for AudioCapture {
 
     fn underrun_count(&self) -> Option<u32> {
         AudioCapture::underrun_count(self)
+    }
+
+    fn dropped_frame_count(&self) -> Option<u32> {
+        AudioCapture::dropped_frame_count(self)
     }
 
     fn take_stream_error(&self) -> bool {

@@ -123,6 +123,9 @@ pub struct AudioCapture {
     /// 差し替えて 0 から数え直す。使い回すと、閉じたストリームが最後に数えた分が
     /// 開き直した直後の値として残ってしまう
     underruns: Arc<AtomicU32>,
+    /// 入力コールバックがリングバッファの満杯で捨てたフレーム数（Issue #350）。
+    /// `underruns` と同じく、開き直すたびに新しい `Arc` へ差し替えて 0 から数え直す
+    dropped_frames: Arc<AtomicU32>,
 }
 
 impl AudioCapture {
@@ -145,6 +148,7 @@ impl AudioCapture {
             resample_telemetry: None,
             stream_error: Arc::new(AtomicBool::new(false)),
             underruns: Arc::new(AtomicU32::new(0)),
+            dropped_frames: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -176,17 +180,11 @@ impl AudioCapture {
         }
     }
 
-    /// Windows 側の既定の入力デバイス名。取得できなければ `None`。
+    /// Windows 側の既定の出力デバイス名。取得できなければ `None`。
     ///
     /// 「既定のデバイス」設定が Windows 側の切り替えに追従しているかを
     /// 確認するために呼ぶ（3〜5 秒おき）。ストリームは開かないので
-    /// `list_input_devices` より軽いが、COM を伴うため毎フレームは避ける。
-    pub fn default_input_device_name(&self) -> Option<String> {
-        self.host.default_input_device()?.name().ok()
-    }
-
-    /// Windows 側の既定の出力デバイス名。取得できなければ `None`。
-    /// 意図は `default_input_device_name` と同じ。
+    /// `list_output_devices` より軽いが、COM を伴うため毎フレームは避ける。
     pub fn default_output_device_name(&self) -> Option<String> {
         self.host.default_output_device()?.name().ok()
     }
@@ -318,6 +316,8 @@ impl AudioCapture {
         let stream_error = Arc::new(AtomicBool::new(false));
         // アンダーランの数え手も同じく作り直す（開き直したら 0 から）
         let underruns = Arc::new(AtomicU32::new(0));
+        // 満杯で捨てたフレームの数え手も同じく作り直す
+        let dropped_frames = Arc::new(AtomicU32::new(0));
 
         // 録画へ入力の形と開き直しを知らせる。**入力のコールバックが動き出す前に書く。**
         // 録画スレッドはここを境に、前のストリームのサンプルと分けて扱う
@@ -333,6 +333,7 @@ impl AudioCapture {
                 producer.clone(),
                 self.tap.clone(),
                 stream_error.clone(),
+                dropped_frames.clone(),
                 |sample| sample,
             ),
             SampleFormat::I16 => build_input_stream_with::<i16>(
@@ -341,6 +342,7 @@ impl AudioCapture {
                 producer.clone(),
                 self.tap.clone(),
                 stream_error.clone(),
+                dropped_frames.clone(),
                 i16_to_f32,
             ),
             SampleFormat::U16 => build_input_stream_with::<u16>(
@@ -349,6 +351,7 @@ impl AudioCapture {
                 producer.clone(),
                 self.tap.clone(),
                 stream_error.clone(),
+                dropped_frames.clone(),
                 u16_to_f32,
             ),
             SampleFormat::I32 => build_input_stream_with::<i32>(
@@ -357,6 +360,7 @@ impl AudioCapture {
                 producer.clone(),
                 self.tap.clone(),
                 stream_error.clone(),
+                dropped_frames.clone(),
                 i32_to_f32,
             ),
             other => {
@@ -480,6 +484,7 @@ impl AudioCapture {
         self.resample_telemetry = resample_telemetry;
         // 数え手も、いま開いたストリームのものへ差し替える
         self.underruns = underruns;
+        self.dropped_frames = dropped_frames;
         // 接続状態の表示用に、実際に開いた内容を控える
         self.active = Some(ActiveAudio {
             input_device: input_device_name,
@@ -529,6 +534,14 @@ impl AudioCapture {
             .map(|_| self.underruns.load(Ordering::Relaxed))
     }
 
+    /// 「接続状態」タブへ出す、入力がリングバッファの満杯で捨てたフレーム数の累計。
+    /// `underrun_count` と同じく、開いていなければ `None`
+    pub fn dropped_frame_count(&self) -> Option<u32> {
+        self.active
+            .as_ref()
+            .map(|_| self.dropped_frames.load(Ordering::Relaxed))
+    }
+
     pub fn stop_capture(&mut self) {
         self.active = None;
         self.resample_telemetry = None;
@@ -543,6 +556,7 @@ impl AudioCapture {
         self.stream_error = Arc::new(AtomicBool::new(false));
         // 同じ理由で、数え手も新しいものへ差し替える
         self.underruns = Arc::new(AtomicU32::new(0));
+        self.dropped_frames = Arc::new(AtomicU32::new(0));
     }
 
     /// 稼働中のストリームでエラーが起きていたかを返し、旗を下ろす。

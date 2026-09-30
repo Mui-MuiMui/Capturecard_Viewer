@@ -233,10 +233,6 @@ impl AudioBackend for FakeAudioCapture {
         FakeAudioCapture::list_output_devices(self)
     }
 
-    fn default_input_device_name(&self) -> Option<String> {
-        FakeAudioCapture::default_input_device_name(self)
-    }
-
     fn default_output_device_name(&self) -> Option<String> {
         FakeAudioCapture::default_output_device_name(self)
     }
@@ -271,6 +267,10 @@ impl AudioBackend for FakeAudioCapture {
 
     fn underrun_count(&self) -> Option<u32> {
         FakeAudioCapture::underrun_count(self)
+    }
+
+    fn dropped_frame_count(&self) -> Option<u32> {
+        FakeAudioCapture::dropped_frame_count(self)
     }
 
     fn take_stream_error(&self) -> bool {

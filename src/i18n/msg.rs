@@ -319,6 +319,14 @@ pub fn settings_import_failed(path: impl Display, source: impl Display) -> Strin
     }
 }
 
+/// 保存先（`%AppData%` の設定ファイル）の置き場所が分からない。
+pub fn settings_location_unavailable(source: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("保存先が分からない: {source}"),
+        Language::English => format!("Cannot determine where to save: {source}"),
+    }
+}
+
 // ---- 接続状態（status.rs） ----
 
 pub fn resample_ratio(ratio: f32) -> String {
@@ -340,6 +348,13 @@ pub fn underrun_count(count: u32) -> String {
     match language() {
         Language::Japanese => format!("アンダーラン: {count} 回"),
         Language::English => format!("Underruns: {count}"),
+    }
+}
+
+pub fn dropped_frame_count(count: u32) -> String {
+    match language() {
+        Language::Japanese => format!("満杯で捨てた: {count} フレーム"),
+        Language::English => format!("Dropped (buffer full): {count} frames"),
     }
 }
 

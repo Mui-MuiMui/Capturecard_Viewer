@@ -130,8 +130,7 @@ pub(super) trait AudioBackend {
     fn list_input_devices(&self) -> Vec<String>;
     fn list_output_devices(&self) -> Vec<String>;
 
-    /// Windows 側の既定デバイス名。切り替えの追従に使う（`super::worker_timers`）
-    fn default_input_device_name(&self) -> Option<String>;
+    /// Windows 側の既定の出力デバイス名。切り替えの追従に使う（`super::worker_timers`）
     fn default_output_device_name(&self) -> Option<String>;
 
     /// デバイスが対応するサンプリングレートとチャンネル数
@@ -162,6 +161,9 @@ pub(super) trait AudioBackend {
 
     /// 出力のアンダーラン累計。開いていなければ `None`
     fn underrun_count(&self) -> Option<u32>;
+
+    /// 入力がリングバッファの満杯で捨てたフレーム数の累計。開いていなければ `None`
+    fn dropped_frame_count(&self) -> Option<u32>;
 
     /// ストリームのエラー旗を読んで落とす。**読んだ時点で下りる**ので、
     /// 見送る場合は呼び出し側が保持する（`super::worker_timers`）
@@ -404,10 +406,6 @@ pub(super) mod mock {
             self.with(|state| state.output_devices.clone())
         }
 
-        fn default_input_device_name(&self) -> Option<String> {
-            None
-        }
-
         fn default_output_device_name(&self) -> Option<String> {
             None
         }
@@ -465,6 +463,10 @@ pub(super) mod mock {
         }
 
         fn underrun_count(&self) -> Option<u32> {
+            None
+        }
+
+        fn dropped_frame_count(&self) -> Option<u32> {
             None
         }
 
