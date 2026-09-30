@@ -213,6 +213,7 @@ pub(super) fn process_output<T: Clone>(
             // 足りなかったサンプル数はバッファの大きさで意味が変わり、
             // 「何回途切れたか」ほど直感的に読めないため
             count_underrun(underruns);
+            converter.note_underrun();
         }
     } else {
         // 無音を表す値は型ごとに違う（u16 は 0 ではなく 32768）ので変換関数に通す
@@ -220,6 +221,7 @@ pub(super) fn process_output<T: Clone>(
         // ロックを取れなかったときも無音を書く。聞こえ方は取り出せなかった
         // ときと同じなので、同じく 1 回数える
         count_underrun(underruns);
+        converter.note_underrun();
     }
 }
 
@@ -748,5 +750,30 @@ mod tests {
 
         assert_eq!(data, [0.0; 4]);
         assert_eq!(underruns.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn process_output_underrun_marks_the_drift_correction_window() {
+        // アンダーランを数えた窓では、クロックドリフト補正が速める側へ動かない
+        // （`decide_resample_correction`）。その印を出力コールバックが付ける
+        let (_producer, consumer) = ring(8);
+        let controls = AudioControls::default();
+        let underruns = AtomicU32::new(0);
+        let telemetry = Arc::new(super::super::resample::ResampleTelemetry::new(4));
+        let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2)
+            .with_telemetry(Some(Arc::clone(&telemetry)));
+
+        let mut data = [9.0f32; 4];
+        process_output(
+            &mut data,
+            &consumer,
+            &controls,
+            &mut converter,
+            &underruns,
+            |sample| sample,
+        );
+
+        assert_eq!(underruns.load(Ordering::Relaxed), 1);
+        assert!(telemetry.take_window().underran());
     }
 }

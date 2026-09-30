@@ -19,19 +19,21 @@ const RESAMPLE_SATURATION_RATIO: f64 = 0.10;
 const RESAMPLE_MAX_CORRECTION: f32 = 0.001;
 
 /// 観測の窓を 1 つの `AtomicU64` に詰めるときの、水位の合計に使う下位ビット数。
-/// 残りの上位 24 ビットが観測の回数。
+/// その上の 23 ビットが観測の回数、最上位の 1 ビットがアンダーランの印。
 ///
-/// 合計と回数を別々の Atomic にすると、デバイスワーカーが読み出す間に出力
-/// コールバックが片方だけ足し、平均がずれる。1 語にまとめれば読み出し（`swap`）も
-/// 足し込み（`fetch_update`）も 1 回の不可分操作で済む。
+/// 別々の Atomic にすると、デバイスワーカーが読み出す間に出力コールバックが
+/// 片方だけ足し、平均がずれる。1 語にまとめれば読み出し（`swap`）も
+/// 足し込み（`fetch_update` / `fetch_or`）も 1 回の不可分操作で済む。
 ///
 /// 40 ビットは 1 兆サンプル強。192kHz 8ch の 200ms（容量 400ms、61 万サンプル）を
-/// 3 秒間（約 300 回）足しても 2 億に届かない。24 ビットの回数は 10ms ごとの
-/// コールバックで約 46 時間ぶん。どちらもデバイスワーカーが数秒ごとに読み出して
+/// 3 秒間（約 300 回）足しても 2 億に届かない。23 ビットの回数は 10ms ごとの
+/// コールバックで約 23 時間ぶん。どちらもデバイスワーカーが数秒ごとに読み出して
 /// 0 へ戻すので届かないが、届いたらそれ以上は足さない（`with_observation`）。
 const WINDOW_SUM_BITS: u32 = 40;
 const WINDOW_SUM_MAX: u64 = (1 << WINDOW_SUM_BITS) - 1;
-const WINDOW_COUNT_MAX: u32 = (1 << (64 - WINDOW_SUM_BITS)) - 1;
+const WINDOW_COUNT_BITS: u32 = 23;
+const WINDOW_COUNT_MAX: u32 = (1 << WINDOW_COUNT_BITS) - 1;
+const WINDOW_UNDERRUN_BIT: u64 = 1 << (WINDOW_SUM_BITS + WINDOW_COUNT_BITS);
 
 /// デバイスワーカーが前回読み出してから今回までに、出力コールバックが観測した
 /// 水位（Issue #308）。
@@ -46,18 +48,26 @@ pub struct WaterLevelWindow {
     sum: u64,
     /// 観測した回数（出力コールバックの回数）
     count: u32,
+    /// この窓の間にアンダーランが起きた（`decide_resample_correction`）
+    underran: bool,
 }
 
 impl WaterLevelWindow {
     fn from_packed(packed: u64) -> Self {
         Self {
             sum: packed & WINDOW_SUM_MAX,
-            count: (packed >> WINDOW_SUM_BITS) as u32,
+            count: ((packed >> WINDOW_SUM_BITS) & u64::from(WINDOW_COUNT_MAX)) as u32,
+            underran: packed & WINDOW_UNDERRUN_BIT != 0,
         }
     }
 
     fn to_packed(self) -> u64 {
-        (u64::from(self.count) << WINDOW_SUM_BITS) | self.sum
+        let underran = if self.underran {
+            WINDOW_UNDERRUN_BIT
+        } else {
+            0
+        };
+        underran | (u64::from(self.count) << WINDOW_SUM_BITS) | self.sum
     }
 
     /// 観測を 1 回足した窓。回数か合計が上限に届くなら `None`（足さない）。
@@ -72,6 +82,7 @@ impl WaterLevelWindow {
         Some(Self {
             sum,
             count: self.count + 1,
+            ..self
         })
     }
 
@@ -83,6 +94,11 @@ impl WaterLevelWindow {
     /// 観測の回数。ログに出すため
     pub fn count(self) -> u32 {
         self.count
+    }
+
+    /// この窓の間にアンダーランが起きたか。ログに出すため
+    pub fn underran(self) -> bool {
+        self.underran
     }
 }
 
@@ -101,6 +117,12 @@ impl WaterLevelWindow {
 /// - 窓に観測が無い（出力コールバックが回っていない）なら `1.0`
 /// - 相対誤差が `RESAMPLE_DEAD_ZONE_RATIO` 未満なら `1.0`（目標付近では変えない）
 /// - 相対誤差が `RESAMPLE_SATURATION_RATIO` 以上は `RESAMPLE_MAX_CORRECTION` に頭打ち
+/// - **アンダーランが起きた窓では速める側へは補正しない**（`1.0`）。アンダーランの
+///   間は出力が取り出さずに無音を書くので、そのぶん水位が上がって平均は目標を
+///   超える。それを速めて削ると水位の底がまた下がり、次のアンダーランを招く
+///   （フェイクの 20ms で、速める補正が頭打ちに張り付いたままアンダーランが
+///   毎秒数回ずつ増え続けた）。削るのはアンダーランが止まった窓からでよい。
+///   遅らせる側は、アンダーランを減らす向きなのでそのまま掛ける
 pub(crate) fn decide_resample_correction(window: WaterLevelWindow, target_level: usize) -> f32 {
     let Some(water_level) = window.mean() else {
         return 1.0;
@@ -111,6 +133,9 @@ pub(crate) fn decide_resample_correction(window: WaterLevelWindow, target_level:
 
     let relative_error = (water_level as f64 - target_level as f64) / target_level as f64;
     if relative_error.abs() < RESAMPLE_DEAD_ZONE_RATIO {
+        return 1.0;
+    }
+    if window.underran && relative_error > 0.0 {
         return 1.0;
     }
 
@@ -171,6 +196,12 @@ impl ResampleTelemetry {
                     .with_observation(level)
                     .map(WaterLevelWindow::to_packed)
             });
+    }
+
+    /// 出力コールバックが呼ぶ。この窓の間にアンダーランが起きたことを印す
+    /// （`decide_resample_correction`）。`fetch_or` 1 回で、ロックもアロケーションもしない。
+    pub(super) fn mark_underrun(&self) {
+        self.window.fetch_or(WINDOW_UNDERRUN_BIT, Ordering::Relaxed);
     }
 
     /// 出力コールバックが呼ぶ。補正係数を読む。
@@ -332,14 +363,22 @@ mod tests {
 
     #[test]
     fn water_level_window_survives_packing() {
-        // 1 語に詰めて戻しても同じ窓になる。上限いっぱいの値でも回数と合計が混ざらない
+        // 1 語に詰めて戻しても同じ窓になる。上限いっぱいの値でも回数・合計・
+        // アンダーランの印が混ざらない
         let window = window_of(&[123, 456, 789]);
         assert_eq!(WaterLevelWindow::from_packed(window.to_packed()), window);
         let full = WaterLevelWindow {
             sum: WINDOW_SUM_MAX,
             count: WINDOW_COUNT_MAX,
+            underran: false,
         };
         assert_eq!(WaterLevelWindow::from_packed(full.to_packed()), full);
+        let marked = WaterLevelWindow {
+            underran: true,
+            ..full
+        };
+        assert_eq!(WaterLevelWindow::from_packed(marked.to_packed()), marked);
+        assert!(!WaterLevelWindow::from_packed(WINDOW_UNDERRUN_BIT - 1).underran());
     }
 
     #[test]
@@ -348,6 +387,7 @@ mod tests {
         let near_sum = WaterLevelWindow {
             sum: WINDOW_SUM_MAX - 10,
             count: 1,
+            underran: false,
         };
         assert_eq!(
             near_sum.with_observation(10).map(|w| w.sum),
@@ -359,8 +399,49 @@ mod tests {
         let full_count = WaterLevelWindow {
             sum: 0,
             count: WINDOW_COUNT_MAX,
+            underran: false,
         };
         assert_eq!(full_count.with_observation(0), None);
+    }
+
+    #[test]
+    fn decide_resample_correction_does_not_speed_up_in_a_window_with_underruns() {
+        // アンダーランの間は出力が止まって水位が上がる。それを速めて削ると、
+        // 水位の底がまた下がって次のアンダーランを招く
+        let window = WaterLevelWindow {
+            underran: true,
+            ..window_of(&[600, 600])
+        };
+        assert_eq!(decide_resample_correction(window, 500), 1.0);
+    }
+
+    #[test]
+    fn decide_resample_correction_still_slows_down_in_a_window_with_underruns() {
+        // 遅らせる向きはアンダーランを減らすので、印があっても掛ける
+        let window = WaterLevelWindow {
+            underran: true,
+            ..window_of(&[400, 400])
+        };
+        assert_eq!(
+            decide_resample_correction(window, 500),
+            1.0 - RESAMPLE_MAX_CORRECTION
+        );
+    }
+
+    #[test]
+    fn telemetry_mark_underrun_sets_the_flag_until_the_window_is_taken() {
+        let telemetry = ResampleTelemetry::new(500);
+        telemetry.add_to_window(600);
+        telemetry.mark_underrun();
+        // 印を付けたあとの観測も同じ窓に入る
+        telemetry.add_to_window(600);
+
+        let window = telemetry.take_window();
+        assert!(window.underran());
+        assert_eq!(window.count(), 2);
+        assert_eq!(window.mean(), Some(600));
+        // 読み出したら印も消える
+        assert!(!telemetry.take_window().underran());
     }
 
     #[test]

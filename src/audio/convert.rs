@@ -215,6 +215,15 @@ impl PassthroughConverter {
         self.primed
     }
 
+    /// 出力コールバックが、アンダーラン（取り出せずに無音を書いた）を数えるときに
+    /// 呼ぶ。補正の窓に印を付け、その窓では速める側の補正を止めさせる
+    /// （`decide_resample_correction`）。補正を紐づけていなければ何もしない。
+    pub fn note_underrun(&self) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.mark_underrun();
+        }
+    }
+
     /// 出力サンプルを 1 つ取り出す。入力が足りなければ `None`。
     ///
     /// `read_frame` はリングバッファから入力フレーム（`dst.len()` =

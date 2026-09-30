@@ -84,6 +84,14 @@ impl WorkerState {
         let Some(water_level) = window.mean() else {
             return;
         };
+        if window.underran() && water_level > target_level {
+            // 速める補正をアンダーランで見送った（`decide_resample_correction`）。
+            // バッファ長が短すぎるかを判断する材料になる
+            debug!(
+                "アンダーランが起きたので音声のリサンプル比を速める補正を見送った（水位の平均 {} / 目標 {}）",
+                water_level, target_level
+            );
+        }
         if (ratio - 1.0).abs() > f32::EPSILON {
             debug!(
                 "音声のリサンプル比を補正した: {:.5}（水位の平均 {} / 目標 {}、{} 回の観測）",
