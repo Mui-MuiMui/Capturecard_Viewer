@@ -383,6 +383,12 @@ pub(super) mod mock {
         pub(in crate::app) running: bool,
         /// 立てておくと `take_stream_error` が 1 回だけ真を返す
         pub(in crate::app) stream_error: bool,
+        /// 立てておくと `capabilities` が空の一覧で成功する（既定は失敗）
+        pub(in crate::app) capabilities_ok: bool,
+        /// `capabilities` が呼ばれた向きを順に記録する
+        pub(in crate::app) capability_queries: Vec<AudioDirection>,
+        /// `start_passthrough` を失敗させるときの向き。`None` なら入力
+        pub(in crate::app) failure_direction: Option<AudioDirection>,
     }
 
     /// 音声バックエンドのモック。
@@ -415,7 +421,14 @@ pub(super) mod mock {
             direction: AudioDirection,
             _device_name: Option<&str>,
         ) -> Result<AudioCapabilities, AudioError> {
-            Err(AudioError::NoDefaultDevice(direction))
+            self.with(|state| {
+                state.capability_queries.push(direction);
+                if state.capabilities_ok {
+                    Ok(AudioCapabilities::new(Vec::new(), 48_000, 2))
+                } else {
+                    Err(AudioError::NoDefaultDevice(direction))
+                }
+            })
         }
 
         fn start_passthrough(
@@ -427,7 +440,9 @@ pub(super) mod mock {
                 if state.failures_before_success > 0 {
                     state.failures_before_success -= 1;
                     state.running = false;
-                    return Err(AudioError::NoDefaultDevice(AudioDirection::Input));
+                    return Err(AudioError::NoDefaultDevice(
+                        state.failure_direction.unwrap_or(AudioDirection::Input),
+                    ));
                 }
                 state.running = true;
                 Ok(())
