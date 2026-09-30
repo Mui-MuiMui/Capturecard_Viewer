@@ -150,6 +150,10 @@ impl WorkerState {
             Err(e) => {
                 warn!("映像デバイスへの接続に失敗した（{} 回目）: {}", attempt, e);
                 self.video_retry.record_failure(now);
+                // **開けなかったら、開いている相手は無い。** `start_capture` は開く前に
+                // 古いストリームを閉じている。前の設定を残すと、元へ戻したときに差分が
+                // 立たず、この失敗で伸びたバックオフを待ってから開くことになる（#311）
+                self.last_video_target = None;
                 // UI へは日本語の 1 行に落として渡す。`DeviceEvent` に種別を
                 // 載せても、いまの再試行は理由で戦略を変えないため
                 let reason = e.to_string();
@@ -268,6 +272,8 @@ impl WorkerState {
                     );
                 }
                 self.audio_retry.record_failure(now);
+                // 映像と同じく、開く前に古いストリームを閉じているので記録も消す（#311）
+                self.last_audio_target = None;
                 // 映像と同じく、UI へは日本語の 1 行に落として渡す
                 let reason = e.to_string();
                 self.emit(DeviceEvent::AudioFailed(failure_message(
@@ -708,6 +714,87 @@ mod tests {
             video.with(|state| state.last_backend),
             Some(VideoBackendSetting::DirectShow)
         );
+    }
+
+    // 切り替えに失敗したあとで元へ戻す（#311）。失敗した回は開く前に古い
+    // ストリームを閉じているので、元の設定へ戻したら次の tick ですぐ開く。
+    // B の失敗で伸びたバックオフは、B を選び直したときだけ効く
+
+    #[test]
+    fn worker_reopens_the_previous_video_right_after_a_failed_switch() {
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        let (mut state, _events) = mock_state(&video, &audio);
+        let a = config_for(Some("A"), None);
+        let b = config_for(Some("B"), None);
+        apply_config(&mut state, a.clone(), true);
+        let base = Instant::now();
+        state.tick(base);
+        assert_eq!(video.with(|state| state.start_calls), 1);
+
+        // B は 3 回続けて開けない。3 回目のあとは 800ms 待つ
+        video.with(|state| state.failures_before_success = 3);
+        apply_config(&mut state, b.clone(), false);
+        for step in 2..5 {
+            state.tick(base + Duration::from_secs(step));
+        }
+        assert_eq!(video.with(|state| state.start_calls), 4);
+        assert!(
+            !video.with(|state| state.capturing),
+            "B の失敗で A も閉じている"
+        );
+
+        // A へ戻すと、B のバックオフ（+4.8 秒まで）を待たずに次の tick で開く
+        apply_config(&mut state, a.clone(), false);
+        let back = base + Duration::from_millis(4_100);
+        state.tick(back);
+        assert_eq!(video.with(|state| state.start_calls), 5);
+        assert_eq!(
+            video.with(|state| state.last_device_name.clone()),
+            Some("A".to_string())
+        );
+        assert!(video.with(|state| state.capturing));
+
+        // 2 秒ごとの再適用では開き直さない
+        apply_config(&mut state, a, false);
+        state.tick(back + Duration::from_secs(2));
+        assert_eq!(video.with(|state| state.start_calls), 5);
+
+        // B を選び直すと即座に試し、失敗したら同じ B の再適用ではバックオフを守る
+        video.with(|state| state.failures_before_success = u32::MAX);
+        let again = back + Duration::from_secs(4);
+        apply_config(&mut state, b.clone(), false);
+        state.tick(again);
+        assert_eq!(video.with(|state| state.start_calls), 6);
+        apply_config(&mut state, b, false);
+        state.tick(again + Duration::from_millis(100));
+        assert_eq!(video.with(|state| state.start_calls), 6, "200ms 待つ");
+        state.tick(again + Duration::from_millis(200));
+        assert_eq!(video.with(|state| state.start_calls), 7);
+    }
+
+    #[test]
+    fn worker_reopens_the_previous_audio_right_after_a_failed_switch() {
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        let (mut state, _events) = mock_state(&video, &audio);
+        let a = config_for(None, Some("入力 A"));
+        apply_config(&mut state, a.clone(), true);
+        let base = Instant::now();
+        state.tick(base);
+        assert_eq!(audio.with(|state| state.start_calls), 1);
+
+        audio.with(|state| state.failures_before_success = 3);
+        apply_config(&mut state, config_for(None, Some("入力 B")), false);
+        for step in 2..5 {
+            state.tick(base + Duration::from_secs(step));
+        }
+        assert_eq!(audio.with(|state| state.start_calls), 4);
+
+        apply_config(&mut state, a, false);
+        state.tick(base + Duration::from_millis(4_100));
+        assert_eq!(audio.with(|state| state.start_calls), 5);
+        assert!(audio.with(|state| state.running));
     }
 
     #[test]

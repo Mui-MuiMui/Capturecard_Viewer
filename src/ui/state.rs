@@ -39,7 +39,8 @@ pub struct SettingsDialogTransition {
 #[derive(Default)]
 pub struct SettingsDialogState {
     draft: Option<AppSettings>,
-    // 開いた時点の設定。ドラフトのどの項目が実際に編集されたかを判別するために持つ
+    // 開いた時点の設定。ドラフトのどの項目が実際に編集されたかを判別するために持つ。
+    // 「適用」で反映したあとは反映後の設定に取り直す（`commit_into`）
     original: Option<AppSettings>,
     // 選択中のタブ
     selected_tab: SettingsTab,
@@ -261,9 +262,24 @@ impl SettingsDialogState {
     }
 
     /// ドラフトを実行中の設定へ反映する。ドラフトを持っていなければ何もしない。
-    pub fn commit_into(&self, target: &mut AppSettings) {
+    ///
+    /// 反映したあとは、比較の基準（`original`）とドラフトを反映後の設定の複製で
+    /// 取り直す。「適用」は閉じないので、そのまま続けて編集して 2 回目の「適用」を
+    /// 押せる。基準が開いた時点のままだと、`commit_draft` の「ドラフトが基準と
+    /// 違うときだけ反映する」項目（`ui.maintain_aspect_ratio` / `ui.volume` /
+    /// `video.auto_reconnect` / `update.skipped_version`）で、1 回目のあとに
+    /// ダイアログの外で変えた値が 1 回目のドラフトの値へ巻き戻り、逆にダイアログで
+    /// 開いた時点の値へ戻した編集は反映されない（Issue #316）。
+    ///
+    /// ドラフトも取り直すのは、基準だけを取り直すと、1 回目の前にダイアログの外で
+    /// 変わって 1 回目で残した値（ドラフト側は古い値のまま）が、2 回目で
+    /// 「ドラフトが基準と違う」とみなされて古い値で上書きされるため。
+    /// 反映した直後のドラフトは、これらの項目を除けば反映後の設定と同じ。
+    pub fn commit_into(&mut self, target: &mut AppSettings) {
         if let (Some(draft), Some(original)) = (&self.draft, &self.original) {
             commit_draft(target, draft, original);
+            self.draft = Some(target.clone());
+            self.original = Some(target.clone());
         }
     }
 
@@ -472,7 +488,7 @@ mod tests {
     #[test]
     fn settings_dialog_state_commit_into_without_draft_does_nothing() {
         // ドラフトを持っていない状態で反映しても何も起きない
-        let state = SettingsDialogState::default();
+        let mut state = SettingsDialogState::default();
         let mut shared = sample_settings();
         let before = shared.clone();
 
@@ -564,6 +580,111 @@ mod tests {
 
         assert_eq!(shared.video.fps, Some(24));
         assert!(!state.has_draft());
+    }
+
+    /// 「適用」（閉じない）を 2 回押す流れを再現する。1 回目のあと、ダイアログの
+    /// 外（ホイール・右クリックメニュー・通知ダイアログ）で値が変わる
+    fn apply_twice_with_outside_change(
+        edit: impl Fn(&mut AppSettings),
+        outside: impl Fn(&mut AppSettings),
+    ) -> AppSettings {
+        let mut shared = sample_settings();
+        let mut state = SettingsDialogState::default();
+        state.begin_edit(&shared);
+
+        edit(state.draft_mut().expect("ドラフトがある"));
+        state.commit_into(&mut shared);
+
+        outside(&mut shared);
+
+        // 関係のない項目を変えてもう一度「適用」する
+        state.draft_mut().expect("ドラフトがある").video.fps = Some(60);
+        state.commit_into(&mut shared);
+        assert_eq!(shared.video.fps, Some(60));
+        shared
+    }
+
+    #[test]
+    fn second_apply_keeps_volume_changed_outside_the_dialog() {
+        // Issue #316: 1 回目の「適用」のあとにホイールで変えた音量が、
+        // 2 回目の「適用」で 1 回目の値へ巻き戻ってはいけない
+        let shared = apply_twice_with_outside_change(
+            |draft| draft.ui.volume = 30.0,
+            |shared| shared.ui.volume = 90.0,
+        );
+        assert_eq!(shared.ui.volume, 90.0);
+    }
+
+    #[test]
+    fn second_apply_keeps_aspect_ratio_changed_outside_the_dialog() {
+        // ダイアログで切り替えて「適用」したあと、右クリックメニューで戻した値が残る
+        let opening = sample_settings().ui.maintain_aspect_ratio;
+        let shared = apply_twice_with_outside_change(
+            |draft| draft.ui.maintain_aspect_ratio = !opening,
+            |shared| shared.ui.maintain_aspect_ratio = opening,
+        );
+        assert_eq!(shared.ui.maintain_aspect_ratio, opening);
+    }
+
+    #[test]
+    fn second_apply_keeps_auto_reconnect_changed_outside_the_dialog() {
+        // 自動再接続はダイアログに無いので、読み込み・初期化でドラフトが変わった場面を模す
+        let opening = sample_settings().video.auto_reconnect;
+        let shared = apply_twice_with_outside_change(
+            |draft| draft.video.auto_reconnect = !opening,
+            |shared| shared.video.auto_reconnect = opening,
+        );
+        assert_eq!(shared.video.auto_reconnect, opening);
+    }
+
+    #[test]
+    fn second_apply_keeps_skipped_version_changed_outside_the_dialog() {
+        // 通知ダイアログの「このバージョンは通知しない」で変わった値が残る
+        let shared = apply_twice_with_outside_change(
+            |draft| draft.update.skipped_version = Some("9.0.0".to_string()),
+            |shared| shared.update.skipped_version = Some("9.1.0".to_string()),
+        );
+        assert_eq!(shared.update.skipped_version.as_deref(), Some("9.1.0"));
+    }
+
+    #[test]
+    fn second_apply_keeps_volume_changed_outside_before_the_first_apply() {
+        // 1 回目の「適用」より前にホイールで変えた音量は 1 回目で残る。
+        // 基準を取り直したあとの 2 回目でも、古いドラフトの値で上書きしない
+        let mut shared = sample_settings();
+        let mut state = SettingsDialogState::default();
+        state.begin_edit(&shared);
+
+        shared.ui.volume = 90.0;
+        state.draft_mut().expect("ドラフトがある").video.fps = Some(24);
+        state.commit_into(&mut shared);
+        assert_eq!(shared.ui.volume, 90.0);
+
+        state.draft_mut().expect("ドラフトがある").video.fps = Some(60);
+        state.commit_into(&mut shared);
+
+        assert_eq!(shared.ui.volume, 90.0);
+        // ダイアログの表示も反映後の値に揃う
+        assert_eq!(state.draft().expect("ドラフトがある").ui.volume, 90.0);
+    }
+
+    #[test]
+    fn second_apply_reflects_value_returned_to_the_opening_value() {
+        // 開いた時点の値から変えて「適用」し、ダイアログで元の値へ戻して
+        // もう一度「適用」したら、戻した値が反映される
+        let mut shared = sample_settings();
+        let opening = shared.ui.volume;
+        let mut state = SettingsDialogState::default();
+        state.begin_edit(&shared);
+
+        state.draft_mut().expect("ドラフトがある").ui.volume = 30.0;
+        state.commit_into(&mut shared);
+        assert_eq!(shared.ui.volume, 30.0);
+
+        state.draft_mut().expect("ドラフトがある").ui.volume = opening;
+        state.commit_into(&mut shared);
+
+        assert_eq!(shared.ui.volume, opening);
     }
 
     #[test]

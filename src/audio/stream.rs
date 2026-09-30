@@ -51,16 +51,39 @@ fn count_underrun(counter: &AtomicU32) {
     });
 }
 
+/// 入力コールバックがリングバッファの満杯で捨てたフレーム数を足す。
+///
+/// **入力コールバックから呼ぶので、ロックもアロケーションもしない**
+/// （`docs/design/audio.md`）。`count_underrun` と同じく `u32::MAX` で頭打ちにする。
+/// 0 フレームなら何もしない。
+fn count_dropped_frames(counter: &AtomicU32, frames: usize) {
+    if frames == 0 {
+        return;
+    }
+    let add = u32::try_from(frames).unwrap_or(u32::MAX);
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(add))
+    });
+}
+
+/// 渡されたサンプル数 `offered` のうち `pushed` だけ積めたとき、捨てたフレーム数。
+/// 半端なサンプルはフレームに数えない。0ch は 1ch として扱う。
+fn dropped_frames(offered: usize, pushed: usize, channels: usize) -> usize {
+    offered.saturating_sub(pushed) / channels.max(1)
+}
+
 /// 入力ストリームを組み立てる。
 ///
 /// `to_f32` でデバイスのサンプル型をリングバッファの表現（f32）へ正規化する。
 /// `tap` は録画へ回す差し込み口（録画中だけ同じ値を積む）。
+/// `dropped_frames` はリングバッファの満杯で捨てたフレーム数の数え手。
 pub(super) fn build_input_stream_with<T>(
     device: &Device,
     config: &cpal::StreamConfig,
     producer: Arc<Mutex<AudioProducer>>,
     tap: AudioTap,
     stream_error: Arc<AtomicBool>,
+    dropped_frames: Arc<AtomicU32>,
     to_f32: impl Fn(T) -> f32 + Send + 'static,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
@@ -70,7 +93,7 @@ where
     device.build_input_stream(
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
-            process_input(data, channels, &producer, &tap, &to_f32);
+            process_input(data, channels, &producer, &tap, &dropped_frames, &to_f32);
         },
         move |e| {
             error!("入力ストリームのエラー: {}", e);
@@ -137,6 +160,8 @@ where
 /// **パススルーのリングバッファへはフレーム（`channels` サンプル）単位でだけ
 /// 積む。** 溢れる分はフレームごと捨てる。1 サンプル単位で捨てると、捨てた
 /// 位置から後ろが 1 つずれて左右が入れ替わったまま戻らない（`docs/design/audio.md`）。
+/// 捨てたフレーム数は `dropped` に足す（「接続状態」タブへ出す、Issue #350）。
+/// リングを握れずに捨てた分は数えない（満杯とは別の理由のため）。
 ///
 /// 録画へは入力の形のまま積む。音量・ミュート・パススルーの無効は出力
 /// コールバックの判定なので、録画には効かない（`docs/design/recording.md`）。
@@ -145,6 +170,7 @@ pub(super) fn process_input<T: Copy>(
     channels: usize,
     producer: &Mutex<AudioProducer>,
     tap: &AudioTap,
+    dropped: &AtomicU32,
     to_f32: impl Fn(T) -> f32,
 ) {
     let mut passthrough = producer.try_lock().ok();
@@ -158,6 +184,9 @@ pub(super) fn process_input<T: Copy>(
     let mut room = passthrough.as_ref().map_or(0, |prod| {
         whole_frame_samples(prod.free_len().min(data.len()), channels)
     });
+    if passthrough.is_some() {
+        count_dropped_frames(dropped, dropped_frames(data.len(), room, channels));
+    }
     for &sample in data {
         let value = to_f32(sample);
         if room > 0 {
@@ -420,6 +449,49 @@ mod tests {
     }
 
     #[test]
+    fn dropped_frames_counts_whole_frames_not_pushed() {
+        assert_eq!(dropped_frames(8, 8, 2), 0);
+        assert_eq!(dropped_frames(8, 4, 2), 2);
+        assert_eq!(dropped_frames(8, 0, 2), 4);
+        // 半端なサンプルはフレームに数えない
+        assert_eq!(dropped_frames(5, 0, 2), 2);
+        // 0ch は 1ch として扱う
+        assert_eq!(dropped_frames(3, 1, 0), 2);
+    }
+
+    #[test]
+    fn count_dropped_frames_adds_and_saturates() {
+        let counter = AtomicU32::new(0);
+        count_dropped_frames(&counter, 0);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        count_dropped_frames(&counter, 3);
+        count_dropped_frames(&counter, 2);
+        assert_eq!(counter.load(Ordering::Relaxed), 5);
+
+        let counter = AtomicU32::new(u32::MAX - 1);
+        count_dropped_frames(&counter, 10);
+        assert_eq!(counter.load(Ordering::Relaxed), u32::MAX);
+    }
+
+    #[test]
+    fn process_input_does_not_count_drops_when_the_ring_is_busy() {
+        // 握れずに捨てた分は満杯とは別の理由なので数えない
+        let (producer, _consumer) = ring(8);
+        let dropped = AtomicU32::new(0);
+        let held = producer.lock().expect("ロックできる");
+        process_input(
+            &[0.25f32, 0.5],
+            2,
+            &producer,
+            &AudioTap::new(),
+            &dropped,
+            |s| s,
+        );
+        drop(held);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn render_output_samples_empty_source_writes_silence() {
         let mut source = SampleSource::new(&[]);
         let mut data = [9.0f32; 2];
@@ -506,9 +578,14 @@ mod tests {
         let underruns = AtomicU32::new(0);
         let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2);
 
-        process_input(&[1.0f32, -0.5], 2, &producer, &AudioTap::new(), |sample| {
-            sample
-        });
+        process_input(
+            &[1.0f32, -0.5],
+            2,
+            &producer,
+            &AudioTap::new(),
+            &AtomicU32::new(0),
+            |sample| sample,
+        );
         let mut data = [9.0f32; 2];
         process_output(
             &mut data,
@@ -536,6 +613,7 @@ mod tests {
             2,
             &producer,
             &AudioTap::new(),
+            &AtomicU32::new(0),
             |sample| sample,
         );
         let mut data = [9.0f32; 2];
@@ -565,8 +643,18 @@ mod tests {
         let tap = AudioTap::new();
         let mut data = [9.0f32; 2];
 
-        process_input(&[1.0f32, -1.0, 2.0, -2.0], 2, &producer, &tap, |s| s);
+        let dropped = AtomicU32::new(0);
+        process_input(
+            &[1.0f32, -1.0, 2.0, -2.0],
+            2,
+            &producer,
+            &tap,
+            &dropped,
+            |s| s,
+        );
         assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        // 捨てた 2 フレーム目を数える（Issue #350）
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
         process_output(
             &mut data,
             &consumer,
@@ -577,7 +665,14 @@ mod tests {
         );
         assert_eq!(data, [1.0, -1.0]);
 
-        process_input(&[3.0f32, -3.0], 2, &producer, &tap, |s| s);
+        process_input(
+            &[3.0f32, -3.0],
+            2,
+            &producer,
+            &tap,
+            &AtomicU32::new(0),
+            |s| s,
+        );
         process_output(
             &mut data,
             &consumer,
@@ -593,13 +688,21 @@ mod tests {
     fn process_input_never_leaves_a_partial_frame_in_the_ring() {
         // 空きが 3 サンプルでも、積むのは 2ch の 1 フレーム（2 サンプル）まで
         let (producer, consumer) = ring(5);
-        process_input(&[0.1f32, -0.1], 2, &producer, &AudioTap::new(), |s| s);
+        process_input(
+            &[0.1f32, -0.1],
+            2,
+            &producer,
+            &AudioTap::new(),
+            &AtomicU32::new(0),
+            |s| s,
+        );
 
         process_input(
             &[0.2f32, -0.2, 0.3, -0.3],
             2,
             &producer,
             &AudioTap::new(),
+            &AtomicU32::new(0),
             |s| s,
         );
 
@@ -668,7 +771,14 @@ mod tests {
         let tap = AudioTap::new();
         let mut attachment = tap.attach(8);
 
-        process_input(&[16_384i16, -32_768], 2, &producer, &tap, i16_to_f32);
+        process_input(
+            &[16_384i16, -32_768],
+            2,
+            &producer,
+            &tap,
+            &AtomicU32::new(0),
+            i16_to_f32,
+        );
 
         let mut read = [0.0f32; 4];
         let count = attachment.consumer.pop_slice(&mut read);
@@ -684,7 +794,14 @@ mod tests {
 
         // パススルーのリングを別の誰かが握っていても、録画には積む
         let held = producer.lock().expect("ロックできる");
-        process_input(&[0.25f32, 0.5], 2, &producer, &tap, |sample| sample);
+        process_input(
+            &[0.25f32, 0.5],
+            2,
+            &producer,
+            &tap,
+            &AtomicU32::new(0),
+            |sample| sample,
+        );
         drop(held);
 
         let mut read = [0.0f32; 4];
@@ -703,7 +820,14 @@ mod tests {
         let tap = AudioTap::new();
         let mut data = [9.0f32; 2];
 
-        process_input(&[1.0f32, -1.0], 2, &producer, &tap, |s| s);
+        process_input(
+            &[1.0f32, -1.0],
+            2,
+            &producer,
+            &tap,
+            &AtomicU32::new(0),
+            |s| s,
+        );
         process_output(
             &mut data,
             &consumer,
@@ -717,7 +841,14 @@ mod tests {
         assert_eq!(underruns.load(Ordering::Relaxed), 0);
 
         // 目標に達したら、溜まった先頭から出す
-        process_input(&[0.5f32, -0.5], 2, &producer, &tap, |s| s);
+        process_input(
+            &[0.5f32, -0.5],
+            2,
+            &producer,
+            &tap,
+            &AtomicU32::new(0),
+            |s| s,
+        );
         process_output(
             &mut data,
             &consumer,

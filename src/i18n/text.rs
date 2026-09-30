@@ -133,6 +133,7 @@ texts! {
     ResampleIdentity { ja: "変換なし", en: "No conversion" },
     WaterLevelUnknown { ja: "不明", en: "unknown" },
     UnderrunUnknown { ja: "アンダーラン: -", en: "Underruns: -" },
+    DroppedFramesUnknown { ja: "満杯で捨てた: -", en: "Dropped (buffer full): -" },
     LinkConnected { ja: "接続中", en: "Connected" },
     LinkReconnecting { ja: "未接続（再接続を試しています）", en: "Disconnected (trying to reconnect)" },
     LinkDisconnected { ja: "未接続", en: "Disconnected" },
