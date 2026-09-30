@@ -30,7 +30,7 @@ mod worker_timers;
 
 use self::menu::MenuLayout;
 use self::screenshot::ScreenshotResult;
-use self::screenshot_sound::SoundLoadResult;
+use self::screenshot_sound::SoundMessage;
 use self::update::UpdateState;
 use self::window::needs_drag_move_guard;
 use self::worker::{DeviceSnapshot, DeviceWorker};
@@ -91,10 +91,14 @@ pub struct CaptureCardViewer {
     // 能力取得と同じく、UI スレッドが update() で try_recv するだけにする
     screenshot_tx: Sender<ScreenshotResult>,
     screenshot_rx: Receiver<ScreenshotResult>,
-    // 効果音ファイルの読み込み結果を受け取るチャネル。適用とテスト再生の両方。
-    // 読み込みも別スレッドで行うため、保存結果と同じ形で受け取る
-    sound_load_tx: Sender<SoundLoadResult>,
-    sound_load_rx: Receiver<SoundLoadResult>,
+    // 効果音ファイルの読み込み結果（適用とテスト再生の両方）と、再生スレッドが
+    // 出力先を開けたかを受け取るチャネル。どちらも別スレッドで行うため、
+    // 保存結果と同じ形で受け取る
+    sound_tx: Sender<SoundMessage>,
+    sound_rx: Receiver<SoundMessage>,
+    // 前回の効果音の再生で出力先を開けなかった理由。開けていれば None。
+    // 同じ理由を撮影のたびに報告しないために持つ（`app::screenshot_sound`）
+    sound_output_failure: Option<String>,
 
     // 発生源ごとの直近の失敗。トーストの間引きもここが判断する
     errors: ErrorCenter,
@@ -231,7 +235,7 @@ impl Default for CaptureCardViewer {
 
         let screenshot_manager = Arc::new(Mutex::new(ScreenshotManager::new()));
         let (screenshot_tx, screenshot_rx) = std::sync::mpsc::channel();
-        let (sound_load_tx, sound_load_rx) = std::sync::mpsc::channel();
+        let (sound_tx, sound_rx) = std::sync::mpsc::channel();
 
         // デバイスに触るものは、すべてワーカースレッドの中で作る。
         // ここから渡すのは UI スレッドとも共有する 4 つだけ
@@ -263,8 +267,8 @@ impl Default for CaptureCardViewer {
             repaint_waker,
             screenshot_tx,
             screenshot_rx,
-            sound_load_tx,
-            sound_load_rx,
+            sound_tx,
+            sound_rx,
             errors: ErrorCenter::default(),
             last_screenshot_outcome_at: None,
             show_settings: false,
@@ -306,6 +310,7 @@ impl Default for CaptureCardViewer {
 
             screenshot_save_threads: Vec::new(),
             sound_load_threads: Vec::new(),
+            sound_output_failure: None,
             update_check: UpdateState::new(),
             recorder,
 
@@ -426,7 +431,7 @@ impl eframe::App for CaptureCardViewer {
         // 失敗はここでトーストになる
         self.drain_screenshot_results();
         // 別スレッドで読み込んだ効果音を取り込む。テスト再生はここで鳴る
-        self.drain_sound_load_results();
+        self.drain_sound_results();
         // 録画スレッドから届いた結果（開始・保存・失敗）を取り込む
         self.drain_recording_events();
         // 別スレッドで行った更新の確認の結果を取り込む
