@@ -498,7 +498,8 @@ fn finishes_audio_after(error: &RecordingError) -> bool {
         | RecordingError::ReplayDiskShort { .. }
         | RecordingError::EncoderUnavailable { .. }
         | RecordingError::NoVideo
-        | RecordingError::Platform { .. } => false,
+        | RecordingError::Platform { .. }
+        | RecordingError::ThreadStopped => false,
     }
 }
 
@@ -676,6 +677,7 @@ mod tests {
             },
             RecordingError::NoVideo,
             RecordingError::Platform { reason: reason() },
+            RecordingError::ThreadStopped,
         ] {
             assert!(!finishes_audio_after(&error), "{error:?}");
         }

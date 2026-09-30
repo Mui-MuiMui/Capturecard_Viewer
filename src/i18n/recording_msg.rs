@@ -73,6 +73,22 @@ pub fn recording_encoder_unavailable(reason: impl Display) -> String {
     }
 }
 
+// ---- エンコーダ MFT の失敗（recording::encoder::EncoderError）。上の文の理由に入る ----
+
+pub fn recording_encoder_configure_failed(reason: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("エンコーダを設定できない: {reason}"),
+        Language::English => format!("Cannot configure the encoder: {reason}"),
+    }
+}
+
+pub fn recording_encoder_encode_failed(reason: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("エンコードに失敗した: {reason}"),
+        Language::English => format!("Encoding failed: {reason}"),
+    }
+}
+
 pub fn recording_size_changed(
     from_width: u32,
     from_height: u32,

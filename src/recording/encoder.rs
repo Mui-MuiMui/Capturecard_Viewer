@@ -51,6 +51,7 @@ use super::encoder_setup::{
 use super::pts::{AUDIO_CHANNELS, AUDIO_SAMPLE_RATE};
 use super::writer::{allocated_string, WriterParams};
 use super::EncoderInfo;
+use crate::i18n::{self, Text};
 
 /// 出力のバッファの大きさをエンコーダが教えてくれないときの予備（音声、バイト）
 const FALLBACK_AUDIO_OUTPUT_BYTES: u32 = 64 * 1024;
@@ -99,13 +100,15 @@ pub(super) enum EncoderError {
     Encode(windows::core::Error),
 }
 
+/// 文言は `RecordingError::EncoderUnavailable` の理由として画面に出るので `crate::i18n` から引く。
 impl std::fmt::Display for EncoderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EncoderError::NotFound => f.write_str("エンコーダが登録されていない"),
-            EncoderError::Configure(error) => write!(f, "組み立て: {error}"),
-            EncoderError::Encode(error) => write!(f, "エンコード: {error}"),
-        }
+        let text = match self {
+            EncoderError::NotFound => Text::RecordingEncoderNotFound.get().to_string(),
+            EncoderError::Configure(error) => i18n::recording_encoder_configure_failed(error),
+            EncoderError::Encode(error) => i18n::recording_encoder_encode_failed(error),
+        };
+        f.write_str(&text)
     }
 }
 
@@ -606,6 +609,30 @@ mod tests {
         assert!(outputs.windows(2).all(|pair| pair[0].pts < pair[1].pts));
         let stream_type = encoder.stream_type().expect("Sink Writer へ渡す形を作れる");
         assert!(unsafe { stream_type.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) }.unwrap_or(0) > 0);
+    }
+
+    // #315: 英語の画面に日本語の理由が混じらない
+    #[test]
+    fn encoder_error_display_follows_the_language() {
+        use crate::i18n::{with_language, Language};
+        use crate::recording::RecordingError;
+        let error = windows::core::Error::from(windows::Win32::Foundation::E_FAIL);
+        // HRESULT の説明は OS の言語で出るので、除いた残り（固定の文言）だけを見る
+        let os_message = error.message();
+        for encoder_error in [
+            EncoderError::NotFound,
+            EncoderError::Configure(error.clone()),
+            EncoderError::Encode(error),
+        ] {
+            let english = with_language(Language::English, || {
+                RecordingError::EncoderUnavailable {
+                    reason: encoder_error.to_string(),
+                }
+                .to_string()
+            });
+            let fixed = english.replace(&os_message, "");
+            assert!(fixed.is_ascii(), "{english}");
+        }
     }
 
     #[test]
