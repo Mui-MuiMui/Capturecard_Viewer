@@ -85,11 +85,14 @@ pub struct PassthroughConverter {
     /// 補間の左端と右端になる入力フレーム。長さは `in_channels`
     prev: Vec<f32>,
     next: Vec<f32>,
-    /// `prev` と `next` の間の位置。0.0 以上 1.0 未満
+    /// `prev` と `next` の間の位置。0.0 以上 1.0 未満。入力が尽きて
+    /// フレームを進められなかった間だけ 1.0 以上のまま残る
     position: f64,
-    /// `prev` / `next` を読み込み済みか
-    primed: bool,
-    /// 組み立て済みの出力フレーム。長さは `out_channels`
+    /// `prev` / `next` のうち読み込み済みのフレーム数（0〜2）。
+    /// 入力が尽きても読んだフレームは捨てず、続きから読む
+    loaded: u8,
+    /// 組み立て済みの出力フレーム。長さは `out_channels`。
+    /// identity 経路では、リングバッファから読んだ入力フレームをそのまま置く
     frame: Vec<f32>,
     /// `frame` の中で次に返すチャンネル
     channel: usize,
@@ -134,7 +137,7 @@ impl PassthroughConverter {
             prev: vec![0.0; in_channels],
             next: vec![0.0; in_channels],
             position: 0.0,
-            primed: false,
+            loaded: 0,
             frame: vec![0.0; out_channels],
             channel: 0,
             starved: false,
@@ -164,20 +167,21 @@ impl PassthroughConverter {
 
     /// 出力サンプルを 1 つ取り出す。入力が足りなければ `None`。
     ///
-    /// `pop` はリングバッファから入力サンプルを 1 つ取り出す。
-    pub fn next_sample(&mut self, pop: &mut impl FnMut() -> Option<f32>) -> Option<f32> {
-        if self.identity {
-            return pop();
-        }
-
+    /// `read_frame` はリングバッファから入力フレーム（`dst.len()` =
+    /// 入力のチャンネル数ぶんのサンプル）を 1 つ取り出す。**フレームが丸ごと
+    /// 揃っていれば `dst` を埋めて `true`、揃っていなければ何も読まずに
+    /// `false` を返すこと。** 途中まで読んで捨てると、以降のサンプルが
+    /// 1 つずれて左右が入れ替わったまま戻らない。
+    pub fn next_sample(&mut self, read_frame: &mut impl FnMut(&mut [f32]) -> bool) -> Option<f32> {
         // 出力フレームの先頭でだけ入力を読む。途中で読むとチャンネルがずれる
         if self.channel == 0 {
-            self.starved = !self.fill_frame(pop);
-            if self.starved {
-                // 途中まで読んだフレームは捨て、次のフレーム境界で組み立て直す
-                self.primed = false;
-                self.position = 0.0;
-            }
+            self.starved = if self.identity {
+                // 揃っている組み合わせでは入力フレームがそのまま出力フレームになる
+                !read_frame(&mut self.frame)
+            } else {
+                // 尽きても読み込み済みのフレームと位置は残し、次の呼び出しで続きから読む
+                !self.fill_frame(read_frame)
+            };
         }
 
         let sample = if self.starved {
@@ -196,11 +200,10 @@ impl PassthroughConverter {
     /// 溜めてある入力から、出力フレームを出せるだけ組み立てて `output` へ足す。
     /// 録画スレッドが使う（`crate::recording`）。
     ///
-    /// **出力フレームの途中で入力を切らさない。** `next_sample` は入力が尽きると
-    /// 組み立て途中の状態を捨てて次のフレームで読み直す（リアルタイムの出力で
-    /// 途切れたときの扱い）。録画は数 ms ごとに溜まった分を渡すので、そのたびに
-    /// 状態を捨てると補間が途切れて雑音になる。ここでは次のフレームに要る入力が
+    /// **出力フレームの途中で入力を切らさない。** 次のフレームに要る入力が
     /// 揃っているときだけ組み立て、足りない分は `input` に残して次の呼び出しへ回す。
+    /// 録画は数 ms ごとに溜まった分を渡すので、出力フレームの途中で尽きて
+    /// 無音を挟むと雑音になる。
     pub fn convert_buffered(&mut self, input: &mut VecDeque<f32>, output: &mut Vec<f32>) {
         // レート比が 0 以下だと入力を読まずに出力し続けてしまう。形は録画側が
         // 0 を弾いてから渡すので来ないが、無限に回らないよう止める
@@ -208,9 +211,9 @@ impl PassthroughConverter {
             return;
         }
         while input.len() >= self.input_needed_for_next_frame() {
-            let mut pop = || input.pop_front();
+            let mut read = |dst: &mut [f32]| read_frame_from(input, dst);
             for _ in 0..self.out_channels {
-                match self.next_sample(&mut pop) {
+                match self.next_sample(&mut read) {
                     Some(sample) => output.push(sample),
                     // 足りることは確かめてあるので来ない
                     None => return,
@@ -224,33 +227,44 @@ impl PassthroughConverter {
         if self.identity {
             return self.in_channels;
         }
-        // 読み込み前なら補間の両端の 2 フレーム。読み込み後は、位置が `next` を
+        // 読み込み前なら補間の両端のうち足りない分。読み込み後は、位置が `next` を
         // 追い越した分だけ進める（`fill_frame` の while と同じ数）
-        let frames = if self.primed {
-            self.position.floor() as usize
+        let frames = if self.loaded < 2 {
+            usize::from(2 - self.loaded)
         } else {
-            2
+            self.position.floor() as usize
         };
         frames * self.in_channels
     }
 
     /// 次の出力フレームを組み立てる。入力が足りなければ `false`。
-    fn fill_frame(&mut self, pop: &mut impl FnMut() -> Option<f32>) -> bool {
-        if !self.primed {
-            if !read_frame(&mut self.prev, pop) || !read_frame(&mut self.next, pop) {
+    ///
+    /// **足りなくても、読み込み済みのフレームと位置は捨てない。** `read_frame` は
+    /// 揃っていないフレームを読まないので、次の呼び出しで同じ所から続けられる。
+    fn fill_frame(&mut self, read_frame: &mut impl FnMut(&mut [f32]) -> bool) -> bool {
+        if self.loaded < 1 {
+            if !read_frame(&mut self.prev) {
                 return false;
             }
-            self.primed = true;
+            self.loaded = 1;
+        }
+        if self.loaded < 2 {
+            if !read_frame(&mut self.next) {
+                return false;
+            }
+            self.loaded = 2;
             self.position = 0.0;
         }
 
         // 位置が `next` を追い越しているあいだ、入力フレームを進める。
-        // ダウンサンプル（step > 1）では 1 回の出力で複数フレーム進む
+        // ダウンサンプル（step > 1）では 1 回の出力で複数フレーム進む。
+        // 次のフレームは要らなくなる `prev` の側へ読み、読めてから入れ替える。
+        // 先に入れ替えると、読めなかったときに `prev` を失う
         while self.position >= 1.0 {
-            std::mem::swap(&mut self.prev, &mut self.next);
-            if !read_frame(&mut self.next, pop) {
+            if !read_frame(&mut self.prev) {
                 return false;
             }
+            std::mem::swap(&mut self.prev, &mut self.next);
             self.position -= 1.0;
         }
 
@@ -274,16 +288,15 @@ impl PassthroughConverter {
     }
 }
 
-/// 入力フレームを 1 つ読み込む。途中で尽きたら `false`。
-///
-/// 尽きた場合に読んだぶんは捨てる。呼び出し側が組み立て直すので、
-/// 中途半端なフレームを持ち越さない。
-fn read_frame(dst: &mut [f32], pop: &mut impl FnMut() -> Option<f32>) -> bool {
-    for slot in dst.iter_mut() {
-        match pop() {
-            Some(sample) => *slot = sample,
-            None => return false,
-        }
+/// `VecDeque` に溜めた入力からフレームを 1 つ取り出す。`next_sample` へ渡す
+/// `read_frame` の約束どおり、揃っていなければ何も読まずに `false` を返す。
+fn read_frame_from(input: &mut VecDeque<f32>, dst: &mut [f32]) -> bool {
+    let len = dst.len();
+    if input.len() < len {
+        return false;
+    }
+    for (slot, sample) in dst.iter_mut().zip(input.drain(..len)) {
+        *slot = sample;
     }
     true
 }
@@ -334,17 +347,20 @@ mod tests {
     /// 出たら止める作りにすると、フレーム境界まで `None` を返す仕様
     /// （`starved`）を確かめられない。
     fn drain_converter(converter: &mut PassthroughConverter, input: &[f32]) -> Vec<f32> {
-        let mut source = input
-            .iter()
-            .copied()
-            .collect::<std::collections::VecDeque<_>>();
-        let mut pop = || source.pop_front();
+        let mut source = input.iter().copied().collect::<VecDeque<_>>();
+        drain_from(converter, &mut source)
+    }
+
+    /// `drain_converter` の、入力を呼び出しをまたいで持ち越す版。リングバッファと
+    /// 同じく、読まれなかった（フレームが揃っていなかった）サンプルは `source` に残る。
+    fn drain_from(converter: &mut PassthroughConverter, source: &mut VecDeque<f32>) -> Vec<f32> {
+        let mut read = |dst: &mut [f32]| read_frame_from(source, dst);
         let mut out = Vec::new();
         let frame_len = converter.out_channels;
         loop {
             let before = out.len();
             for _ in 0..frame_len {
-                if let Some(sample) = converter.next_sample(&mut pop) {
+                if let Some(sample) = converter.next_sample(&mut read) {
                     out.push(sample);
                 }
             }
@@ -356,16 +372,102 @@ mod tests {
         out
     }
 
+    /// 入力を `chunk` サンプルずつ（フレームの途中で切れる長さでもよい）
+    /// 渡しながら出せるだけ出す。リングバッファにフレームの途中までしか
+    /// 届いていない瞬間を、出力コールバックが何度も読みに来る状況を真似る。
+    fn drain_in_chunks(
+        converter: &mut PassthroughConverter,
+        input: &[f32],
+        chunk: usize,
+    ) -> Vec<f32> {
+        let mut source = VecDeque::new();
+        let mut out = Vec::new();
+        for piece in input.chunks(chunk) {
+            source.extend(piece.iter().copied());
+            out.extend(drain_from(converter, &mut source));
+        }
+        out
+    }
+
     #[test]
     fn passthrough_converter_same_format_passes_samples_through() {
         // 揃えて開けた場合は補間も再配置も挟まない
         let mut converter = PassthroughConverter::new(48000, 2, 48000, 2);
 
         assert!(converter.is_identity());
+        // 末尾の半端な 1 サンプルはフレームが揃うまで読まない
         assert_eq!(
             drain_converter(&mut converter, &[0.25, -0.5, 1.0]),
-            vec![0.25, -0.5, 1.0]
+            vec![0.25, -0.5]
         );
+    }
+
+    #[test]
+    fn passthrough_converter_identity_leaves_a_partial_frame_in_the_source() {
+        // リングバッファにフレームの途中までしか届いていないとき、
+        // 届いた分だけ読むと次のフレームから左右が入れ替わったまま戻らない
+        let mut converter = PassthroughConverter::new(48000, 2, 48000, 2);
+        let mut source: VecDeque<f32> = [0.25].into_iter().collect();
+
+        assert!(drain_from(&mut converter, &mut source).is_empty());
+        assert_eq!(source.len(), 1);
+
+        source.extend([-0.25, 0.5, -0.5]);
+        assert_eq!(
+            drain_from(&mut converter, &mut source),
+            vec![0.25, -0.25, 0.5, -0.5]
+        );
+    }
+
+    #[test]
+    fn passthrough_converter_partial_frame_does_not_shift_channels() {
+        // Issue #307 の再現。48kHz 2ch -> 44.1kHz 2ch で、最初の入力フレームの
+        // 左だけが届いた状態で読みに来る。修正前は左の 1.0 を読んで捨て、
+        // 以降を [-1.0, 0.5] / [-0.5, 0.25] と 1 つずれたフレームとして組んでいた
+        let mut converter = PassthroughConverter::new(48000, 2, 44100, 2);
+        let mut source: VecDeque<f32> = [1.0].into_iter().collect();
+
+        assert!(drain_from(&mut converter, &mut source).is_empty());
+        assert_eq!(source.len(), 1);
+
+        source.extend([-1.0, 0.5, -0.5, 0.25, -0.25]);
+        let out = drain_from(&mut converter, &mut source);
+
+        assert_eq!(&out[..2], &[1.0, -1.0]);
+        // どのフレームも左右が逆符号の組のまま（入れ替わっていない）
+        assert_eq!(out.len(), 4);
+        assert!(out[2] > 0.0 && out[2] == -out[3], "{out:?}");
+    }
+
+    #[test]
+    fn passthrough_converter_input_split_mid_frame_matches_one_pass() {
+        // フレームの途中で切れた長さ（7 サンプル = 3.5 フレーム）ずつ届いても、
+        // まとめて渡したときと同じ出力になること。尽きたときに読み込み済みの
+        // フレームや補間の位置を捨てると、ここが食い違う
+        let input: Vec<f32> = (0..882)
+            .map(|i| {
+                let frame = (i / 2) as f32 / 441.0;
+                if i % 2 == 0 {
+                    frame
+                } else {
+                    -frame
+                }
+            })
+            .collect();
+
+        for (in_rate, out_rate) in [(48000, 44100), (44100, 48000), (48000, 24000)] {
+            let mut whole = PassthroughConverter::new(in_rate, 2, out_rate, 2);
+            let expected = drain_converter(&mut whole, &input);
+
+            let mut chunked = PassthroughConverter::new(in_rate, 2, out_rate, 2);
+            let actual = drain_in_chunks(&mut chunked, &input, 7);
+
+            assert_eq!(actual, expected, "{in_rate} -> {out_rate}");
+            // 左右が逆符号の組のまま
+            for frame in actual.chunks(2) {
+                assert_eq!(frame[0], -frame[1], "{in_rate} -> {out_rate}");
+            }
+        }
     }
 
     #[test]
@@ -445,10 +547,11 @@ mod tests {
         // 1 フレームだけでは補間の右端が無く、何も出せない
         assert!(drain_converter(&mut converter, &[1.0, -1.0]).is_empty());
 
-        // 改めて 2 フレーム渡すと、先頭のチャンネルから組み立て直す
+        // 続きの 2 フレームを渡すと、先頭のチャンネルから組み立てる。
+        // 読み込み済みの 1 フレーム目は捨てずに補間の左端として使う
         let out = drain_converter(&mut converter, &[0.5, -0.5, 0.25, -0.25]);
 
-        assert_eq!(out, vec![0.5, -0.5, 0.0, 0.0]);
+        assert_eq!(out, vec![1.0, -1.0, 0.0, 0.0, 0.5, -0.5, 0.0, 0.0]);
     }
 
     #[test]
