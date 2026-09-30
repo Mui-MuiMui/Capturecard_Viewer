@@ -186,7 +186,7 @@ texts! {
     ChannelStereo { ja: "2（ステレオ）", en: "2 (stereo)" },
     ChannelsFixedByDevice { ja: "このデバイスの組み合わせでは 1 つしか選べません（Windows の共有モードではデバイスのミックスフォーマットに固定されます）", en: "Only one choice is available for this device combination (Windows shared mode fixes it to the device's mix format)" },
     AudioBufferLabel { ja: "音声バッファ:", en: "Audio buffer:" },
-    AudioBufferHint { ja: "小さいほど低遅延だがノイズが出やすい（既定: 50 ms）", en: "Smaller means lower latency but more likely to crackle (default: 50 ms)" },
+    AudioBufferHint { ja: "この長さがそのまま音声の遅延になる。小さいほど低遅延だがノイズが出やすい（既定: 50 ms）", en: "This length becomes the audio delay. Smaller means lower latency but more likely to crackle (default: 50 ms)" },
     PassthroughLabel { ja: "音声パススルー:", en: "Audio passthrough:" },
     Enabled { ja: "有効", en: "Enabled" },
     PassthroughDisabledWarning { ja: "音声パススルーが無効です（音は出力されません）", en: "Audio passthrough is disabled (no sound will be output)" },
