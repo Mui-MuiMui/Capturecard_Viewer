@@ -27,7 +27,7 @@ use std::time::Duration;
 pub(super) const FAKE_DEVICES_ENV: &str = "CAPTURECARD_VIEWER_FAKE_DEVICES";
 
 /// フェイクに起こさせる出来事を指定する環境変数。
-/// `disconnect:<秒>` / `fail:<回数>` / `audio-error:<秒>` をカンマで区切って並べる
+/// `disconnect:<秒>` / `reopen-fail:<秒>` / `fail:<回数>` / `audio-error:<秒>` をカンマで区切って並べる
 pub(super) const FAKE_SCENARIO_ENV: &str = "CAPTURECARD_VIEWER_FAKE_SCENARIO";
 
 /// 名乗れる台数の上限。設定画面の一覧が埋まらない程度にとどめる
@@ -38,6 +38,8 @@ const MAX_DEVICES: u32 = 8;
 pub(super) struct FakeScenario {
     /// 映像を開いてからこの時間が経つとフレームを止める
     pub(super) disconnect_after: Option<Duration>,
+    /// 映像が途絶えてからこの時間は開き直しに失敗する（抜いたままの再現）
+    pub(super) reopen_fail_for: Option<Duration>,
     /// 映像と音声のそれぞれで、最初にこの回数だけ開くのに失敗する
     pub(super) failures_before_success: u32,
     /// 音声を開いてからこの時間が経つとストリームのエラーを立てる
@@ -87,7 +89,8 @@ impl DeviceBackends for FakeBackends {
                 disconnect_after: self.scenario.disconnect_after,
                 failures_before_success: self.scenario.failures_before_success,
             },
-        );
+        )
+        .with_reopen_fail(self.scenario.reopen_fail_for);
         let audio = FakeAudioCapture::new(
             audio_controls,
             audio_tap,
@@ -160,6 +163,14 @@ fn parse_scenario(value: Option<&str>) -> FakeScenario {
                     .map(|secs| {
                         scenario.audio_error_after = Some(Duration::from_secs(secs));
                     }),
+                // 0 秒は指定しないのと同じなので、打ち間違いとして知らせる
+                "reopen-fail" => arg
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|secs| *secs > 0)
+                    .map(|secs| {
+                        scenario.reopen_fail_for = Some(Duration::from_secs(secs));
+                    }),
                 "fail" => arg.parse::<u32>().ok().map(|count| {
                     scenario.failures_before_success = count;
                 }),
@@ -168,7 +179,7 @@ fn parse_scenario(value: Option<&str>) -> FakeScenario {
         });
         if parsed.is_none() {
             warn!(
-                "{} の '{}' を読めないので無視する（書式は disconnect:<秒> / fail:<回数> / audio-error:<秒>）",
+                "{} の '{}' を読めないので無視する（書式は disconnect:<秒> / reopen-fail:<秒> / fail:<回数> / audio-error:<秒>）",
                 FAKE_SCENARIO_ENV, item
             );
         }
@@ -326,6 +337,7 @@ mod tests {
                 disconnect_after: Some(Duration::from_secs(10)),
                 failures_before_success: 0,
                 audio_error_after: None,
+                reopen_fail_for: None,
             }
         );
         assert_eq!(
@@ -334,6 +346,7 @@ mod tests {
                 disconnect_after: None,
                 failures_before_success: 3,
                 audio_error_after: None,
+                reopen_fail_for: None,
             }
         );
         // カンマで並べられる。大文字小文字と前後の空白は問わない
@@ -343,6 +356,7 @@ mod tests {
                 disconnect_after: Some(Duration::from_secs(5)),
                 failures_before_success: 2,
                 audio_error_after: None,
+                reopen_fail_for: None,
             }
         );
     }
@@ -355,7 +369,28 @@ mod tests {
                 disconnect_after: None,
                 failures_before_success: 1,
                 audio_error_after: Some(Duration::from_secs(3)),
+                reopen_fail_for: None,
             }
+        );
+    }
+
+    #[test]
+    fn parse_scenario_reads_reopen_fail() {
+        assert_eq!(
+            parse_scenario(Some("disconnect:5, Reopen-Fail: 20 ,fail:1")),
+            FakeScenario {
+                disconnect_after: Some(Duration::from_secs(5)),
+                reopen_fail_for: Some(Duration::from_secs(20)),
+                failures_before_success: 1,
+                ..FakeScenario::default()
+            }
+        );
+        assert_eq!(parse_scenario(Some("disconnect:5")).reopen_fail_for, None);
+        assert_eq!(
+            parse_scenario(Some(
+                "reopen-fail:0,reopen-fail:x,reopen-fail,reopen-fail:-1"
+            )),
+            FakeScenario::default()
         );
     }
 
@@ -368,6 +403,7 @@ mod tests {
                 disconnect_after: None,
                 failures_before_success: 1,
                 audio_error_after: None,
+                reopen_fail_for: None,
             }
         );
         assert_eq!(

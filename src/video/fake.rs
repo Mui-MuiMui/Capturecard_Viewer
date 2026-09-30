@@ -72,6 +72,8 @@ struct FakeVideoStream {
     /// 落とすと生成スレッドが止まる（受け側が切断を見る）
     stop: Sender<()>,
     handle: JoinHandle<()>,
+    /// 開いた時刻。シナリオ disconnect で途絶えた時刻を割り出すのに使う
+    opened_at: Instant,
 }
 
 /// フェイクの映像デバイス。`VideoCapture` と同じ窓口を持つ。
@@ -85,6 +87,10 @@ pub struct FakeVideoCapture {
     options: FakeVideoOptions,
     /// シナリオ（`failures_before_success`）で、あと何回失敗させるか
     remaining_failures: u32,
+    /// シナリオ reopen-fail: 途絶のあと、この時間は開き直しを失敗させる
+    reopen_fail: Option<Duration>,
+    /// シナリオ disconnect で途絶えた時刻。開くのに成功したら消す
+    disconnected_at: Option<Instant>,
     stream: Option<FakeVideoStream>,
     active: Option<ActiveVideo>,
 }
@@ -103,9 +109,19 @@ impl FakeVideoCapture {
             repaint_waker,
             remaining_failures: options.failures_before_success,
             options,
+            reopen_fail: None,
+            disconnected_at: None,
             stream: None,
             active: None,
         }
+    }
+
+    /// シナリオ reopen-fail を足す。途絶（disconnect）のあと `reopen_fail` の間は
+    /// 開き直しを失敗させ、USB を抜いたままの状態を再現する。
+    /// `FakeVideoOptions` に足さないのは、録画のテストが構造体リテラルで組んでいるため
+    pub fn with_reopen_fail(mut self, reopen_fail: Option<Duration>) -> Self {
+        self.reopen_fail = reopen_fail;
+        self
     }
 
     /// 名乗るデバイスの一覧。`(名前, 説明)`
@@ -135,6 +151,20 @@ impl FakeVideoCapture {
 
         let index = self.find_device(device_name)?;
         let name = self::device_name(index);
+
+        if let Some(at) = self.disconnected_at {
+            let since = at.elapsed();
+            if reopen_blocked(since, self.reopen_fail) {
+                info!(
+                    "フェイクの映像デバイスを開くのに失敗させた（シナリオ reopen-fail、途絶から {} ms）",
+                    since.as_millis()
+                );
+                return Err(VideoError::CameraOpenFailed {
+                    device: name,
+                    source: "フェイクのシナリオ（reopen-fail）で失敗させた".to_string(),
+                });
+            }
+        }
 
         if self.remaining_failures > 0 {
             self.remaining_failures -= 1;
@@ -186,9 +216,11 @@ impl FakeVideoCapture {
             "フェイクの映像デバイスを開いた（{}、{}x{} {}fps、パターン: {:?}）",
             name, mode.width, mode.height, mode.fps, pattern
         );
+        self.disconnected_at = None;
         self.stream = Some(FakeVideoStream {
             stop: stop_tx,
             handle,
+            opened_at: Instant::now(),
         });
         self.active = Some(ActiveVideo {
             device_name: name,
@@ -204,6 +236,11 @@ impl FakeVideoCapture {
     pub fn stop_capture(&mut self) {
         self.active = None;
         if let Some(stream) = self.stream.take() {
+            if let Some(ago) =
+                disconnected_ago(stream.opened_at.elapsed(), self.options.disconnect_after)
+            {
+                self.disconnected_at = Instant::now().checked_sub(ago);
+            }
             drop(stream.stop);
             if stream.handle.join().is_err() {
                 warn!("フェイクの映像の生成スレッドが異常終了していた");
@@ -268,6 +305,17 @@ fn choose_mode(resolution: Option<(u32, u32)>, fps: Option<u32>) -> VideoMode {
         closest.height,
         fps.unwrap_or(DEFAULT_MODE.fps).clamp(MIN_FPS, MAX_FPS),
     )
+}
+
+/// 開いてから `open_for` 経ったストリームが、シナリオ disconnect で
+/// どれだけ前に途絶えたか。まだ途絶えていない・シナリオが無いなら `None`
+fn disconnected_ago(open_for: Duration, disconnect_after: Option<Duration>) -> Option<Duration> {
+    open_for.checked_sub(disconnect_after?)
+}
+
+/// 途絶から `since` 経った今、シナリオ reopen-fail で開き直しを失敗させるか
+fn reopen_blocked(since: Duration, reopen_fail: Option<Duration>) -> bool {
+    reopen_fail.is_some_and(|window| since < window)
 }
 
 /// 生成スレッドが持つもの一式。
@@ -370,6 +418,48 @@ mod tests {
             VideoMode::new(1280, 720, 30)
         );
         assert_eq!(choose_mode(None, Some(30)), DEFAULT_MODE);
+    }
+
+    #[test]
+    fn disconnected_ago_only_after_the_disconnect_time() {
+        let secs = Duration::from_secs;
+        assert_eq!(disconnected_ago(secs(10), None), None);
+        assert_eq!(disconnected_ago(secs(4), Some(secs(5))), None);
+        assert_eq!(disconnected_ago(secs(5), Some(secs(5))), Some(secs(0)));
+        assert_eq!(disconnected_ago(secs(8), Some(secs(5))), Some(secs(3)));
+    }
+
+    #[test]
+    fn reopen_blocked_only_within_the_window() {
+        let secs = Duration::from_secs;
+        assert!(!reopen_blocked(secs(0), None));
+        assert!(reopen_blocked(secs(0), Some(secs(20))));
+        assert!(reopen_blocked(secs(19), Some(secs(20))));
+        assert!(!reopen_blocked(secs(20), Some(secs(20))));
+    }
+
+    #[test]
+    fn fake_video_reopen_fail_scenario_blocks_reopening_after_disconnect() {
+        let (capture, frames) = capture(FakeVideoOptions {
+            disconnect_after: Some(Duration::from_millis(50)),
+            ..TWO_DEVICES
+        });
+        let mut capture = capture.with_reopen_fail(Some(Duration::from_millis(400)));
+        capture
+            .start_capture(None, Some((640, 480)), None, Some(60))
+            .expect("最初は開ける");
+        assert!(wait_for_frame(&frames));
+        std::thread::sleep(Duration::from_millis(150));
+        capture.stop_capture();
+
+        assert!(
+            capture.start_capture(None, None, None, None).is_err(),
+            "途絶のあとの期間は開き直せない"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        capture
+            .start_capture(None, None, None, None)
+            .expect("期間が過ぎたら開ける");
     }
 
     fn capture(options: FakeVideoOptions) -> (FakeVideoCapture, VideoFrames) {
