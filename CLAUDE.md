@@ -92,6 +92,7 @@ cargo build --release
 | `src/recording/replay_recording.rs` | リプレイバッファを通す 1 回の録画 `ReplayRecording`。先頭のキーフレームからエンコードなしの Sink Writer へ書く。リングの中身は数 ms ごとに少しずつ書き（`catch_up`）、追いついたらライブのサンプルを直接書く |
 | `src/recording/replay_ring.rs` | エンコード済みのリング `EncodedRing` と、書き出すキーフレームの選び方（`replay_start`）・捨てる境界（`keep_from` / `gops_to_drop`）・PTS の付け替え（`Cut`）。判定は純粋関数 |
 | `src/recording/encoder.rs` | エンコーダ MFT `EncoderMft`（H.264 はハードウェアの非同期型 → ソフトウェアの同期型の順に試す、AAC は同期型）。非同期型は `METransformNeedInput` / `METransformHaveOutput` を待たずに取る。エンコードなしの Sink Writer へ渡すメディアタイプ（`stream_type`） |
+| `src/recording/encoder_setup.rs` | `EncoderMft` を作るときだけ使う補助。エンコーダ MFT の列挙（`enumerate`）、候補を先頭から開く（`open_first`）、H.264 / AAC の入出力の形の組み立て（`configure_video` / `configure_audio`）、ストリームの番号（`stream_ids`） |
 | `src/recording/passthrough.rs` | エンコードなしの Sink Writer `PassthroughWriter`（入力 = 出力の H.264 / AAC を MP4 へまとめるだけ） |
 | `src/recording/bitstream.rs` | H.264 の Annex B の読み取り（IDR か、SPS / PPS）と、AAC の `MF_MT_USER_DATA` の予備の組み立て。純粋関数 |
 | `src/recording/writer.rs` | Media Foundation の Sink Writer（`IMFSinkWriter`）の組み立て（H.264 と AAC の 2 ストリーム）と NV12 / 16bit PCM の書き込み、`Finalize`、エンコーダの遅れ（`backlog`）、使っているエンコーダの名前（`encoder_info`） |

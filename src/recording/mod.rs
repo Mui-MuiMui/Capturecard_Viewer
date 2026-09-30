@@ -29,6 +29,7 @@ mod audio;
 mod bitstream;
 mod convert;
 mod encoder;
+mod encoder_setup;
 mod file_name;
 mod passthrough;
 mod pts;
