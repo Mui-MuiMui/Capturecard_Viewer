@@ -279,6 +279,8 @@ impl WorkerState {
             return;
         };
         let (configured_input, configured_output, ..) = config.audio.clone();
+        // 入力が未指定なら音声を開かない（`worker_connect::audio_input_is_selected`、
+        // #304）ので、入力側は下の `active()` で抜けて実際には追いかけない
         let track_input = configured_input.is_none();
         let track_output = configured_output.is_none();
         if !track_input && !track_output {
@@ -651,5 +653,162 @@ mod tests {
         assert!(!state.audio.take_stream_error(), "開き直したら数え直すこと");
         at(10_400);
         assert!(state.audio.take_stream_error(), "新しい期限で立つこと");
+    }
+
+    /// 音声の失敗の理由を、届いた順に取り出す。
+    fn audio_failures(events: &[DeviceEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::AudioFailed(reason) => Some(reason.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn worker_does_not_open_the_default_input_after_the_input_is_cleared() {
+        // 設定の初期化・読み込みで入力が未指定になっても、Windows の既定の
+        // 入力（ノート PC なら内蔵マイク）を開かない（#304）。起動直後でない
+        // `ApplyConfig` では `resolve_default_devices` が通らないので、`None` の
+        // まま接続の試行まで届く
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        audio.with(|state| state.input_devices = vec!["モック入力".to_string()]);
+        let (mut state, events) = mock_state(&video, &audio);
+        apply_config(
+            &mut state,
+            config_for(Some("キャプチャーボード"), Some("モック入力")),
+            true,
+        );
+        let base = Instant::now();
+        state.tick(base);
+        assert_eq!(audio.with(|state| state.start_calls), 1);
+        assert!(audio.with(|state| state.running));
+        drain(&events);
+
+        // 「設定を初期化」→「適用」。入力だけが未指定になって届く
+        let cleared = config_for(Some("キャプチャーボード"), None);
+        apply_config(&mut state, cleared.clone(), false);
+        state.tick(base + Duration::from_secs(2));
+
+        assert_eq!(
+            audio.with(|state| state.start_calls),
+            1,
+            "未指定の入力で開き直さないこと"
+        );
+        assert!(
+            !audio.with(|state| state.running),
+            "設定に合わせて、前の入力のパススルーは閉じること"
+        );
+        assert!(!state.audio_retry.is_active(), "再試行も続けないこと");
+        let reasons = audio_failures(&drain(&events));
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(
+            reasons[0].contains("オーディオ入力デバイスが選ばれていません"),
+            "{reasons:?}"
+        );
+
+        // 2 秒ごとの `apply_settings` で同じ設定が届いても、通知を繰り返さない
+        for step in 2..6 {
+            apply_config(&mut state, cleared.clone(), false);
+            state.tick(base + Duration::from_secs(2) * step);
+        }
+        assert_eq!(audio.with(|state| state.start_calls), 1);
+        assert!(audio_failures(&drain(&events)).is_empty());
+
+        // 入力を選び直せば、また開く
+        apply_config(
+            &mut state,
+            config_for(Some("キャプチャーボード"), Some("モック入力")),
+            false,
+        );
+        state.tick(base + Duration::from_secs(20));
+        assert_eq!(audio.with(|state| state.start_calls), 2);
+        assert!(audio.with(|state| state.running));
+    }
+
+    #[test]
+    fn worker_does_not_open_the_default_input_when_none_is_listed_at_startup() {
+        // 起動時に入力が 1 台も列挙できないと `resolve_default_devices` が埋められず、
+        // 未指定のまま届く。このときも既定の入力へは倒さない
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        let (mut state, events) = mock_state(&video, &audio);
+        apply_config(
+            &mut state,
+            config_for(Some("キャプチャーボード"), None),
+            true,
+        );
+        state.tick(Instant::now());
+
+        assert_eq!(audio.with(|state| state.start_calls), 0);
+        assert_eq!(audio_failures(&drain(&events)).len(), 1);
+    }
+
+    /// 映像の失敗の理由を、届いた順に取り出す。
+    fn video_failures(events: &[DeviceEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::VideoFailed(reason) => Some(reason.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn worker_closes_the_video_stream_after_the_device_is_cleared() {
+        // 設定の初期化・読み込みで映像デバイスが未指定になったら、開いている
+        // ストリームを閉じる（#334）。閉じないと古い映像が映り続けたまま、
+        // 設定の表示だけが「未選択」になる
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        let (mut state, events) = mock_state(&video, &audio);
+        let selected = config_for(Some("キャプチャーボード"), None);
+        apply_config(&mut state, selected.clone(), false);
+        let base = Instant::now();
+        state.tick(base);
+        assert!(video.with(|state| state.capturing));
+        drain(&events);
+
+        // 「設定を初期化」→「適用」。映像デバイスが未指定になって届く
+        let cleared = config_for(None, None);
+        apply_config(&mut state, cleared.clone(), false);
+        state.tick(base + Duration::from_secs(2));
+
+        assert_eq!(video.with(|state| state.start_calls), 1, "開き直さないこと");
+        assert!(
+            !video.with(|state| state.capturing),
+            "ストリームを閉じること"
+        );
+        assert!(!state.video_retry.is_active(), "再試行も続けないこと");
+        let after_clear = drain(&events);
+        assert!(
+            after_clear
+                .iter()
+                .any(|event| matches!(event, DeviceEvent::VideoSignalLost)),
+            "最後のフレームを画面から落とすこと"
+        );
+        let reasons = video_failures(&after_clear);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(
+            reasons[0].contains("映像デバイスが選ばれていません"),
+            "{reasons:?}"
+        );
+
+        // 2 秒ごとの `apply_settings` で同じ設定が届いても、通知を繰り返さない
+        for step in 2..6 {
+            apply_config(&mut state, cleared.clone(), false);
+            state.tick(base + Duration::from_secs(2) * step);
+        }
+        assert_eq!(video.with(|state| state.stop_calls), 1);
+        assert!(video_failures(&drain(&events)).is_empty());
+
+        // 映像デバイスを選び直せば、また開く
+        apply_config(&mut state, selected, false);
+        state.tick(base + Duration::from_secs(20));
+        assert_eq!(video.with(|state| state.start_calls), 2);
+        assert!(video.with(|state| state.capturing));
     }
 }
