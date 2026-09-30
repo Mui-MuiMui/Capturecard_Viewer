@@ -1,0 +1,61 @@
+# 依存の脆弱性情報（RustSec）を cargo audit で検査する。
+#
+# ci.yml とは別のワークフローにしてあり、ジョブ名はルールセットの必須チェック
+# （fmt / clippy / build / test）に入れない。新しい勧告が出た瞬間に無関係な
+# PR が全部マージできなくなるのを避けるため。落ちたら赤く出るので、
+# 対応する Issue を起票するか .cargo/audit.toml に理由付きで載せる。
+# 運用は docs/DEPENDENCIES.md の「脆弱性情報（RustSec）の検査」。
+#
+# Cargo.lock と勧告データベースを突き合わせるだけでビルドしないので、
+# Windows ランナーは要らない。ci.yml の実行時間にも影響しない。
+name: Audit
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - main
+  push:
+    branches:
+      - dev
+      - main
+  # 勧告は依存を変えなくても後から増えるので、週 1 回（月曜 09:00 JST）も回す
+  schedule:
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: 依存の脆弱性情報（RustSec）
+    runs-on: ubuntu-latest
+
+    steps:
+      # Action を SHA で固定する理由は ci.yml と同じ
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust ツールチェインを用意する
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master (2026-09-12)
+        with:
+          toolchain: stable
+
+      # ~/.cargo/bin をキャッシュして cargo-audit のビルドを 2 回目以降は省く
+      - name: cargo のキャッシュを復元する
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # 版を固定するのは、版が変わると判定や出力が変わりうるため
+      - name: cargo-audit を用意する
+        run: cargo install cargo-audit --locked --version 0.22.2
+
+      # 無視する勧告とその理由は .cargo/audit.toml（cargo audit が自動で読む）
+      - name: 脆弱性情報を検査する
+        run: cargo audit
