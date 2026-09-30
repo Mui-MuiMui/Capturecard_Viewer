@@ -143,10 +143,14 @@ pub fn export_file_name(date: &impl Datelike) -> String {
 // **confy の `store_path` をそのまま使う。** 書式を `%AppData%` の設定ファイルと
 // 揃えたいためで、ここだけ別の toml 実装で書くと、confy が書式を変えたときに
 // 書き出したファイルを読み戻せない組み合わせが生まれる。
+//
+// 書き方は `save()` と同じく、書き出し先と同じフォルダの一時ファイルへ書いて
+// rename で置き換える（Issue #361）。選んだファイルへ直接書くと、書き込み中に
+// 止まったとき壊れたファイルが残る。
 pub fn export_to(path: &Path, settings: &AppSettings) -> Result<(), SettingsError> {
-    confy::store_path(path, settings).map_err(|e| SettingsError::ExportFailed {
+    replace_atomically(path, settings).map_err(|source| SettingsError::ExportFailed {
         path: path.to_path_buf(),
-        source: e.to_string(),
+        source,
     })
 }
 
@@ -217,9 +221,18 @@ fn temp_path_for(path: &Path) -> PathBuf {
 // `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` で差し替える。
 //
 // 一時ファイルへの書き込みには confy の `store_path` をそのまま使う。書式を
-// 読み込み（confy）と書き出し（`export_to`）に揃えるため。このクレートが
+// 読み込み（confy）に揃えるため。このクレートが
 // 直接使う toml と confy が内部で使う toml は版が違う。
 fn write_atomically(path: &Path, settings: &AppSettings) -> Result<(), SettingsError> {
+    replace_atomically(path, settings).map_err(|source| SettingsError::SaveFailed {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+// `write_atomically` と `export_to` の本体。失敗の理由だけを返し、どの
+// `SettingsError` にするかは呼び出し側が決める。
+fn replace_atomically(path: &Path, settings: &AppSettings) -> Result<(), String> {
     let temp_path = temp_path_for(path);
 
     let written = confy::store_path(&temp_path, settings)
@@ -239,10 +252,7 @@ fn write_atomically(path: &Path, settings: &AppSettings) -> Result<(), SettingsE
         // 置き換えられなかった一時ファイルは残さない。元のファイルは
         // 手付かずのまま。消せなくても次の保存で上書きされるので、失敗は捨てる
         let _ = std::fs::remove_file(&temp_path);
-        return Err(SettingsError::SaveFailed {
-            path: path.to_path_buf(),
-            source,
-        });
+        return Err(source);
     }
     Ok(())
 }
@@ -629,6 +639,38 @@ mod tests {
             assert!(result.is_err(), "読み取り専用のファイルを置き換えた");
             assert_eq!(fs::read_to_string(&path).unwrap(), "[video]\nfps = 15\n");
         }
+        assert!(!temp_path_for(&path).exists(), "一時ファイルが残っている");
+    }
+
+    #[test]
+    fn export_to_replaces_an_existing_file_and_leaves_no_temp_file() {
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("exported.toml");
+        fs::write(&path, "[video]\nfps = 15\n").expect("古い内容を書けること");
+        let settings: AppSettings = toml::from_str(FULL_CONFIG).expect("読めること");
+
+        export_to(&path, &settings).expect("書き出せること");
+
+        assert!(!temp_path_for(&path).exists(), "一時ファイルが残っている");
+        let imported = import_from(&path).expect("読み戻せること");
+        assert_eq!(imported.video.fps, settings.video.fps);
+    }
+
+    #[test]
+    fn export_to_failure_returns_export_error_and_removes_the_temp_file() {
+        // 書き出し先がディレクトリで置き換えられない場合。保存ではなく
+        // 書き出しの失敗として返り、一時ファイルも残らないこと
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("exported.toml");
+        fs::create_dir(&path).expect("ディレクトリを作れること");
+
+        let err = export_to(&path, &AppSettings::default()).expect_err("失敗すること");
+
+        assert!(
+            matches!(&err, SettingsError::ExportFailed { path: p, .. } if p == &path),
+            "書き出しの失敗として返ること: {err:?}"
+        );
+        assert!(path.is_dir(), "元の場所が変わっている");
         assert!(!temp_path_for(&path).exists(), "一時ファイルが残っている");
     }
 
