@@ -8,7 +8,11 @@ fn main() {
         println!("cargo:rerun-if-changed=Cargo.toml");
 
         generate_version_header();
-        embed_resource::compile("app.rc", embed_resource::NONE);
+        // embed-resource 3 は失敗しても結果を返すだけでビルドを止めない。
+        // アイコンとバージョン情報の無い exe が出来上がらないよう、ここで止める
+        embed_resource::compile("app.rc", embed_resource::NONE)
+            .manifest_required()
+            .unwrap_or_else(|e| panic!("app.rc のリソースを埋め込めなかった: {e}"));
     }
 }
 

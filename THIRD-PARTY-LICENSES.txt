@@ -29,10 +29,10 @@ file at the root of the repository.
 1. LICENSE OVERVIEW
 ================================================================================
 
-  MIT (MIT License): 211
+  MIT (MIT License): 198
   Apache-2.0 (Apache License 2.0): 19
   Unicode-3.0 (Unicode License v3): 19
-  BSD-3-Clause (BSD 3-Clause "New" or "Revised" License): 7
+  BSD-3-Clause (BSD 3-Clause "New" or "Revised" License): 5
   MPL-2.0 (Mozilla Public License 2.0): 5
   Zlib (zlib License): 4
   BSL-1.0 (Boost Software License 1.0): 2
@@ -96,10 +96,6 @@ base64 0.23.1
 base64ct 1.8.3
   License: Apache-2.0 OR MIT
   Repository: https://github.com/RustCrypto/formats
-
-bit_field 0.10.3
-  License: Apache-2.0 OR MIT
-  Repository: https://github.com/phil-opp/rust-bit-field
 
 bitflags 1.3.2
   License: MIT OR Apache-2.0
@@ -185,14 +181,6 @@ crc32fast 1.5.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/srijs/rust-crc32fast
 
-crossbeam-deque 0.8.8
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/crossbeam-rs/crossbeam
-
-crossbeam-epoch 0.9.21
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/crossbeam-rs/crossbeam
-
 crossbeam-utils 0.8.23
   License: MIT OR Apache-2.0
   Repository: https://github.com/crossbeam-rs/crossbeam
@@ -221,11 +209,15 @@ directories 5.0.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/soc/directories-rs
 
-dirs 5.0.1
+dirs 7.0.0
   License: MIT OR Apache-2.0
-  Repository: https://github.com/soc/dirs-rs
+  Repository: https://codeberg.org/dirs/dirs-rs
 
 dirs-sys 0.4.1
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/dirs-dev/dirs-sys-rs
+
+dirs-sys 0.5.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/dirs-dev/dirs-sys-rs
 
@@ -261,15 +253,11 @@ egui_glow 0.26.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/emilk/egui/tree/master/crates/egui_glow
 
-either 1.18.0
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/rayon-rs/either
-
 emath 0.26.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/emilk/egui/tree/master/crates/emath
 
-embed-resource 2.5.2
+embed-resource 3.0.11
   License: MIT
   Repository: https://github.com/nabijaczleweli/rust-embed-resource
 
@@ -288,10 +276,6 @@ equivalent 1.0.2
 error-code 3.4.0
   License: BSL-1.0
   Repository: https://github.com/DoumanAsh/error-code
-
-exr 1.74.2
-  License: BSD-3-Clause
-  Repository: https://github.com/johannesvollmer/exrs
 
 fdeflate 0.3.7
   License: MIT OR Apache-2.0
@@ -329,10 +313,6 @@ getrandom 0.4.3
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-random/getrandom
 
-gif 0.13.3
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/image-rs/image-gif
-
 gl_generator 0.14.0
   License: Apache-2.0
   Repository: https://github.com/brendanzab/gl-rs/
@@ -356,10 +336,6 @@ glutin_egl_sys 0.6.0
 glutin_wgl_sys 0.5.0
   License: Apache-2.0
   Repository: https://github.com/rust-windowing/glutin
-
-half 2.7.1
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/VoidStarKat/half-rs
 
 hashbrown 0.17.1
   License: MIT OR Apache-2.0
@@ -437,10 +413,6 @@ jobserver 0.1.35
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang/jobserver-rs
 
-jpeg-decoder 0.3.2
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/image-rs/jpeg-decoder
-
 khronos_api 3.1.0
   License: Apache-2.0
   Repository: https://github.com/brendanzab/gl-rs/
@@ -448,10 +420,6 @@ khronos_api 3.1.0
 lazy_static 1.5.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang-nursery/lazy-static.rs
-
-lebe 0.5.3
-  License: BSD-3-Clause
-  Repository: https://github.com/johannesvollmer/lebe
 
 lewton 0.10.2
   License: MIT OR Apache-2.0
@@ -464,10 +432,6 @@ libc 0.2.189
 libloading 0.8.9
   License: ISC
   Repository: https://github.com/nagisa/rust_libloading/
-
-libm 0.2.16
-  License: MIT
-  Repository: https://github.com/rust-lang/compiler-builtins
 
 litemap 0.8.3
   License: Unicode-3.0
@@ -553,10 +517,6 @@ nokhwa-core 0.1.9
   License: Apache-2.0
   Repository: https://github.com/l1npengtul/nokhwa
 
-num-complex 0.4.6
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/rust-num/num-complex
-
 num-traits 0.2.19
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-num/num-traits
@@ -613,29 +573,13 @@ proc-macro2 1.0.107
   License: MIT OR Apache-2.0
   Repository: https://github.com/dtolnay/proc-macro2
 
-pulp 0.22.3
-  License: MIT
-  Repository: https://github.com/sarah-quinones/pulp/
-
-pulp-wasm-simd-flag 0.1.1
-  License: MIT
-  Repository: https://github.com/sarah-quinones/pulp/
-
 pxfm 0.1.30
   License: BSD-3-Clause OR Apache-2.0
   Repository: https://github.com/awxkee/pxfm
 
-qoi 0.4.1
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/aldanor/qoi-rust
-
 quote 1.0.47
   License: MIT OR Apache-2.0
   Repository: https://github.com/dtolnay/quote
-
-raw-cpuid 11.6.0
-  License: MIT
-  Repository: https://github.com/gz/rust-cpuid
 
 raw-window-handle 0.5.2
   License: MIT OR Apache-2.0 OR Zlib
@@ -645,19 +589,7 @@ raw-window-handle 0.6.2
   License: MIT OR Apache-2.0 OR Zlib
   Repository: https://github.com/rust-windowing/raw-window-handle
 
-rayon 1.12.0
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/rayon-rs/rayon
-
-rayon-core 1.13.0
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/rayon-rs/rayon
-
-reborrow 0.5.5
-  License: MIT
-  Repository: https://github.com/sarah-ek/reborrow/
-
-rfd 0.11.4
+rfd 0.17.2
   License: MIT
   Repository: https://github.com/PolyMeilex/rfd
 
@@ -714,6 +646,10 @@ serde_json 1.0.151
   Repository: https://github.com/serde-rs/json
 
 serde_spanned 0.6.9
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/toml-rs/toml
+
+serde_spanned 1.1.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
@@ -801,10 +737,6 @@ thiserror-impl 2.0.20
   License: MIT OR Apache-2.0
   Repository: https://github.com/dtolnay/thiserror
 
-tiff 0.9.1
-  License: MIT
-  Repository: https://github.com/image-rs/image-tiff
-
 tinystr 0.8.4
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
@@ -817,7 +749,15 @@ toml 0.8.23
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
+toml 1.1.6+spec-1.1.0
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/toml-rs/toml
+
 toml_datetime 0.6.11
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/toml-rs/toml
+
+toml_datetime 1.1.1+spec-1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
@@ -825,7 +765,15 @@ toml_edit 0.22.27
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
+toml_parser 1.1.3+spec-1.1.0
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/toml-rs/toml
+
 toml_write 0.1.2
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/toml-rs/toml
+
+toml_writer 1.1.2+spec-1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
@@ -889,17 +837,9 @@ webpki-root-certs 1.0.9
   License: CDLA-Permissive-2.0
   Repository: https://github.com/rustls/webpki-roots
 
-weezl 0.1.12
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/image-rs/weezl
-
 winapi 0.3.9
   License: MIT OR Apache-2.0
   Repository: https://github.com/retep998/winapi-rs
-
-windows 0.44.0
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/microsoft/windows-rs
 
 windows 0.48.0
   License: MIT OR Apache-2.0
@@ -969,15 +909,15 @@ windows-sys 0.48.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/microsoft/windows-rs
 
+windows-sys 0.59.0
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/microsoft/windows-rs
+
 windows-sys 0.60.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/microsoft/windows-rs
 
 windows-sys 0.61.2
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/microsoft/windows-rs
-
-windows-targets 0.42.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/microsoft/windows-rs
 
@@ -994,10 +934,6 @@ windows-targets 0.53.5
   Repository: https://github.com/microsoft/windows-rs
 
 windows-threading 0.2.1
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/microsoft/windows-rs
-
-windows_x86_64_msvc 0.42.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/microsoft/windows-rs
 
@@ -1021,7 +957,11 @@ winnow 0.7.15
   License: MIT
   Repository: https://github.com/winnow-rs/winnow
 
-winreg 0.52.0
+winnow 1.0.4
+  License: MIT
+  Repository: https://github.com/winnow-rs/winnow
+
+winreg 0.55.0
   License: MIT
   Repository: https://github.com/gentoo90/winreg-rs
 
@@ -1042,10 +982,6 @@ yoke-derive 0.8.2
   Repository: https://github.com/unicode-org/icu4x
 
 zerocopy 0.8.57
-  License: BSD-2-Clause OR Apache-2.0 OR MIT
-  Repository: https://github.com/google/zerocopy
-
-zerocopy-derive 0.8.57
   License: BSD-2-Clause OR Apache-2.0 OR MIT
   Repository: https://github.com/google/zerocopy
 
@@ -1077,8 +1013,13 @@ zmij 1.0.23
   License: MIT
   Repository: https://github.com/dtolnay/zmij
 
-zune-inflate 0.2.54
+zune-core 0.5.3
   License: MIT OR Apache-2.0 OR Zlib
+  Repository: https://github.com/etemesi254/zune-image
+
+zune-jpeg 0.5.15
+  License: MIT OR Apache-2.0 OR Zlib
+  Repository: https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg
 
 ================================================================================
 3. LICENSE TEXTS
@@ -2428,59 +2369,6 @@ pub(crate) static GB18030_2022_OVERRIDE_BYTES: [[u8; 2]; 18] = [
 BSD 3-Clause "New" or "Revised" License (BSD-3-Clause)
 ================================================================================
 Used by:
-  - lebe 0.5.3
-
-Copyright (c) 2022 Contributors to the lebe Project. All rights reserved.
-
-Redistribution and use in source and binary forms, with or without modification,
-are permitted provided that the following conditions are met:
-
-1. Redistributions of source code must retain the above copyright notice,
-this list of conditions and the following disclaimer.
-
-2. Redistributions in binary form must reproduce the above copyright notice,
-this list of conditions and the following disclaimer in the documentation
-and/or other materials provided with the distribution.
-
-3. Neither the name of the copyright holder nor the names of its contributors
-may be used to endorse or promote products derived from this software without
-specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
-USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-
-================================================================================
-BSD 3-Clause "New" or "Revised" License (BSD-3-Clause)
-================================================================================
-Used by:
-  - exr 1.74.2
-
-Copyright (c) <year> <owner>. 
-
-Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
-
-1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
-
-2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
-
-3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-
-================================================================================
-BSD 3-Clause "New" or "Revised" License (BSD-3-Clause)
-================================================================================
-Used by:
   - encoding_rs 0.8.41
 
 Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
@@ -2775,68 +2663,7 @@ The `cfg_aliases!` macro uses a lot of the code from [`tectonic_cfg_support::tar
 MIT License (MIT)
 ================================================================================
 Used by:
-  - qoi 0.4.1
-
-/*
-
-clang fuzzing harness for qoi_decode
-
-Compile and run with: 
-	clang -fsanitize=address,fuzzer -g -O0 qoifuzz.c && ./a.out
-
-Dominic Szablewski - https://phoboslab.org
-
-
--- LICENSE: The MIT License(MIT)
-
-Copyright(c) 2021 Dominic Szablewski
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files(the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and / or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions :
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-*/
-
-
-#define QOI_IMPLEMENTATION
-#include "qoi.h"
-#include <stddef.h>
-#include <stdint.h>
-
-int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
-	int w, h;
-	if (size < 4) {
-		return 0;
-	}
-
-	qoi_desc desc;
-	void* decoded = qoi_decode((void*)(data + 4), (int)(size - 4), &desc, *((int *)data));
-	if (decoded != NULL) {
-		free(decoded);
-	}
-	return 0;
-}
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
   - lazy_static 1.5.0
-  - rayon-core 1.13.0
-  - rayon 1.12.0
 
 Copyright (c) 2010 The Rust Project Developers
 
@@ -3010,7 +2837,6 @@ Used by:
   - bitflags 1.3.2
   - bitflags 2.13.2
   - log 0.4.34
-  - num-complex 0.4.6
   - num-traits 0.2.19
 
 Copyright (c) 2014 The Rust Project Developers
@@ -3077,40 +2903,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - either 1.18.0
-
-Copyright (c) 2015
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
-  - winreg 0.52.0
+  - winreg 0.55.0
 
 Copyright (c) 2015 Igor Shaula
 
@@ -3887,7 +3680,8 @@ MIT License (MIT)
 ================================================================================
 Used by:
   - dirs-sys 0.4.1
-  - dirs 5.0.1
+  - dirs-sys 0.5.0
+  - dirs 7.0.0
 
 Copyright (c) 2018-2019 dirs-rs contributors
 
@@ -4242,39 +4036,6 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - qoi 0.4.1
-
-Copyright (c) 2022 Ivan Smirnov
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
   - hybrid-array 0.4.15
 
 Copyright (c) 2022-2026 The RustCrypto Project Developers
@@ -4396,10 +4157,15 @@ MIT License (MIT)
 ================================================================================
 Used by:
   - serde_spanned 0.6.9
+  - serde_spanned 1.1.1
   - toml 0.8.23
+  - toml 1.1.6+spec-1.1.0
   - toml_datetime 0.6.11
+  - toml_datetime 1.1.1+spec-1.1.0
   - toml_edit 0.22.27
+  - toml_parser 1.1.3+spec-1.1.0
   - toml_write 0.1.2
+  - toml_writer 1.1.2+spec-1.1.0
 
 Copyright (c) Individual contributors
 
@@ -4597,7 +4363,6 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 MIT License (MIT)
 ================================================================================
 Used by:
-  - zerocopy-derive 0.8.57
   - zerocopy 0.8.57
 
 Copyright 2023 The Fuchsia Authors
@@ -4711,69 +4476,11 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 MIT License (MIT)
 ================================================================================
 Used by:
-  - jpeg-decoder 0.3.2
-
-MIT License
-
-Copyright (c) 2016 The jpeg-decoder Developers
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
   - static_assertions 1.1.0
 
 MIT License
 
 Copyright (c) 2017 Nikolai Vazquez
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
-  - tiff 0.9.1
-
-MIT License
-
-Copyright (c) 2018 PistonDevelopers
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -4933,28 +4640,11 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - cfg_aliases 0.1.1
+  - rfd 0.17.2
 
 MIT License
 
-Copyright (c) 2020 Katharos Technology
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
-  - pulp 0.22.3
-
-MIT License
-
-Copyright (c) 2021 sarah
+Copyright (c) 2020 Bilal Elmoussaoui
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -4979,7 +4669,24 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - rfd 0.11.4
+  - cfg_aliases 0.1.1
+
+MIT License
+
+Copyright (c) 2020 Katharos Technology
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+MIT License (MIT)
+================================================================================
+Used by:
+  - rfd 0.17.2
 
 MIT License
 
@@ -5013,35 +4720,6 @@ Used by:
 MIT License
 
 Copyright (c) 2022 The Arboard contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
-  - reborrow 0.5.5
-
-MIT License
-
-Copyright (c) 2022 sarah
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -5107,8 +4785,6 @@ Used by:
   - egui_glow 0.26.2
   - emath 0.26.2
   - lewton 0.10.2
-  - libm 0.2.16
-  - pulp-wasm-simd-flag 0.1.1
   - windows-collections 0.3.2
   - windows-core 0.54.0
   - windows-core 0.62.2
@@ -5123,22 +4799,19 @@ Used by:
   - windows-result 0.4.1
   - windows-strings 0.5.1
   - windows-sys 0.48.0
+  - windows-sys 0.59.0
   - windows-sys 0.60.2
   - windows-sys 0.61.2
-  - windows-targets 0.42.2
   - windows-targets 0.48.5
   - windows-targets 0.52.6
   - windows-targets 0.53.5
   - windows-threading 0.2.1
-  - windows 0.44.0
   - windows 0.48.0
   - windows 0.54.0
   - windows 0.62.2
-  - windows_x86_64_msvc 0.42.2
   - windows_x86_64_msvc 0.48.5
   - windows_x86_64_msvc 0.52.6
   - windows_x86_64_msvc 0.53.1
-  - zune-inflate 0.2.54
 
 MIT License
 
@@ -5169,6 +4842,36 @@ Used by:
 MIT License
 
 Copyright (c) [2021] [Marvin Countryman]
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+MIT License (MIT)
+================================================================================
+Used by:
+  - zune-core 0.5.3
+  - zune-jpeg 0.5.15
+
+MIT License
+
+Copyright (c) zune-image developers
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -5321,33 +5024,6 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - half 2.7.1
-
-MIT License
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
   - flume 0.11.1
 
 Permission is hereby granted, free of charge, to any
@@ -5464,6 +5140,7 @@ MIT License (MIT)
 ================================================================================
 Used by:
   - winnow 0.7.15
+  - winnow 1.0.4
 
 Permission is hereby granted, free of charge, to any person obtaining
 a copy of this software and associated documentation files (the
@@ -5619,34 +5296,6 @@ THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - raw-cpuid 11.6.0
-
-The MIT License (MIT)
-
-Copyright (c) 2015 Gerd Zellweger
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
   - shlex 2.0.1
 
 The MIT License (MIT)
@@ -5670,35 +5319,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
-  - gif 0.13.3
-
-The MIT License (MIT)
-
-Copyright (c) 2015 nwin
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 
 
 ================================================================================
@@ -5740,35 +5360,6 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - bit_field 0.10.3
-
-The MIT License (MIT)
-
-Copyright (c) 2016 Philipp Oppermann
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
   - color_quant 1.1.0
 
 The MIT License (MIT)
@@ -5798,7 +5389,7 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - embed-resource 2.5.2
+  - embed-resource 3.0.11
 
 The MIT License (MIT)
 
@@ -5827,8 +5418,6 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - crossbeam-deque 0.8.8
-  - crossbeam-epoch 0.9.21
   - crossbeam-utils 0.8.23
 
 The MIT License (MIT)
@@ -5918,36 +5507,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
-  - weezl 0.1.12
-
-The MIT License (MIT)
-
-Copyright (c) HeroicKatora 2020
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
 
 
 ================================================================================
