@@ -23,6 +23,7 @@ use cpal::{
     SupportedStreamConfigRange,
 };
 use log::{debug, info, warn};
+use ringbuf::traits::Split;
 use ringbuf::HeapRb;
 use std::f64::consts::TAU;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -590,6 +591,7 @@ impl DiscardOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ringbuf::traits::Consumer;
 
     fn capture(input_count: u32, failures_before_success: u32) -> FakeAudioCapture {
         FakeAudioCapture::new(

@@ -11,7 +11,8 @@
 use cpal::traits::DeviceTrait;
 use cpal::Device;
 use log::error;
-use ringbuf::HeapRb;
+use ringbuf::traits::{Consumer, Observer, Producer};
+use ringbuf::{HeapCons, HeapProd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -21,8 +22,8 @@ use super::tap::AudioTap;
 
 /// リングバッファの内部表現は f32 に統一する。デバイス側のサンプル型は
 /// 入力で f32 へ正規化し、出力で書き戻す。
-pub(super) type AudioProducer = ringbuf::Producer<f32, Arc<HeapRb<f32>>>;
-pub(super) type AudioConsumer = ringbuf::Consumer<f32, Arc<HeapRb<f32>>>;
+pub(super) type AudioProducer = HeapProd<f32>;
+pub(super) type AudioConsumer = HeapCons<f32>;
 
 /// 出力ストリームがデバイスワーカーへ知らせる値。
 ///
@@ -182,7 +183,7 @@ pub(super) fn process_input<T: Copy>(
     // フレームは積まない。空きは出力側が読むと増えるだけで減らないので、
     // ここで数えた分は必ず入る
     let mut room = passthrough.as_ref().map_or(0, |prod| {
-        whole_frame_samples(prod.free_len().min(data.len()), channels)
+        whole_frame_samples(prod.vacant_len().min(data.len()), channels)
     });
     if passthrough.is_some() {
         count_dropped_frames(dropped, dropped_frames(data.len(), room, channels));
@@ -191,7 +192,7 @@ pub(super) fn process_input<T: Copy>(
         let value = to_f32(sample);
         if room > 0 {
             if let Some(prod) = passthrough.as_mut() {
-                let _ = prod.push(value);
+                let _ = prod.try_push(value);
                 room -= 1;
             }
         }
@@ -223,7 +224,7 @@ pub(super) fn process_output<T: Clone>(
     if let Ok(mut cons) = consumer.try_lock() {
         // この呼び出し分を消費する前の水位を渡す（クロックドリフト補正の観測と、
         // 最初の水位に達したかの判定）
-        if !converter.observe_water_level(cons.len()) {
+        if !converter.observe_water_level(cons.occupied_len()) {
             // 最初の水位に達するまでは取り出さずに無音を書く。わざと待っているので
             // アンダーランには数えない
             data.fill(to_sample(0.0));
@@ -268,7 +269,7 @@ fn whole_frame_samples(samples: usize, channels: usize) -> usize {
 /// 出力側からはフレームの途中までが見えることがある。途中まで読むと以降が
 /// 1 つずれるので、残りが届くまで読まずに残す。
 fn pop_whole_frame(consumer: &mut AudioConsumer, dst: &mut [f32]) -> bool {
-    if consumer.len() < dst.len() {
+    if consumer.occupied_len() < dst.len() {
         return false;
     }
     // 揃っていることは確かめたので、ここで取り出せる数は `dst.len()` になる
@@ -321,6 +322,8 @@ fn render_output_samples<T>(
 mod tests {
     use super::*;
     use crate::audio::convert::{f32_to_i16, f32_to_i32, f32_to_u16, i16_to_f32};
+    use ringbuf::traits::Split;
+    use ringbuf::HeapRb;
 
     /// テスト用のサンプル供給源。取り出した回数も数える。
     struct SampleSource {
@@ -628,7 +631,7 @@ mod tests {
 
         assert_eq!(data, [0.0, 0.0]);
         // ミュート中も同じだけ取り出す（残りは 1 フレーム）
-        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        assert_eq!(consumer.lock().expect("ロックできる").occupied_len(), 2);
     }
 
     #[test]
@@ -652,7 +655,7 @@ mod tests {
             &dropped,
             |s| s,
         );
-        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        assert_eq!(consumer.lock().expect("ロックできる").occupied_len(), 2);
         // 捨てた 2 フレーム目を数える（Issue #350）
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
         process_output(
@@ -723,7 +726,7 @@ mod tests {
         let mut data = [9.0f32; 2];
 
         // 左だけが公開された瞬間を作る
-        let _ = producer.lock().expect("ロックできる").push(1.0);
+        let _ = producer.lock().expect("ロックできる").try_push(1.0);
         process_output(
             &mut data,
             &consumer,
@@ -735,11 +738,11 @@ mod tests {
         assert_eq!(data, [0.0, 0.0]);
         assert_eq!(underruns.load(Ordering::Relaxed), 1);
         // 左は読まずに残っている
-        assert_eq!(consumer.lock().expect("ロックできる").len(), 1);
+        assert_eq!(consumer.lock().expect("ロックできる").occupied_len(), 1);
 
         let mut prod = producer.lock().expect("ロックできる");
         for value in [-1.0, 0.5, -0.5] {
-            let _ = prod.push(value);
+            let _ = prod.try_push(value);
         }
         drop(prod);
         let mut data = [9.0f32; 4];
@@ -837,7 +840,7 @@ mod tests {
             |s| s,
         );
         assert_eq!(data, [0.0, 0.0]);
-        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        assert_eq!(consumer.lock().expect("ロックできる").occupied_len(), 2);
         assert_eq!(underruns.load(Ordering::Relaxed), 0);
 
         // 目標に達したら、溜まった先頭から出す
@@ -858,7 +861,7 @@ mod tests {
             |s| s,
         );
         assert_eq!(data, [1.0, -1.0]);
-        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        assert_eq!(consumer.lock().expect("ロックできる").occupied_len(), 2);
         assert_eq!(underruns.load(Ordering::Relaxed), 0);
     }
 

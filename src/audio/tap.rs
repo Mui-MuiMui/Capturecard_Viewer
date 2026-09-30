@@ -31,13 +31,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use ringbuf::HeapRb;
+use ringbuf::traits::{Observer, Producer, Split};
+use ringbuf::{HeapCons, HeapProd, HeapRb};
 
-type TapRing = Arc<HeapRb<f32>>;
-type TapProducer = ringbuf::Producer<f32, TapRing>;
+type TapProducer = HeapProd<f32>;
 
 /// リングの読み手。録画スレッドが持つ。
-pub type AudioTapConsumer = ringbuf::Consumer<f32, TapRing>;
+pub type AudioTapConsumer = HeapCons<f32>;
 
 /// 入力の形が分からない（まだ 1 度も開いていない）ときに見積もるリングの形。
 /// 録画の出力（48kHz 2ch）と同じにしておく
@@ -260,7 +260,7 @@ impl AudioTap {
             }
         };
         match guard.as_ref() {
-            Some(producer) if producer.free_len() >= len => Some(AudioTapWriter {
+            Some(producer) if producer.vacant_len() >= len => Some(AudioTapWriter {
                 tap: self,
                 guard,
                 pushed: 0,
@@ -309,7 +309,7 @@ impl AudioTapWriter<'_> {
     /// 1 サンプル積む。空きは `writer` で確かめてあるので溢れない。
     pub(super) fn push(&mut self, sample: f32) {
         if let Some(producer) = self.guard.as_mut() {
-            if producer.push(sample).is_ok() {
+            if producer.try_push(sample).is_ok() {
                 self.pushed += 1;
             }
         }
@@ -337,6 +337,7 @@ impl Drop for AudioTapWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ringbuf::traits::Consumer;
 
     fn push_all(tap: &AudioTap, samples: &[f32]) {
         if let Some(mut writer) = tap.writer(samples.len()) {

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use log::{debug, info, warn};
+use ringbuf::traits::Consumer;
 
 use super::audio::{AudioChunk, AudioTrack};
 use super::convert::{even_size, rgb_to_nv12, Nv12Matrix};
@@ -276,7 +277,7 @@ impl ReplayPipeline {
         // 取り出したそばから次が積まれて抜けられなくなり、音声やコマンドが止まるため
         // （捌けなかった分は差し込み口が捨てて数える）
         for _ in 0..VIDEO_TAP_CAPACITY {
-            let Some((frame, received_at)) = self.consumer.pop() else {
+            let Some((frame, received_at)) = self.consumer.try_pop() else {
                 break;
             };
             let Some(pts) = self.clock.pts_for(received_at) else {

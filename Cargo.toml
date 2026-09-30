@@ -34,7 +34,7 @@ dirs = "7.0"
 # 設定ダイアログのフォルダ選択とファイル選択。既定のフィーチャ（xdg-portal / wayland）は
 # Linux 向けのバックエンドなので切る。Windows では IFileDialog を直接使い、フィーチャは要らない
 rfd = { version = "0.17", default-features = false }
-ringbuf = "0.3"
+ringbuf = "0.5"
 # スクリーンショットをクリップボードへコピーする。egui-winit が既に同じ版を
 # 使っているため、クレート自体は増えない（image-data フィーチャの分だけ増える）
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }

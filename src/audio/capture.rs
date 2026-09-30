@@ -7,6 +7,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat};
 use log::{debug, info};
+use ringbuf::traits::Split;
 use ringbuf::HeapRb;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
