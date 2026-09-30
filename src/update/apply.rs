@@ -8,6 +8,7 @@
 //! **元の exe を壊す経路を作らない。** ダウンロードは exe と同じフォルダの
 //! `<exe の名前>.new` へ落とし、照合が済むまで元の exe には触らない。
 //! 差し替え（`swap_in`）が途中で失敗したら、動かした元の exe を戻して `.new` を消す。
+//! 元の exe を戻せなければ `.new` は消さず、元の名前へ置く（置けなければ残す）。
 //!
 //! 差し替えとその戻し方、exe の隣の一時名（`ExePaths`）は `swap.rs`、
 //! `SHA256SUMS.txt` の読み方と照合は `checksum.rs`、資産の選び方（`ApplyPlan`）は `assets.rs`。
@@ -75,6 +76,16 @@ pub enum ApplyError {
     File(String),
     /// exe を置き換えられない。元の exe は戻してある
     Replace(String),
+    /// exe を置き換えられず、元の exe も戻せなかったので、照合済みの新しい exe を
+    /// 元の名前へ置いた。`old` は元の exe の場所
+    ReplaceKeptNew { source: String, old: String },
+    /// exe を置き換えられず、元の exe も新しい exe も元の名前へ置けなかった。
+    /// `old` は元の exe、`new` は照合済みの新しい exe の場所
+    ReplaceKeptNothing {
+        source: String,
+        old: String,
+        new: String,
+    },
     /// キャンセルされた。画面には出さない
     Cancelled,
 }
@@ -94,6 +105,12 @@ impl fmt::Display for ApplyError {
             ApplyError::ChecksumMismatch => Text::UpdateChecksumMismatch.get().to_string(),
             ApplyError::File(source) => i18n::update_file_failed(source),
             ApplyError::Replace(source) => i18n::update_replace_failed(source),
+            ApplyError::ReplaceKeptNew { source, old } => {
+                i18n::update_replace_kept_new(old, source)
+            }
+            ApplyError::ReplaceKeptNothing { source, old, new } => {
+                i18n::update_replace_kept_nothing(old, new, source)
+            }
             ApplyError::Cancelled => Text::UpdateCancelled.get().to_string(),
         };
         f.write_str(&text)
@@ -138,6 +155,8 @@ impl ApplyProgress {
 /// どの版でも自動更新できず、exe を移せば直る、という伝えるべきことだから。
 ///
 /// 失敗・キャンセルのどちらでも `.new` は消し、元の exe は元の名前のまま残す。
+/// 例外は差し替えで元の exe を戻せなかったときで、`.new` を元の名前へ置くか、
+/// 置けなければ `.old` と `.new` を残す（`ReplaceKeptNew` / `ReplaceKeptNothing`）。
 /// 成功したら、新しい exe は `paths.exe` にあり、起動は呼び出し側が行う。
 /// キャンセルは読み取りの合間に見る。差し替えの直前に `ApplyControl::begin_swap` で
 /// キャンセルと取り合い、先にキャンセルされていれば差し替えない。
