@@ -122,6 +122,36 @@ pub fn update_replace_failed(source: impl Display) -> String {
     }
 }
 
+/// 置き換えに失敗し、元の exe も戻せなかったので新しい exe を置いたとき。
+/// `old` は元の exe の場所。
+pub fn update_replace_kept_new(old: impl Display, source: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "exe を置き換えられず、元の exe も戻せなかったため、新しい exe を置いた。次の起動から新しいバージョンになる（元の exe は {old}）: {source}"
+        ),
+        Language::English => format!(
+            "Cannot replace the exe or restore the current one, so the new exe was put in place. The new version starts next time (the previous exe is at {old}): {source}"
+        ),
+    }
+}
+
+/// 置き換えに失敗し、元の exe も新しい exe も元の名前へ置けなかったとき。
+/// `old` は元の exe、`new` は照合済みの新しい exe の場所。
+pub fn update_replace_kept_nothing(
+    old: impl Display,
+    new: impl Display,
+    source: impl Display,
+) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "exe を置き換えられず、元に戻すこともできなかった。{old} の名前から「.old」を外せば元のバージョンで起動できる（照合済みの新しい exe は {new}）: {source}"
+        ),
+        Language::English => format!(
+            "Cannot replace the exe or put it back. Remove \".old\" from the name of {old} to start the previous version (the verified new exe is at {new}): {source}"
+        ),
+    }
+}
+
 /// ダウンロード中の割合。
 pub fn update_downloading_percent(percent: u8) -> String {
     match language() {

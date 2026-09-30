@@ -12,3 +12,5 @@
 THIRD-PARTY-LICENSES.txt text eol=lf
 about.hbs                text eol=lf
 about.toml               text eol=lf
+# bash のスクリプトは CRLF だと「: command not found」で動かないので LF に固定する
+scripts/*.sh             text eol=lf
