@@ -332,7 +332,7 @@ flowchart LR
 
 ### ③で新しく必要になったもの
 
-- **ハードウェアのエンコーダ MFT は非同期型**（`MF_TRANSFORM_ASYNC_UNLOCK` を立て、`IMFMediaEventGenerator` の `METransformNeedInput` / `METransformHaveOutput` に従って入出力する）。①②では Sink Writer がこれを隠してくれていた。`src/recording/encoder.rs` の `EncoderMft` が同期型（Microsoft のソフトウェアの H.264 / AAC エンコーダ）と非同期型の両方を扱う。**イベントは待たずに取る**（`MF_EVENT_FLAG_NO_WAIT`）。録画スレッドは数 ms ごとに起きるので、そのたびに溜まった `NeedInput` / `HaveOutput` を捌く。非同期型が入力を求めていないときに届いたフレームは、エンコーダへ渡さずに捨てて数える（①の「エンコーダの遅れが 30 枚を超えたら捨てる」と同じ考え方）
+- **ハードウェアのエンコーダ MFT は非同期型**（`MF_TRANSFORM_ASYNC_UNLOCK` を立て、`IMFMediaEventGenerator` の `METransformNeedInput` / `METransformHaveOutput` に従って入出力する）。①②では Sink Writer がこれを隠してくれていた。**非同期型の失敗は `ProcessInput` ではなく次のイベントの取り出し（`MEError`）で届くのが普通なので、「ハードウェアで 1 枚も出していなければソフトウェアで作り直す」の判定（`replay.rs` の `should_fall_back`）は `encode` / `accepts_input` / `pull` の 3 か所すべてで通す**（#312）。`src/recording/encoder.rs` の `EncoderMft` が同期型（Microsoft のソフトウェアの H.264 / AAC エンコーダ）と非同期型の両方を扱う。**イベントは待たずに取る**（`MF_EVENT_FLAG_NO_WAIT`）。録画スレッドは数 ms ごとに起きるので、そのたびに溜まった `NeedInput` / `HaveOutput` を捌く。非同期型が入力を求めていないときに届いたフレームは、エンコーダへ渡さずに捨てて数える（①の「エンコーダの遅れが 30 枚を超えたら捨てる」と同じ考え方）
 - Sink Writer をエンコードなしで使うには、H.264 の入力のメディアタイプに `MF_MT_MPEG_SEQUENCE_HEADER`（SPS / PPS）、AAC に `MF_MT_USER_DATA`（AudioSpecificConfig）が要る。どちらもエンコーダ MFT の出力のメディアタイプから写す（`EncoderMft::stream_type`）。**出力のメディアタイプに SPS / PPS を付けないエンコーダに備え、無ければ最初のキーフレームの Annex B から取り出して補う**（`src/recording/bitstream.rs`）。AAC の `USER_DATA` も無ければ AAC-LC 48kHz 2ch の値を組み立てて補う。Microsoft のエンコーダはどちらも付ける
 - **リプレイバッファ OFF の録画は③の経路に一本化しなかった**（#182 の指示役の判断）。①②で実機確認した経路（Sink Writer 直書き）を置き換えないため。`src/recording/session.rs` の `Session` が①②の経路、`src/recording/replay.rs` の `ReplayPipeline` が③の経路で、NV12 と PCM への変換（`convert` / `audio`）、PTS（`pts`）、失敗の扱い（`session.rs` の `prepare_folder` / `check_disk` / `create_error` / `Finished`）は共有する。一本化すれば Sink Writer の使い方が 1 通りになるので、③の実機確認が済んだら改めて検討する
 
@@ -345,6 +345,7 @@ flowchart LR
 - 録画スレッドは `ReplayState`（`Off` / `Pending` / `Running` / `Failed`）を持つ。`Running` のあいだは `ReplayPipeline` が差し込み口を差したままにし、`Start` もそこへ渡す。それ以外は①②の `Session` で録る
 - **差し込み口は 1 つしか無い。** リプレイバッファを通さない録画の間に ON にされたら、その録画が終わってから溜め始める（`Pending`）。リプレイバッファを通す録画の間に OFF にされたら、その録画は最後まで続け、リングは最後の GOP だけを持つようにして、録画が終わってから止める。エンコーダが変わる設定（映像のビットレート、ハードウェアエンコーダ、音声の有無とビットレート、公称 fps）も録画が終わってから反映する（途中でエンコーダを作り直すと、同じファイルに続けられない）。さかのぼる長さだけの変更はすぐ反映する
 - **設定の反映はすぐ。** `apply_settings`（起動時、2 秒ごと、設定ダイアログの適用）が `sync_replay_buffer` で `ReplayConfig` を作り、前に送ったものと違うときだけ録画スレッドへ送る。映像の公称 fps（キーフレームの間隔の元）が変わったときも同じ経路で伝わる。エンコーダが変わる設定を変えると、溜めた分は捨てて溜め直す
+- **映像が途絶えて閉じた間（公称 fps が `None`）は、fps が変わったとはみなさない**（#306、`ReplayConfig::same_encoders`）。`None` を 60 として比べると、30fps の機器では途絶のたびに作り直され、切断の直前という残したい分がリングから消える。映像が戻って本当に fps が変わったときだけ作り直す。最後に分かった fps は動いている `ReplayPipeline` の設定がそのまま持つので、UI 側に状態を足していない。映像が無いまま始めたもの（60 として作ったもの）は、映像が来て fps が分かった時点で作り直す
 - エンコーダを用意できなければ `Failed` にし、**設定が変わるまで作り直さない**（2 秒ごとに作り直して失敗を繰り返さない）。その間の録画は①②の経路で行う
 
 **リングと PTS**（`src/recording/replay.rs` / `src/recording/replay_ring.rs`）
