@@ -37,7 +37,8 @@ grep -E '\] capturecard_viewer(::| )' "$APPDATA/capturecard_viewer/logs/<ファ�
 |---|---|
 | `app::worker` | ワーカースレッドの起動と終了（`debug`） |
 | `app::worker_loop` | ワーカーの開始・停止、「デバイス再接続」の要求、最小化中のホットキー（音量・ミュート） |
-| `app::worker_timers` | 切断の検出、再接続の要求、既定デバイスの切り替え、音声のリサンプル比の補正 |
+| `app::worker_timers` | 映像の切断の検出、再接続の要求 |
+| `app::worker_audio_timers` | 音声ストリームのエラーによる再接続の要求、既定デバイスの切り替え、音声のリサンプル比の補正 |
 | `app::worker_connect` / `app::worker_audio_connect` | 接続の試行と成否、デバイス能力・対応設定の取得、既定デバイス名の確定（音声側は `worker_audio_connect`） |
 | `app::device` | 起動直後の設定適用（`app` 側）。接続そのものは出さない |
 | `video` / `audio` | デバイスを開く処理の中身（列挙、`Camera::new`、選んだ設定、ストリームのエラー） |
@@ -50,7 +51,7 @@ Get-PnpDevice -PresentOnly | Where-Object Class -in 'Camera','MEDIA'
 
 ここに出ない（またはデバイスマネージャーで問題コード 45 = 未接続）なら、ケーブル・USB ポート・ドライバーの問題で、アプリ側を直しても戻らない。設定の名前が 5 回続けて一覧に無いときは `設定の映像デバイスが Windows 側にも見えていない` の WARN も出る（画面にも同じ案内が出る。`docs/design/reconnect.md` の「列挙の結果をログへ出し、Windows 側にも無ければ知らせる」）。
 
-**`app::monitor` はログを出さない。** 切断や既定切り替えの「判定」だけを持つ純粋関数の置き場所で、ログは呼び出し側の `app::worker_timers` が出す。
+**`app::monitor` はログを出さない。** 切断や既定切り替えの「判定」だけを持つ純粋関数の置き場所で、ログは呼び出し側の `app::worker_timers` / `app::worker_audio_timers` が出す。
 
 ## 手順 2: 正常時の目安と突き合わせる
 
