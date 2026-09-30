@@ -256,7 +256,24 @@ cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES.txt
 
 `about.toml` の `accepted` に無いライセンスの依存が入ると**生成が失敗する**。GPL / AGPL / LGPL は意図的に載せていないので、コピーレフトの依存が混ざればここで気付ける。
 
-**この仕組みがポリシー検査を兼ねているため、`cargo-deny` は導入していない。** 取得元レジストリの制限や脆弱性情報（RustSec）の検査まで欲しくなった時点で、別途検討する。
+**この仕組みがポリシー検査を兼ねているため、`cargo-deny` は導入していない。** 脆弱性情報（RustSec）は次の節の `cargo audit` で見る。取得元レジストリの制限まで欲しくなった時点で、別途検討する。
+
+### 脆弱性情報（RustSec）の検査
+
+`.github/workflows/audit.yml` が `cargo audit`（0.22.2 に固定）で `Cargo.lock` を RustSec の勧告データベースと突き合わせる。
+
+- **回るとき:** `dev` / `main` への PR と push、週 1 回（月曜 09:00 JST）の定期実行、手動（`workflow_dispatch`）。勧告は依存を変えなくても後から増えるので定期実行を入れている
+- **必須チェックではない。** ジョブ名「依存の脆弱性情報（RustSec）」はルールセットの必須チェック（`fmt / clippy / build / test`）に入れていないので、落ちても PR はマージできる。新しい勧告が出た瞬間に無関係な PR が全部止まるのを避けるため。ビルドしないので `ubuntu-latest` で回し、`ci.yml` の実行時間は増えない
+- **落ちたら:** 脆弱性の勧告が増えている。該当クレートが `x86_64-pc-windows-msvc` のビルドに入るかを `cargo tree -i <crate> --target x86_64-pc-windows-msvc` で確かめ、入るなら Issue を起票して依存を上げる。解消まで待つ場合や Windows に入らない場合は `.cargo/audit.toml` の `ignore` に**理由と Issue 番号を添えて**載せる。解消したら行ごと消す
+- **ターゲットで絞れない。** `cargo audit` は `Cargo.lock` 全体を見るため、配布物に入らないクレートも拾う。除外は `.cargo/audit.toml` の `ignore` で 1 件ずつ行う
+- **unmaintained の警告では落ちない**（`cargo audit` の既定）。2026-09-30 時点で `derivative` / `instant`（Windows のビルドに入らない）と `paste` / `ttf-parser`（egui 系の経由で外せない）が出ている
+
+手元で回すときは次のとおり。
+
+```bash
+cargo install cargo-audit --locked --version 0.22.2
+cargo audit
+```
 
 生成が落ちたときに `accepted` へ機械的に足さないこと。**単一バイナリを MIT で配布できるライセンスかどうかを判断してから足す。**
 

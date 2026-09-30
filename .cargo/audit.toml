@@ -1,0 +1,19 @@
+# cargo audit（CI の「依存の脆弱性情報（RustSec）」ジョブ）の設定。
+# 運用と理由は docs/DEPENDENCIES.md の「脆弱性情報（RustSec）の検査」。
+#
+# cargo audit はターゲットを区別せず Cargo.lock 全体を見る。ここに載せるのは
+# 「Windows のビルドに入らない」か「対応する Issue で解消を待っている」勧告だけで、
+# 1 件ごとに理由と Issue 番号を添える。解消したら行ごと消す。
+#
+# unmaintained の警告（derivative / instant / paste / ttf-parser、2026-09-30 時点）は
+# 既定で失敗扱いにならないので載せていない。derivative と instant は
+# x86_64-pc-windows-msvc のビルドに入らず、paste（accesskit_windows 経由）と
+# ttf-parser（epaint 経由）は egui 系の経由で手元では外せない。
+[advisories]
+ignore = [
+    # ringbuf 0.3.3。Windows のビルドに入る。#299 で ringbuf を上げて解消する
+    "RUSTSEC-2026-0293",
+    # webbrowser 0.8.15（egui-winit 0.26 経由）。Unix の BROWSER 環境変数の扱いの
+    # 問題で、Windows では通らない経路。#300 で解消する
+    "RUSTSEC-2026-0257",
+]
