@@ -18,7 +18,7 @@ pub use super::swap::{remove_leftovers, roll_back, ExePaths};
 
 use super::assets::ApplyPlan;
 use super::checksum::{checksum_matches, find_checksum, to_hex};
-use super::download::{fetch_text, file_error, open_source, read_in_chunks};
+use super::download::{fetch_text, file_error, open_source, read_in_chunks, ReadLimits};
 use super::swap::{ensure_writable, remove_if_exists, swap_in};
 use super::UpdateCheck;
 use crate::i18n::{self, Text};
@@ -28,6 +28,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::Write;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// exe の大きさの上限。配布物は数十 MB なので、桁違いに大きいものは
@@ -37,9 +38,9 @@ const MAX_EXE_BYTES: u64 = 256 * 1024 * 1024;
 /// `SHA256SUMS.txt` の大きさの上限。数行のテキストなので十分に大きい。
 pub(super) const MAX_CHECKSUMS_BYTES: u64 = 64 * 1024;
 
-/// exe の本文を受け取り終えるまでの上限。遅い回線でも数十 MB が落ちきる長さにする。
-/// キャンセルは読み取りの合間に見るので、少しずつでも届いていればここより早く止められる。
-/// 受け取りが完全に止まると、読み取りから戻るのはこの上限のとき。
+/// exe の本文を受け取り終えるまでの上限（全体）。遅い回線でも数十 MB が落ちきる長さにする。
+/// 受け取りが止まったときの打ち切りとキャンセルは、これとは別に読み取りを待つ間にも
+/// 見る（`download::ReadLimits`）。
 const EXE_BODY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// `SHA256SUMS.txt` の本文を受け取り終えるまでの上限。数行（上限 64 KiB）なので、
@@ -176,7 +177,7 @@ pub fn run_apply(
     let sums = fetch_text(
         &plan.checksums,
         MAX_CHECKSUMS_BYTES,
-        CHECKSUMS_BODY_TIMEOUT,
+        ReadLimits::with_body(CHECKSUMS_BODY_TIMEOUT),
         cancel,
     )?;
     let expected = find_checksum(&sums, &plan.exe_name)
@@ -204,7 +205,8 @@ fn download_and_verify(
     cancel: &ApplyControl,
     progress: &mut dyn FnMut(ApplyProgress),
 ) -> Result<(), ApplyError> {
-    let (mut reader, total) = open_source(&plan.exe, EXE_BODY_TIMEOUT)?;
+    let (mut reader, total) =
+        open_source(&plan.exe, ReadLimits::with_body(EXE_BODY_TIMEOUT), cancel)?;
     if total.is_some_and(|total| total > MAX_EXE_BYTES) {
         return Err(ApplyError::TooLarge);
     }
@@ -281,10 +283,22 @@ fn should_report(last: Option<ApplyProgress>, now: ApplyProgress) -> bool {
 /// 1 つも無くなるため。ダウンロードの最中はキャンセルが通るので、待たない。
 ///
 /// `Mutex` にしないのは、差し替え（ファイルの改名）の間ロックを握ることになるため
-/// （`GUARDRAIL.md`）。
+/// （`GUARDRAIL.md`）。状態を `Arc` に入れているのは、ureq の接続（`'static` を求める）
+/// へキャンセルを見るだけの控え（`CancelWatch`）を渡すため。
 #[derive(Debug, Default)]
 pub struct ApplyControl {
-    state: AtomicU8,
+    state: Arc<AtomicU8>,
+}
+
+/// キャンセルされたかを見るだけの控え。読み取りを待つ間の ureq の接続が持つ
+/// （`download::WatchedTransport`）。
+#[derive(Debug, Clone)]
+pub(super) struct CancelWatch(Arc<AtomicU8>);
+
+impl CancelWatch {
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire) == CONTROL_CANCELLED
+    }
 }
 
 const CONTROL_RUNNING: u8 = 0;
@@ -308,6 +322,10 @@ impl ApplyControl {
 
     pub(super) fn is_cancelled(&self) -> bool {
         self.state.load(Ordering::Acquire) == CONTROL_CANCELLED
+    }
+
+    pub(super) fn watch(&self) -> CancelWatch {
+        CancelWatch(Arc::clone(&self.state))
     }
 
     /// 差し替えを始める。先にキャンセルされていれば `false`。
@@ -573,28 +591,29 @@ mod tests {
         assert_eq!(writable, Err(ApplyError::NoAssets));
     }
 
-    // ---- SHA256SUMS.txt の取得中のキャンセル（ローカルの HTTP サーバー） ----
+    // ---- 受け取り中のキャンセル（ローカルの HTTP サーバー） ----
 
-    /// `SHA256SUMS.txt` を `sums_url` から取っている `run_apply` を 200ms 後に
-    /// キャンセルし、結果を返す。キャンセルから 10 秒で戻らなければ失敗とする。
-    fn cancel_while_fetching_checksums(sums_url: &str) -> Result<(), ApplyError> {
+    /// exe を `exe_url`、`SHA256SUMS.txt` を `sums_url` から取る `run_apply` を 200ms 後に
+    /// キャンセルし、結果と `.new` が残っているかを返す。キャンセルから 10 秒で
+    /// 戻らなければ失敗とする（戻ればスレッドが終わり、`is_applying` が偽になる）。
+    fn cancel_run_apply_after_200ms(
+        exe_url: &str,
+        sums_url: &str,
+    ) -> (Result<(), ApplyError>, bool) {
         use std::sync::{mpsc, Arc};
 
         let dir = tempfile::tempdir().expect("一時ディレクトリ");
         let paths = dummy_paths(dir.path());
         let check = check_with_assets(
             "v9.9.9",
-            &[
-                (EXE_ASSET_NAME, "http://127.0.0.1:9/capturecard_viewer.exe"),
-                (CHECKSUMS_ASSET_NAME, sums_url),
-            ],
+            &[(EXE_ASSET_NAME, exe_url), (CHECKSUMS_ASSET_NAME, sums_url)],
         );
         let control = Arc::new(ApplyControl::default());
         let (tx, rx) = mpsc::channel();
         let worker_control = Arc::clone(&control);
         std::thread::spawn(move || {
             let result = run_apply(&check, true, &paths, &worker_control, &mut |_| {});
-            let _ = tx.send(result);
+            let _ = tx.send((result, paths.new.exists()));
             drop(dir);
         });
         std::thread::sleep(Duration::from_millis(200));
@@ -608,10 +627,26 @@ mod tests {
         // 本文が少しずつしか届かなくても、読み取りの合間にキャンセルへ気づく
         let url = slow_http_server(Some(Duration::from_millis(20)));
 
-        assert_eq!(
-            cancel_while_fetching_checksums(&url),
-            Err(ApplyError::Cancelled)
-        );
+        let (result, _) =
+            cancel_run_apply_after_200ms("http://127.0.0.1:9/capturecard_viewer.exe", &url);
+
+        assert_eq!(result, Err(ApplyError::Cancelled));
+    }
+
+    #[test]
+    fn run_apply_cancel_while_the_exe_is_stalled_returns_promptly() {
+        // exe の受け取りが完全に止まっても（1 バイトも届かない）、本文の上限（10 分）を
+        // 待たずにキャンセルへ気づき、`.new` を消す（Issue #357）
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let sums = dir.path().join(CHECKSUMS_ASSET_NAME);
+        fs::write(&sums, format!("{HELLO_SHA256}  capturecard_viewer.exe\n")).unwrap();
+        let exe_url = slow_http_server(None);
+
+        let (result, new_left) =
+            cancel_run_apply_after_200ms(&exe_url, &format!("file:///{}", sums.display()));
+
+        assert_eq!(result, Err(ApplyError::Cancelled));
+        assert!(!new_left);
     }
 
     // ---- キャンセルと差し替えの取り合い ----
