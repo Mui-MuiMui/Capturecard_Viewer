@@ -11,22 +11,24 @@
 //! 元の exe を戻せなければ `.new` は消さず、元の名前へ置く（置けなければ残す）。
 //!
 //! 差し替えとその戻し方、exe の隣の一時名（`ExePaths`）は `swap.rs`、
-//! `SHA256SUMS.txt` の読み方と照合は `checksum.rs`、資産の選び方（`ApplyPlan`）は `assets.rs`。
+//! `SHA256SUMS.txt` の読み方と照合は `checksum.rs`、資産の選び方（`ApplyPlan`）は `assets.rs`、
+//! 資産の読み取り（HTTP / ファイルを開き、小分けに読みながらキャンセルを見る）は `download.rs`。
 
 pub use super::swap::{remove_leftovers, roll_back, ExePaths};
 
-use super::assets::{ApplyPlan, AssetSource};
+use super::assets::ApplyPlan;
 use super::checksum::{checksum_matches, find_checksum, to_hex};
+use super::download::{fetch_text, file_error, open_source, read_in_chunks, ReadLimits};
 use super::swap::{ensure_writable, remove_if_exists, swap_in};
-use super::{tls_config, UpdateCheck, USER_AGENT};
+use super::UpdateCheck;
 use crate::i18n::{self, Text};
-use log::{debug, info, warn};
+use log::{info, warn};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Read, Write};
-use std::path::Path;
+use std::io::Write;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// exe の大きさの上限。配布物は数十 MB なので、桁違いに大きいものは
@@ -34,23 +36,17 @@ use std::time::Duration;
 const MAX_EXE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// `SHA256SUMS.txt` の大きさの上限。数行のテキストなので十分に大きい。
-const MAX_CHECKSUMS_BYTES: u64 = 64 * 1024;
+pub(super) const MAX_CHECKSUMS_BYTES: u64 = 64 * 1024;
 
-/// 接続（TLS のハンドシェイクを含む）と、応答のヘッダーが揃うまでの上限。
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// exe の本文を受け取り終えるまでの上限。遅い回線でも数十 MB が落ちきる長さにする。
-/// キャンセルは読み取りの合間に見るので、少しずつでも届いていればここより早く止められる。
-/// 受け取りが完全に止まると、読み取りから戻るのはこの上限のとき。
+/// exe の本文を受け取り終えるまでの上限（全体）。遅い回線でも数十 MB が落ちきる長さにする。
+/// 受け取りが止まったときの打ち切りとキャンセルは、これとは別に読み取りを待つ間にも
+/// 見る（`download::ReadLimits`）。
 const EXE_BODY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// `SHA256SUMS.txt` の本文を受け取り終えるまでの上限。数行（上限 64 KiB）なので、
 /// 遅い回線でも数秒で届く。exe と同じ 10 分にすると、受け取りが止まったときに
 /// キャンセルしてもスレッドが 10 分残り、その間は次の更新を始められない（Issue #319）。
 const CHECKSUMS_BODY_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// 1 回に読む大きさ。キャンセルと進捗はこの単位で見る。
-const CHUNK_BYTES: usize = 64 * 1024;
 
 /// 大きさが分からないときに進捗を知らせる間隔。
 const PROGRESS_STEP_BYTES: u64 = 256 * 1024;
@@ -181,7 +177,7 @@ pub fn run_apply(
     let sums = fetch_text(
         &plan.checksums,
         MAX_CHECKSUMS_BYTES,
-        CHECKSUMS_BODY_TIMEOUT,
+        ReadLimits::with_body(CHECKSUMS_BODY_TIMEOUT),
         cancel,
     )?;
     let expected = find_checksum(&sums, &plan.exe_name)
@@ -209,7 +205,8 @@ fn download_and_verify(
     cancel: &ApplyControl,
     progress: &mut dyn FnMut(ApplyProgress),
 ) -> Result<(), ApplyError> {
-    let (mut reader, total) = open_source(&plan.exe, EXE_BODY_TIMEOUT)?;
+    let (mut reader, total) =
+        open_source(&plan.exe, ReadLimits::with_body(EXE_BODY_TIMEOUT), cancel)?;
     if total.is_some_and(|total| total > MAX_EXE_BYTES) {
         return Err(ApplyError::TooLarge);
     }
@@ -277,14 +274,6 @@ fn should_report(last: Option<ApplyProgress>, now: ApplyProgress) -> bool {
     }
 }
 
-fn check_cancelled(control: &ApplyControl) -> Result<(), ApplyError> {
-    if control.is_cancelled() {
-        Err(ApplyError::Cancelled)
-    } else {
-        Ok(())
-    }
-}
-
 /// 更新のスレッドと UI スレッドで共有する、キャンセルと差し替えの取り合い。
 ///
 /// キャンセルと差し替えの開始は、どちらか先に来た方だけが通る（`compare_exchange`）。
@@ -294,10 +283,22 @@ fn check_cancelled(control: &ApplyControl) -> Result<(), ApplyError> {
 /// 1 つも無くなるため。ダウンロードの最中はキャンセルが通るので、待たない。
 ///
 /// `Mutex` にしないのは、差し替え（ファイルの改名）の間ロックを握ることになるため
-/// （`GUARDRAIL.md`）。
+/// （`GUARDRAIL.md`）。状態を `Arc` に入れているのは、ureq の接続（`'static` を求める）
+/// へキャンセルを見るだけの控え（`CancelWatch`）を渡すため。
 #[derive(Debug, Default)]
 pub struct ApplyControl {
-    state: AtomicU8,
+    state: Arc<AtomicU8>,
+}
+
+/// キャンセルされたかを見るだけの控え。読み取りを待つ間の ureq の接続が持つ
+/// （`download::WatchedTransport`）。
+#[derive(Debug, Clone)]
+pub(super) struct CancelWatch(Arc<AtomicU8>);
+
+impl CancelWatch {
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire) == CONTROL_CANCELLED
+    }
 }
 
 const CONTROL_RUNNING: u8 = 0;
@@ -319,8 +320,12 @@ impl ApplyControl {
         }
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub(super) fn is_cancelled(&self) -> bool {
         self.state.load(Ordering::Acquire) == CONTROL_CANCELLED
+    }
+
+    pub(super) fn watch(&self) -> CancelWatch {
+        CancelWatch(Arc::clone(&self.state))
     }
 
     /// 差し替えを始める。先にキャンセルされていれば `false`。
@@ -336,133 +341,15 @@ impl ApplyControl {
     }
 }
 
-/// 資産を読み始める。大きさが分かればそれも返す。
-/// `body_timeout` は HTTP の本文を受け取り終えるまでの上限（ファイルでは使わない）。
-fn open_source(
-    source: &AssetSource,
-    body_timeout: Duration,
-) -> Result<(Box<dyn Read>, Option<u64>), ApplyError> {
-    match source {
-        AssetSource::File(path) => {
-            let file = File::open(path).map_err(|e| file_error(path, e))?;
-            let len = file.metadata().ok().map(|m| m.len());
-            Ok((Box::new(file), len))
-        }
-        AssetSource::Http(url) => {
-            let config = ureq::Agent::config_builder()
-                .timeout_connect(Some(CONNECT_TIMEOUT))
-                .timeout_recv_response(Some(CONNECT_TIMEOUT))
-                .timeout_recv_body(Some(body_timeout))
-                .tls_config(tls_config())
-                .user_agent(USER_AGENT)
-                .build();
-            let agent = ureq::Agent::new_with_config(config);
-            debug!("更新の資産を取る: {}", url);
-            // GitHub の資産の URL は別のホストへのリダイレクトを返す。ureq が辿る
-            let response = agent.get(url).call().map_err(download_error_from)?;
-            let body = response.into_body();
-            let len = body.content_length();
-            Ok((Box::new(body.into_reader()), len))
-        }
-    }
-}
-
-/// 小さなテキストの資産（`SHA256SUMS.txt`）を読む。
-///
-/// exe と同じく小分けに読み、読み取りの合間にキャンセルを見る。受け取りが止まって
-/// 読み取りが上限（`body_timeout`）で失敗したときも、その間にキャンセルされていれば
-/// 失敗ではなく `Cancelled` を返す（画面に失敗を出さない）。
-fn fetch_text(
-    source: &AssetSource,
-    limit: u64,
-    body_timeout: Duration,
-    cancel: &ApplyControl,
-) -> Result<String, ApplyError> {
-    let (mut reader, total) = open_source(source, body_timeout)?;
-    if total.is_some_and(|total| total > limit) {
-        return Err(ApplyError::TooLarge);
-    }
-    let mut bytes = Vec::new();
-    read_in_chunks(&mut reader, source, limit, cancel, |chunk, _| {
-        bytes.extend_from_slice(chunk);
-        Ok(())
-    })?;
-    check_cancelled(cancel)?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
-/// `reader` を `CHUNK_BYTES` ずつ読み終えるまで読み、1 回ごとに `on_chunk` へ
-/// 読んだ分とそれまでの合計を渡す。読んだ合計を返す。
-///
-/// 1 回読む前にキャンセルを見る。読み取りが失敗したときも、その間にキャンセル
-/// されていれば `Cancelled` を返す（受け取りが止まって上限で失敗した場合など）。
-/// 合計が `limit` を超えたら、`on_chunk` へ渡す前に `TooLarge` で止める。
-fn read_in_chunks(
-    reader: &mut dyn Read,
-    source: &AssetSource,
-    limit: u64,
-    cancel: &ApplyControl,
-    mut on_chunk: impl FnMut(&[u8], u64) -> Result<(), ApplyError>,
-) -> Result<u64, ApplyError> {
-    let mut buffer = vec![0u8; CHUNK_BYTES];
-    let mut total: u64 = 0;
-    loop {
-        check_cancelled(cancel)?;
-        let read = match reader.read(&mut buffer) {
-            Ok(read) => read,
-            Err(error) => {
-                check_cancelled(cancel)?;
-                return Err(read_error(source)(error));
-            }
-        };
-        if read == 0 {
-            return Ok(total);
-        }
-        total += read as u64;
-        if total > limit {
-            return Err(ApplyError::TooLarge);
-        }
-        on_chunk(&buffer[..read], total)?;
-    }
-}
-
-fn download_error_from(error: ureq::Error) -> ApplyError {
-    match error {
-        ureq::Error::StatusCode(code) => ApplyError::HttpStatus(code),
-        ureq::Error::Timeout(_) => ApplyError::Timeout,
-        other => ApplyError::Network(other.to_string()),
-    }
-}
-
-fn read_error(source: &AssetSource) -> impl Fn(io::Error) -> ApplyError + '_ {
-    move |error| match source {
-        AssetSource::File(path) => file_error(path, error),
-        AssetSource::Http(_) if is_timeout(&error) => ApplyError::Timeout,
-        AssetSource::Http(_) => ApplyError::Network(error.to_string()),
-    }
-}
-
-/// 読み取りの失敗が上限の時間切れか。ureq は本文の上限（`timeout_recv_body`）を
-/// `ErrorKind::Other` の中に `ureq::Error::Timeout` を包んで返すので、中身も見る。
-fn is_timeout(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::TimedOut
-        || error
-            .get_ref()
-            .and_then(|inner| inner.downcast_ref::<ureq::Error>())
-            .is_some_and(|inner| matches!(inner, ureq::Error::Timeout(_)))
-}
-
-fn file_error(path: &Path, error: io::Error) -> ApplyError {
-    ApplyError::File(format!("{}: {}", path.display(), error))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::update::assets::{legacy_exe_asset_name, CHECKSUMS_ASSET_NAME, EXE_ASSET_NAME};
+    use crate::update::download::slow_http_server;
     use crate::update::ReleaseAsset;
     use semver::Version;
     use std::fs;
+    use std::path::Path;
 
     fn check_with_assets(tag: &str, assets: &[(&str, &str)]) -> UpdateCheck {
         UpdateCheck {
@@ -704,61 +591,29 @@ mod tests {
         assert_eq!(writable, Err(ApplyError::NoAssets));
     }
 
-    // ---- SHA256SUMS.txt の取得中のキャンセル（ローカルの HTTP サーバー） ----
+    // ---- 受け取り中のキャンセル（ローカルの HTTP サーバー） ----
 
-    /// 応答のヘッダーを返したあと、本文を `interval` ごとに 1 バイトずつ流す
-    /// （`None` なら 1 バイトも送らずに止まる）ローカルの HTTP サーバー。
-    /// 相手が切断したら抜ける。URL を返す。
-    fn slow_http_server(interval: Option<Duration>) -> String {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ローカルのポート");
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            let Ok((mut stream, _)) = listener.accept() else {
-                return;
-            };
-            // 要求（本文なし）を読み捨ててから応答のヘッダーを返す
-            let mut request = [0u8; 4096];
-            let _ = stream.read(&mut request);
-            let header = b"HTTP/1.1 200 OK\r\nContent-Length: 60000\r\n\r\n";
-            if stream.write_all(header).is_err() {
-                return;
-            }
-            let Some(interval) = interval else {
-                // 相手が切断するまで何も送らない
-                let _ = stream.read(&mut request);
-                return;
-            };
-            // 60000 バイトを送り切る前にテストが終われば、切断されてここで抜ける
-            for _ in 0..60_000 {
-                if stream.write_all(b"0").and_then(|_| stream.flush()).is_err() {
-                    return;
-                }
-                std::thread::sleep(interval);
-            }
-        });
-        format!("http://{addr}/SHA256SUMS.txt")
-    }
-
-    /// `SHA256SUMS.txt` を `sums_url` から取っている `run_apply` を 200ms 後に
-    /// キャンセルし、結果を返す。キャンセルから 10 秒で戻らなければ失敗とする。
-    fn cancel_while_fetching_checksums(sums_url: &str) -> Result<(), ApplyError> {
+    /// exe を `exe_url`、`SHA256SUMS.txt` を `sums_url` から取る `run_apply` を 200ms 後に
+    /// キャンセルし、結果と `.new` が残っているかを返す。キャンセルから 10 秒で
+    /// 戻らなければ失敗とする（戻ればスレッドが終わり、`is_applying` が偽になる）。
+    fn cancel_run_apply_after_200ms(
+        exe_url: &str,
+        sums_url: &str,
+    ) -> (Result<(), ApplyError>, bool) {
         use std::sync::{mpsc, Arc};
 
         let dir = tempfile::tempdir().expect("一時ディレクトリ");
         let paths = dummy_paths(dir.path());
         let check = check_with_assets(
             "v9.9.9",
-            &[
-                (EXE_ASSET_NAME, "http://127.0.0.1:9/capturecard_viewer.exe"),
-                (CHECKSUMS_ASSET_NAME, sums_url),
-            ],
+            &[(EXE_ASSET_NAME, exe_url), (CHECKSUMS_ASSET_NAME, sums_url)],
         );
         let control = Arc::new(ApplyControl::default());
         let (tx, rx) = mpsc::channel();
         let worker_control = Arc::clone(&control);
         std::thread::spawn(move || {
             let result = run_apply(&check, true, &paths, &worker_control, &mut |_| {});
-            let _ = tx.send(result);
+            let _ = tx.send((result, paths.new.exists()));
             drop(dir);
         });
         std::thread::sleep(Duration::from_millis(200));
@@ -772,38 +627,26 @@ mod tests {
         // 本文が少しずつしか届かなくても、読み取りの合間にキャンセルへ気づく
         let url = slow_http_server(Some(Duration::from_millis(20)));
 
-        assert_eq!(
-            cancel_while_fetching_checksums(&url),
-            Err(ApplyError::Cancelled)
-        );
+        let (result, _) =
+            cancel_run_apply_after_200ms("http://127.0.0.1:9/capturecard_viewer.exe", &url);
+
+        assert_eq!(result, Err(ApplyError::Cancelled));
     }
 
     #[test]
-    fn fetch_text_stalled_body_gives_up_at_the_body_timeout() {
-        // 受け取りが完全に止まると読み取りから戻れないので、本文の上限で打ち切る。
-        // その間にキャンセルされていれば、失敗ではなくキャンセルとして返す
-        let timeout = Duration::from_secs(1);
-        let stalled = || AssetSource::Http(slow_http_server(None));
-        let cancelled = ApplyControl::default();
-        let running = ApplyControl::default();
-        let fetch = |control: &ApplyControl| {
-            let started = std::time::Instant::now();
-            let result = fetch_text(&stalled(), MAX_CHECKSUMS_BYTES, timeout, control);
-            (result, started.elapsed())
-        };
+    fn run_apply_cancel_while_the_exe_is_stalled_returns_promptly() {
+        // exe の受け取りが完全に止まっても（1 バイトも届かない）、本文の上限（10 分）を
+        // 待たずにキャンセルへ気づき、`.new` を消す（Issue #357）
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let sums = dir.path().join(CHECKSUMS_ASSET_NAME);
+        fs::write(&sums, format!("{HELLO_SHA256}  capturecard_viewer.exe\n")).unwrap();
+        let exe_url = slow_http_server(None);
 
-        let (timed_out, elapsed) = fetch(&running);
-        assert_eq!(timed_out, Err(ApplyError::Timeout));
-        assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+        let (result, new_left) =
+            cancel_run_apply_after_200ms(&exe_url, &format!("file:///{}", sums.display()));
 
-        let (result, _) = std::thread::scope(|scope| {
-            scope.spawn(|| {
-                std::thread::sleep(Duration::from_millis(200));
-                cancelled.cancel();
-            });
-            fetch(&cancelled)
-        });
         assert_eq!(result, Err(ApplyError::Cancelled));
+        assert!(!new_left);
     }
 
     // ---- キャンセルと差し替えの取り合い ----

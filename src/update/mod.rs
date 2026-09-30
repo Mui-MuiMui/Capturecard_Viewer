@@ -11,6 +11,7 @@
 pub mod apply;
 mod assets;
 mod checksum;
+mod download;
 mod overrides;
 mod swap;
 
