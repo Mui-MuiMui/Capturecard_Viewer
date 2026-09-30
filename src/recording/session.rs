@@ -226,24 +226,19 @@ impl Session {
         frame: Arc<VideoFrame>,
         received_at: Instant,
     ) -> Result<(), RecordingError> {
-        let Some(pts) = self.clock.pts_for(received_at) else {
-            // 録画を始める前に受け取ったフレーム
-            return Ok(());
-        };
         let (width, height) = even_size(frame.width, frame.height);
         if width == 0 || height == 0 {
             return Ok(());
         }
         let size = (width as u32, height as u32);
+        let writer_size = self.writer.as_ref().map(SinkWriter::size);
+        let Some(pts) = stamp_frame(&mut self.clock, writer_size, size, received_at)? else {
+            // 録画を始める前に受け取ったフレーム
+            return Ok(());
+        };
 
         match &self.writer {
             None => self.open_writer(size)?,
-            Some(writer) if writer.size() != size => {
-                return Err(RecordingError::SizeChanged {
-                    from: writer.size(),
-                    to: size,
-                });
-            }
             Some(writer) if writer.backlog() > MAX_ENCODER_BACKLOG => {
                 // エンコーダが追いつかない。表示は落とさず、録画だけがコマ落ちする
                 self.frames_skipped += 1;
@@ -469,6 +464,27 @@ impl Session {
     }
 }
 
+/// フレームに PTS を付ける。`t0` より前なら `Ok(None)`。書いている大きさと違えば
+/// `SizeChanged` を返し、**`PtsClock` を進めない。** 書かずに捨てるフレームの時刻が
+/// 映像の長さ（`PtsClock::duration`）に入ると、止めるときに音声がその分だけ長く揃い、
+/// `RecordingSummary::duration` にも入るため（#340）。
+fn stamp_frame(
+    clock: &mut PtsClock,
+    writer_size: Option<(u32, u32)>,
+    size: (u32, u32),
+    received_at: Instant,
+) -> Result<Option<i64>, RecordingError> {
+    if !clock.accepts(received_at) {
+        return Ok(None);
+    }
+    if let Some(from) = writer_size {
+        if from != size {
+            return Err(RecordingError::SizeChanged { from, to: size });
+        }
+    }
+    Ok(clock.pts_for(received_at))
+}
+
 /// 途中で止まったときに、閉じる前に音声を仕上げるか（残りを渡し、映像の終わりまで無音で埋める）。
 /// Sink Writer がまだ書ける失敗（大きさの変化・空き容量が境界を切った）だけ仕上げる。
 /// 書き込みの失敗では書けないので仕上げない。Sink Writer を作れなかった失敗では
@@ -602,6 +618,36 @@ mod tests {
             Finished::FinalizeFailed(RecordingError::NoVideo, Some(summary.clone())).into_summary(),
             Some(summary)
         );
+    }
+
+    #[test]
+    fn dropped_frame_of_new_size_does_not_advance_clock() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + std::time::Duration::from_millis(ms);
+        let mut clock = PtsClock::new(t0, 60);
+        let size = Some((1280, 720));
+        assert_eq!(
+            stamp_frame(&mut clock, None, (1280, 720), at(0)).unwrap(),
+            Some(0)
+        );
+        assert!(stamp_frame(&mut clock, size, (1280, 720), at(1000))
+            .unwrap()
+            .is_some());
+        let before = clock.duration();
+        // 大きさの変わったフレームは書かずに捨てる。映像の長さに入れない
+        let error = stamp_frame(&mut clock, size, (640, 480), at(1500)).unwrap_err();
+        assert_eq!(
+            error,
+            RecordingError::SizeChanged {
+                from: (1280, 720),
+                to: (640, 480)
+            }
+        );
+        assert_eq!(clock.duration(), before);
+        // t0 より前のフレームは大きさが違っても捨てるだけ
+        let mut later = PtsClock::new(at(10), 60);
+        assert_eq!(stamp_frame(&mut later, size, (640, 480), t0).unwrap(), None);
+        assert_eq!(later.duration(), std::time::Duration::ZERO);
     }
 
     #[test]
