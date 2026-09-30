@@ -72,6 +72,8 @@ texts! {
 
     // ---- エラーの文言（各エラー enum の Display） ----
     VideoNoDevices { ja: "映像デバイスが 1 台も見つからない", en: "No video devices found" },
+    // ワーカーが映像デバイスの未指定でストリームを閉じたときの理由（app/worker_connect.rs、#334）
+    VideoDeviceNotSelected { ja: "映像デバイスが選ばれていません。「デバイス設定」タブで選んでください", en: "No video device is selected. Choose one in the Devices tab" },
     // ワーカーが入力の未指定で音声を開かないときの理由（app/worker_connect.rs、#304）
     AudioInputNotSelected { ja: "オーディオ入力デバイスが選ばれていません。「デバイス設定」タブで選んでください", en: "No audio input device is selected. Choose one in the Devices tab" },
     DeviceNotVisibleNoDevices { ja: "Windows 側にもデバイスが見えていない可能性があります（1 台も見えていません）。デバイスマネージャーで接続を確認してください", en: "Windows may not see the device either (no devices are visible). Check the connection in Device Manager" },

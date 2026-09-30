@@ -326,8 +326,9 @@ impl WorkerState {
             self.audio_not_visible = None;
         }
 
+        // 未指定でも要求を立てる。ストリームを閉じるのは `try_connect_video`（#334）
         let need_video_restart = Some(&config.video) != self.last_video_target.as_ref();
-        if config.video.0.is_some() && (need_video_restart || initial) {
+        if need_video_restart || initial {
             self.video_retry.request(config.video.clone());
         }
 
