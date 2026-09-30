@@ -254,10 +254,16 @@ impl CaptureCardViewer {
         // 効果音は保存の完了を待たずに鳴らす。撮った手応えをその場で返すため。
         // 保存まで待つと、エンコードにかかる数十 ms だけシャッター音が遅れる。
         // 保存に失敗した場合は音だけ鳴ることになるが、失敗はログに残す
-        if let Ok(ss) = self.screenshot_manager.lock() {
-            ss.play_screenshot_sound(sound_volume);
-        } else {
-            warn!("スクリーンショットの効果音で screenshot_manager のロックを取得できない");
+        // ロックの中では音の `Arc` を複製するだけにし、再生スレッドは離してから起こす
+        let sound = match self.screenshot_manager.lock() {
+            Ok(ss) => ss.shot_sound(),
+            Err(_) => {
+                warn!("スクリーンショットの効果音で screenshot_manager のロックを取得できない");
+                None
+            }
+        };
+        if let Some(sound) = sound {
+            self.play_sound(sound, sound_volume);
         }
 
         // エンコードと書き出しは UI スレッドから外す。
