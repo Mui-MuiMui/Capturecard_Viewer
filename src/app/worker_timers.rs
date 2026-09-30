@@ -278,12 +278,12 @@ impl WorkerState {
         info!("音声デバイスの再接続を要求した");
     }
 
-    /// 「既定のデバイス」設定が、Windows 側の既定切り替えに追従しているかを
+    /// 出力の「既定のデバイス」設定が、Windows 側の既定切り替えに追従しているかを
     /// 確認する。内部でタイマーを見て `DEFAULT_AUDIO_DEVICE_POLL_INTERVAL`
     /// おきにしか動かない（#135）。
     ///
     /// cpal は WASAPI の `IMMNotificationClient` を公開しておらず、既定
-    /// デバイスの切り替えを通知では受け取れない。`default_input_device()` /
+    /// デバイスの切り替えを通知では受け取れない。
     /// `default_output_device()` を都度問い合わせて名前を突き合わせるしかない。
     fn poll_default_audio_device(&mut self, now: Instant) {
         let elapsed = self
@@ -303,13 +303,12 @@ impl WorkerState {
         let Some(config) = self.config.clone() else {
             return;
         };
-        let (configured_input, configured_output, ..) = config.audio.clone();
-        // 入力が未指定なら音声を開かない（`worker_connect::audio_input_is_selected`、
-        // #304）ので、入力側は下の `active()` で抜けて実際には追いかけない
-        let track_input = configured_input.is_none();
-        let track_output = configured_output.is_none();
-        if !track_input && !track_output {
-            // 入出力とも明示的にデバイスを選んでいるので、追いかける対象が無い
+        // 追いかけるのは出力だけ。入力が未指定なら音声を開かない
+        // （`worker_connect::audio_input_is_selected`、#304）ので、入力を
+        // 「既定のデバイス」のまま開いている状態は無い
+        let (_, configured_output, ..) = config.audio.clone();
+        if configured_output.is_some() {
+            // 出力を明示的に選んでいるので、追いかける対象が無い
             return;
         }
 
@@ -319,40 +318,22 @@ impl WorkerState {
             return;
         };
 
-        let input_switched = track_input
-            && default_audio_device_changed(
-                configured_input.as_deref(),
-                &active.input_device,
-                self.audio.default_input_device_name().as_deref(),
-            );
-        let output_switched = track_output
-            && default_audio_device_changed(
-                configured_output.as_deref(),
-                &active.output_device,
-                self.audio.default_output_device_name().as_deref(),
-            );
-        if !input_switched && !output_switched {
+        if !default_audio_device_changed(
+            configured_output.as_deref(),
+            &active.output_device,
+            self.audio.default_output_device_name().as_deref(),
+        ) {
             return;
         }
 
-        info!(
-            "Windows 側の既定音声デバイスが切り替わったので再接続する（入力: {}, 出力: {}）",
-            input_switched, output_switched
-        );
+        info!("Windows 側の既定の出力デバイスが切り替わったので再接続する");
 
         // 「既定のデバイス」のキャッシュキーは切り替わっても同じ文字列
         // （`DEFAULT_DEVICE_KEY`）のままなので、古い物理デバイスの対応設定が
         // 残ってしまう。取り直さないと、新しい既定デバイスが対応しない
         // サンプリングレートやチャンネル数のまま開こうとしうる
-        let default_key = audio::cache_key(None);
-        if input_switched {
-            self.audio_capabilities
-                .remove(&(AudioDirection::Input, default_key.clone()));
-        }
-        if output_switched {
-            self.audio_capabilities
-                .remove(&(AudioDirection::Output, default_key));
-        }
+        self.audio_capabilities
+            .remove(&(AudioDirection::Output, audio::cache_key(None)));
 
         self.audio.stop_capture();
         self.last_audio_target = None;

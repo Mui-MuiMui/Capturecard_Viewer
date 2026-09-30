@@ -233,10 +233,6 @@ impl AudioBackend for FakeAudioCapture {
         FakeAudioCapture::list_output_devices(self)
     }
 
-    fn default_input_device_name(&self) -> Option<String> {
-        FakeAudioCapture::default_input_device_name(self)
-    }
-
     fn default_output_device_name(&self) -> Option<String> {
         FakeAudioCapture::default_output_device_name(self)
     }

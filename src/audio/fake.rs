@@ -183,11 +183,6 @@ impl FakeAudioCapture {
         outputs().into_iter().map(|device| device.name).collect()
     }
 
-    /// 既定の入力は 1 番
-    pub fn default_input_device_name(&self) -> Option<String> {
-        self.inputs().into_iter().next().map(|device| device.name)
-    }
-
     /// 既定の出力は 1 番
     pub fn default_output_device_name(&self) -> Option<String> {
         outputs().into_iter().next().map(|device| device.name)
@@ -645,10 +640,6 @@ mod tests {
         assert_eq!(
             capture.list_output_devices(),
             vec!["Fake Audio Output 1", "Fake Audio Output 2"]
-        );
-        assert_eq!(
-            capture.default_input_device_name().as_deref(),
-            Some("Fake Audio Input 1")
         );
         assert_eq!(
             capture.default_output_device_name().as_deref(),

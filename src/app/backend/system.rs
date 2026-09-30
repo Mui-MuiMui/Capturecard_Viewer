@@ -248,10 +248,6 @@ impl AudioBackend for AudioCapture {
         AudioCapture::list_output_devices(self)
     }
 
-    fn default_input_device_name(&self) -> Option<String> {
-        AudioCapture::default_input_device_name(self)
-    }
-
     fn default_output_device_name(&self) -> Option<String> {
         AudioCapture::default_output_device_name(self)
     }

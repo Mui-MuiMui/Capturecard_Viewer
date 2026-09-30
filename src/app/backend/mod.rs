@@ -130,8 +130,7 @@ pub(super) trait AudioBackend {
     fn list_input_devices(&self) -> Vec<String>;
     fn list_output_devices(&self) -> Vec<String>;
 
-    /// Windows 側の既定デバイス名。切り替えの追従に使う（`super::worker_timers`）
-    fn default_input_device_name(&self) -> Option<String>;
+    /// Windows 側の既定の出力デバイス名。切り替えの追従に使う（`super::worker_timers`）
     fn default_output_device_name(&self) -> Option<String>;
 
     /// デバイスが対応するサンプリングレートとチャンネル数
@@ -405,10 +404,6 @@ pub(super) mod mock {
 
         fn list_output_devices(&self) -> Vec<String> {
             self.with(|state| state.output_devices.clone())
-        }
-
-        fn default_input_device_name(&self) -> Option<String> {
-            None
         }
 
         fn default_output_device_name(&self) -> Option<String> {
