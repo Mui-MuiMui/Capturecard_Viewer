@@ -42,6 +42,12 @@ fn audio_input_is_selected(input: Option<&str>) -> bool {
     input.is_some_and(|name| !name.is_empty())
 }
 
+/// 設定で選ばれている映像デバイスの名前。未指定（`None`、空文字も含む）なら
+/// `None` で、そのときは開いているストリームを閉じて待つ（#334、音声の #304 と揃える）。
+fn selected_video_device(name: Option<&str>) -> Option<&str> {
+    name.filter(|name| !name.is_empty())
+}
+
 /// 列挙の結果を 1 経路ぶんだけログへ出す。**台数と名前を必ず並べる。**
 /// 0 台なのか、名前が食い違っているのかをログだけで見分けるため。
 fn log_listing<E: Display>(trigger: &str, source: &str, result: &Result<Vec<String>, E>) {
@@ -107,11 +113,9 @@ impl WorkerState {
 
     /// 映像デバイスへの接続を 1 回だけ試す。
     pub(super) fn try_connect_video(&mut self, config: &DeviceConfig, now: Instant) {
-        let (device_name, resolution, format, fps, backend) = config.video.clone();
-        let Some(device_name) = device_name else {
-            // 繋ぐ相手が無い。要求を取り下げて、デバイスが選ばれるまで待つ
-            debug!("映像デバイスが未設定なので接続の要求を取り下げる");
-            self.video_retry.cancel();
+        let (_, resolution, format, fps, backend) = config.video.clone();
+        let Some(device_name) = selected_video_device(config.video.0.as_deref()) else {
+            self.hold_video_without_device(config);
             return;
         };
 
@@ -122,7 +126,7 @@ impl WorkerState {
         );
 
         let result = self.video.start_capture(
-            Some(&device_name),
+            Some(device_name),
             resolution,
             format.as_deref(),
             fps,
@@ -277,6 +281,26 @@ impl WorkerState {
                 );
             }
         }
+    }
+
+    /// 映像デバイスが選ばれていないので、開いているストリームを閉じて待つ（#334）。
+    ///
+    /// 閉じないと古い映像が映り続けたまま、設定の表示だけが「未選択」になる。
+    /// 再試行はしない。扱いは音声の `hold_audio_without_input` と同じ。
+    fn hold_video_without_device(&mut self, config: &DeviceConfig) {
+        info!("映像デバイスが未設定なので映像を開かない");
+        self.video_retry.cancel();
+        if self.video.active().is_some() {
+            self.video.stop_capture();
+            // 最後のフレームを画面から落とし、プレースホルダーへ戻してもらう
+            self.emit(DeviceEvent::VideoSignalLost);
+        }
+        // 同じ設定が 2 秒ごとに届いても通知を繰り返さないよう、扱い済みとして記録する
+        self.last_video_target = Some(config.video.clone());
+        self.video_not_visible = None;
+        let reason = i18n::Text::VideoDeviceNotSelected.get().to_string();
+        self.last_video_failure = Some(reason.clone());
+        self.emit(DeviceEvent::VideoFailed(reason));
     }
 
     /// 入力デバイスが選ばれていないので、音声を開かずに待つ（#304）。
@@ -685,6 +709,13 @@ mod tests {
         assert!(audio_input_is_selected(Some("キャプチャーボード")));
         assert!(!audio_input_is_selected(None));
         assert!(!audio_input_is_selected(Some("")));
+    }
+
+    #[test]
+    fn selected_video_device_only_with_a_name() {
+        assert_eq!(selected_video_device(Some("カメラ")), Some("カメラ"));
+        assert_eq!(selected_video_device(None), None);
+        assert_eq!(selected_video_device(Some("")), None);
     }
 
     #[test]
