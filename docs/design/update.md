@@ -16,7 +16,7 @@ GitHub の Release から新しい版を見つけて知らせ、人が「更新�
 
 - **`User-Agent` を必ず付ける。** GitHub の API は無い要求を拒否する。`capturecard_viewer/<版>` にしてある。`Accept: application/vnd.github+json` と `X-GitHub-Api-Version` も付ける
 - 使うのは `tag_name` / `html_url` / `draft` / `prerelease` / `assets[].name` / `assets[].browser_download_url` だけ。知らない項目は読み飛ばす
-- タグ（`v1.2.0`）から先頭の `v` を外して `semver` で読み、`CARGO_PKG_VERSION` と比べる。**新しい正式版のときだけ「更新あり」。** 同じ版・古い版（ダウングレード）・`1.2.0-rc.1` のような pre-release のタグは「最新」として扱う（`update::is_newer_stable`）。`/latest` は draft と pre-release の印を付けた Release を元から除くが、印を付け忘れたものまで勧めないよう、タグの形と `draft` / `prerelease` の値でも弾く
+- タグ（`v1.2.0`）から先頭の `v` を外して `semver` で読み、`CARGO_PKG_VERSION` と比べる。**新しい正式版のときだけ「更新あり」。** 同じ版・古い版（ダウングレード）・`1.2.0-rc.1` のような pre-release のタグは「最新」として扱う（`update::is_newer_stable`）。`/latest` は draft と pre-release の印を付けた Release を元から除くが、印を付け忘れたものまで勧めないよう、タグの形と `draft` / `prerelease` の値でも弾く。印を付けずに Latest で出すと `/latest` がその rc を返し、正式版の更新まで知らせなくなるので、リリースのワークフローは `-` を含むタグに印を自動で付け、Latest にしない（`docs/RELEASE.md` の「pre-release を出す」）
 - タグが版として読めなければ失敗として扱う（`UpdateError::InvalidTag`）
 - **`html_url` はそのままブラウザへ渡さない。** `https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/<タグ>` の形（タグは英数字と `.` `-` `_` だけで、`.` / `..` ではない）のときだけ使い、それ以外は最新のリリースページにする（`release_page_url`）。頭の一致だけで許すと、`.../releases/../../../他人/リポジトリ/...` をブラウザが畳んで別のリポジトリを開く
 - 失敗の理由は `UpdateError` の変種で分ける。404 は「公開されたリリースが無い」、403 / 429 は認証なしの問い合わせ回数の上限（1 時間 60 回）、タイムアウト、その他の HTTP、接続の失敗、JSON を読めない、の 7 つ。文言は `Display` から `crate::i18n` を呼んで出す（`docs/design/error-reporting.md`）

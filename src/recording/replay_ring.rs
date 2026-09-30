@@ -11,6 +11,10 @@
 //!   捨てると、続きのフレームを復号できなくなる）。映像が途絶えて最後の GOP が
 //!   「いま − N 秒」より古くなったら、録画は次のキーフレームから始める（古い GOP から
 //!   書き出すと、途絶えていた長い空白までファイルに入るため）
+//! - **大きさにも上限がある**（`ring_byte_limit`、#313）。キーフレームの間隔の指定を無視する
+//!   エンコーダでは最後の GOP が伸び続けるので、上限を超えたら古い GOP から捨て、キーフレームが
+//!   1 つしか無ければ映像を空にして数える。キーフレームそのものは `should_force_keyframe` で
+//!   エンコーダに強制する
 //! - 音声（AAC）はどのフレームからでも復号できるので、映像とは関係なく境界の時刻で切る
 //!   （映像が途絶えている間も音声が溜まり続けないように）
 //!
@@ -30,6 +34,19 @@ pub(super) struct EncodedRing {
     bytes: usize,
     /// 古い GOP を捨てた回数
     discarded_gops: u64,
+    /// 上限の大きさを超えたのにキーフレームが 1 つしか無く、映像を空にした回数
+    overflows: u64,
+}
+
+/// 上限の大きさ（`ring_byte_limit`）を超えたときに映像をどう切るか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ByteTrim {
+    /// 上限に収まっている
+    Keep,
+    /// 先頭から GOP をこの数だけ捨てれば収まる
+    DropGops(usize),
+    /// 最後の GOP だけで上限を超えている。映像を空にし、次のキーフレームから積み直す
+    Clear,
 }
 
 /// 書き出すときの 1 件。
@@ -100,6 +117,50 @@ impl EncodedRing {
                 self.bytes -= sample.data.len();
             }
         }
+    }
+
+    /// 持っているデータが `limit`（バイト）を超えていたら、古い GOP から捨てる。最後の GOP だけで
+    /// 超えていれば（エンコーダがキーフレームを出さない）映像を空にして数える。音声は `trim` が
+    /// 時刻で切っているので、ここでは切らない（#313）。
+    pub(super) fn cap_bytes(&mut self, limit: usize) -> ByteTrim {
+        if self.bytes <= limit {
+            return ByteTrim::Keep;
+        }
+        let mut gops: Vec<(i64, usize)> = Vec::new();
+        for sample in &self.video {
+            match gops.last_mut() {
+                Some((_, bytes)) if !sample.keyframe => *bytes += sample.data.len(),
+                _ => gops.push((sample.pts, sample.data.len())),
+            }
+        }
+        let video_bytes: usize = gops.iter().map(|&(_, bytes)| bytes).sum();
+        let sizes: Vec<usize> = gops.iter().map(|&(_, bytes)| bytes).collect();
+        let decision = trim_for_bytes(&sizes, self.bytes - video_bytes, limit);
+        match decision {
+            ByteTrim::Keep => {}
+            ByteTrim::DropGops(drop) => {
+                let first_kept = gops[drop].0;
+                while self
+                    .video
+                    .front()
+                    .is_some_and(|sample| sample.pts < first_kept)
+                {
+                    self.pop_video();
+                }
+                self.discarded_gops += drop as u64;
+            }
+            ByteTrim::Clear => {
+                self.video.clear();
+                self.bytes -= video_bytes;
+                self.overflows += 1;
+            }
+        }
+        decision
+    }
+
+    /// 上限の大きさを超えて映像を空にした回数。
+    pub(super) fn overflows(&self) -> u64 {
+        self.overflows
     }
 
     /// 全部捨てる（映像の大きさが変わってエンコーダを作り直すとき）。
@@ -213,6 +274,74 @@ pub(super) fn gops_to_drop(keyframes: &[i64], keep_from: i64) -> usize {
     older.min(keyframes.len().saturating_sub(1))
 }
 
+/// リングに持つデータの上限（バイト）。「設定の秒数 + 1 GOP」を映像と音声のビットレートで
+/// 流した量の 2 倍。エンコーダがビットレートを多少超えても、ここで捨て始めることは無い見込み。
+///
+/// **保険。** 普段は `gops_to_drop` が時間で切るので、ここに届かない。キーフレームの間隔の指定を
+/// 無視し、`CODECAPI_AVEncVideoForceKeyFrame` も効かないエンコーダだと、最後の GOP を
+/// 捨てられずにリングが伸び続けるので、大きさでも切る（#313）。
+pub(super) fn ring_byte_limit(
+    seconds: u32,
+    video_kbps: u32,
+    audio_kbps: Option<u32>,
+    gop_units: i64,
+) -> usize {
+    let held_units = i64::from(seconds) * UNITS_PER_SECOND + gop_units.max(0);
+    let kbps = u64::from(video_kbps) + u64::from(audio_kbps.unwrap_or(0));
+    // kbps × 1000 / 8 = バイト/秒。100ns 単位の長さを掛けてから割る
+    let bytes = u128::from(kbps) * 1000 / 8 * held_units as u128 / UNITS_PER_SECOND as u128 * 2;
+    usize::try_from(bytes).unwrap_or(usize::MAX)
+}
+
+/// 上限の大きさを超えたときに、先頭から捨てる GOP の数を決める。`gop_bytes` は時刻の順の
+/// GOP ごとの大きさ、`other_bytes` は映像以外（音声）の大きさ。
+///
+/// 最後の GOP は捨てない（`gops_to_drop` と同じ理由）。最後の GOP だけでも超えるなら `Clear`。
+/// 映像が無いなら `Keep`（音声は時刻で切っている）。
+pub(super) fn trim_for_bytes(gop_bytes: &[usize], other_bytes: usize, limit: usize) -> ByteTrim {
+    let mut total = gop_bytes.iter().sum::<usize>() + other_bytes;
+    if total <= limit || gop_bytes.is_empty() {
+        return ByteTrim::Keep;
+    }
+    let mut drop = 0;
+    while total > limit && drop + 1 < gop_bytes.len() {
+        total -= gop_bytes[drop];
+        drop += 1;
+    }
+    if total > limit {
+        ByteTrim::Clear
+    } else {
+        ByteTrim::DropGops(drop)
+    }
+}
+
+/// エンコーダにキーフレームを強制するか。`pts` はいまエンコーダへ渡すフレームの時刻、
+/// `last_keyframe` はエンコーダが最後に出したキーフレームの時刻、`last_forced` は最後に
+/// 強制した時刻。
+///
+/// 最後のキーフレームから GOP の 2 倍が過ぎたら強制する。キーフレームの間隔の指定を無視する
+/// エンコーダだと、最後の GOP を捨てられずにリングが伸び続け、録画の先頭にする「いま − N 秒」
+/// 以降のキーフレームも来ない（#313）。強制したあとは、キーフレームが出てくるまで 1 GOP の間は
+/// 送り直さない（エンコーダは数枚遅れて出力するため）。まだ 1 枚も出ていなければ強制しない
+/// （最初の出力はキーフレーム）。
+pub(super) fn should_force_keyframe(
+    pts: i64,
+    last_keyframe: Option<i64>,
+    last_forced: Option<i64>,
+    gop_units: i64,
+) -> bool {
+    let Some(last) = last_keyframe else {
+        return false;
+    };
+    if pts.saturating_sub(last) < gop_units.saturating_mul(2) {
+        return false;
+    }
+    match last_forced {
+        Some(forced) if forced >= last => pts.saturating_sub(forced) >= gop_units,
+        _ => true,
+    }
+}
+
 /// 録画の先頭にするキーフレーム。`cut`（いま − N 秒）以降の最初のもの。無ければ `None`
 /// （次のキーフレームがエンコーダから出てくるのを待つ）。
 pub(super) fn replay_start(keyframes: impl IntoIterator<Item = i64>, cut: i64) -> Option<i64> {
@@ -311,6 +440,127 @@ mod tests {
         assert_eq!(gops_to_drop(&[0, 2 * SECOND], 100 * SECOND), 1);
         assert_eq!(gops_to_drop(&[0], 100 * SECOND), 0);
         assert_eq!(gops_to_drop(&[], 100 * SECOND), 0);
+    }
+
+    // #313 の再現: キーフレームが最初の 1 枚しか無いと、時間では 1 バイトも捨てられない
+    #[test]
+    fn encoded_ring_with_a_single_keyframe_is_not_trimmed_by_time() {
+        let mut ring = EncodedRing::default();
+        ring.push_video(sample(0, true, 10));
+        for index in 1..600 {
+            ring.push_video(sample(index * SECOND / 2, false, 10));
+        }
+        ring.trim(keep_from(300 * SECOND, 30, 2 * SECOND));
+        assert_eq!(ring.bytes(), 600 * 10, "最後の GOP は時間では捨てない");
+        // 録画の先頭にする「いま − 30 秒」以降のキーフレームも無い
+        assert_eq!(
+            ring.start_point(replay_cut(300 * SECOND, 30)),
+            None,
+            "録画が始まらない"
+        );
+    }
+
+    #[test]
+    fn ring_byte_limit_is_twice_the_bitrate_over_the_held_length() {
+        // 30 秒 + 2 秒 × (8000 + 160)kbps = 32 × 1,020,000 バイト/秒、その 2 倍
+        assert_eq!(
+            ring_byte_limit(30, 8000, Some(160), 2 * SECOND),
+            32 * 1_020_000 * 2
+        );
+        assert_eq!(
+            ring_byte_limit(30, 8000, None, 2 * SECOND),
+            32 * 1_000_000 * 2
+        );
+        // 録画中に OFF にされた（0 秒）ときも 1 GOP ぶんは持てる
+        assert_eq!(
+            ring_byte_limit(0, 8000, None, 2 * SECOND),
+            2 * 1_000_000 * 2
+        );
+        // 300 秒 × 大きなビットレートでも溢れない
+        assert!(ring_byte_limit(300, u32::MAX, Some(u32::MAX), 2 * SECOND) > 0);
+    }
+
+    #[test]
+    fn trim_for_bytes_drops_old_gops_until_it_fits() {
+        assert_eq!(trim_for_bytes(&[10, 10, 10], 5, 35), ByteTrim::Keep);
+        assert_eq!(trim_for_bytes(&[10, 10, 10], 5, 34), ByteTrim::DropGops(1));
+        assert_eq!(trim_for_bytes(&[10, 10, 10], 5, 15), ByteTrim::DropGops(2));
+        // 映像が無ければ音声だけで超えていても切らない（音声は時刻で切る）
+        assert_eq!(trim_for_bytes(&[], 100, 10), ByteTrim::Keep);
+    }
+
+    #[test]
+    fn trim_for_bytes_clears_when_the_last_gop_alone_is_too_big() {
+        assert_eq!(trim_for_bytes(&[100], 0, 50), ByteTrim::Clear);
+        assert_eq!(trim_for_bytes(&[10, 100], 0, 50), ByteTrim::Clear);
+        // 音声と合わせて超えるときも、最後の GOP は途中で切れないので空にする
+        assert_eq!(trim_for_bytes(&[10, 45], 10, 50), ByteTrim::Clear);
+    }
+
+    #[test]
+    fn encoded_ring_cap_bytes_clears_a_single_endless_gop_and_counts_it() {
+        let mut ring = EncodedRing::default();
+        ring.push_video(sample(0, true, 10));
+        for index in 1..100 {
+            ring.push_video(sample(index * SECOND / 2, false, 10));
+        }
+        ring.push_audio(sample(49 * SECOND, true, 3));
+        assert_eq!(ring.cap_bytes(2_000), ByteTrim::Keep);
+        assert_eq!(ring.cap_bytes(500), ByteTrim::Clear);
+        assert_eq!(ring.overflows(), 1);
+        // 音声は残し、映像は次のキーフレームから積み直す
+        assert_eq!(ring.bytes(), 3);
+        ring.push_video(sample(50 * SECOND, false, 10));
+        assert_eq!(ring.bytes(), 3);
+        ring.push_video(sample(51 * SECOND, true, 10));
+        assert_eq!(ring.start_point(i64::MIN), Some(51 * SECOND));
+    }
+
+    #[test]
+    fn encoded_ring_cap_bytes_drops_whole_gops() {
+        // 0〜10 秒、キーフレームは 2 秒ごと、1 GOP = 4 枚 × 10 バイト
+        let mut ring = ring_with_video(10);
+        assert_eq!(ring.cap_bytes(100), ByteTrim::DropGops(3));
+        assert_eq!(ring.start_point(i64::MIN), Some(6 * SECOND));
+        assert_eq!(ring.bytes(), 80);
+        assert_eq!(ring.discarded_gops(), 3);
+        assert_eq!(ring.overflows(), 0);
+    }
+
+    #[test]
+    fn should_force_keyframe_after_two_gops_without_one() {
+        let gop = 2 * SECOND;
+        // まだ何も出ていない
+        assert!(!should_force_keyframe(10 * SECOND, None, None, gop));
+        // 最後のキーフレームから 2 GOP 未満
+        assert!(!should_force_keyframe(4 * SECOND - 1, Some(0), None, gop));
+        assert!(should_force_keyframe(4 * SECOND, Some(0), None, gop));
+        // 強制したあとは 1 GOP の間は送り直さない
+        assert!(!should_force_keyframe(
+            5 * SECOND,
+            Some(0),
+            Some(4 * SECOND),
+            gop
+        ));
+        assert!(should_force_keyframe(
+            6 * SECOND,
+            Some(0),
+            Some(4 * SECOND),
+            gop
+        ));
+        // 強制したあとにキーフレームが出てきたら、そこから数え直す
+        assert!(!should_force_keyframe(
+            7 * SECOND,
+            Some(4 * SECOND),
+            Some(4 * SECOND - 1),
+            gop
+        ));
+        assert!(should_force_keyframe(
+            8 * SECOND,
+            Some(4 * SECOND),
+            Some(4 * SECOND - 1),
+            gop
+        ));
     }
 
     #[test]
