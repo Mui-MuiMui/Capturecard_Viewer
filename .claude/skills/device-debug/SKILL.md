@@ -38,7 +38,7 @@ grep -E '\] capturecard_viewer(::| )' "$APPDATA/capturecard_viewer/logs/<ファ�
 | `app::worker` | ワーカースレッドの起動と終了（`debug`） |
 | `app::worker_loop` | ワーカーの開始・停止、「デバイス再接続」の要求、最小化中のホットキー（音量・ミュート） |
 | `app::worker_timers` | 切断の検出、再接続の要求、既定デバイスの切り替え、音声のリサンプル比の補正 |
-| `app::worker_connect` | 接続の試行と成否、デバイス能力・対応設定の取得、既定デバイス名の確定 |
+| `app::worker_connect` / `app::worker_audio_connect` | 接続の試行と成否、デバイス能力・対応設定の取得、既定デバイス名の確定（音声側は `worker_audio_connect`） |
 | `app::device` | 起動直後の設定適用（`app` 側）。接続そのものは出さない |
 | `video` / `audio` | デバイスを開く処理の中身（列挙、`Camera::new`、選んだ設定、ストリームのエラー） |
 
@@ -93,7 +93,7 @@ AVerMedia Live Gamer EXTREME 3 + Windows 11 での実測（2026-09、release ビ
 
 ## 手順 3: 待ちとリトライの実装を思い出す
 
-`src/app/worker_timers.rs` の `poll_connection()`、`src/app/worker_connect.rs` の `try_connect_video` / `try_connect_audio`、`src/app/retry.rs` の `ConnectRetry`。**`sleep` は使っていないので、リトライで秒単位止まることはない。** 「数秒〜ずっと応答しない」という報告が来たらリトライ以外を疑う。
+`src/app/worker_timers.rs` の `poll_connection()`、`src/app/worker_connect.rs` の `try_connect_video`、`src/app/worker_audio_connect.rs` の `try_connect_audio`、`src/app/retry.rs` の `ConnectRetry`。**`sleep` は使っていないので、リトライで秒単位止まることはない。** 「数秒〜ずっと応答しない」という報告が来たらリトライ以外を疑う。
 
 **デバイスを開く処理は専用のワーカースレッドにある。** UI スレッドは止まらないので、**「接続を試している間だけウィンドウが固まる」という症状はもう出ない。** 出るなら UI スレッド側に別の原因がある（`rfd` のファイルダイアログ、フォントの読み込みなど）。1 回の試行にかかる時間は次のとおりで、**この間はワーカーが次のコマンドを処理できない**（設定ダイアログでのデバイス切り替えがその分だけ遅れる）。
 

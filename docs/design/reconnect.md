@@ -46,7 +46,7 @@ Windows 側の既定デバイスの切り替えを追いかける仕組みもこ
 
 ### 入力が未指定なら音声を開かない（#304）
 
-**入力デバイスが未指定（`None`、空文字も含む）のとき、ワーカーは音声を開かない。** `start_passthrough` は入力が `None` なら `default_input_device()` を開くが、そこへ届かせない。判定は純粋関数 `audio_input_is_selected`（`app::worker_connect`）で、`try_connect_audio` の入口で見る。未指定なら開いているパススルーを閉じ、`audio_retry` を取り下げ、「オーディオ入力デバイスが選ばれていません」を `AudioFailed` で返す（「接続状態」タブと通知に出る）。同じ設定が 2 秒ごとに届いても繰り返さないよう、その設定を `last_audio_target` に記録する。入力を選べば設定が変わるので、`apply_config` の差分判定で要求が立つ。
+**入力デバイスが未指定（`None`、空文字も含む）のとき、ワーカーは音声を開かない。** `start_passthrough` は入力が `None` なら `default_input_device()` を開くが、そこへ届かせない。判定は純粋関数 `audio_input_is_selected`（`app::worker_audio_connect`）で、`try_connect_audio` の入口で見る。未指定なら開いているパススルーを閉じ、`audio_retry` を取り下げ、「オーディオ入力デバイスが選ばれていません」を `AudioFailed` で返す（「接続状態」タブと通知に出る）。同じ設定が 2 秒ごとに届いても繰り返さないよう、その設定を `last_audio_target` に記録する。入力を選べば設定が変わるので、`apply_config` の差分判定で要求が立つ。
 
 - **抑えているのは、同じ設定の定期的な再適用（2 秒ごとの `apply_settings`）による再通知だけ。** `last_audio_target` を捨てて音声の要求を立て直す経路（映像の途絶からの復帰に合わせた `resync_audio_after_video_recovery`、右クリックの「デバイス再接続」、起動直後の `ApplyConfig`）を通ると、入力が未指定のままなら同じ通知がもう 1 度出る。どれもユーザーの操作か映像の復帰のときだけなので、分けて抑えていない。同じ内容のトーストは `ErrorCenter` が 60 秒間引く
 
