@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// スクリーンショットまわりの処理が失敗した理由。
 ///
@@ -37,6 +38,8 @@ pub enum ScreenshotError {
     /// 効果音ファイルは読めたが音声としてデコードできない（拡張子だけ mp3 など）。
     /// 既定音へは倒さず、撮影時は無音になる（`docs/design/assets.md`）
     SoundFileUndecodable { path: PathBuf, source: String },
+    /// 効果音の出力先（既定の出力デバイス）を開けない。撮影しても無音になる
+    SoundOutputUnavailable(String),
 }
 
 impl fmt::Display for ScreenshotError {
@@ -62,6 +65,9 @@ impl fmt::Display for ScreenshotError {
             }
             ScreenshotError::SoundFileUndecodable { path, source } => {
                 i18n::sound_file_undecodable(path.display(), source)
+            }
+            ScreenshotError::SoundOutputUnavailable(source) => {
+                i18n::sound_output_unavailable(source)
             }
         };
         f.write_str(&text)
@@ -218,7 +224,8 @@ fn rgb_to_rgba(rgb: &[u8], width: usize, height: usize) -> Result<Vec<u8>, Scree
 /// （`finish_load`）だけを置く。大きなファイルや遅いドライブで UI スレッドが
 /// 止まらないようにするため（Issue #214）。
 pub struct ScreenshotManager {
-    sound_data: Option<Vec<u8>>,
+    // 撮影のたびに再生スレッドへ渡すので `Arc` で持ち、中身は写さない（Issue #321）
+    sound_data: Option<Arc<[u8]>>,
     // 適用の読み込み要求。テスト再生の要求とは別に数える
     loads: SoundLoadRequests,
     // 設定画面の「テスト再生」の要求。適用済みの音には触れない
@@ -262,11 +269,11 @@ impl ScreenshotManager {
 
     /// 読み込んだ効果音を反映する。最新の要求の結果でなければ何もせず
     /// `false` を返す。
-    pub fn finish_load(&mut self, id: u64, data: Vec<u8>) -> bool {
+    pub fn finish_load(&mut self, id: u64, data: impl Into<Arc<[u8]>>) -> bool {
         if !self.loads.complete(id) {
             return false;
         }
-        self.sound_data = Some(data);
+        self.sound_data = Some(data.into());
         true
     }
 
@@ -283,12 +290,10 @@ impl ScreenshotManager {
         self.test_plays.complete(id)
     }
 
-    pub fn play_screenshot_sound(&self, volume: f32) {
-        if let Some(sound_data) =
-            select_shot_sound(self.sound_data.as_deref(), self.loads.is_pending())
-        {
-            play_sound_data(sound_data.to_vec(), volume);
-        }
+    /// 撮影時に鳴らす音。`None` なら鳴らさない。返すのは `Arc` の複製だけなので、
+    /// 呼び出し側はロックを離してから `play_sound_data` へ渡す。
+    pub fn shot_sound(&self) -> Option<Arc<[u8]>> {
+        select_shot_sound(self.sound_data.as_ref(), self.loads.is_pending())
     }
 }
 
@@ -352,10 +357,11 @@ fn is_latest_sound_load(pending: Option<u64>, id: u64) -> bool {
 /// 読み込みは別スレッドなので、起動直後や適用の直後に撮ると結果がまだ
 /// 届いていないことがある。そこで無音にすると、撮れたのかが分からない。
 /// 読み込み中でなく音も無いのは「鳴らさない」を選んだときだけ。
-fn select_shot_sound(applied: Option<&[u8]>, loading: bool) -> Option<&[u8]> {
+fn select_shot_sound(applied: Option<&Arc<[u8]>>, loading: bool) -> Option<Arc<[u8]>> {
     match (applied, loading) {
-        (Some(data), _) => Some(data),
-        (None, true) => Some(EMBEDDED_SOUND),
+        (Some(data), _) => Some(Arc::clone(data)),
+        // 内蔵音は 12KB ほどで、読み込みを待っている間しか通らないので写してよい
+        (None, true) => Some(Arc::from(EMBEDDED_SOUND)),
         (None, false) => None,
     }
 }
@@ -374,24 +380,24 @@ fn select_shot_sound(applied: Option<&[u8]>, loading: bool) -> Option<&[u8]> {
 /// 既定音を返す。ファイルがあるのに読めなかった場合も既定音を返し、
 /// その理由を 2 つ目の値で添える。どの場合もデータは必ず返るので、
 /// 呼び出し側は失敗を報告したうえでそのまま鳴らしてよい。
-pub fn load_sound_data(sound_path: &Path) -> (Vec<u8>, Option<ScreenshotError>) {
+pub fn load_sound_data(sound_path: &Path) -> (Arc<[u8]>, Option<ScreenshotError>) {
     match resolve_sound_path(sound_path, exe_dir().as_deref(), |path| path.exists()) {
-        SoundSource::Embedded => (EMBEDDED_SOUND.to_vec(), None),
+        SoundSource::Embedded => (Arc::from(EMBEDDED_SOUND), None),
         SoundSource::File(path) => match std::fs::read(&path) {
             Ok(data) => {
                 // デコードできるかは選んだ時点（テスト再生と適用）で確かめる。
-                // 撮影時の再生スレッドは失敗を黙って捨てるため、ここで見ないと
-                // 無音の理由がどこにも出ない。データは差し替えない（撮影時は無音のまま）
+                // 撮影時の再生スレッドはデコードの失敗を黙って捨てるため、ここで
+                // 見ないと無音の理由がどこにも出ない。データは差し替えない（撮影時は無音のまま）
                 let error = check_decodable(&data).err().map(|source| {
                     ScreenshotError::SoundFileUndecodable {
                         path: path.clone(),
                         source,
                     }
                 });
-                (data, error)
+                (Arc::from(data), error)
             }
             Err(e) => (
-                EMBEDDED_SOUND.to_vec(),
+                Arc::from(EMBEDDED_SOUND),
                 Some(ScreenshotError::SoundFileUnreadable {
                     path,
                     source: e.to_string(),
@@ -411,21 +417,43 @@ fn check_decodable(data: &[u8]) -> Result<(), String> {
 /// 効果音のデータを、別スレッドで 1 回鳴らす。
 ///
 /// `volume` は設定画面と同じパーセント表記（100 で等倍、上限 200）。
-/// 再生の終わりを待たずに戻る。
-pub fn play_sound_data(sound_data: Vec<u8>, volume: f32) {
+/// 再生の終わりを待たずに戻る。出力先を開けたかは `on_output` で返す。
+/// **再生スレッドからはログを出さない**（保存スレッドと同じ。`docs/design/threads.md`）。
+/// デコードできないデータは選んだ時点で知らせてあるので、ここでは黙って無音にする。
+pub fn play_sound_data(
+    sound_data: Arc<[u8]>,
+    volume: f32,
+    on_output: impl FnOnce(Result<(), ScreenshotError>) + Send + 'static,
+) {
     let volume = (volume / 100.0).clamp(0.0, 2.0); // パーセンテージを0.0-2.0範囲に変換
-    std::thread::spawn(move || {
-        if let Ok((_stream, stream_handle)) = OutputStream::try_default() {
-            if let Ok(sink) = Sink::try_new(&stream_handle) {
-                sink.set_volume(volume);
-                let cursor = Cursor::new(sound_data);
-                if let Ok(decoder) = Decoder::new(cursor) {
-                    sink.append(decoder);
-                    sink.sleep_until_end();
-                }
-            }
-        }
-    });
+    std::thread::spawn(move || play_blocking(open_output, sound_data, volume, on_output));
+}
+
+/// 出力先を開いて鳴らし終わるまで待つ。`open` を差し替えて失敗を注入できる。
+fn play_blocking(
+    open: impl FnOnce() -> Result<(OutputStream, Sink), ScreenshotError>,
+    sound_data: Arc<[u8]>,
+    volume: f32,
+    on_output: impl FnOnce(Result<(), ScreenshotError>),
+) {
+    let (_stream, sink) = match open() {
+        Ok(opened) => opened,
+        Err(e) => return on_output(Err(e)),
+    };
+    on_output(Ok(()));
+    sink.set_volume(volume);
+    if let Ok(decoder) = Decoder::new(Cursor::new(sound_data)) {
+        sink.append(decoder);
+        sink.sleep_until_end();
+    }
+}
+
+/// 既定の出力デバイスを開く。無い・開けないときは理由を返す。
+fn open_output() -> Result<(OutputStream, Sink), ScreenshotError> {
+    let unavailable = |e: &dyn fmt::Display| ScreenshotError::SoundOutputUnavailable(e.to_string());
+    let (stream, handle) = OutputStream::try_default().map_err(|e| unavailable(&e))?;
+    let sink = Sink::try_new(&handle).map_err(|e| unavailable(&e))?;
+    Ok((stream, sink))
 }
 
 impl Default for ScreenshotManager {
@@ -662,6 +690,7 @@ mod tests {
                 path: PathBuf::from("C:/sounds/SS.mp3"),
                 source: "unrecognized format".to_string(),
             },
+            ScreenshotError::SoundOutputUnavailable("NoDevice".to_string()),
         ];
 
         for error in all {
@@ -680,7 +709,7 @@ mod tests {
 
         let (data, error) = load_sound_data(&path);
 
-        assert_eq!(data, EMBEDDED_SOUND);
+        assert_eq!(&*data, EMBEDDED_SOUND);
         assert_eq!(error, None);
     }
 
@@ -694,7 +723,7 @@ mod tests {
 
         let (data, error) = load_sound_data(&path);
 
-        assert_eq!(data, b"not really mp3");
+        assert_eq!(&*data, b"not really mp3");
         assert!(
             matches!(error, Some(ScreenshotError::SoundFileUndecodable { path: ref p, .. }) if *p == path),
             "デコードできない理由が返ること: {error:?}"
@@ -707,7 +736,7 @@ mod tests {
         // テスト再生でも撮影時と同じく内蔵音が鳴ること
         let (data, error) = load_sound_data(Path::new(crate::settings::DEFAULT_SOUND_FILE));
 
-        assert_eq!(data, EMBEDDED_SOUND);
+        assert_eq!(&*data, EMBEDDED_SOUND);
         assert_eq!(error, None);
     }
 
@@ -719,7 +748,7 @@ mod tests {
 
         let (data, error) = load_sound_data(dir.path());
 
-        assert_eq!(data, EMBEDDED_SOUND);
+        assert_eq!(&*data, EMBEDDED_SOUND);
         assert!(
             matches!(error, Some(ScreenshotError::SoundFileUnreadable { ref path, .. }) if path == dir.path()),
             "読めなかった理由が返ること: {error:?}"
@@ -809,21 +838,35 @@ mod tests {
 
     #[test]
     fn select_shot_sound_applied_sound_is_used_even_while_loading() {
-        // 読み込み中は直前の音で鳴らす
-        assert_eq!(
-            select_shot_sound(Some(b"previous"), true),
-            Some(&b"previous"[..])
-        );
-        assert_eq!(
-            select_shot_sound(Some(b"previous"), false),
-            Some(&b"previous"[..])
-        );
+        // 読み込み中は直前の音で鳴らす。中身は写さず同じ領域を指すこと（Issue #321）
+        let previous: Arc<[u8]> = Arc::from(&b"previous"[..]);
+        for loading in [true, false] {
+            let chosen = select_shot_sound(Some(&previous), loading).expect("鳴らすこと");
+            assert!(Arc::ptr_eq(&chosen, &previous));
+        }
     }
 
     #[test]
     fn select_shot_sound_loading_without_previous_uses_embedded() {
         // 起動直後や「鳴らさない」から切り替えた直後。無音にせず内蔵音で鳴らす
-        assert_eq!(select_shot_sound(None, true), Some(EMBEDDED_SOUND));
+        assert_eq!(
+            select_shot_sound(None, true).as_deref(),
+            Some(EMBEDDED_SOUND)
+        );
+    }
+
+    #[test]
+    fn play_blocking_output_failure_is_returned_without_playing() {
+        // 出力デバイスが無いとき。黙って捨てず、理由を呼び出し側へ返すこと（Issue #321）
+        let mut outcome = None;
+        let fail = || Err(ScreenshotError::SoundOutputUnavailable("NoDevice".into()));
+        play_blocking(fail, Arc::from(EMBEDDED_SOUND), 1.0, |r| outcome = Some(r));
+        assert_eq!(
+            outcome,
+            Some(Err(ScreenshotError::SoundOutputUnavailable(
+                "NoDevice".into()
+            )))
+        );
     }
 
     #[test]

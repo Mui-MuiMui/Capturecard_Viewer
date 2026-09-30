@@ -213,7 +213,7 @@ impl CaptureCardViewer {
             ) {
                 match &settings.screenshot.sound_file {
                     Some(sf) => {
-                        // 読み込みは別スレッドで行い、結果は drain_sound_load_results が
+                        // 読み込みは別スレッドで行い、結果は drain_sound_results が
                         // 受け取る（app::screenshot_sound）。**要求した時点で適用済みに
                         // する。** 結果を待ってからにすると、読み終わるまで 2 秒ごとに
                         // 同じファイルの読み込みを積み増してしまう。
