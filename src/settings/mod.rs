@@ -7,6 +7,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+mod testing;
+
 /// 設定ファイルの書き出し・読み込みが失敗した理由。
 ///
 /// 対象は「設定を書き出す」「設定を読み込む」の 2 つだけ。`%AppData%` 側の
@@ -1819,88 +1822,11 @@ pub fn import_from(path: &Path) -> Result<AppSettings, SettingsError> {
 
 #[cfg(test)]
 mod tests {
+    use super::testing::{without_key, DESKTOP, EXE_DIR, FULL_CONFIG, HOME, LEGACY_CONFIG, TEMP};
     use super::*;
     use chrono::NaiveDate;
     use std::fs;
     use tempfile::tempdir;
-
-    // 全項目を明示した設定ファイル。値はすべて既定値と異なるものにしてある。
-    // 各テストはここから一部を削り、「古い版が書いた設定ファイル」を再現する。
-    const FULL_CONFIG: &str = r#"
-[video]
-device_name = "Capture Device"
-resolution = [1920, 1080]
-format = "MJPEG"
-fps = 30
-backend = "direct_show"
-auto_reconnect = false
-color_space = "bt601"
-color_range = "full"
-brightness = 10
-contrast = -20
-saturation = 30
-
-[audio]
-input_device_name = "Line In"
-output_device_name = "Speakers"
-sample_rate = 44100
-channels = 1
-passthrough_enabled = false
-buffer_ms = 120
-
-[screenshot]
-destination = "both"
-save_folder = 'C:\shots'
-format = "png"
-jpeg_quality = 60
-sound_file = 'sound/custom.mp3'
-sound_volume = 50.0
-
-[ui]
-volume = 80.0
-muted = true
-maintain_aspect_ratio = false
-last_window_size = [800.0, 600.0]
-last_window_pos = [10.0, 20.0]
-always_on_top = true
-enable_drag_move = false
-show_stats_overlay = true
-borderless = true
-
-[hotkeys]
-screenshot = "Ctrl+S"
-toggle_fullscreen = "F11"
-"#;
-
-    // ホットキーをアクション別にする前の版が書いた設定ファイル。
-    // [hotkeys] が無く、screenshot セクションに hotkey がある。
-    const LEGACY_CONFIG: &str = r#"
-[video]
-device_name = "Capture Device"
-fps = 30
-
-[audio]
-sample_rate = 44100
-
-[screenshot]
-save_folder = 'C:\shots'
-sound_volume = 50.0
-hotkey = "Ctrl+S"
-
-[ui]
-volume = 80.0
-"#;
-
-    // 指定したキーの行を取り除く。項目を 1 つ追加した直後の、
-    // そのキーだけが存在しない設定ファイルを作るために使う。
-    fn without_key(config: &str, key: &str) -> String {
-        let prefix = format!("{} =", key);
-        config
-            .lines()
-            .filter(|line| !line.trim_start().starts_with(&prefix))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
 
     #[test]
     fn app_settings_missing_one_key_keeps_other_values() {
@@ -2289,13 +2215,6 @@ volume = 80.0
         assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
         assert!(outcome.may_write_defaults_on_startup());
     }
-
-    // 保存先の候補。実在しないパスでよい。screenshot_folder_from は
-    // 候補の存在を確かめず、取れた順に選ぶだけ
-    const DESKTOP: &str = r"C:\Users\tester\Desktop";
-    const HOME: &str = r"C:\Users\tester";
-    const EXE_DIR: &str = r"C:\Program Files\capturecard_viewer";
-    const TEMP: &str = r"C:\Users\tester\AppData\Local\Temp";
 
     #[test]
     fn screenshot_folder_from_desktop_available_uses_desktop() {
