@@ -39,6 +39,8 @@ mod replay_recording;
 mod replay_ring;
 mod session;
 mod storage;
+#[cfg(test)]
+mod test_support;
 mod writer;
 
 pub use file_name::{render_file_name, resolve_file_stem, RECORDING_EXTENSION};
