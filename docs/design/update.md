@@ -8,7 +8,7 @@ GitHub の Release から新しい版を見つけて知らせ、人が「更新�
 | 2 | 検知、通知ダイアログ、設定 `[update]`、「その他」タブの「更新」の欄 | 済み（PR #243） |
 | 3 | ダウンロード、照合、差し替え、再起動 | この文書の「適用」 |
 
-置き場所は `src/update/mod.rs`（問い合わせと判断の純粋関数）、`src/update/apply.rs`（ダウンロードと照合の本体）、`src/update/assets.rs`（資産の選び方）、`src/update/swap.rs`（差し替えと戻し方）、`src/update/checksum.rs`（`SHA256SUMS.txt` の読み方）、`src/update/overrides.rs`（試すための環境変数）、`src/app/update.rs`（スレッドと結果の取り込み、通知ダイアログの操作、終了時の新しい exe の起動）、`src/ui/update_dialog.rs`（通知ダイアログの描画）、`src/ui/other_tab.rs`（「更新」の欄）。
+置き場所は `src/update/mod.rs`（問い合わせと判断の純粋関数）、`src/update/apply.rs`（ダウンロードと照合の本体）、`src/update/download.rs`（資産の読み取りとキャンセル）、`src/update/assets.rs`（資産の選び方）、`src/update/swap.rs`（差し替えと戻し方）、`src/update/checksum.rs`（`SHA256SUMS.txt` の読み方）、`src/update/overrides.rs`（試すための環境変数）、`src/app/update.rs`（スレッドと結果の取り込み、通知ダイアログの操作、終了時の新しい exe の起動）、`src/ui/update_dialog.rs`（通知ダイアログの描画）、`src/ui/other_tab.rs`（「更新」の欄）。
 
 ## 検知
 
