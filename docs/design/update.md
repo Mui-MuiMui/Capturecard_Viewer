@@ -16,7 +16,7 @@ GitHub の Release から新しい版を見つけて知らせ、人が「更新�
 
 - **`User-Agent` を必ず付ける。** GitHub の API は無い要求を拒否する。`capturecard_viewer/<版>` にしてある。`Accept: application/vnd.github+json` と `X-GitHub-Api-Version` も付ける
 - 使うのは `tag_name` / `html_url` / `draft` / `prerelease` / `assets[].name` / `assets[].browser_download_url` だけ。知らない項目は読み飛ばす
-- タグ（`v1.2.0`）から先頭の `v` を外して `semver` で読み、`CARGO_PKG_VERSION` と比べる。**新しい正式版のときだけ「更新あり」。** 同じ版・古い版（ダウングレード）・`1.2.0-rc.1` のような pre-release のタグは「最新」として扱う（`update::is_newer_stable`）。`/latest` は draft と pre-release の印を付けた Release を元から除くが、印を付け忘れたものまで勧めないよう、タグの形と `draft` / `prerelease` の値でも弾く
+- タグ（`v1.2.0`）から先頭の `v` を外して `semver` で読み、`CARGO_PKG_VERSION` と比べる。**新しい正式版のときだけ「更新あり」。** 同じ版・古い版（ダウングレード）・`1.2.0-rc.1` のような pre-release のタグは「最新」として扱う（`update::is_newer_stable`）。`/latest` は draft と pre-release の印を付けた Release を元から除くが、印を付け忘れたものまで勧めないよう、タグの形と `draft` / `prerelease` の値でも弾く。印を付けずに Latest で出すと `/latest` がその rc を返し、正式版の更新まで知らせなくなるので、リリースのワークフローは `-` を含むタグに印を自動で付け、Latest にしない（`docs/RELEASE.md` の「pre-release を出す」）
 - タグが版として読めなければ失敗として扱う（`UpdateError::InvalidTag`）
 - **`html_url` はそのままブラウザへ渡さない。** `https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/<タグ>` の形（タグは英数字と `.` `-` `_` だけで、`.` / `..` ではない）のときだけ使い、それ以外は最新のリリースページにする（`release_page_url`）。頭の一致だけで許すと、`.../releases/../../../他人/リポジトリ/...` をブラウザが畳んで別のリポジトリを開く
 - 失敗の理由は `UpdateError` の変種で分ける。404 は「公開されたリリースが無い」、403 / 429 は認証なしの問い合わせ回数の上限（1 時間 60 回）、タイムアウト、その他の HTTP、接続の失敗、JSON を読めない、の 7 つ。文言は `Display` から `crate::i18n` を呼んで出す（`docs/design/error-reporting.md`）
@@ -143,12 +143,15 @@ flowchart TD
 |---|---|---|
 | 書けるかの確認、`SHA256SUMS.txt` | 触っていない | 何も落としていない |
 | exe のダウンロード・照合・キャンセル | 触っていない | `.new` を消す |
+| 差し替えの前に、元の名前に exe が無い（前回 `ReplaceKeptNothing` で終わった状態からの再試行） | `.old` にある | どの手順にも進まず、`.old` と `.new` を残して `ReplaceKeptNothing` で案内する（`may_swap`） |
 | `.old` を消せない、exe を `.old` へ改名できない | 元の名前のまま | `.new` を消す |
 | `.new` を元の名前へ改名できない | `.old` にある | **先に `.old` を元の名前へ戻し**、戻せたときだけ `.new` を消す（`Replace`） |
 | 上の行で `.old` を戻せない | `.old` にある | `.new` を消さず、元の名前へ改名する（`ReplaceKeptNew`。次の起動から新しいバージョン）。それもできなければ `.old` と `.new` を残し、場所を画面で案内する（`ReplaceKeptNothing`） |
 | 新しい exe を起動できない（`on_exit`） | `.old` にある | 新しい exe を `.new` へ戻し、`.old` を元の名前へ戻す。戻せなければ新しい exe を元の名前へ置き直す（`roll_back`） |
 
 戻し方の順は純粋関数（最初の 1 手を `recovery_for`、試した結果から次の 1 手を `next_recovery`）で決め、テストで確かめている。**`.new` を消すのは、元の名前に元の exe があるときだけ。** 戻せないまま消すと、元の名前に何も無いうえに、手で置ける照合済みの exe が 1 つ減るため（Issue #305）。`.old` を戻せなかったときは `roll_back` と同じ考え方で新しい exe を元の名前へ置く。改名の失敗が 3 回重なった場合（ウイルス対策ソフトが `.old` と `.new` を掴み続けている、など）だけは元の名前に何も残らないが、そのときも `.old` と `.new` は残し、画面の文言で `.old` の名前を戻せば元のバージョンで起動できることを案内する。
+
+その状態のまま（プロセスは動き続けている）もう一度「更新する」を押すと、最初の手順「`.old` を消す」が元の exe を消してしまう。そのため `swap_in` は先頭で元の名前に exe があるかを見て（`may_swap`）、無ければどの手順にも進まない（Issue #332）。起動時の後片付け（`remove_leftovers`）は、元の名前から起動していれば exe があるので同じ状態にはならない。案内に従わず `.old` のまま起動した場合は、一時名が `<名前>.old.old` / `<名前>.old.new` になるので、起動した `.old` 自身と隣の `.new` には触らない（テスト `remove_leftovers_when_started_from_old_keeps_itself`）。
 
 失敗の理由は、ダイアログ（理由と「リリースページを開く」「閉じる」）・トースト（`report_error(ErrorSource::Update, ..)`）・ログに出す。`NotWritable` はフォルダの詳細を画面に出さないので、ログには `{:?}` で中身ごと残す。手で直す方法は `docs/TROUBLESHOOTING.md` の「更新に失敗したとき」。
 

@@ -495,6 +495,7 @@ fn finishes_audio_after(error: &RecordingError) -> bool {
         RecordingError::WriteFailed { .. }
         | RecordingError::Folder { .. }
         | RecordingError::FolderNotAbsolute { .. }
+        | RecordingError::ReplayDiskShort { .. }
         | RecordingError::EncoderUnavailable { .. }
         | RecordingError::NoVideo
         | RecordingError::Platform { .. } => false,

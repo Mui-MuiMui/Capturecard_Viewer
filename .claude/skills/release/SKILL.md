@@ -65,11 +65,11 @@ gh pr view <番号> --json headRefOid --jq .headRefOid
 
 **PR がマージされたことを確認してから。** `main` の最新を取得して打つ。
 
-タグ push は Release の公開を起動する。**打つ直前にタグ名と `Cargo.toml` の version を読み上げ、承認を得てから push する。**
+タグ push は Release の公開を起動する。**打つ直前にタグ名と `Cargo.toml` の version を読み上げ、承認を得てから push する。** タグに `-` が含まれる（`v1.4.0-rc.1`）なら pre-release として出ること（Latest にならず、自動アップデートも勧めない）も合わせて伝える（`docs/RELEASE.md` の「pre-release を出す」）。
 
 ### 6. 結果を確認する
 
-`docs/RELEASE.md` の手順 5。Release ができたら URL を報告する。**資産が 2 つ（`capturecard_viewer.exe` と `SHA256SUMS.txt`）付いていることを `gh release view <tag>` で確かめる。** 資産名は自動アップデートが読むので変えない（`docs/RELEASE.md` の「配布物」）。**exe を落として起動するかの確認はユーザーに依頼する。** ビルドが通ったことと、配った物が動くことは別。
+`docs/RELEASE.md` の手順 5。Release ができたら URL を報告する。**資産が 2 つ（`capturecard_viewer.exe` と `SHA256SUMS.txt`）付いていることを `gh release view <tag>` で確かめる。** 資産名は自動アップデートが読むので変えない（`docs/RELEASE.md` の「配布物」）。pre-release のタグなら、`gh release view <tag> --json isPrerelease` が `true` で、`gh release view`（タグなし、Latest を表示する）が直前の正式版のままであることも確かめる。**exe を落として起動するかの確認はユーザーに依頼する。** ビルドが通ったことと、配った物が動くことは別。
 
 失敗していたら「ワークフローが失敗したとき」の表で切り分ける。**手動でリリースを出す前に、タグを打ち直せる状況か（Release がまだ無いか）を確認する。**
 

@@ -16,7 +16,8 @@
 //!   ①の Sink Writer の「遅れが 30 枚を超えたら捨てる」と同じ考え方
 //! - H.264 はキーフレームを 2 秒ごと（`CODECAPI_AVEncMPVGOPSize` = fps × 2）にし、
 //!   B フレームを使わせない（`CODECAPI_AVEncMPVDefaultBPictureCount` = 0）。B フレームが
-//!   あると出力が表示順と違う順で出てきて、リングを時刻で切る前提が崩れる
+//!   あると出力が表示順と違う順で出てきて、リングを時刻で切る前提が崩れる。間隔の指定を
+//!   受け付けないエンコーダは `warn` に残し、`force_keyframe` で補う（#313）
 //! - D3D のデバイスマネージャは渡さない。サンプルはシステムメモリに置く（①と同じ）
 
 use std::mem::ManuallyDrop;
@@ -26,9 +27,10 @@ use std::sync::Arc;
 use log::{info, warn};
 use windows::core::{Interface, GUID};
 use windows::Win32::Media::MediaFoundation::{
-    CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize, ICodecAPI, IMFActivate,
-    IMFAttributes, IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFShutdown, IMFTransform,
-    MEError, METransformHaveOutput, METransformNeedInput, MFAudioFormat_AAC, MFAudioFormat_PCM,
+    CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize,
+    CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMFActivate, IMFAttributes,
+    IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFShutdown, IMFTransform, MEError,
+    METransformHaveOutput, METransformNeedInput, MFAudioFormat_AAC, MFAudioFormat_PCM,
     MFCreateAlignedMemoryBuffer, MFCreateMediaType, MFCreateSample, MFMediaType_Audio,
     MFMediaType_Video, MFSampleExtension_CleanPoint, MFTEnumEx, MFT_FRIENDLY_NAME_Attribute,
     MFVideoFormat_H264, MFVideoFormat_NV12, MFT_CATEGORY_AUDIO_ENCODER, MFT_CATEGORY_VIDEO_ENCODER,
@@ -291,6 +293,16 @@ impl EncoderMft {
         self.produced > 0
     }
 
+    /// 次に渡すフレームをキーフレームにするよう頼む（`CODECAPI_AVEncVideoForceKeyFrame`）。
+    /// 受け付けたら真。キーフレームの間隔の指定を無視するエンコーダに備える（#313）。
+    pub(super) fn force_keyframe(&self) -> bool {
+        let Ok(codec) = self.transform.cast::<ICodecAPI>() else {
+            return false;
+        };
+        let value = VARIANT::from(1u32);
+        unsafe { codec.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &value) }.is_ok()
+    }
+
     /// いま入力を受け取れるか。同期型は常に受け取る。非同期型は `METransformNeedInput` が
     /// 残っているときだけ。
     pub(super) fn accepts_input(&mut self) -> Result<bool, EncoderError> {
@@ -536,12 +548,25 @@ struct Transform<'a> {
 /// H.264: キーフレームの間隔と B フレームの数を先に伝え、出力 → 入力の順に形を決める
 /// （エンコーダは出力の形を先に求める）。
 fn configure_video(target: &Transform<'_>, params: &WriterParams) -> windows::core::Result<()> {
-    if let Ok(codec) = target.transform.cast::<ICodecAPI>() {
-        // 受け付けないエンコーダもある。付かなくても録画はできるので、失敗は捨てる
-        let gop = VARIANT::from(params.gop_size());
-        let _ = unsafe { codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &gop) };
-        let no_b_frames = VARIANT::from(0u32);
-        let _ = unsafe { codec.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &no_b_frames) };
+    // 受け付けないエンコーダもある。付かなくてもエンコードはできるので止めないが、リングは
+    // キーフレームで捨てるので `warn` に残す。キーフレームは `force_keyframe` で補う（#313）
+    match target.transform.cast::<ICodecAPI>() {
+        Ok(codec) => {
+            let gop = VARIANT::from(params.gop_size());
+            if let Err(error) = unsafe { codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &gop) } {
+                warn!(
+                    "エンコーダがキーフレームの間隔（{} 枚）を受け付けない: {}",
+                    params.gop_size(),
+                    error
+                );
+            }
+            let no_b_frames = VARIANT::from(0u32);
+            let _ = unsafe { codec.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &no_b_frames) };
+        }
+        Err(error) => warn!(
+            "エンコーダが ICodecAPI を持たないので、キーフレームの間隔を伝えられない: {}",
+            error
+        ),
     }
     let output = output_media_type(params)?;
     unsafe { target.transform.SetOutputType(target.output, &output, 0) }?;
@@ -762,6 +787,51 @@ mod tests {
         assert!(!encoder.is_hardware());
         let outputs = encode_three_seconds(&mut encoder);
         check_h264_outputs(&encoder, &outputs);
+    }
+
+    #[test]
+    #[ignore = "Media Foundation の H.264 エンコーダが必要（CI のランナーにあるかは未確認）"]
+    fn software_h264_encoder_honours_force_keyframe() {
+        // 実行: cargo test -- --ignored software_h264_encoder_honours_force_keyframe
+        // #313: キーフレームの間隔より前でも、頼んだフレームがキーフレームになる
+        let _com = ComApartment::enter(ComModel::MultiThreaded).expect("COM を初期化できる");
+        let _mf = MfPlatform::start().expect("MF を起こせる");
+        let mut encoder = EncoderMft::video(&params(false)).expect("エンコーダを作れる");
+        let mut nv12 = Vec::new();
+        let mut outputs = Vec::new();
+        for index in 0..50u8 {
+            let rgb = vec![index.wrapping_mul(5); 320 * 240 * 3];
+            assert!(rgb_to_nv12(
+                &rgb,
+                320,
+                240,
+                320,
+                240,
+                params(false).matrix(),
+                &mut nv12
+            ));
+            let sample = memory_sample(&nv12, i64::from(index) * 333_333, 333_333).expect("作れる");
+            if index == 15 {
+                assert!(encoder.force_keyframe(), "キーフレームの強制を受け付ける");
+            }
+            encoder.encode(&sample).expect("エンコードできる");
+            outputs.extend(encoder.take_output());
+        }
+        for _ in 0..50 {
+            encoder.pull().expect("取り出せる");
+            outputs.extend(encoder.take_output());
+        }
+        // 同期型は十数枚遅れて出力するので、頼んだ 15 枚目が出てくるまで 50 枚渡してある
+        // （2 秒ごとのキーフレームは 60 枚目なので、ここまでには来ない）
+        let keyframes: Vec<i64> = outputs
+            .iter()
+            .filter(|sample| sample.keyframe)
+            .map(|sample| sample.pts)
+            .collect();
+        assert!(
+            keyframes.contains(&(15 * 333_333)),
+            "キーフレーム: {keyframes:?}"
+        );
     }
 
     #[test]

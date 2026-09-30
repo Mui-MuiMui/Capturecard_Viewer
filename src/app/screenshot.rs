@@ -483,7 +483,7 @@ mod tests {
     // 書き出したファイルの中身から画像形式を判定する。
     // 拡張子ではなく実際のバイト列を見る
     fn detect_format(path: &Path) -> image::ImageFormat {
-        let reader = image::io::Reader::open(path)
+        let reader = image::ImageReader::open(path)
             .expect("保存したファイルを開けること")
             .with_guessed_format()
             .expect("形式を判定できること");

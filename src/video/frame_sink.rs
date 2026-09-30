@@ -661,7 +661,7 @@ mod tests {
         let rgb = vec![200u8; 2 * 2 * 3];
         let mut jpeg = Vec::new();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 100)
-            .encode(&rgb, 2, 2, image::ColorType::Rgb8)
+            .encode(&rgb, 2, 2, image::ExtendedColorType::Rgb8)
             .expect("JPEG にできる");
         let frames = VideoFrames::new();
         let mut sink = FrameSink::new(

@@ -299,7 +299,7 @@ impl CaptureCardViewer {
         };
 
         let Some(path) = rfd::FileDialog::new()
-            .set_file_name(&settings::export_file_name(&Local::now()))
+            .set_file_name(settings::export_file_name(&Local::now()))
             .add_filter(Text::SettingsFile.get(), &["toml"])
             .save_file()
         else {
