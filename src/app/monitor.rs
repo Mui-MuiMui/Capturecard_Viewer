@@ -102,18 +102,26 @@ pub(super) enum AudioErrorAction {
     Idle,
     /// 保留したまま待つ。自動再接続が無効か、開き直しの下限に達していない
     Wait,
+    /// ストリームを閉じて UI へ知らせる。開き直さず、保留は持ち越す。
+    /// 自動再接続が無効な間に、新しいエラーを拾ったフレームだけ（#310）
+    CloseAndReport,
     /// ストリームを閉じて開き直す
     Reconnect,
 }
 
-/// 保留中の音声エラーの扱いを決める。
+/// 保留中の音声エラーの扱いを決める。`new_error` はこのフレームで
+/// `take_stream_error` が新しいエラーを拾ったか。
 ///
-/// **見送るときも保留を落とさない（`Wait` で持ち越す）。** エラーの通知は
-/// `take_stream_error` が読んだ時点で消えるため、ここで捨てると誰も
-/// 開き直さないまま音が戻らなくなる。自動再接続を有効にし直したとき、
+/// **見送るときも保留を落とさない（`Wait` / `CloseAndReport` で持ち越す）。**
+/// エラーの通知は `take_stream_error` が読んだ時点で消えるため、ここで捨てると
+/// 誰も開き直さないまま音が戻らなくなる。自動再接続を有効にし直したとき、
 /// または下限に達したときのフレームで `Reconnect` に変わる。
+///
+/// 自動再接続が無効でも、新しいエラーは 1 度だけ `CloseAndReport` にする。
+/// 止まったストリームを接続中として出し続けず、失敗を UI へ届けるため（#310）。
 pub(super) fn decide_audio_reconnect(
     error_pending: bool,
+    new_error: bool,
     auto_reconnect: bool,
     since_last_reconnect: Option<Duration>,
 ) -> AudioErrorAction {
@@ -121,6 +129,9 @@ pub(super) fn decide_audio_reconnect(
         return AudioErrorAction::Idle;
     }
     if !auto_reconnect {
+        if new_error {
+            return AudioErrorAction::CloseAndReport;
+        }
         return AudioErrorAction::Wait;
     }
     if !should_reconnect_after_stream_error(since_last_reconnect) {
@@ -608,12 +619,12 @@ mod tests {
     #[test]
     fn decide_audio_reconnect_without_pending_error_is_idle() {
         assert_eq!(
-            decide_audio_reconnect(false, true, None),
+            decide_audio_reconnect(false, false, true, None),
             AudioErrorAction::Idle
         );
         // 保留が無ければ、間隔の下限に達していても何もしない
         assert_eq!(
-            decide_audio_reconnect(false, true, Some(Duration::from_secs(600))),
+            decide_audio_reconnect(false, false, true, Some(Duration::from_secs(600))),
             AudioErrorAction::Idle
         );
     }
@@ -621,7 +632,7 @@ mod tests {
     #[test]
     fn decide_audio_reconnect_pending_error_reconnects() {
         assert_eq!(
-            decide_audio_reconnect(true, true, None),
+            decide_audio_reconnect(true, false, true, None),
             AudioErrorAction::Reconnect
         );
     }
@@ -630,7 +641,33 @@ mod tests {
     fn decide_audio_reconnect_without_auto_reconnect_waits() {
         // 見送るだけで、保留は呼び出し側に残る。捨てると音が戻らなくなる
         assert_eq!(
-            decide_audio_reconnect(true, false, None),
+            decide_audio_reconnect(true, false, false, None),
+            AudioErrorAction::Wait
+        );
+    }
+
+    #[test]
+    fn decide_audio_reconnect_new_error_without_auto_reconnect_closes_and_reports() {
+        // 拾ったフレームだけ閉じて知らせる。次のフレームからは Wait で持ち越す（#310）
+        assert_eq!(
+            decide_audio_reconnect(true, true, false, None),
+            AudioErrorAction::CloseAndReport
+        );
+        assert_eq!(
+            decide_audio_reconnect(true, true, false, Some(Duration::from_millis(1))),
+            AudioErrorAction::CloseAndReport
+        );
+    }
+
+    #[test]
+    fn decide_audio_reconnect_new_error_with_auto_reconnect_follows_the_interval() {
+        // 自動再接続が有効なら、新しいエラーでも下限の扱いは変わらない
+        assert_eq!(
+            decide_audio_reconnect(true, true, true, None),
+            AudioErrorAction::Reconnect
+        );
+        assert_eq!(
+            decide_audio_reconnect(true, true, true, Some(Duration::from_millis(4999))),
             AudioErrorAction::Wait
         );
     }
@@ -638,7 +675,7 @@ mod tests {
     #[test]
     fn decide_audio_reconnect_within_minimum_interval_waits() {
         assert_eq!(
-            decide_audio_reconnect(true, true, Some(Duration::from_millis(4999))),
+            decide_audio_reconnect(true, false, true, Some(Duration::from_millis(4999))),
             AudioErrorAction::Wait
         );
     }
@@ -647,7 +684,7 @@ mod tests {
     fn decide_audio_reconnect_after_minimum_interval_reconnects() {
         // 下限に達したフレームで、保留していたエラーが処理される
         assert_eq!(
-            decide_audio_reconnect(true, true, Some(Duration::from_secs(5))),
+            decide_audio_reconnect(true, false, true, Some(Duration::from_secs(5))),
             AudioErrorAction::Reconnect
         );
     }
