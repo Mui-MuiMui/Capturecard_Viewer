@@ -56,11 +56,12 @@ pub use video::{
     MIN_VIDEO_ADJUSTMENT,
 };
 
-/// 設定ファイルの書き出し・読み込みが失敗した理由。
+/// 設定ファイルの保存・書き出し・読み込みが失敗した理由。
 ///
-/// 対象は「設定を書き出す」「設定を読み込む」の 2 つだけ。`%AppData%` 側の
-/// 読み書き（`AppSettings::load` / `save`）は成否を `bool` で扱い、理由は
-/// ログにしか出していないのでここを通らない。
+/// 対象は `%AppData%` の設定ファイルの保存（`AppSettings::save`）と、
+/// 「その他」タブの「設定を書き出す」「設定を読み込む」。起動時の読み込み
+/// （`AppSettings::load`）は失敗しても既定値で起動し、結果を `LoadOutcome` で
+/// 返すのでここを通らない。
 ///
 /// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
 /// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事
@@ -76,6 +77,11 @@ pub enum SettingsError {
     ExportFailed { path: PathBuf, source: String },
     /// ファイルは読めたが TOML として解釈できない
     ImportFailed { path: PathBuf, source: String },
+    /// 設定ファイルの置き場所が分からず、保存できない
+    LocationUnavailable(String),
+    /// 設定ファイルを保存できない（書き込み権限が無い、ディスクが一杯、
+    /// 他のプロセスが開いているなど）
+    SaveFailed { path: PathBuf, source: String },
 }
 
 impl fmt::Display for SettingsError {
@@ -88,6 +94,12 @@ impl fmt::Display for SettingsError {
             }
             SettingsError::ImportFailed { path, source } => {
                 i18n::settings_import_failed(path.display(), source)
+            }
+            SettingsError::LocationUnavailable(source) => {
+                i18n::settings_location_unavailable(source)
+            }
+            SettingsError::SaveFailed { path, source } => {
+                i18n::file_write_failed(path.display(), source)
             }
         };
         f.write_str(&text)
