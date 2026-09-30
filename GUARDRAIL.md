@@ -69,7 +69,7 @@
 - `println!` / `eprintln!` を新たに足さない（例外は `#[cfg(test)]` の中）（理由: `docs/design/logging.md`）
 - `catch_unwind` を使わない（理由: `docs/design/logging.md`）
 - 失敗はログだけで終わらせず `report_error(ErrorSource::_, 理由)` を呼ぶ。接続に成功したら `errors.clear(..)` を呼ぶ（理由: `docs/design/error-reporting.md`）
-- `video/` / `audio/` / `recording/` / `screenshot.rs` / `hotkey/` / `settings.rs` の公開 API は `String` ではなく自分のエラー enum を返す（理由: `docs/design/error-reporting.md`）
+- `video/` / `audio/` / `recording/` / `screenshot.rs` / `hotkey/` / `settings/` の公開 API は `String` ではなく自分のエラー enum を返す（理由: `docs/design/error-reporting.md`）
 - エラー enum の文言はその型の `Display` から `crate::i18n` を呼んで出す。`status.rs` に発生源ごとの `match` を足さない（理由: `docs/design/error-reporting.md`）
 - 画面に出す文字列をリテラルで書かない。`crate::i18n` の `Text` のキーか関数を通す。ログの文言は入れない（理由: `docs/design/i18n.md`）
 - カレントディレクトリ基準でファイルを解決する処理を新たに足さない（理由: `docs/design/assets.md`）

@@ -76,6 +76,8 @@ texts! {
     VideoDeviceNotSelected { ja: "映像デバイスが選ばれていません。「デバイス設定」タブで選んでください", en: "No video device is selected. Choose one in the Devices tab" },
     // ワーカーが入力の未指定で音声を開かないときの理由（app/worker_connect.rs、#304）
     AudioInputNotSelected { ja: "オーディオ入力デバイスが選ばれていません。「デバイス設定」タブで選んでください", en: "No audio input device is selected. Choose one in the Devices tab" },
+    // 自動再接続が無効な間に音声ストリームがエラーで止まったときの理由（app/worker_timers.rs、#310）
+    AudioStreamStoppedWithoutReconnect { ja: "音声ストリームがエラーで止まりました。自動再接続が無効なので、右クリックメニューの「デバイス再接続」で開き直してください", en: "The audio stream stopped with an error. Automatic reconnection is off, so use Reconnect devices in the right-click menu" },
     DeviceNotVisibleNoDevices { ja: "Windows 側にもデバイスが見えていない可能性があります（1 台も見えていません）。デバイスマネージャーで接続を確認してください", en: "Windows may not see the device either (no devices are visible). Check the connection in Device Manager" },
     HotkeyMultipleKeys { ja: "通常キーを 2 つ以上は指定できません", en: "Only one non-modifier key can be specified" },
     HotkeyMissingKey { ja: "通常キーが指定されていません", en: "No non-modifier key is specified" },
@@ -186,7 +188,7 @@ texts! {
     ChannelStereo { ja: "2（ステレオ）", en: "2 (stereo)" },
     ChannelsFixedByDevice { ja: "このデバイスの組み合わせでは 1 つしか選べません（Windows の共有モードではデバイスのミックスフォーマットに固定されます）", en: "Only one choice is available for this device combination (Windows shared mode fixes it to the device's mix format)" },
     AudioBufferLabel { ja: "音声バッファ:", en: "Audio buffer:" },
-    AudioBufferHint { ja: "小さいほど低遅延だがノイズが出やすい（既定: 50 ms）", en: "Smaller means lower latency but more likely to crackle (default: 50 ms)" },
+    AudioBufferHint { ja: "この長さがそのまま音声の遅延になる。小さいほど低遅延だがノイズが出やすい（既定: 50 ms）", en: "This length becomes the audio delay. Smaller means lower latency but more likely to crackle (default: 50 ms)" },
     PassthroughLabel { ja: "音声パススルー:", en: "Audio passthrough:" },
     Enabled { ja: "有効", en: "Enabled" },
     PassthroughDisabledWarning { ja: "音声パススルーが無効です（音は出力されません）", en: "Audio passthrough is disabled (no sound will be output)" },
