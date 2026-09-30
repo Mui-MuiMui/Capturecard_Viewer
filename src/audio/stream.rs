@@ -192,8 +192,14 @@ pub(super) fn process_output<T: Clone>(
         controls.muted.load(Ordering::Relaxed),
     );
     if let Ok(mut cons) = consumer.try_lock() {
-        // クロックドリフト補正の水位。この呼び出し分を消費する前の値を書く
-        converter.record_water_level(cons.len());
+        // この呼び出し分を消費する前の水位を渡す（クロックドリフト補正の観測と、
+        // 最初の水位に達したかの判定）
+        if !converter.observe_water_level(cons.len()) {
+            // 最初の水位に達するまでは取り出さずに無音を書く。わざと待っているので
+            // アンダーランには数えない
+            data.fill(to_sample(0.0));
+            return;
+        }
         let mut read = |dst: &mut [f32]| pop_whole_frame(&mut cons, dst);
         let starved = render_output_samples(
             data,
@@ -207,6 +213,7 @@ pub(super) fn process_output<T: Clone>(
             // 足りなかったサンプル数はバッファの大きさで意味が変わり、
             // 「何回途切れたか」ほど直感的に読めないため
             count_underrun(underruns);
+            converter.note_underrun();
         }
     } else {
         // 無音を表す値は型ごとに違う（u16 は 0 ではなく 32768）ので変換関数に通す
@@ -214,6 +221,7 @@ pub(super) fn process_output<T: Clone>(
         // ロックを取れなかったときも無音を書く。聞こえ方は取り出せなかった
         // ときと同じなので、同じく 1 回数える
         count_underrun(underruns);
+        converter.note_underrun();
     }
 }
 
@@ -685,6 +693,45 @@ mod tests {
     }
 
     #[test]
+    fn process_output_writes_silence_until_the_ring_reaches_the_prebuffer() {
+        // Issue #308。最初の水位（ここでは 2 フレーム）まではリングバッファから
+        // 取り出さずに無音を書く。わざと待っているのでアンダーランには数えない
+        let (producer, consumer) = ring(16);
+        let controls = AudioControls::default();
+        let underruns = AtomicU32::new(0);
+        let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2).with_prebuffer(4);
+        let tap = AudioTap::new();
+        let mut data = [9.0f32; 2];
+
+        process_input(&[1.0f32, -1.0], 2, &producer, &tap, |s| s);
+        process_output(
+            &mut data,
+            &consumer,
+            &controls,
+            &mut converter,
+            &underruns,
+            |s| s,
+        );
+        assert_eq!(data, [0.0, 0.0]);
+        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        assert_eq!(underruns.load(Ordering::Relaxed), 0);
+
+        // 目標に達したら、溜まった先頭から出す
+        process_input(&[0.5f32, -0.5], 2, &producer, &tap, |s| s);
+        process_output(
+            &mut data,
+            &consumer,
+            &controls,
+            &mut converter,
+            &underruns,
+            |s| s,
+        );
+        assert_eq!(data, [1.0, -1.0]);
+        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        assert_eq!(underruns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn process_output_empty_ring_counts_one_underrun() {
         let (_producer, consumer) = ring(8);
         let controls = AudioControls::default();
@@ -703,5 +750,30 @@ mod tests {
 
         assert_eq!(data, [0.0; 4]);
         assert_eq!(underruns.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn process_output_underrun_marks_the_drift_correction_window() {
+        // アンダーランを数えた窓では、クロックドリフト補正が速める側へ動かない
+        // （`decide_resample_correction`）。その印を出力コールバックが付ける
+        let (_producer, consumer) = ring(8);
+        let controls = AudioControls::default();
+        let underruns = AtomicU32::new(0);
+        let telemetry = Arc::new(super::super::resample::ResampleTelemetry::new(4));
+        let mut converter = PassthroughConverter::new(48_000, 2, 48_000, 2)
+            .with_telemetry(Some(Arc::clone(&telemetry)));
+
+        let mut data = [9.0f32; 4];
+        process_output(
+            &mut data,
+            &consumer,
+            &controls,
+            &mut converter,
+            &underruns,
+            |sample| sample,
+        );
+
+        assert_eq!(underruns.load(Ordering::Relaxed), 1);
+        assert!(telemetry.take_window().underran());
     }
 }

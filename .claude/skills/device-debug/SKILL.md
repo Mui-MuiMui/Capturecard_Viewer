@@ -137,7 +137,7 @@ AVerMedia Live Gamer EXTREME 3 + Windows 11 での実測（2026-09、release ビ
 ```mermaid
 flowchart TD
     A[ログを debug で取得] --> B{映像デバイスへの接続を開始する<br/>が出ている?}
-    B -->|出ていない| C[固定待ちの前に止まった<br/>設定の device_name が None<br/>settings.rs と default を見る]
+    B -->|出ていない| C[固定待ちの前に止まった<br/>設定の device_name が None<br/>settings/video.rs と default を見る]
     B -->|出ている| D{映像デバイスに接続した<br/>が出ている?}
     D -->|出ていない| E[失敗理由を読む<br/>映像が出ないの表へ]
     D -->|出ている| F{画面に映像が出る?}
