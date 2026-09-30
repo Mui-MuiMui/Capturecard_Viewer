@@ -728,4 +728,70 @@ mod tests {
         assert_eq!(audio.with(|state| state.start_calls), 0);
         assert_eq!(audio_failures(&drain(&events)).len(), 1);
     }
+
+    /// 映像の失敗の理由を、届いた順に取り出す。
+    fn video_failures(events: &[DeviceEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::VideoFailed(reason) => Some(reason.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn worker_closes_the_video_stream_after_the_device_is_cleared() {
+        // 設定の初期化・読み込みで映像デバイスが未指定になったら、開いている
+        // ストリームを閉じる（#334）。閉じないと古い映像が映り続けたまま、
+        // 設定の表示だけが「未選択」になる
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        let (mut state, events) = mock_state(&video, &audio);
+        let selected = config_for(Some("キャプチャーボード"), None);
+        apply_config(&mut state, selected.clone(), false);
+        let base = Instant::now();
+        state.tick(base);
+        assert!(video.with(|state| state.capturing));
+        drain(&events);
+
+        // 「設定を初期化」→「適用」。映像デバイスが未指定になって届く
+        let cleared = config_for(None, None);
+        apply_config(&mut state, cleared.clone(), false);
+        state.tick(base + Duration::from_secs(2));
+
+        assert_eq!(video.with(|state| state.start_calls), 1, "開き直さないこと");
+        assert!(
+            !video.with(|state| state.capturing),
+            "ストリームを閉じること"
+        );
+        assert!(!state.video_retry.is_active(), "再試行も続けないこと");
+        let after_clear = drain(&events);
+        assert!(
+            after_clear
+                .iter()
+                .any(|event| matches!(event, DeviceEvent::VideoSignalLost)),
+            "最後のフレームを画面から落とすこと"
+        );
+        let reasons = video_failures(&after_clear);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(
+            reasons[0].contains("映像デバイスが選ばれていません"),
+            "{reasons:?}"
+        );
+
+        // 2 秒ごとの `apply_settings` で同じ設定が届いても、通知を繰り返さない
+        for step in 2..6 {
+            apply_config(&mut state, cleared.clone(), false);
+            state.tick(base + Duration::from_secs(2) * step);
+        }
+        assert_eq!(video.with(|state| state.stop_calls), 1);
+        assert!(video_failures(&drain(&events)).is_empty());
+
+        // 映像デバイスを選び直せば、また開く
+        apply_config(&mut state, selected, false);
+        state.tick(base + Duration::from_secs(20));
+        assert_eq!(video.with(|state| state.start_calls), 2);
+        assert!(video.with(|state| state.capturing));
+    }
 }
