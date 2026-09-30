@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use super::color::{adjusted_color_matrix, color_matrix_for, ColorMatrix, SharedColorConversion};
 use super::convert::{bgr24_stride, bgr24_to_rgb, mjpeg_to_rgb, yuy2_to_rgb_naive};
-use super::frame_buffer::{FrameBuffer, VideoFrame, VideoFrames};
+use super::frame_buffer::{frame_len_status, FrameBuffer, FrameLenStatus, VideoFrame, VideoFrames};
 use super::tap::VideoTap;
 use super::yuv420::{yuv420_frame_len, yuv420_to_rgb, Yuv420Layout};
 use crate::repaint::RepaintWaker;
@@ -78,6 +78,11 @@ pub(super) struct FrameSink {
     short_frame_notice: FirstTimeOnly,
     lock_error_notice: FirstTimeOnly,
     decode_error_notice: FirstTimeOnly,
+    decoded_long_notice: FirstTimeOnly,
+    decoded_short_notice: FirstTimeOnly,
+    /// デコーダの経路で長さが足りずに捨てたフレームの数。
+    /// 警告は初回だけなので、何枚捨てたかはストリームを閉じるときに出す（`Drop`）
+    decoded_short_drops: u64,
 }
 
 impl FrameSink {
@@ -96,6 +101,9 @@ impl FrameSink {
             short_frame_notice: FirstTimeOnly::default(),
             lock_error_notice: FirstTimeOnly::default(),
             decode_error_notice: FirstTimeOnly::default(),
+            decoded_long_notice: FirstTimeOnly::default(),
+            decoded_short_notice: FirstTimeOnly::default(),
+            decoded_short_drops: 0,
         }
     }
 
@@ -301,14 +309,50 @@ impl FrameSink {
     /// **この経路では色空間・色レンジ・映像調整が効かない。** 係数表は
     /// デコーダの内部にあり、外から差し替えられないため。
     /// `source_format` は元のフォーマットの表示名。積めたら `true`。
+    ///
+    /// **長さを `width * height * 3` に揃えてから積む**（#309）。nokhwa の
+    /// YUYV → RGB は出力の長さを解像度ではなく入力の長さから決めるので、
+    /// 幅が奇数のときや行に詰め物があるときは合わない Vec が来る。合わない
+    /// まま積むと UI スレッドの `ColorImage::from_rgb` の assert で落ちる。
+    /// 長ければ切り詰め（`truncate` なので確保は起きない）、短ければ捨てる。
     pub(super) fn push_decoded(
         &mut self,
         width: usize,
         height: usize,
-        rgb: Vec<u8>,
+        mut rgb: Vec<u8>,
         received_at: Instant,
         source_format: &'static str,
     ) -> bool {
+        match frame_len_status(rgb.len(), width, height) {
+            FrameLenStatus::Exact => {}
+            FrameLenStatus::TooLong { expected } => {
+                if self.decoded_long_notice.take() {
+                    warn!(
+                        "デコーダが返した {} のフレームが長いので切り詰めた（{}x{} に必要な {} バイトに対し {} バイト）。以降は記録しない",
+                        source_format,
+                        width,
+                        height,
+                        expected,
+                        rgb.len()
+                    );
+                }
+                rgb.truncate(expected);
+            }
+            FrameLenStatus::TooShort { expected } => {
+                self.decoded_short_drops += 1;
+                if self.decoded_short_notice.take() {
+                    warn!(
+                        "デコーダが返した {} のフレームが短いので破棄した（{}x{} に必要な {} バイトに対し {} バイト）。以降は数えてストリームを閉じるときに記録する",
+                        source_format,
+                        width,
+                        height,
+                        expected,
+                        rgb.len()
+                    );
+                }
+                return false;
+            }
+        }
         self.push(
             VideoFrame {
                 width,
@@ -387,6 +431,19 @@ impl FrameSink {
             }
         }
         pushed
+    }
+}
+
+impl Drop for FrameSink {
+    /// ストリームを閉じるとき（フレームを生むスレッドが受け口を手放すとき）に、
+    /// 毎フレームは記録しなかった破棄の数をまとめて残す。
+    fn drop(&mut self) {
+        if self.decoded_short_drops > 0 {
+            warn!(
+                "デコーダの経路で長さが足りないフレームを {} 枚破棄した",
+                self.decoded_short_drops
+            );
+        }
     }
 }
 
@@ -510,6 +567,47 @@ mod tests {
         assert_eq!(stats.fallback_count, 1);
         assert_eq!(stats.source_format, Some("MJPEG"));
         assert_eq!(frames.latest().expect("積んだ").data, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn frame_sink_push_decoded_truncates_a_longer_frame() {
+        // 幅 3 の YUYV を nokhwa が RGB にすると、入力 6 バイトから 6 画素ぶん
+        // （18 バイト）が返る。3x1 に要るのは 9 バイトなので、先頭へ切り詰めて積む
+        let frames = VideoFrames::new();
+        let mut sink = FrameSink::new(
+            &frames,
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::default(),
+        );
+        let rgb: Vec<u8> = (0..18).collect();
+
+        assert!(sink.push_decoded(3, 1, rgb, Instant::now(), "YUYV"));
+
+        let frame = frames.latest().expect("積んだ");
+        assert_eq!((frame.width, frame.height), (3, 1));
+        assert_eq!(frame.data, (0..9).collect::<Vec<u8>>());
+        assert_eq!(
+            frame_len_status(frame.data.len(), frame.width, frame.height),
+            FrameLenStatus::Exact
+        );
+    }
+
+    #[test]
+    fn frame_sink_push_decoded_drops_a_shorter_frame_and_counts_it() {
+        // 2x2 には 12 バイト要る。足りなければ積まず、捨てた枚数を数える
+        let frames = VideoFrames::new();
+        let mut sink = FrameSink::new(
+            &frames,
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::default(),
+        );
+
+        assert!(!sink.push_decoded(2, 2, vec![0; 11], Instant::now(), "YUYV"));
+        assert!(!sink.push_decoded(2, 2, vec![0; 3], Instant::now(), "YUYV"));
+
+        assert!(frames.latest().is_none());
+        assert_eq!(frames.stats().fallback_count, 0);
+        assert_eq!(sink.decoded_short_drops, 2);
     }
 
     #[test]
