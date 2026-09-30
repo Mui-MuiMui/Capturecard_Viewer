@@ -343,6 +343,13 @@ pub fn underrun_count(count: u32) -> String {
     }
 }
 
+pub fn dropped_frame_count(count: u32) -> String {
+    match language() {
+        Language::Japanese => format!("満杯で捨てた: {count} フレーム"),
+        Language::English => format!("Dropped (buffer full): {count} frames"),
+    }
+}
+
 // ---- 「デバイス設定」タブ（ui/device_tab.rs / ui/capability.rs） ----
 
 pub fn video_capability_failed(reason: impl Display) -> String {

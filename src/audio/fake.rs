@@ -142,6 +142,8 @@ pub struct FakeAudioCapture {
     /// シナリオの期限を実時間を待たずに跨ぐ（`with_clock`）
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
     underruns: Arc<AtomicU32>,
+    /// 入力がリングバッファの満杯で捨てたフレーム数。`AudioCapture` と同じ扱い
+    dropped_frames: Arc<AtomicU32>,
 }
 
 impl FakeAudioCapture {
@@ -159,6 +161,7 @@ impl FakeAudioCapture {
             scenario_error_raised: AtomicBool::new(false),
             clock: Arc::new(Instant::now),
             underruns: Arc::new(AtomicU32::new(0)),
+            dropped_frames: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -259,6 +262,7 @@ impl FakeAudioCapture {
         // 開き直すたびに作り直す（`AudioCapture` と同じ理由）
         let stream_error = Arc::new(AtomicBool::new(false));
         let underruns = Arc::new(AtomicU32::new(0));
+        let dropped_frames = Arc::new(AtomicU32::new(0));
 
         // 出力は目標水位まで溜まってから取り出し始める。本物と同じく、入力と
         // 出力のスレッドは同時に起こしてよい
@@ -277,6 +281,7 @@ impl FakeAudioCapture {
         let sine = SineInput {
             producer,
             tap: self.tap.clone(),
+            dropped_frames: Arc::clone(&dropped_frames),
             sample_rate: input_rate,
             channels: input_channels,
             frequency_hz: input.frequency_hz,
@@ -325,6 +330,7 @@ impl FakeAudioCapture {
         self.scenario_error_raised = AtomicBool::new(false);
         self.resample_telemetry = resample_telemetry;
         self.underruns = underruns;
+        self.dropped_frames = dropped_frames;
         self.active = Some(ActiveAudio {
             input_device: input.name,
             output_device: output.name,
@@ -360,6 +366,12 @@ impl FakeAudioCapture {
             .map(|_| self.underruns.load(Ordering::Relaxed))
     }
 
+    pub fn dropped_frame_count(&self) -> Option<u32> {
+        self.active
+            .as_ref()
+            .map(|_| self.dropped_frames.load(Ordering::Relaxed))
+    }
+
     pub fn stop_capture(&mut self) {
         self.active = None;
         self.resample_telemetry = None;
@@ -378,6 +390,7 @@ impl FakeAudioCapture {
         self.stream_error = Arc::new(AtomicBool::new(false));
         self.opened_at = None;
         self.underruns = Arc::new(AtomicU32::new(0));
+        self.dropped_frames = Arc::new(AtomicU32::new(0));
     }
 
     pub fn take_stream_error(&self) -> bool {
@@ -511,6 +524,7 @@ fn fill_sine(
 struct SineInput {
     producer: Arc<Mutex<AudioProducer>>,
     tap: AudioTap,
+    dropped_frames: Arc<AtomicU32>,
     sample_rate: u32,
     channels: u16,
     frequency_hz: f64,
@@ -534,7 +548,14 @@ impl SineInput {
                 self.frequency_hz,
                 &mut phase,
             );
-            process_input(chunk, channels, &self.producer, &self.tap, |sample| sample);
+            process_input(
+                chunk,
+                channels,
+                &self.producer,
+                &self.tap,
+                &self.dropped_frames,
+                |sample| sample,
+            );
         });
         debug!("フェイクの音声入力のスレッドを終えた");
     }
@@ -671,11 +692,13 @@ mod tests {
         assert_eq!(status.target_level, 4800);
         assert_eq!(status.ratio, 1.0);
         assert!(capture.underrun_count().is_some());
+        assert!(capture.dropped_frame_count().is_some());
 
         capture.stop_capture();
         assert!(capture.active().is_none());
         assert!(capture.resample_status().is_none());
         assert!(capture.underrun_count().is_none());
+        assert!(capture.dropped_frame_count().is_none());
     }
 
     #[test]

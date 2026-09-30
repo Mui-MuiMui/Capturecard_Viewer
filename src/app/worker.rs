@@ -207,6 +207,10 @@ pub(super) struct DeviceSnapshot {
     /// の累計回数。音声を開いていなければ `None`。開き直すと 0 から数え直す。
     /// 統計 OSD（`app::view`）と「接続状態」タブの両方がこれを読む
     pub(super) audio_underruns: Option<u32>,
+    /// 音声の入力がリングバッファの満杯で捨てたフレーム数の累計（Issue #350）。
+    /// 音声を開いていなければ `None`。開き直すと 0 から数え直す。
+    /// 「接続状態」タブだけが読む（統計 OSD には出さない）
+    pub(super) audio_dropped_frames: Option<u32>,
 }
 
 /// ワーカースレッドと、UI スレッドが共有する読み取り専用のスナップショット。

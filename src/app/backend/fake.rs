@@ -273,6 +273,10 @@ impl AudioBackend for FakeAudioCapture {
         FakeAudioCapture::underrun_count(self)
     }
 
+    fn dropped_frame_count(&self) -> Option<u32> {
+        FakeAudioCapture::dropped_frame_count(self)
+    }
+
     fn take_stream_error(&self) -> bool {
         FakeAudioCapture::take_stream_error(self)
     }
