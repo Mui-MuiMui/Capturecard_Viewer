@@ -88,7 +88,8 @@ cargo build --release
 | `src/recording/recorder.rs` | 録画スレッドの窓口 `Recorder`（UI スレッドが 1 つ持つ）。録画かリプレイバッファが ON のときにスレッドを起こし、どちらも無くなったら止めて join する（スレッドは自分から抜けない）。`RecordingCommand` / `RecordingEvent` / `RecordingSummary` / `RecordingTelemetry`（録画中の値は録画を始めたときからの差） |
 | `src/recording/recorder_loop.rs` | 録画スレッドの本体。コマンドの受け口と、リプレイバッファを通すかの経路の切り替え（`ReplayState`）。差し込み口を使っている録画の間に変えられたリプレイバッファの設定を、録画が終わってから反映する |
 | `src/recording/session.rs` | リプレイバッファを通さない 1 回の録画 `Session`（①②の経路。リングの差し込み、最初のフレームで Sink Writer を作る、それまでの音声を溜めて渡す、止めるときに音声を映像の終わりまで揃える、ハードウェアからソフトウェアへの作り直し、大きさの変化・空き容量・書き込みの失敗で止める）。失敗の扱いの共通部分（`prepare_folder` / `check_disk` / `create_error` / `Finished`） |
-| `src/recording/replay.rs` | リプレイバッファ `ReplayPipeline`（③）と `ReplayConfig`。差し込み口を差したまま、エンコーダ MFT で H.264 / AAC にしてエンコード済みのリングへ積む。大きさが変わったらエンコーダを作り直してリングを空にする |
+| `src/recording/replay.rs` | リプレイバッファ `ReplayPipeline`（③）。差し込み口を差したまま、エンコーダ MFT で H.264 / AAC にしてエンコード済みのリングへ積む。大きさが変わったらエンコーダを作り直してリングを空にする |
+| `src/recording/replay_config.rs` | リプレイバッファの設定 `ReplayConfig`（UI スレッドが組み立てて録画スレッドへ渡す）と、エンコーダの作り直しが要るかの判定（`same_encoders`） |
 | `src/recording/replay_recording.rs` | リプレイバッファを通す 1 回の録画 `ReplayRecording`。先頭のキーフレームからエンコードなしの Sink Writer へ書く。リングの中身は数 ms ごとに少しずつ書き（`catch_up`）、追いついたらライブのサンプルを直接書く |
 | `src/recording/replay_ring.rs` | エンコード済みのリング `EncodedRing` と、書き出すキーフレームの選び方（`replay_start`）・捨てる境界（`keep_from` / `gops_to_drop`）・PTS の付け替え（`Cut`）。判定は純粋関数 |
 | `src/recording/encoder.rs` | エンコーダ MFT `EncoderMft`（H.264 はハードウェアの非同期型 → ソフトウェアの同期型の順に試す、AAC は同期型）。非同期型は `METransformNeedInput` / `METransformHaveOutput` を待たずに取る。エンコードなしの Sink Writer へ渡すメディアタイプ（`stream_type`） |

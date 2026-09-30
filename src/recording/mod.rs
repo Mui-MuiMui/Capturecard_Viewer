@@ -36,6 +36,7 @@ mod pts;
 mod recorder;
 mod recorder_loop;
 mod replay;
+mod replay_config;
 mod replay_recording;
 mod replay_ring;
 mod session;
@@ -49,7 +50,7 @@ pub use recorder::{
     Recorder, RecordingAudioStats, RecordingEvent, RecordingRequest, RecordingSummary,
     ReplayRingStats,
 };
-pub use replay::ReplayConfig;
+pub use replay_config::ReplayConfig;
 
 use std::fmt;
 use std::path::PathBuf;
