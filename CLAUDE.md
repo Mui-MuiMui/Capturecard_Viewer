@@ -106,7 +106,16 @@ cargo build --release
 | `src/hotkey/listener.rs` | リスナースレッドと共有状態 `ListenerState`、押下の照合とデバウンス |
 | `src/keyboard_hook.rs` | 低レベルキーボードフック（`WH_KEYBOARD_LL`）。キーを奪わずに押下を観測し、リスナースレッドのメッセージループへ渡す。前面でもフックが呼ばれるよう、winit が登録したキーボードの Raw Input を外す（`stop_raw_keyboard_input`） |
 | `src/screenshot.rs` | rodio による効果音の読み込みと再生 |
-| `src/settings.rs` | `AppSettings` とその serde 定義、confy による読み書き、保存パスの決定、旧形式からの移行 |
+| `src/settings/mod.rs` | 設定の入口。`AppSettings` と、読み込みで必ず通る `RawAppSettings` → `From`（旧形式からの移行とプリセットの整え）、`SettingsError`、`APP_NAME`。外から使う経路（`crate::settings::...`）の `pub use` もここ |
+| `src/settings/video.rs` | `[video]`。`VideoSettings`、色空間・輝度レンジ・開き方の選択肢、映像調整の範囲と、それぞれの serde の補助 |
+| `src/settings/audio.rs` | `[audio]`。`AudioSettings`、サンプリングレート・チャンネル数の既定値、リングバッファの長さの範囲 |
+| `src/settings/screenshot.rs` | `[screenshot]`。出力先・保存形式・JPEG 品質の選択肢、保存先の既定値、保存するファイルのパス（`AppSettings::get_screenshot_path`） |
+| `src/settings/recording.rs` | `[recording]`。ビットレート・リプレイバッファの長さの範囲、保存先の既定値 |
+| `src/settings/ui.rs` | `[ui]`（音量・言語・ウィンドウ）と `[update]`。音量の範囲と言語の選択肢（`LanguageSetting`） |
+| `src/settings/hotkeys.rs` | `[hotkeys]` / `[hotkey_settings]`。既定の割り当て、旧版の `screenshot.hotkey` からの移行（`migrate_hotkeys`）、`AppSettings::hotkey` / `set_hotkey` |
+| `src/settings/preset.rs` | `[[presets]]`。適用と一致の判定（`matches_preset` / `resolved_active_preset`）、名前の検証、読み込んだ一覧の整え方（`sanitize_presets`）、`AppSettings` のプリセット操作 |
+| `src/settings/store.rs` | confy による読み書き（`AppSettings::load` / `save`）、読めなかったファイルの退避、`LoadOutcome` / `AutoSavePolicy`、書き出し / 読み込み（`export_to` / `import_from`）。置き場所は `config_path` を呼ぶだけ |
+| `src/settings/testing.rs` | テストが複数のファイルから使う設定ファイルの例（`FULL_CONFIG` / `LEGACY_CONFIG`）と `without_key`、保存先の候補の例（`#[cfg(test)]`） |
 | `src/config_path.rs` | 設定ファイルとログの置き場所（`ConfigLocation`）。既定は confy の置き場所で、環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で差し替える。解釈（`parse_config_dir` / `resolve`）は純粋関数 |
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |
 | `src/ui/mod.rs` | 設定ダイアログの入口 `show_settings_dialog` と、タブをまたいで使うイベント型・注意書きのヘルパー（`warning_label` / `notice_label` / `status_badge`）。外から使う経路（`crate::ui::...`）の `pub use` もここ |
@@ -149,6 +158,8 @@ cargo build --release
 `src/audio/` の子モジュールで**状態を持つのは `capture.rs` の `AudioCapture`、`fake.rs` の `FakeAudioCapture` と、スレッドをまたいで共有する `AudioControls` / `ResampleTelemetry` / `AudioTap` だけ。** 残りは純粋関数か、cpal のストリームを組み立てて返すだけにする。**外から使う経路（`crate::audio::...`）は `audio/mod.rs` の `pub use` に集める**（`ui/mod.rs` と同じ理由で、誰も使わない再輸出は警告になる）。子モジュール同士で使うものには `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
 `src/recording/` の子モジュールで**状態を持つのは `recorder.rs` の `Recorder`（UI スレッドの窓口）と、録画スレッドの中だけにあるもの（`recorder_loop.rs` の `Worker`、1 回の録画 `Session` / `ReplayRecording`、リプレイバッファ `ReplayPipeline` とそのリング `EncodedRing`、音声トラック `AudioTrack`、`SinkWriter` / `PassthroughWriter` / `EncoderMft`）だけ。** 変換・PTS・ファイル名・空き容量の判定、リングのどこから書くか・どこで捨てるかは純粋関数にする。**録画スレッドから `error!` を出さず、失敗は `RecordingEvent` で UI スレッドへ返す**（`docs/design/threads.md`）。外から使う経路は `recording/mod.rs` の `pub use` に集める。
+
+`src/settings/` の子モジュールは**セクションごとに分けてあるだけで、`AppSettings` の定義と `RawAppSettings` / `From` は `mod.rs` に置く。** セクションに項目を足すときは型を置いたファイルを、`AppSettings` に項目を足すときは `mod.rs` の 3 か所（`AppSettings` / `RawAppSettings` / `From`）を触る。serde の補助（`deserialize_*` / `*_from_str`）はそれを使う設定と同じファイルに置く。`AppSettings` のメソッドは関係するファイルがそれぞれ `impl AppSettings` を足す。外から使う経路（`crate::settings::...`）は `settings/mod.rs` の `pub use` に集め、外からテストでしか使わない項目は再輸出しない（`ui/mod.rs` と同じ理由。例外は `app::worker_loop` のテストが使う `DEFAULT_BUFFER_MS` で、`#[cfg(test)]` の `pub use` にしてある）。複数のファイルのテストが使う設定ファイルの例は `settings/testing.rs` に置く。
 
 ## 設計の理由はどこにあるか
 
