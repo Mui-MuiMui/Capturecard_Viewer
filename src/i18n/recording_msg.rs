@@ -41,6 +41,18 @@ pub fn recording_disk_low(free_mb: u64) -> String {
     }
 }
 
+/// リプレイバッファを通す録画で、リングを書き出すだけの空きが無いので始めなかったとき。
+pub fn recording_replay_disk_short(free_mb: u64, required_mb: u64) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "保存先の空き容量が足りないので録画を始めなかった（残り {free_mb} MB、リプレイバッファの書き出しに {required_mb} MB 要る）"
+        ),
+        Language::English => format!(
+            "Did not start recording because the disk does not have enough space ({free_mb} MB left, {required_mb} MB needed to write out the replay buffer)"
+        ),
+    }
+}
+
 pub fn recording_write_failed(reason: impl Display) -> String {
     match language() {
         Language::Japanese => {
