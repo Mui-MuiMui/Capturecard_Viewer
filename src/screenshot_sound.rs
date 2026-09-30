@@ -5,8 +5,7 @@
 
 use crate::screenshot::ScreenshotError;
 use log::info;
-use rodio::{Decoder, OutputStream, Sink};
-use std::fmt;
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -297,29 +296,36 @@ pub fn play_sound_data(
 
 /// 出力先を開いて鳴らし終わるまで待つ。`open` を差し替えて失敗を注入できる。
 fn play_blocking(
-    open: impl FnOnce() -> Result<(OutputStream, Sink), ScreenshotError>,
+    open: impl FnOnce() -> Result<MixerDeviceSink, ScreenshotError>,
     sound_data: Arc<[u8]>,
     volume: f32,
     on_output: impl FnOnce(Result<(), ScreenshotError>),
 ) {
-    let (_stream, sink) = match open() {
-        Ok(opened) => opened,
+    // 出力先（`MixerDeviceSink`）は鳴り終わるまで持っておく。落とすと音が止まる
+    let output = match open() {
+        Ok(output) => output,
         Err(e) => return on_output(Err(e)),
     };
     on_output(Ok(()));
-    sink.set_volume(volume);
+    let player = Player::connect_new(output.mixer());
+    player.set_volume(volume);
     if let Ok(decoder) = Decoder::new(Cursor::new(sound_data)) {
-        sink.append(decoder);
-        sink.sleep_until_end();
+        player.append(decoder);
+        player.sleep_until_end();
     }
 }
 
 /// 既定の出力デバイスを開く。無い・開けないときは理由を返す。
-fn open_output() -> Result<(OutputStream, Sink), ScreenshotError> {
-    let unavailable = |e: &dyn fmt::Display| ScreenshotError::SoundOutputUnavailable(e.to_string());
-    let (stream, handle) = OutputStream::try_default().map_err(|e| unavailable(&e))?;
-    let sink = Sink::try_new(&handle).map_err(|e| unavailable(&e))?;
-    Ok((stream, sink))
+///
+/// 既定のデバイスで開けなければ、rodio が他の出力デバイスを順に試す（0.17 の
+/// `OutputStream::try_default` と同じ振る舞い）。
+fn open_output() -> Result<MixerDeviceSink, ScreenshotError> {
+    let mut output = DeviceSinkBuilder::open_default_sink()
+        .map_err(|e| ScreenshotError::SoundOutputUnavailable(e.to_string()))?;
+    // 落とすときに rodio が標準エラーへ 1 行書く既定を切る。`println!` / `eprintln!` を
+    // 足さない決まり（`docs/design/logging.md`）と同じ理由
+    output.log_on_drop(false);
+    Ok(output)
 }
 
 impl Default for ScreenshotManager {
@@ -609,6 +615,18 @@ mod tests {
                 "NoDevice".into()
             )))
         );
+    }
+
+    #[test]
+    #[ignore = "音声の出力デバイスが必要（鳴り終わるまで 1 秒ほど待つ）"]
+    fn play_blocking_plays_the_embedded_sound_on_the_default_output() {
+        // 実行: cargo test play_blocking_plays -- --ignored
+        // 既定の出力デバイスを開いて内蔵音を鳴らし終わること（rodio 0.22 の経路、#299）
+        let mut outcome = None;
+        play_blocking(open_output, Arc::from(EMBEDDED_SOUND), 0.3, |r| {
+            outcome = Some(r)
+        });
+        assert_eq!(outcome, Some(Ok(())));
     }
 
     #[test]

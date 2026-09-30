@@ -108,9 +108,22 @@ pub fn query_capabilities(
 
     Ok(AudioCapabilities {
         configs,
-        default_sample_rate: default_config.sample_rate().0,
+        default_sample_rate: default_config.sample_rate(),
         default_channels: default_config.channels(),
     })
+}
+
+/// デバイスの名前。設定ファイルに書き、一覧から探すときに突き合わせる値。
+/// 取れなければ `None`。
+///
+/// cpal 0.18 で `name()` が無くなったので `description()` の名前を使う。
+/// WASAPI ではどちらも `PKEY_Device_FriendlyName`（例:「スピーカー (Realtek(R) Audio)」）
+/// なので、0.15 のころに保存した設定のデバイス名もそのまま一致する。
+pub(super) fn device_name(device: &Device) -> Option<String> {
+    device
+        .description()
+        .ok()
+        .map(|description| description.name().to_string())
 }
 
 /// ホストの一覧から名前でデバイスを探す。`AudioCapture::find_device_by_name` と
@@ -131,7 +144,7 @@ fn find_device_in_host(
     })?;
 
     for device in devices {
-        if device.name().ok().as_deref() == Some(name) {
+        if device_name(&device).as_deref() == Some(name) {
             return Ok(device);
         }
     }
@@ -166,8 +179,8 @@ pub(super) fn supported_sample_rates(configs: &[SupportedStreamConfigRange]) -> 
         if sample_format_priority(range.sample_format()).is_none() {
             continue;
         }
-        let min = range.min_sample_rate().0;
-        let max = range.max_sample_rate().0;
+        let min = range.min_sample_rate();
+        let max = range.max_sample_rate();
         // 壊れた列挙は無視する（select_best_config と同じ扱い）
         if min > max {
             continue;

@@ -10,7 +10,7 @@
 
 use cpal::traits::DeviceTrait;
 use cpal::Device;
-use log::error;
+use log::{error, warn};
 use ringbuf::traits::{Consumer, Observer, Producer};
 use ringbuf::{HeapCons, HeapProd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -73,6 +73,42 @@ fn dropped_frames(offered: usize, pushed: usize, channels: usize) -> usize {
     offered.saturating_sub(pushed) / channels.max(1)
 }
 
+/// ストリームのエラーのうち、ストリームが動き続けていて開き直さなくてよいものか。
+///
+/// cpal 0.18 からは、止まったわけではない出来事もエラーのコールバックへ届く
+/// （`docs/design/audio.md` の「cpal 0.18 で変わったこと」）。これを切断として
+/// 開き直すと、そのたびに数百 ms 途切れる。
+///
+/// - `Xrun`: WASAPI の入力で取りこぼしの印（`AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY`）が
+///   付いたとき（0.18.2 から）
+/// - `RealtimeDenied`: 音声スレッドの優先度を上げられなかった。音は出る
+/// - `DeviceChanged`: 既定のデバイスへ自動で経路を切り替えた。ストリームは動き続ける。
+///   WASAPI では出ない（既定のデバイスが替わると `StreamInvalidated` が届く）
+fn is_recoverable_stream_error(kind: cpal::ErrorKind) -> bool {
+    matches!(
+        kind,
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceChanged
+    )
+}
+
+/// ストリームのエラーのコールバックの本体。開き直すべきものなら旗を立てる。
+///
+/// `direction` はログに出す「入力」「出力」。`Xrun` はログにも出さない。取りこぼしの
+/// たびに届きうるうえ、WASAPI ではデータのコールバックと同じ音声スレッドから呼ばれる
+/// ため、そこでロックやアロケーションをしたくない。
+fn handle_stream_error(direction: &str, e: &cpal::Error, stream_error: &AtomicBool) {
+    match e.kind() {
+        cpal::ErrorKind::Xrun => {}
+        kind if is_recoverable_stream_error(kind) => {
+            warn!("{}ストリームの通知（開き直さない）: {}", direction, e);
+        }
+        _ => {
+            error!("{}ストリームのエラー: {}", direction, e);
+            stream_error.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 /// 入力ストリームを組み立てる。
 ///
 /// `to_f32` でデバイスのサンプル型をリングバッファの表現（f32）へ正規化する。
@@ -86,22 +122,19 @@ pub(super) fn build_input_stream_with<T>(
     stream_error: Arc<AtomicBool>,
     dropped_frames: Arc<AtomicU32>,
     to_f32: impl Fn(T) -> f32 + Send + 'static,
-) -> Result<cpal::Stream, cpal::BuildStreamError>
+) -> Result<cpal::Stream, cpal::Error>
 where
     T: cpal::SizedSample,
 {
     let channels = usize::from(config.channels);
     device.build_input_stream(
-        config,
+        *config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
             process_input(data, channels, &producer, &tap, &dropped_frames, &to_f32);
         },
-        move |e| {
-            error!("入力ストリームのエラー: {}", e);
-            // 呼ばれるのは cpal のストリームスレッド。ここで開き直すと
-            // ストリーム自身を drop することになるので、旗を立てるだけにする
-            stream_error.store(true, Ordering::Relaxed);
-        },
+        // 呼ばれるのは cpal のストリームスレッド。ここで開き直すと
+        // ストリーム自身を drop することになるので、旗を立てるだけにする
+        move |e| handle_stream_error("入力", &e, &stream_error),
         None,
     )
 }
@@ -119,7 +152,7 @@ pub(super) fn build_output_stream_with<T>(
     signals: OutputSignals,
     mut converter: PassthroughConverter,
     to_sample: impl Fn(f32) -> T + Send + 'static,
-) -> Result<cpal::Stream, cpal::BuildStreamError>
+) -> Result<cpal::Stream, cpal::Error>
 where
     T: cpal::SizedSample,
 {
@@ -130,7 +163,7 @@ where
         underruns,
     } = signals;
     device.build_output_stream(
-        config,
+        *config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
             process_output(
                 data,
@@ -141,11 +174,8 @@ where
                 &to_sample,
             );
         },
-        move |e| {
-            error!("出力ストリームのエラー: {}", e);
-            // 入力側と同じ理由で、旗を立てるだけにする
-            stream_error.store(true, Ordering::Relaxed);
-        },
+        // 入力側と同じ理由で、旗を立てるだけにする
+        move |e| handle_stream_error("出力", &e, &stream_error),
         None,
     )
 }
@@ -909,5 +939,33 @@ mod tests {
 
         assert_eq!(underruns.load(Ordering::Relaxed), 1);
         assert!(telemetry.take_window().underran());
+    }
+
+    #[test]
+    fn is_recoverable_stream_error_keeps_running_streams() {
+        // ストリームが動き続けている通知は開き直さない
+        assert!(is_recoverable_stream_error(cpal::ErrorKind::Xrun));
+        assert!(is_recoverable_stream_error(cpal::ErrorKind::RealtimeDenied));
+        assert!(is_recoverable_stream_error(cpal::ErrorKind::DeviceChanged));
+        // 止まった・使えなくなったものは開き直す
+        assert!(!is_recoverable_stream_error(
+            cpal::ErrorKind::StreamInvalidated
+        ));
+        assert!(!is_recoverable_stream_error(
+            cpal::ErrorKind::DeviceNotAvailable
+        ));
+        assert!(!is_recoverable_stream_error(cpal::ErrorKind::BackendError));
+        assert!(!is_recoverable_stream_error(cpal::ErrorKind::Other));
+    }
+
+    #[test]
+    fn handle_stream_error_raises_flag_only_for_fatal_errors() {
+        let flag = AtomicBool::new(false);
+        handle_stream_error("入力", &cpal::ErrorKind::Xrun.into(), &flag);
+        handle_stream_error("出力", &cpal::ErrorKind::RealtimeDenied.into(), &flag);
+        assert!(!flag.load(Ordering::Relaxed));
+
+        handle_stream_error("出力", &cpal::ErrorKind::StreamInvalidated.into(), &flag);
+        assert!(flag.load(Ordering::Relaxed));
     }
 }

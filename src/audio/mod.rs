@@ -220,7 +220,7 @@ pub fn device_name_from_key(key: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cpal::{SampleRate, SupportedStreamConfigRange};
+    use cpal::SupportedStreamConfigRange;
 
     #[test]
     fn audio_error_unsupported_sample_format_names_the_format() {
@@ -329,8 +329,8 @@ mod tests {
     ) -> SupportedStreamConfigRange {
         SupportedStreamConfigRange::new(
             channels,
-            SampleRate(min_rate),
-            SampleRate(max_rate),
+            min_rate,
+            max_rate,
             cpal::SupportedBufferSize::Unknown,
             format,
         )

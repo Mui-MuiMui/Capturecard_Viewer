@@ -177,6 +177,10 @@ impl WorkerState {
     /// cpal は WASAPI の `IMMNotificationClient` を公開しておらず、既定
     /// デバイスの切り替えを通知では受け取れない。
     /// `default_output_device()` を都度問い合わせて名前を突き合わせるしかない。
+    /// cpal 0.18 からは、既定のデバイスで開いたストリームへ切り替えを
+    /// `StreamInvalidated` として送るので `monitor_audio_stream` の側でも拾えるが、
+    /// そちらは開き直しの下限（5 秒）に掛かるので、この確認は残してある
+    /// （`docs/design/reconnect.md`）。
     pub(super) fn poll_default_audio_device(&mut self, now: Instant) {
         let elapsed = self
             .last_default_audio_check

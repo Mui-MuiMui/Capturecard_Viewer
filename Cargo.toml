@@ -19,7 +19,9 @@ print_stderr = "warn"
 eframe = "0.26"
 egui = "0.26"
 nokhwa = { version = "0.10", features = ["input-msmf", "output-threaded", "decoding"] }
-cpal = "0.15"
+# realtime は音声のスレッドを MMCSS（Pro Audio）で優先させる。0.15 は常に
+# THREAD_PRIORITY_TIME_CRITICAL へ上げていたが、0.18 からはこのフィーチャが要る
+cpal = { version = "0.18", features = ["realtime"] }
 confy = "0.6"
 # ログのファサード。出力先の実装は src/logging.rs にある
 log = "0.4.34"
@@ -29,7 +31,9 @@ serde = { version = "1.0", features = ["derive"] }
 # など使わない形式まで引き込むので切り、使う形式だけを足す
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico"] }
 chrono = { version = "0.4", features = ["serde"] }
-rodio = "0.17"
+# 既定のフィーチャはマイクからの録音（recording）や MP4 / AAC、ディザ（rand）まで
+# 引き込むので切る。0.17 の既定と同じ形式（MP3 / WAV / Ogg Vorbis / FLAC）だけを足す
+rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "wav", "vorbis", "flac"] }
 dirs = "7.0"
 # 設定ダイアログのフォルダ選択とファイル選択。既定のフィーチャ（xdg-portal / wayland）は
 # Linux 向けのバックエンドなので切る。Windows では IFileDialog を直接使い、フィーチャは要らない
