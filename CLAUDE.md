@@ -126,7 +126,8 @@ cargo build --release
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |
 | `src/ui/mod.rs` | 設定ダイアログの入口 `show_settings_dialog` と、タブをまたいで使うイベント型・注意書きのヘルパー（`warning_label` / `notice_label` / `status_badge`）。外から使う経路（`crate::ui::...`）の `pub use` もここ |
 | `src/ui/state.rs` | `SettingsDialogState`。ドラフトの保持、操作の受け止め、`SettingsDialogView` の切り出し |
-| `src/ui/draft.rs` | `commit_draft` / `draft_from_imported` / `draft_from_defaults`。設定を組み替えるだけで描画を含まない |
+| `src/ui/draft.rs` | `commit_draft`（ドラフトを実行中の設定へ反映する）。設定を組み替えるだけで描画を含まない |
+| `src/ui/draft_import.rs` | `draft_from_imported` / `draft_from_defaults`（読み込みと初期化でドラフトを作る）。`commit_draft` が反映する項目と揃える。描画を含まない |
 | `src/ui/preset.rs` | プリセットの保存・読み込み・削除と「（変更あり）」の判定。描画を含まない |
 | `src/ui/capability.rs` | `CapabilityCache`（デバイス能力の取得状態）と、そこから作る選択肢まわりの表示 |
 | `src/ui/video_mode.rs` | デバイスを切り替えたときに選び直すビデオの既定値（`select_default_video_mode`） |
