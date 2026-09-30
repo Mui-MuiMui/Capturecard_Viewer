@@ -9,7 +9,7 @@ use super::video_overlay::show_video_overlay;
 use super::CaptureCardViewer;
 use crate::i18n::{self, Text};
 use crate::status::{self, ErrorSource};
-use crate::video::FrameStats;
+use crate::video::{frame_len_status, FrameLenStatus, FrameStats, VideoFrame};
 use eframe::egui;
 use log::warn;
 
@@ -112,6 +112,12 @@ fn calculate_aspect_ratio_size(image_size: egui::Vec2, available_size: egui::Vec
     }
 }
 
+/// テクスチャへ取り込めるフレームか。画素データの長さが `幅 × 高さ × 3`
+/// ちょうどのときだけ真（`egui::ColorImage::from_rgb` の前提）。
+fn is_drawable_frame(frame: &VideoFrame) -> bool {
+    frame_len_status(frame.data.len(), frame.width, frame.height) == FrameLenStatus::Exact
+}
+
 impl CaptureCardViewer {
     /// 新着フレームがあればテクスチャへ取り込む。取り込んだら `true`。
     ///
@@ -137,6 +143,14 @@ impl CaptureCardViewer {
                 minification: egui::TextureFilter::Linear,
                 wrap_mode: egui::TextureWrapMode::ClampToEdge,
             };
+
+            // 長さが合わないフレームは描かず、前のテクスチャを保つ。`from_rgb` は
+            // 長さが違うと assert で落ちる（#309）。積む側（`FrameSink`）で揃えて
+            // あるので通常は来ないが、二重の守りとして置いておく。世代は進めて
+            // あるので、同じフレームで毎回ここへ来ることはない
+            if !is_drawable_frame(&frame) {
+                return false;
+            }
 
             let image = egui::ColorImage::from_rgb([frame.width, frame.height], &frame.data);
             if let Some(texture) = &mut self.video_texture {
@@ -440,6 +454,26 @@ mod tests {
     use super::*;
     use crate::video::frame_buffer::IntervalStats;
     use egui::Vec2;
+
+    fn frame(width: usize, height: usize, len: usize) -> VideoFrame {
+        VideoFrame {
+            width,
+            height,
+            data: vec![0; len],
+        }
+    }
+
+    #[test]
+    fn is_drawable_frame_accepts_exact_length() {
+        assert!(is_drawable_frame(&frame(3, 2, 18)));
+    }
+
+    #[test]
+    fn is_drawable_frame_rejects_mismatched_length() {
+        // `ColorImage::from_rgb` は長さが違うと assert で落ちるので、どちらも描かない
+        assert!(!is_drawable_frame(&frame(3, 2, 17)));
+        assert!(!is_drawable_frame(&frame(3, 2, 19)));
+    }
 
     #[test]
     fn format_stats_lines_without_frames_shows_no_numbers() {
