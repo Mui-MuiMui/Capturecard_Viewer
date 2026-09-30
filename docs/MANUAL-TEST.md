@@ -938,12 +938,20 @@ $hash = (Get-FileHash "$w\release\$exe" -Algorithm SHA256).Hash.ToLowerInvariant
 - [ ] `SHA256SUMS.txt` の hash を大文字にしても、更新は通る
 - [ ] 上の PowerShell の `$exe` を 1.2.0 の旧名 `"capturecard_viewer-v9.9.9-windows-x64.exe"` にして作り直しても、更新は通る。差し替わった exe の名前は `C:\work\app\capturecard_viewer.exe` のまま
 - [ ] 更新中も映像と音声は止まらない（ローカルのファイルでは一瞬で終わるので、次のリリースで確かめる）
+- [ ] `SHA256SUMS.txt` の取得中でもキャンセルが効く。`latest.json` の `SHA256SUMS.txt` の `browser_download_url` を `http://127.0.0.1:8765/SHA256SUMS.txt` に書き換え、別の PowerShell で下の「応答のヘッダーだけ返して止まるサーバー」を動かしてから起動する。「更新する」→「キャンセル」でダイアログが閉じ、**30 秒以内に**設定 > その他 の「更新する」がまた押せるようになる（以前は 10 分押せなかった。Issue #319）。`.new` は作られない
+
+```powershell
+$l = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 8765); $l.Start()
+$c = $l.AcceptTcpClient(); $s = $c.GetStream(); Start-Sleep 1
+$h = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: 1000`r`n`r`n"); $s.Write($h, 0, $h.Length)
+Read-Host "確かめたら Enter"; $c.Close(); $l.Stop()
+```
 
 **次のリリース（自動更新用のファイルを添付した版）で確かめること**
 
 - [ ] 1.2.1 の公開後、1.2.0 で「更新する」を押すと「このバージョンには自動更新用のファイルがありません。リリースページから手動で更新してください」が出る（1.2.0 は版付きの名前しか探さないため。想定どおりの動き）。Release の資産が `capturecard_viewer.exe` と `SHA256SUMS.txt` の 2 つである
 - [ ] 1.2.1 以降の版（`capturecard_viewer.exe` を探す版）を書き込めるフォルダに置いて起動し、その次の版が出たあとで「更新する」を押すと、進み具合が % で進み、終わるとウィンドウが閉じて新しい版が起動する。設定 > その他 の「現在のバージョン」が上がっている
-- [ ] ダウンロード中に「キャンセル」を押すと、ダイアログが閉じ、exe の隣に `.new` が残らない（数秒以内に消える）。exe は元の版のまま
+- [ ] ダウンロード中に「キャンセル」を押すと、ダイアログが閉じ、exe の隣に `.new` が残らない（数秒以内に消える）。exe は元の版のまま。「準備しています」の間（`SHA256SUMS.txt` の取得中）に押しても効く
 - [ ] ダウンロード中にアプリを閉じると、待たされずに終わる。次の起動で `.new` が消える
 
 ## フォント
