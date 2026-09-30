@@ -126,7 +126,7 @@ pub const MAX_JPEG_QUALITY: u8 = 100;
 // 効果音の既定値。実行ファイルに埋め込んだ既定音（内蔵の SS.mp3）を指す。
 //
 // ファイルとしては配布していないので、exe の隣を探しても見つからず、
-// screenshot::resolve_sound_path が埋め込みの既定音へ倒すことで鳴る。
+// screenshot_sound::resolve_sound_path が埋め込みの既定音へ倒すことで鳴る。
 // 設定画面の「既定に戻す」もこの値を書き、「既定（内蔵）」の表示もこの値との
 // 一致で判定する（docs/design/assets.md）
 pub const DEFAULT_SOUND_FILE: &str = "sound/SS.mp3";
@@ -286,7 +286,7 @@ impl Default for ScreenshotSettings {
             jpeg_quality: 90,
             // 相対パスのまま既定値にしてある。既存ユーザーの設定ファイルにも
             // この値が保存されているため、変えると移行の前提が崩れる。
-            // 解決は screenshot::resolve_sound_path が exe の置き場所を基準に行い、
+            // 解決は screenshot_sound::resolve_sound_path が exe の置き場所を基準に行い、
             // 見つからなければ埋め込みの既定音へ倒す。
             // None は「効果音を鳴らさない」の意味なので、既定値には使えない
             sound_file: Some(PathBuf::from(DEFAULT_SOUND_FILE)),

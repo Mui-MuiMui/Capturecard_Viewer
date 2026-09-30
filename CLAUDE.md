@@ -105,7 +105,8 @@ cargo build --release
 | `src/hotkey/assignments.rs` | `HotkeyAssignmentError`、アクション別の登録（差分適用・一時停止と再開・試し登録）と押下の取り出し |
 | `src/hotkey/listener.rs` | リスナースレッドと共有状態 `ListenerState`、押下の照合とデバウンス |
 | `src/keyboard_hook.rs` | 低レベルキーボードフック（`WH_KEYBOARD_LL`）。キーを奪わずに押下を観測し、リスナースレッドのメッセージループへ渡す。前面でもフックが呼ばれるよう、winit が登録したキーボードの Raw Input を外す（`stop_raw_keyboard_input`） |
-| `src/screenshot.rs` | rodio による効果音の読み込みと再生 |
+| `src/screenshot.rs` | `ScreenshotError`（クリップボードへのコピーと効果音で共通）と、映像フレームのクリップボードへのコピー（`copy_frame_to_clipboard`） |
+| `src/screenshot_sound.rs` | rodio による効果音の読み込みと再生。埋め込みの既定音、設定のパスの解決（`resolve_sound_path`）、読み込み要求の番号の管理（`ScreenshotManager`） |
 | `src/settings/mod.rs` | 設定の入口。`AppSettings` と、読み込みで必ず通る `RawAppSettings` → `From`（旧形式からの移行とプリセットの整え）、`SettingsError`、`APP_NAME`。外から使う経路（`crate::settings::...`）の `pub use` もここ |
 | `src/settings/video.rs` | `[video]`。`VideoSettings`、色空間・輝度レンジ・開き方の選択肢、映像調整の範囲と、それぞれの serde の補助 |
 | `src/settings/audio.rs` | `[audio]`。`AudioSettings`、サンプリングレート・チャンネル数の既定値、リングバッファの長さの範囲 |
