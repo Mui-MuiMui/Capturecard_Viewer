@@ -20,7 +20,8 @@ use std::time::Duration;
 use log::{debug, info};
 
 use super::recorder::{RecordingCommand, RecordingEvent, RecordingRequest, RecordingTelemetry};
-use super::replay::{ReplayConfig, ReplayPipeline};
+use super::replay::ReplayPipeline;
+use super::replay_config::ReplayConfig;
 use super::session::{fail, Session};
 use super::RecordingError;
 use crate::audio::AudioTap;

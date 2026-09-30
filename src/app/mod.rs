@@ -44,7 +44,7 @@ use crate::overlay::TransientOverlay;
 use crate::platform;
 use crate::recording::Recorder;
 use crate::repaint::{next_repaint_delay, should_wake_on_event, RepaintCondition, RepaintWaker};
-use crate::screenshot::ScreenshotManager;
+use crate::screenshot_sound::ScreenshotManager;
 use crate::settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace};
 use crate::status::ErrorCenter;
 use crate::ui;

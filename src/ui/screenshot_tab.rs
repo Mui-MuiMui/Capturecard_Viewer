@@ -194,7 +194,7 @@ pub(super) fn show_screenshot_settings_tab(
 ///
 /// 設定の値は `Option<PathBuf>` だけなので、内蔵の既定音は既定値のパス
 /// （`DEFAULT_SOUND_FILE`）と一致するかで見分ける。既定値のファイルは
-/// 配布しておらず、`screenshot::resolve_sound_path` が埋め込みの既定音へ
+/// 配布しておらず、`screenshot_sound::resolve_sound_path` が埋め込みの既定音へ
 /// 倒して鳴らす（`docs/design/assets.md`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SoundChoice<'a> {

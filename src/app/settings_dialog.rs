@@ -260,7 +260,7 @@ impl CaptureCardViewer {
     /// 「適用」の前にその場で確かめられるようにするため（Issue #204）。
     ///
     /// **適用済みの効果音は差し替えない。** 読み込みは別スレッドで
-    /// `screenshot::load_sound_data` を通して行い（`request_test_sound`）、
+    /// `screenshot_sound::load_sound_data` を通して行い（`request_test_sound`）、
     /// 撮影時に鳴る音は「適用」か「OK」まで差し替わらない。解決の仕方は撮影時と
     /// 同じで、既定値のパスは内蔵音へ倒れる。ファイルが読めなければ内蔵音で
     /// 鳴らし、理由をトーストへ出す

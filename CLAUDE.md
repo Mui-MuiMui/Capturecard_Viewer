@@ -88,10 +88,12 @@ cargo build --release
 | `src/recording/recorder.rs` | 録画スレッドの窓口 `Recorder`（UI スレッドが 1 つ持つ）。録画かリプレイバッファが ON のときにスレッドを起こし、どちらも無くなったら止めて join する（スレッドは自分から抜けない）。`RecordingCommand` / `RecordingEvent` / `RecordingSummary` / `RecordingTelemetry`（録画中の値は録画を始めたときからの差） |
 | `src/recording/recorder_loop.rs` | 録画スレッドの本体。コマンドの受け口と、リプレイバッファを通すかの経路の切り替え（`ReplayState`）。差し込み口を使っている録画の間に変えられたリプレイバッファの設定を、録画が終わってから反映する |
 | `src/recording/session.rs` | リプレイバッファを通さない 1 回の録画 `Session`（①②の経路。リングの差し込み、最初のフレームで Sink Writer を作る、それまでの音声を溜めて渡す、止めるときに音声を映像の終わりまで揃える、ハードウェアからソフトウェアへの作り直し、大きさの変化・空き容量・書き込みの失敗で止める）。失敗の扱いの共通部分（`prepare_folder` / `check_disk` / `create_error` / `Finished`） |
-| `src/recording/replay.rs` | リプレイバッファ `ReplayPipeline`（③）と `ReplayConfig`。差し込み口を差したまま、エンコーダ MFT で H.264 / AAC にしてエンコード済みのリングへ積む。大きさが変わったらエンコーダを作り直してリングを空にする |
+| `src/recording/replay.rs` | リプレイバッファ `ReplayPipeline`（③）。差し込み口を差したまま、エンコーダ MFT で H.264 / AAC にしてエンコード済みのリングへ積む。大きさが変わったらエンコーダを作り直してリングを空にする |
+| `src/recording/replay_config.rs` | リプレイバッファの設定 `ReplayConfig`（UI スレッドが組み立てて録画スレッドへ渡す）と、エンコーダの作り直しが要るかの判定（`same_encoders`） |
 | `src/recording/replay_recording.rs` | リプレイバッファを通す 1 回の録画 `ReplayRecording`。先頭のキーフレームからエンコードなしの Sink Writer へ書く。リングの中身は数 ms ごとに少しずつ書き（`catch_up`）、追いついたらライブのサンプルを直接書く |
 | `src/recording/replay_ring.rs` | エンコード済みのリング `EncodedRing` と、書き出すキーフレームの選び方（`replay_start`）・捨てる境界（`keep_from` / `gops_to_drop`）・PTS の付け替え（`Cut`）。判定は純粋関数 |
 | `src/recording/encoder.rs` | エンコーダ MFT `EncoderMft`（H.264 はハードウェアの非同期型 → ソフトウェアの同期型の順に試す、AAC は同期型）。非同期型は `METransformNeedInput` / `METransformHaveOutput` を待たずに取る。エンコードなしの Sink Writer へ渡すメディアタイプ（`stream_type`） |
+| `src/recording/encoder_setup.rs` | `EncoderMft` を作るときだけ使う補助。エンコーダ MFT の列挙（`enumerate`）、候補を先頭から開く（`open_first`）、H.264 / AAC の入出力の形の組み立て（`configure_video` / `configure_audio`）、ストリームの番号（`stream_ids`） |
 | `src/recording/passthrough.rs` | エンコードなしの Sink Writer `PassthroughWriter`（入力 = 出力の H.264 / AAC を MP4 へまとめるだけ） |
 | `src/recording/bitstream.rs` | H.264 の Annex B の読み取り（IDR か、SPS / PPS）と、AAC の `MF_MT_USER_DATA` の予備の組み立て。純粋関数 |
 | `src/recording/writer.rs` | Media Foundation の Sink Writer（`IMFSinkWriter`）の組み立て（H.264 と AAC の 2 ストリーム）と NV12 / 16bit PCM の書き込み、`Finalize`、エンコーダの遅れ（`backlog`）、使っているエンコーダの名前（`encoder_info`） |
@@ -100,6 +102,7 @@ cargo build --release
 | `src/recording/audio.rs` | 音声トラック `AudioTrack`（録画スレッドの中だけ）。`AudioTap` のリングから取り出し、録画用の `PassthroughConverter` で 48kHz 2ch へ寄せて 16bit PCM にし、PTS を付けた塊にする。開き直し・溢れ・音声が来ない間の揃え方と、停止時のドリフトのログ |
 | `src/recording/file_name.rs` | ファイル名の書式の検め（chrono の `Item::Error`、Windows で使えない文字、末尾の空白・ピリオド、予約デバイス名）と、同じ名前があるときの `_2` `_3` … |
 | `src/recording/storage.rs` | 保存先の空き容量（`GetDiskFreeSpaceExW`）と、止める境界（500MB） |
+| `src/recording/test_support.rs` | 録画のテストの補助（`#[cfg(test)]`）。`#[ignore]` のテストが使う、フェイクの映像と音声を流して `Session` で録画する部分（`record_until_size_changes`）と、書いた MP4 を読み戻す部分 |
 | `src/hotkey/mod.rs` | 外から使う経路（`crate::hotkey::...`）の `pub use` だけ |
 | `src/hotkey/action.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）と設定ファイル上の名前、溜まった押下の畳み方 |
 | `src/hotkey/parse.rs` | `HotkeyError` と、ホットキー文字列のパース |
@@ -107,7 +110,8 @@ cargo build --release
 | `src/hotkey/assignments.rs` | `HotkeyAssignmentError`、アクション別の登録（差分適用・一時停止と再開・試し登録）と押下の取り出し |
 | `src/hotkey/listener.rs` | リスナースレッドと共有状態 `ListenerState`、押下の照合とデバウンス |
 | `src/keyboard_hook.rs` | 低レベルキーボードフック（`WH_KEYBOARD_LL`）。キーを奪わずに押下を観測し、リスナースレッドのメッセージループへ渡す。前面でもフックが呼ばれるよう、winit が登録したキーボードの Raw Input を外す（`stop_raw_keyboard_input`） |
-| `src/screenshot.rs` | rodio による効果音の読み込みと再生 |
+| `src/screenshot.rs` | `ScreenshotError`（クリップボードへのコピーと効果音で共通）と、映像フレームのクリップボードへのコピー（`copy_frame_to_clipboard`） |
+| `src/screenshot_sound.rs` | rodio による効果音の読み込みと再生。埋め込みの既定音、設定のパスの解決（`resolve_sound_path`）、読み込み要求の番号の管理（`ScreenshotManager`） |
 | `src/settings/mod.rs` | 設定の入口。`AppSettings` と、読み込みで必ず通る `RawAppSettings` → `From`（旧形式からの移行とプリセットの整え）、`SettingsError`、`APP_NAME`。外から使う経路（`crate::settings::...`）の `pub use` もここ |
 | `src/settings/video.rs` | `[video]`。`VideoSettings`、色空間・輝度レンジ・開き方の選択肢、映像調整の範囲と、それぞれの serde の補助 |
 | `src/settings/audio.rs` | `[audio]`。`AudioSettings`、サンプリングレート・チャンネル数の既定値、リングバッファの長さの範囲 |
@@ -122,7 +126,8 @@ cargo build --release
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |
 | `src/ui/mod.rs` | 設定ダイアログの入口 `show_settings_dialog` と、タブをまたいで使うイベント型・注意書きのヘルパー（`warning_label` / `notice_label` / `status_badge`）。外から使う経路（`crate::ui::...`）の `pub use` もここ |
 | `src/ui/state.rs` | `SettingsDialogState`。ドラフトの保持、操作の受け止め、`SettingsDialogView` の切り出し |
-| `src/ui/draft.rs` | `commit_draft` / `draft_from_imported` / `draft_from_defaults`。設定を組み替えるだけで描画を含まない |
+| `src/ui/draft.rs` | `commit_draft`（ドラフトを実行中の設定へ反映する）。設定を組み替えるだけで描画を含まない |
+| `src/ui/draft_import.rs` | `draft_from_imported` / `draft_from_defaults`（読み込みと初期化でドラフトを作る）。`commit_draft` が反映する項目と揃える。描画を含まない |
 | `src/ui/preset.rs` | プリセットの保存・読み込み・削除と「（変更あり）」の判定。描画を含まない |
 | `src/ui/capability.rs` | `CapabilityCache`（デバイス能力の取得状態）と、そこから作る選択肢まわりの表示 |
 | `src/ui/video_mode.rs` | デバイスを切り替えたときに選び直すビデオの既定値（`select_default_video_mode`） |

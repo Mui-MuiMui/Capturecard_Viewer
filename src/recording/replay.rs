@@ -26,11 +26,12 @@ use super::convert::{even_size, rgb_to_nv12, Nv12Matrix};
 use super::encoder::{EncodedSample, EncoderError, EncoderMft};
 use super::pts::{units_since, PtsClock, AUDIO_CHANNELS, UNITS_PER_SECOND};
 use super::recorder::{RecordingEvent, RecordingRequest, RecordingTelemetry};
+use super::replay_config::ReplayConfig;
 use super::replay_recording::{Baseline, Counters, ReplayRecording};
 use super::replay_ring::{
     keep_from, replay_cut, ring_byte_limit, should_force_keyframe, ByteTrim, EncodedRing, Track,
 };
-use super::session::{check_disk, fail, prepare_folder, FALLBACK_FPS, MIN_AUDIO_CHUNK_FRAMES};
+use super::session::{check_disk, fail, prepare_folder, MIN_AUDIO_CHUNK_FRAMES};
 use super::storage::{free_bytes, is_short, megabytes, replay_required_bytes};
 use super::writer::{memory_sample, WriterParams};
 use super::RecordingError;
@@ -44,40 +45,6 @@ const GOP_UNITS: i64 = 2 * UNITS_PER_SECOND;
 /// 溜まった無音などをまとめて渡さず、小分けにする
 const MAX_AUDIO_INPUT_FRAMES: usize = 4096;
 
-/// リプレイバッファの設定。UI スレッドが `[recording]` と映像の公称 fps から組み立てる。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReplayConfig {
-    /// さかのぼる長さ（秒）。5〜300 に丸めてある
-    pub seconds: u32,
-    pub video_bitrate_kbps: u32,
-    pub hardware_encoder: bool,
-    /// 音声（AAC）のビットレート。`None` なら音声を持たない
-    pub audio_bitrate_kbps: Option<u32>,
-    /// 公称 fps。映像が無ければ `None`（始めるときは 60 として扱い、動いている間に届いたら
-    /// 「変化なし」として扱う。`same_encoders`）
-    pub nominal_fps: Option<u32>,
-}
-
-impl ReplayConfig {
-    fn fps(&self) -> u32 {
-        self.nominal_fps.unwrap_or(FALLBACK_FPS).max(1)
-    }
-
-    /// エンコーダの作り直しが要らない違いか（さかのぼる長さだけが違う）。
-    /// `self` がいま動いているもの、`other` が新しく届いたもの。
-    ///
-    /// **新しい方の公称 fps が `None`（映像が途絶えて閉じた）なら fps は変わっていないとみなす**
-    /// （#306）。途絶のたびに 60 扱いで作り直すと、切断の直前という残したい分がリングから消える。
-    /// 映像が戻って本当に fps が変わったときだけ作り直す。
-    pub(super) fn same_encoders(&self, other: &ReplayConfig) -> bool {
-        self.video_bitrate_kbps == other.video_bitrate_kbps
-            && self.hardware_encoder == other.hardware_encoder
-            && self.audio_bitrate_kbps == other.audio_bitrate_kbps
-            && (other.nominal_fps.is_none() || self.fps() == other.fps())
-    }
-}
-
-/// リプレイバッファ。ON のあいだ録画スレッドが持つ。
 pub(super) struct ReplayPipeline {
     config: ReplayConfig,
     /// リングに持つ長さ（秒）。録画中に OFF にされたら 0（最後の GOP だけ持つ）
@@ -757,50 +724,6 @@ fn encoder_error(error: EncoderError) -> RecordingError {
 mod tests {
     use super::*;
 
-    fn config() -> ReplayConfig {
-        ReplayConfig {
-            seconds: 30,
-            video_bitrate_kbps: 8000,
-            hardware_encoder: true,
-            audio_bitrate_kbps: Some(160),
-            nominal_fps: Some(60),
-        }
-    }
-
-    #[test]
-    fn replay_config_same_encoders_ignores_only_the_seconds() {
-        let base = config();
-        assert!(base.same_encoders(&ReplayConfig {
-            seconds: 300,
-            ..config()
-        }));
-        // 映像が無い（None）が届いても fps は変わっていないとみなす（#306）
-        assert!(base.same_encoders(&ReplayConfig {
-            nominal_fps: None,
-            ..config()
-        }));
-        for changed in [
-            ReplayConfig {
-                video_bitrate_kbps: 12_000,
-                ..config()
-            },
-            ReplayConfig {
-                hardware_encoder: false,
-                ..config()
-            },
-            ReplayConfig {
-                audio_bitrate_kbps: None,
-                ..config()
-            },
-            ReplayConfig {
-                nominal_fps: Some(30),
-                ..config()
-            },
-        ] {
-            assert!(!base.same_encoders(&changed), "{changed:?}");
-        }
-    }
-
     // #312: ハードウェアで 1 枚も出していないときだけソフトウェアへ作り直す
     #[test]
     fn should_fall_back_only_before_the_first_hardware_output() {
@@ -817,36 +740,5 @@ mod tests {
             "ソフトウェアの失敗は作り直さない"
         );
         assert!(!should_fall_back(false, true));
-    }
-
-    // #306: 30fps で開いているときに映像が途絶えても（公称 fps が None になっても）
-    // 作り直さない。映像が戻って本当に fps が変わったときだけ作り直す
-    #[test]
-    fn replay_config_treats_missing_fps_as_unchanged() {
-        let at_30 = ReplayConfig {
-            nominal_fps: Some(30),
-            ..config()
-        };
-        let lost = ReplayConfig {
-            nominal_fps: None,
-            ..config()
-        };
-        assert!(at_30.same_encoders(&lost), "途絶で作り直さない");
-        assert!(
-            at_30.same_encoders(&at_30),
-            "同じ fps で戻ったら作り直さない"
-        );
-        assert!(
-            !at_30.same_encoders(&config()),
-            "30 → 60 に変わったら作り直す"
-        );
-        // 映像が無いまま始めた（60 として作った）ものは、映像が来て fps が分かったら作り直す
-        assert!(!lost.same_encoders(&at_30));
-        assert!(lost.same_encoders(&lost));
-        // fps 以外が変わっていれば、fps が None でも作り直す
-        assert!(!at_30.same_encoders(&ReplayConfig {
-            video_bitrate_kbps: 12_000,
-            ..lost.clone()
-        }));
     }
 }
