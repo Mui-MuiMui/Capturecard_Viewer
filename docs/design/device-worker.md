@@ -56,12 +56,12 @@ eframe は最小化されたウィンドウの再描画要求を捨てるため�
 
 ## デバイスに触る入口は trait 1 枚で仕切る
 
-**ワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。** `worker_loop` / `worker_connect` / `worker_audio_connect` / `worker_timers` / `worker_audio_timers` はどれも `Box<dyn ..>` を持つだけで、`VideoCapture` / `AudioCapture` という具体型を知らない。実装を選ぶのは `DeviceWorker::spawn` の 1 か所（`backend::backends_from_env`。既定は `SystemBackends`、環境変数を指定したときだけフェイク）で、そこが `BackendShared`（フレーム・色変換・音量・録画の音声の差し込み口・再描画の窓口）と一緒にワーカースレッドへ送り、**組み立てはあちら側で行う**（`cpal::Stream` が `!Send` なので、作る場所は使うスレッドでなければならない）。
+**ワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。** `worker_loop` / `worker_commands` / `worker_connect` / `worker_audio_connect` / `worker_timers` / `worker_audio_timers` はどれも `Box<dyn ..>` を持つだけで、`VideoCapture` / `AudioCapture` という具体型を知らない。実装を選ぶのは `DeviceWorker::spawn` の 1 か所（`backend::backends_from_env`。既定は `SystemBackends`、環境変数を指定したときだけフェイク）で、そこが `BackendShared`（フレーム・色変換・音量・録画の音声の差し込み口・再描画の窓口）と一緒にワーカースレッドへ送り、**組み立てはあちら側で行う**（`cpal::Stream` が `!Send` なので、作る場所は使うスレッドでなければならない）。
 
 ```mermaid
 flowchart LR
     spawn["DeviceWorker::spawn<br/>（UI スレッド）"]
-    loop["worker_loop / worker_connect / worker_audio_connect<br/>worker_timers / worker_audio_timers"]
+    loop["worker_loop / worker_commands / worker_connect / worker_audio_connect<br/>worker_timers / worker_audio_timers"]
     trait["VideoBackend / AudioBackend"]
     real["SystemVideo（VideoCapture + DirectShowCapture）/ AudioCapture<br/>app/backend/system.rs"]
     mock["モック（テスト専用）"]

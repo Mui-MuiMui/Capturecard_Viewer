@@ -39,7 +39,8 @@ cargo build --release
 | `src/app/window.rs` | 最前面表示、タイトルバーの有無、装飾なしのときの端のドラッグによるリサイズ、大きさのリセット、フルスクリーンの切り替え |
 | `src/app/device.rs` | `apply_settings`（設定をワーカーへ渡す）と、ワーカーから届いたイベントの取り込み |
 | `src/app/worker.rs` | デバイスワーカーとやり取りする型（コマンド / イベント / `DeviceConfig` / `DeviceSnapshot`）と、UI 側の窓口 `DeviceWorker` |
-| `src/app/worker_loop.rs` | デバイスワーカースレッドの本体。`WorkerState` の定義、コマンドの受け口、待ち時間の決定、観測値の書き出し |
+| `src/app/worker_loop.rs` | デバイスワーカースレッドの本体。`WorkerState` の定義、待ち時間の決定、観測値の書き出し |
+| `src/app/worker_commands.rs` | デバイスワーカーのコマンドの受け口（`handle`）。設定の受け取りと開き直しの要求、最小化中のホットキーの代役（音量・ミュート）、即時の再接続 |
 | `src/app/worker_timers.rs` | ワーカーがタイマーで回す監視の入口（`tick`）。再試行の期限、フレームの途絶 |
 | `src/app/worker_audio_timers.rs` | ワーカーがタイマーで回す監視のうち音声まわり。音声ストリームのエラー、Windows の既定デバイスの切り替え、クロックドリフト補正 |
 | `src/app/worker_connect.rs` | ワーカーが行うデバイス操作のうち映像側と列挙。映像を開く・閉じる、列挙、映像の能力の問い合わせ、既定デバイス名の確定。列挙の結果のログと「Windows 側にも見えていない」の判定の適用 |
@@ -161,7 +162,7 @@ cargo build --release
 
 `src/app/` の子モジュールは**基本どれも `impl CaptureCardViewer` を足す形**で、状態そのものは `app/mod.rs` の構造体 1 つに集めてある。**子モジュール側にフィールドや `static` を持たせないこと。** 他の子モジュールから呼ぶメソッドにだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
-**例外はデバイスワーカーの 7 つ**（`worker.rs` / `worker_loop.rs` / `worker_timers.rs` / `worker_audio_timers.rs` / `worker_connect.rs` / `worker_audio_connect.rs` / `backend/`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_timers.rs` / `worker_audio_timers.rs` / `worker_connect.rs` / `worker_audio_connect.rs` がそこへ `impl` を足す。`backend/` はアプリの状態（`CaptureCardViewer` / `WorkerState` に属するもの）を持たず、デバイスの入口の trait とその実装だけを持つ。テスト用のモックだけは自分の中に観測用の値を抱える。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
+**例外はデバイスワーカーの 8 つ**（`worker.rs` / `worker_loop.rs` / `worker_commands.rs` / `worker_timers.rs` / `worker_audio_timers.rs` / `worker_connect.rs` / `worker_audio_connect.rs` / `backend/`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_commands.rs` / `worker_timers.rs` / `worker_audio_timers.rs` / `worker_connect.rs` / `worker_audio_connect.rs` がそこへ `impl` を足す（コマンドの受け口の `worker_commands.rs` も同じ）。`backend/` はアプリの状態（`CaptureCardViewer` / `WorkerState` に属するもの）を持たず、デバイスの入口の trait とその実装だけを持つ。テスト用のモックだけは自分の中に観測用の値を抱える。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
 
 `src/video/` の子モジュールは**役割で分けてあるだけで、状態はそれぞれのファイルが定義する型が持つ。** 他のファイルから呼ぶ項目にだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。**外から使う経路（`crate::video::...`）は `video/mod.rs` の `pub use` に集める。** ただし**呼び出し側のテストからしか参照されない項目は再輸出しない。** テストを含まないビルドで誰も使わない `pub use` が残り、`unused_imports` の警告になるため。そういう項目（`FormatCapability` / `IntervalStats`）は置いてある子モジュールを `pub(crate) mod` にして、`crate::video::capabilities::FormatCapability` のように子モジュールの経路で参照する。`src/ui/` と同じ考え方。
 
