@@ -303,15 +303,32 @@ fn log_summary(prefix: &str, summary: &RecordingSummary, ring: Option<ReplayRing
         (Some(lead), None) => format!("、さかのぼり {:.1} 秒", lead.as_secs_f64()),
         (None, _) => String::new(),
     };
+    // 音声のドリフトの補正（#288）。残ったずれの測り方は録画スレッドの停止時のログにある
+    let audio = summary
+        .audio_drift
+        .map(|drift| {
+            let residual = drift
+                .residual_us
+                .map(|us| format!("、残ったずれ {:+.1}ms", us as f64 / 1000.0))
+                .unwrap_or_default();
+            format!(
+                "、音声の補正 {:+}ppm（{:+.1}ms{}）",
+                drift.ppm,
+                drift.total_us as f64 / 1000.0,
+                residual
+            )
+        })
+        .unwrap_or_default();
     info!(
-        "{}: {}（長さ {}、書いた {} 枚、捨てた {} 枚、Vec の回収に失敗した回数 {}{}）",
+        "{}: {}（長さ {}、書いた {} 枚、捨てた {} 枚、Vec の回収に失敗した回数 {}{}{}）",
         prefix,
         summary.path.display(),
         format_elapsed(summary.duration),
         summary.frames_written,
         summary.frames_dropped,
         summary.recycle_misses,
-        replay
+        replay,
+        audio
     );
 }
 

@@ -59,6 +59,8 @@ pub(super) struct Baseline {
 pub(super) struct Counters {
     pub(super) dropped: u64,
     pub(super) recycle_misses: u64,
+    /// 音声トラックの観測値。音声を録らない設定なら `None`
+    pub(super) audio: Option<AudioStats>,
 }
 
 /// リプレイバッファを通す 1 回の録画。
@@ -344,6 +346,11 @@ impl ReplayRecording {
                 .recycle_misses
                 .saturating_sub(self.baseline.recycle_misses),
             replay_lead: lead,
+            // 音声トラックは録画をまたいで使い続けるので、補正量は録画を始めてからの差で出す
+            audio_drift: counters
+                .audio
+                .zip(self.baseline.audio)
+                .map(|(now, base)| now.since(&base).drift_correction()),
         })
     }
 }

@@ -79,7 +79,8 @@ impl PtsClock {
 // 「次に書く位置」を比べて、無音を足すか先頭を削って揃える。PTS だけを飛ばすと、
 // AAC のフレーム列は連続したまま時刻だけが食い違うため（`docs/design/recording.md`）。
 // 途切れずに続く間は付け直さないので、入力デバイスの時計と PC の時計の差
-// （ドリフト）はそのまま溜まる。②では直さず、停止時に `DriftSpan` の値を残す。
+// （ドリフト）は付け直しでは直らない。録画用の変換器のレート比で直す（下の
+// 「ドリフトの補正」、#288）。停止時には `DriftSpan` の値（入力デバイスの時計のずれ）も残す。
 
 /// 録画の音声のレート。Microsoft の AAC エンコーダが受け取る 16bit PCM の
 /// 44.1kHz / 48kHz のうち 48kHz に決め打ちする
@@ -217,6 +218,106 @@ impl DriftSpan {
             u128::from(self.start.sample_rate.max(1)) * u128::from(self.start.channels.max(1));
         let by_samples = u128::from(samples) * UNITS_PER_SECOND as u128 / per_second;
         (by_clock, i64::try_from(by_samples).unwrap_or(i64::MAX))
+    }
+}
+
+// ---- ドリフトの補正（#288） ----
+//
+// 音声の PTS（書いた出力フレーム数 ÷ 48000）は入力デバイスの時計で進み、映像の PTS は
+// PC の時計で進む。**録画用の変換器のレート比をわずかに動かし、出力フレームの数を
+// PC の時計に従わせる。** 測るのは「次に書く位置（出力フレーム数から）− そのサンプルを
+// 受け取った時刻（PC の時計）」（ずれ）で、揃え直した直後の窓の平均を基準に、そこから
+// 動いた分を戻す向きに補正する。レート比を直接推定しないのは、1 点ずつの時刻に入力
+// コールバックの周期（10ms）ぶんの粒度があり、600 秒でも ±17ppm 前後の幅が残るため
+// （`docs/design/recording.md` の「ドリフト」）。ずれそのものを数秒の平均で見れば粒度は
+// 均され、補正が効いた結果もそのまま測れる。時計のずれでは説明できないほど飛んだ
+// （入力デバイスがサンプルを落とした）ときは、レート比ではなく揃え直しで戻す。
+
+/// ずれを平均する窓の長さ（PC の時計で 5 秒、100ns）。補正係数は窓を閉じるたびに決める
+pub(super) const DRIFT_WINDOW: i64 = 50_000_000;
+/// 基準からの動きがこれ未満なら補正しない（1ms）。窓の平均にも残る揺らぎで補正を動かさないため
+const DRIFT_DEAD_ZONE: i64 = 10_000;
+/// 基準からの動きがこれ以上で補正が頭打ちになる（10ms）
+const DRIFT_SATURATION: i64 = 100_000;
+/// 補正係数の最大のずれ（±0.1%）。水晶のずれは通常 100ppm 以下なので 10 倍の余裕がある。
+/// パススルーの補正（`decide_resample_correction`）と同じ上限
+const DRIFT_MAX_CORRECTION: f64 = 0.001;
+/// 基準からの動きがこれ以上なら、レート比では直さずに揃え直す（30ms）。
+///
+/// 時計のずれは 1 つの窓（5 秒）で 0.1% でも 5ms しか動かさず、補正が効いていればそこまで
+/// 溜まらない。これを超えるのは、入力デバイスがサンプルを落とした（GC551 の数十〜200ms の
+/// 止まり。200ms 未満なら「来ていない」とはみなさないので揃え直しが起きない）ときで、
+/// 0.1% で戻すと 30ms に 30 秒かかる。揃え直し（`align`）は 15ms 未満を直さないので、
+/// その 2 倍にして、揃え直した直後にまた揃え直す行き来を作らない
+const DRIFT_REALIGN: i64 = 300_000;
+
+/// 窓を閉じたときに決めたこと。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum DriftDecision {
+    /// この補正係数を変換器へ渡す
+    Correct(f64),
+    /// ずれが飛んだ。補正係数を 1.0 に戻し、次のサンプルで揃え直す（無音を足すか先頭を削る）
+    Realign,
+}
+
+/// 基準からのずれの動き（100ns）から、録画用の変換器のレート比に掛ける補正係数を決める。
+///
+/// 正（音声の書く位置が受け取った時刻より先へ進んだ = 入力デバイスの時計が PC より速い）なら
+/// 1.0 より大きくして出力フレームを減らし、負なら 1.0 より小さくして増やす。比例制御で、
+/// 前回の値は見ない（`decide_resample_correction` と同じ形）。
+///
+/// - 動きが `DRIFT_DEAD_ZONE` 未満なら `1.0`
+/// - `DRIFT_SATURATION` 以上は `DRIFT_MAX_CORRECTION` に頭打ち
+pub(super) fn decide_drift_correction(error: i64) -> f64 {
+    if error.unsigned_abs() < DRIFT_DEAD_ZONE.unsigned_abs() {
+        return 1.0;
+    }
+    let clamped = error.clamp(-DRIFT_SATURATION, DRIFT_SATURATION);
+    1.0 + clamped as f64 / DRIFT_SATURATION as f64 * DRIFT_MAX_CORRECTION
+}
+
+/// ずれの窓と基準。揃え直すたびに作り直す（揃え直しで位置が飛ぶので、前の基準は使えない）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct DriftCorrector {
+    /// 窓の始まり（t0 からの 100ns）。窓が空なら `None`
+    window_start: Option<i64>,
+    sum: i128,
+    count: u64,
+    /// 揃え直した直後の窓の平均。**最初の窓は基準を測るだけで補正しない**（録画の開始直後と
+    /// 揃え直しの直後は動かさない）
+    baseline: Option<i64>,
+    /// 直近に閉じた窓の、基準からの動き。停止時のログに「補正しても残ったずれ」として出す
+    last_error: Option<i64>,
+}
+
+impl DriftCorrector {
+    /// `at`（t0 からの 100ns）に測ったずれ `offset` を足す。窓を閉じて決めたら返す。
+    pub(super) fn observe(&mut self, at: i64, offset: i64) -> Option<DriftDecision> {
+        let start = *self.window_start.get_or_insert(at);
+        self.sum += i128::from(offset);
+        self.count += 1;
+        if at.saturating_sub(start) < DRIFT_WINDOW {
+            return None;
+        }
+        let mean = i64::try_from(self.sum / i128::from(self.count)).unwrap_or(0);
+        self.window_start = None;
+        self.sum = 0;
+        self.count = 0;
+        let Some(baseline) = self.baseline else {
+            self.baseline = Some(mean);
+            return None;
+        };
+        let error = mean.saturating_sub(baseline);
+        self.last_error = Some(error);
+        if error.unsigned_abs() >= DRIFT_REALIGN.unsigned_abs() {
+            return Some(DriftDecision::Realign);
+        }
+        Some(DriftDecision::Correct(decide_drift_correction(error)))
+    }
+
+    /// 直近に閉じた窓の、基準からの動き（100ns）。まだ無ければ `None`。
+    pub(super) fn last_error(&self) -> Option<i64> {
+        self.last_error
     }
 }
 
@@ -398,5 +499,131 @@ mod tests {
         let t0 = Instant::now() + Duration::from_secs(1);
         assert_eq!(units_since(t0, t0 + Duration::from_millis(3)), 30_000);
         assert_eq!(units_since(t0, t0 - Duration::from_millis(3)), -30_000);
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "{actual} と {expected} が違う"
+        );
+    }
+
+    #[test]
+    fn decide_drift_correction_ignores_movements_inside_the_dead_zone() {
+        assert_eq!(decide_drift_correction(0), 1.0);
+        assert_eq!(decide_drift_correction(9_999), 1.0);
+        assert_eq!(decide_drift_correction(-9_999), 1.0);
+    }
+
+    #[test]
+    fn decide_drift_correction_is_proportional_from_the_dead_zone_edge() {
+        // 1ms で 0.01%（10ms で 0.1% の比例）。音声が先へ進んだら出力を減らす向き（1.0 より大きい）
+        assert_close(decide_drift_correction(10_000), 1.0001);
+        assert_close(decide_drift_correction(-10_000), 0.9999);
+        assert_close(decide_drift_correction(-50_000), 0.9995);
+    }
+
+    #[test]
+    fn decide_drift_correction_saturates_at_one_tenth_of_a_percent() {
+        assert_close(decide_drift_correction(100_000), 1.001);
+        assert_close(decide_drift_correction(10_000_000), 1.001);
+        assert_close(decide_drift_correction(-10_000_000), 0.999);
+        assert_close(decide_drift_correction(i64::MIN), 0.999);
+    }
+
+    #[test]
+    fn drift_corrector_first_window_only_sets_the_baseline() {
+        let mut corrector = DriftCorrector::default();
+        // 最初の窓（5 秒）は、どれだけずれていても補正しない
+        assert_eq!(corrector.observe(0, 300_000), None);
+        assert_eq!(corrector.observe(DRIFT_WINDOW - 1, 300_000), None);
+        assert_eq!(corrector.observe(DRIFT_WINDOW, 300_000), None);
+        assert_eq!(corrector.last_error(), None);
+    }
+
+    #[test]
+    fn drift_corrector_corrects_the_movement_from_the_baseline() {
+        let mut corrector = DriftCorrector::default();
+        corrector.observe(0, 300_000);
+        corrector.observe(DRIFT_WINDOW, 300_000);
+        // 2 つ目の窓の平均は 300_000 − 50_000。基準から 5ms 音声が遅れた（入力デバイスが遅い）
+        assert_eq!(corrector.observe(DRIFT_WINDOW + 1, 240_000), None);
+        let decision = corrector.observe(DRIFT_WINDOW * 2 + 1, 260_000);
+        assert_correction(decision, 0.9995);
+        assert_eq!(corrector.last_error(), Some(-50_000));
+        // 次の窓は空から始まる（前の窓の値を混ぜない）
+        assert_eq!(corrector.observe(DRIFT_WINDOW * 2 + 2, 300_000), None);
+        let decision = corrector.observe(DRIFT_WINDOW * 3 + 2, 300_000);
+        assert_correction(decision, 1.0);
+        assert_eq!(corrector.last_error(), Some(0));
+    }
+
+    fn assert_correction(decision: Option<DriftDecision>, expected: f64) {
+        match decision {
+            Some(DriftDecision::Correct(correction)) => assert_close(correction, expected),
+            other => panic!("補正係数ではない: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drift_corrector_realigns_when_the_offset_jumps_beyond_what_drift_explains() {
+        let mut corrector = DriftCorrector::default();
+        corrector.observe(0, 0);
+        corrector.observe(DRIFT_WINDOW, 0);
+        // 29.999ms まではレート比で直す（頭打ちの 0.1%）
+        corrector.observe(DRIFT_WINDOW + 1, -299_999);
+        let decision = corrector.observe(DRIFT_WINDOW * 2 + 1, -299_999);
+        assert_correction(decision, 0.999);
+        // 30ms 動いたら、時計のずれではなくサンプルが落ちたとみなして揃え直す。向きは問わない
+        corrector.observe(DRIFT_WINDOW * 2 + 2, -300_000);
+        assert_eq!(
+            corrector.observe(DRIFT_WINDOW * 3 + 2, -300_000),
+            Some(DriftDecision::Realign)
+        );
+        corrector.observe(DRIFT_WINDOW * 3 + 3, 300_000);
+        assert_eq!(
+            corrector.observe(DRIFT_WINDOW * 4 + 3, 300_000),
+            Some(DriftDecision::Realign)
+        );
+        assert_eq!(corrector.last_error(), Some(300_000));
+    }
+
+    /// 入力デバイスの時計が `drift`（比）ずれているとき、10ms ごとにずれを測って補正を掛け続け、
+    /// `seconds` 秒後までの基準からのずれ（100ns）の、最後の 60 秒での最大を返す。
+    /// 測るずれには、入力コールバックの周期（10ms）ぶんの粒度を模した 0〜7.5ms の揺れを足す。
+    fn simulate_drift_correction(drift: f64, seconds: i64) -> f64 {
+        let step = 100_000;
+        let mut corrector = DriftCorrector::default();
+        let mut correction = 1.0;
+        let mut offset = 0.0f64;
+        let mut worst_tail = 0.0f64;
+        for n in 0..seconds * 100 {
+            let at = n * step;
+            offset += step as f64 * ((1.0 + drift) / correction - 1.0);
+            let jitter = (n % 4) * 25_000;
+            match corrector.observe(at, offset as i64 + jitter) {
+                Some(DriftDecision::Correct(next)) => correction = next,
+                Some(DriftDecision::Realign) => panic!("時計のずれだけで揃え直した"),
+                None => {}
+            }
+            if at >= (seconds - 60) * UNITS_PER_SECOND {
+                worst_tail = worst_tail.max(offset.abs());
+            }
+        }
+        worst_tail
+    }
+
+    #[test]
+    fn drift_correction_keeps_the_offset_within_a_few_ms_over_ten_minutes() {
+        // #398 の実測（-51ppm）。補正しなければ 10 分で -30ms
+        assert!(simulate_drift_correction(-51e-6, 600) < 20_000.0);
+        // 逆向きと、大きめのずれ
+        assert!(simulate_drift_correction(100e-6, 600) < 20_000.0);
+        // 上限（0.1%）の半分のずれ。比例制御なので、補正が釣り合うまでの 5ms と、基準を測る
+        // 最初の窓の間に動いた分（約 1ms）を残して止まる
+        let worst = simulate_drift_correction(-500e-6, 600);
+        assert!(worst < 70_000.0, "{worst}");
+        // ずれが無ければ動かさない
+        assert_eq!(simulate_drift_correction(0.0, 600), 0.0);
     }
 }

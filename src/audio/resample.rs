@@ -168,6 +168,13 @@ pub struct ResampleTelemetry {
 }
 
 impl ResampleTelemetry {
+    /// 録画の音声トラック用（#288）。録画スレッドが決めた補正係数を、録画用の変換器へ
+    /// 渡すためだけに使う（水位と観測の窓は使わない）。**出力コールバックの補正とは別の
+    /// 器で、共有しない。** 録画スレッドの中だけで書いて読む。
+    pub(crate) fn for_recording() -> Self {
+        Self::new(0)
+    }
+
     pub(super) fn new(target_level: usize) -> Self {
         Self {
             // 開いた直後は目標どおりとみなす。0 から始めると、最初の水位が

@@ -89,9 +89,9 @@ impl PassthroughConverter {
             f64::from(input_sample_rate) / f64::from(output_sample_rate)
         };
 
-        // 揃っている場合は補間も再配置も要らない。**補正の共有状態を紐づけない
-        // 変換器（録画用の `convert_buffered`）は、この場合リングの値をそのまま出す。**
-        // 出力コールバックの変換器は補正を紐づけるので、揃っていても補間を通る
+        // 揃っている場合は補間も再配置も要らない。**補正の共有状態を紐づけない変換器は、
+        // この場合リングの値をそのまま出す。** 出力コールバックの変換器と録画用の変換器（#288。
+        // 録画スレッドだけが持つ別の器）は補正を紐づけるので、揃っていても補間を通る
         let identity = in_channels == out_channels && input_sample_rate == output_sample_rate;
 
         Self {
@@ -132,8 +132,8 @@ impl PassthroughConverter {
     /// リングバッファの入力フレームを補間せずにそのまま出すか。
     ///
     /// 形が揃っていて、かつクロックドリフト補正を紐づけていないときだけ。
-    /// 録画用の変換器（`convert_buffered`、録画スレッドが持つ）がこれに当たる。
-    /// 録画は補正を使わないので、揃っていれば従来どおり素通しにする。
+    /// 録画用の変換器も #288 から補正を紐づける（`ResampleTelemetry::for_recording`）ので、
+    /// いまこれに当たるのは補正を紐づけないテストだけ。
     fn copies_frames(&self) -> bool {
         self.identity && self.telemetry.is_none()
     }
@@ -655,7 +655,7 @@ mod tests {
 
     #[test]
     fn passthrough_converter_same_shape_without_telemetry_still_copies_frames() {
-        // 録画用の変換器は補正を紐づけないので、揃っていれば従来どおり素通し。
+        // 補正を紐づけない変換器は、揃っていれば従来どおり素通し。
         // 補間の右端を待たずに、届いたフレームをすぐ出す
         let mut converter = PassthroughConverter::new(48000, 2, 48000, 2);
         let mut input: VecDeque<f32> = [0.5, -0.5].into_iter().collect();

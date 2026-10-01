@@ -461,6 +461,10 @@ impl Session {
             frames_dropped: self.tap.dropped() + self.frames_skipped,
             recycle_misses: self.tap.recycle_misses(),
             replay_lead: None,
+            audio_drift: self
+                .audio
+                .as_ref()
+                .map(|audio| audio.stats().drift_correction()),
         })
     }
 }
@@ -613,6 +617,7 @@ mod tests {
             frames_dropped: 0,
             recycle_misses: 0,
             replay_lead: None,
+            audio_drift: None,
         };
         assert_eq!(
             Finished::Saved(summary.clone()).into_summary(),

@@ -661,6 +661,7 @@ impl ReplayPipeline {
         Counters {
             dropped: self.tap.dropped(),
             recycle_misses: self.tap.recycle_misses(),
+            audio: self.audio.as_ref().map(AudioTrack::stats),
         }
     }
 
