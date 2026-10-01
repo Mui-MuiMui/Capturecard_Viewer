@@ -49,9 +49,10 @@ fn main() -> Result<(), eframe::Error> {
     //
     // 読み込みは default でもう一度走る。読めなかったファイルの error! と退避は
     // こちらで先に起き、退避できたときは default 側が「ファイルが無い」を読んで
-    // Loaded になる（既定値で起動し、書き戻すのは同じ）。退避できなかったときは
-    // 2 回とも同じ BrokenFileLeftBehind になるので、書き戻さない判定は変わらない
-    // （error! はその分 2 回出る）。
+    // Loaded になる（既定値で起動し、書き戻すのは同じ）。こちらで退避できなかった
+    // ときは default 側でもう一度退避を試みる（error! はその分 2 回出る）。
+    // そこでも退避できなければ BrokenFileLeftBehind で書き戻さず、そこで退避できれば
+    // FellBackToDefaults で書き戻す。どちらも default 側の結果どおりに正しく判定される。
     let (settings, _) = AppSettings::load();
     let mut viewport_builder = egui::ViewportBuilder::default().with_icon(load_icon());
 
