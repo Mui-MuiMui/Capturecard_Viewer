@@ -140,8 +140,11 @@ pub(super) struct StreamCandidate {
     /// `GetStreamCaps` に渡す番号
     pub(super) index: i32,
     pub(super) format: SampleFormat,
-    /// 開ける fps。大きい順
+    /// 設定画面に出す fps。大きい順
     pub(super) fps: Vec<u32>,
+    /// `MinFrameInterval` 〜 `MaxFrameInterval` を fps に直した `(最小, 最大)`。
+    /// 範囲を持たない（min = max か読めない）なら `None`（#389）
+    pub(super) fps_range: Option<(u32, u32)>,
 }
 
 /// `IAMStreamConfig` の対応形式を読む。受け取れない形式（UYVY など）は飛ばす。
@@ -187,7 +190,13 @@ pub(super) fn read_candidates(config: &IAMStreamConfig) -> Vec<StreamCandidate> 
         if fps.is_empty() {
             continue;
         }
-        candidates.push(StreamCandidate { index, format, fps });
+        let fps_range = fps_range(caps.MinFrameInterval, caps.MaxFrameInterval);
+        candidates.push(StreamCandidate {
+            index,
+            format,
+            fps,
+            fps_range,
+        });
     }
     candidates
 }
@@ -245,15 +254,36 @@ pub(super) fn target_resolution(
     }
 }
 
+/// 範囲を持つデバイスで、設定画面に並べる代表の fps（#389）
+const REPRESENTATIVE_FPS: [u32; 7] = [15, 24, 25, 30, 50, 60, 120];
+
+/// `MinFrameInterval` / `MaxFrameInterval` を fps の `(最小, 最大)` に直す。
+///
+/// 範囲を持たない（両端が同じ fps になる）か、どちらかを読めないなら `None`。
+/// 最短の間隔が最大の fps になる。
+pub(super) fn fps_range(min_interval: i64, max_interval: i64) -> Option<(u32, u32)> {
+    let max = fps_from_interval(min_interval)?;
+    let min = fps_from_interval(max_interval)?;
+    (min < max).then_some((min, max))
+}
+
 /// 1 件の対応形式で開ける fps を並べる。
 ///
 /// メディアタイプの既定値と、`VIDEO_STREAM_CONFIG_CAPS` の最短・最長の間隔を
-/// 候補にする。どれも読めなければ空（その形式は選択肢に出さない）。
+/// 候補にする。範囲を持つなら、その中にある代表値（`REPRESENTATIVE_FPS`）も
+/// 足す（#389）。どれも読めなければ空（その形式は選択肢に出さない）。
 pub(super) fn fps_list(avg: i64, min_interval: i64, max_interval: i64) -> Vec<u32> {
     let mut fps: Vec<u32> = [avg, min_interval, max_interval]
         .into_iter()
         .filter_map(fps_from_interval)
         .collect();
+    if let Some((min, max)) = fps_range(min_interval, max_interval) {
+        fps.extend(
+            REPRESENTATIVE_FPS
+                .into_iter()
+                .filter(|fps| (min..=max).contains(fps)),
+        );
+    }
     fps.sort_unstable_by(|a, b| b.cmp(a));
     fps.dedup();
     fps
@@ -307,6 +337,9 @@ pub(super) fn capabilities_from_candidates(
 ///    色空間と映像調整の効く高速パスを通るため）
 /// 4. 開ける fps が要求に近いもの
 ///
+/// fps は、候補が範囲（`fps_range`）を持ちその中にあるなら要求のまま開く
+/// （#389）。範囲が無ければ一覧（`fps`）の中で最も近いもの。
+///
 /// 解像度が未指定なら 1280x720 60fps を要求したものとして扱う（Media
 /// Foundation の経路と同じ）。fps は 15〜120 へ丸める。
 pub(super) fn choose_candidate(
@@ -331,6 +364,11 @@ pub(super) fn choose_candidate(
     });
 
     let closest_fps = |candidate: &StreamCandidate| {
+        if let Some((min, max)) = candidate.fps_range {
+            if (min..=max).contains(&requested_fps) {
+                return Some(requested_fps);
+            }
+        }
         candidate
             .fps
             .iter()
@@ -381,7 +419,86 @@ mod tests {
                 avg_time_per_frame: 0,
             },
             fps: fps.to_vec(),
+            fps_range: None,
         }
+    }
+
+    /// 範囲を持つ候補。`fps` は `fps_list` が並べたもの
+    fn ranged(
+        index: i32,
+        width: u32,
+        height: u32,
+        min_interval: i64,
+        max_interval: i64,
+    ) -> StreamCandidate {
+        StreamCandidate {
+            fps: fps_list(min_interval, min_interval, max_interval),
+            fps_range: fps_range(min_interval, max_interval),
+            ..candidate(index, SampleKind::Yuy2, width, height, &[])
+        }
+    }
+
+    #[test]
+    fn fps_range_reads_min_and_max() {
+        // GC551: 最短 166666（60.0002fps）、最長 666666（15fps）
+        assert_eq!(fps_range(166_666, 666_666), Some((15, 60)));
+        // 範囲を持たない
+        assert_eq!(fps_range(333_333, 333_333), None);
+        // 丸めると同じ fps になるものも範囲なし
+        assert_eq!(fps_range(333_333, 333_667), None);
+        // 読めない
+        assert_eq!(fps_range(0, 666_666), None);
+        assert_eq!(fps_range(166_666, 0), None);
+    }
+
+    #[test]
+    fn fps_list_adds_representatives_inside_the_range() {
+        assert_eq!(
+            fps_list(166_666, 166_666, 666_666),
+            vec![60, 50, 30, 25, 24, 15]
+        );
+        // 端の値（85）は代表値に無くても残る
+        assert_eq!(
+            fps_list(117_647, 117_647, 666_666),
+            vec![85, 60, 50, 30, 25, 24, 15]
+        );
+    }
+
+    #[test]
+    fn choose_candidate_opens_the_requested_fps_inside_the_range() {
+        // #389: GC551 で 30fps を要求したら 60 ではなく 30
+        let candidates = vec![ranged(0, 1920, 1080, 166_666, 666_666)];
+        assert_eq!(
+            choose_candidate(&candidates, Some((1920, 1080)), None, Some(30)),
+            Some((0, 30))
+        );
+        // 一覧に無い値でも範囲の中ならそのまま
+        assert_eq!(
+            choose_candidate(&candidates, Some((1920, 1080)), None, Some(48)),
+            Some((0, 48))
+        );
+        // 範囲の外は端へ寄る
+        assert_eq!(
+            choose_candidate(&candidates, Some((1920, 1080)), None, Some(120)),
+            Some((0, 60))
+        );
+    }
+
+    #[test]
+    fn choose_candidate_without_range_keeps_the_closest_listed_fps() {
+        // 範囲を持たないデバイスは、これまでどおり一覧の中で最も近いもの
+        let candidates = vec![candidate(0, SampleKind::Yuy2, 1920, 1080, &[60, 24])];
+        assert_eq!(
+            choose_candidate(&candidates, Some((1920, 1080)), None, Some(30)),
+            Some((0, 24))
+        );
+    }
+
+    #[test]
+    fn capabilities_from_candidates_lists_range_representatives() {
+        let caps = capabilities_from_candidates(&[ranged(0, 1920, 1080, 166_666, 666_666)], None);
+        let fps: Vec<u32> = caps[0].modes.iter().map(|mode| mode.fps).collect();
+        assert_eq!(fps, vec![60, 50, 30, 25, 24, 15]);
     }
 
     fn sample_candidates() -> Vec<StreamCandidate> {
@@ -512,8 +629,11 @@ mod tests {
 
     #[test]
     fn fps_list_collects_distinct_rates_in_descending_order() {
-        // 既定 30fps、最短 60fps、最長 15fps
-        assert_eq!(fps_list(333_333, 166_666, 666_666), vec![60, 30, 15]);
+        // 既定 30fps、最短 60fps、最長 15fps。範囲の中の代表値も並ぶ（#389）
+        assert_eq!(
+            fps_list(333_333, 166_666, 666_666),
+            vec![60, 50, 30, 25, 24, 15]
+        );
         // 同じ値は 1 つにする
         assert_eq!(fps_list(333_333, 333_333, 333_333), vec![30]);
         // 読めない値は捨てる

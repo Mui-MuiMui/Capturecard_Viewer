@@ -483,6 +483,29 @@ mod tests {
         capture.stop_capture();
     }
 
+    #[test]
+    #[ignore = "DirectShow のキャプチャーボード（AVerMedia GC551）に 1920x1080 60Hz の入力信号を入れておく"]
+    fn start_capture_requested_fps_inside_the_range_reports_the_delivered_rate() {
+        // 実行: cargo test start_capture_requested_fps_inside_the_range -- --ignored --nocapture
+        // #389。範囲（15〜60fps）の中の 30fps を要求したら 30fps で開くこと。実際に
+        // 届く間隔はボードしだい（入力信号の fps で出すものがある）なので、数値を出すだけ
+        let mut capture = capture();
+        let name = capture
+            .list_friendly_names()
+            .into_iter()
+            .find(|name| name.contains("GC551"))
+            .expect("GC551 がある");
+        let display = display_name(&name);
+        capture
+            .start_capture(&display, Some((1920, 1080)), Some("YUY2"), Some(30), false)
+            .expect("開ける");
+        println!("開いた: {:?}", capture.active());
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        let intervals = capture.frames.stats().intervals.expect("フレームが届く");
+        println!("届いた間隔: {intervals:?}");
+        capture.stop_capture();
+    }
+
     /// `seconds` 秒のあいだ 10ms ごとに最後のフレームからの経過を見て、映像が
     /// 100ms 以上途切れたところを `(経過秒, 途切れた ms)` で返す。
     fn video_stalls(capture: &DirectShowCapture, seconds: u64) -> Vec<(u64, u128)> {
