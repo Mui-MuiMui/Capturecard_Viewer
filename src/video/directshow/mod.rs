@@ -12,7 +12,7 @@
 //! | `devices.rs` | 列挙（`ICreateDevEnum`）、対応形式（`IAMStreamConfig::GetStreamCaps`）、開く形式の選び方 |
 //! | `graph.rs` | フィルターグラフの組み立て・開始・停止・破棄 |
 //! | `filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`） |
-//! | `media_type.rs` | `AM_MEDIA_TYPE` の読み書き、COM の初期化 |
+//! | `media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放（COM の初期化は `crate::com`） |
 //!
 //! **デバイス名には「(DirectShow)」を添える**（`display_name`）。設定に
 //! 保存されるのもこの名前で、Media Foundation の経路とどちらで開くかは

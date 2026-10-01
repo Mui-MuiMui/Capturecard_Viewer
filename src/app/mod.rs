@@ -515,8 +515,6 @@ impl eframe::App for CaptureCardViewer {
         let minimized = viewport.minimized.unwrap_or(false);
 
         // メインUI
-        // F11によるフルスクリーン切り替えを削除（スクリーンショット用に解放）
-
         if self.is_fullscreen {
             self.show_fullscreen_ui(ctx);
         } else {

@@ -5,9 +5,14 @@
 //! `DeviceCommand` を送り、`DeviceEvent` を `update()` の中で非ブロックに
 //! 受け取るだけにする。
 //!
-//! **チャネルを通さない共有が 4 つある。** 映像フレーム（`video::VideoFrames`）、
-//! 色変換と映像調整（`video::SharedColorConversion`）、音量・ミュート・
-//! パススルー（`audio::AudioControls`）、録画へ音声を回す差し込み口（`audio::AudioTap`）。
+//! **チャネルを通さない共有が 4 つある。** 映像フレーム（`video::VideoFrames`。
+//! 録画へ回す `video::VideoTap` を中に持つ）、色変換と映像調整
+//! （`video::SharedColorConversion`）、音量・ミュート・パススルー
+//! （`audio::AudioControls`）、録画へ音声を回す差し込み口（`audio::AudioTap`）。
+//! 数えるのは、UI スレッドか録画スレッドがワーカーを通さずにデバイスの
+//! コールバックとやり取りする共有ハンドル（`BackendShared` に載せて渡すもの）で、
+//! ワーカーの内側で閉じる `ResampleTelemetry` は入れない
+//! （`docs/design/device-worker.md` と同じ数え方）。
 //! どれもデバイスを開く処理を挟まないうえ、フレームはコマンドの列に並べると遅延が増える。
 //!
 //! これとは別に、「いま何に繋がっているか」のような軽い観測値も

@@ -86,7 +86,7 @@ impl CaptureCardViewer {
                 .details
                 .push(i18n::link_capture_api(active.api.label()));
             video.details.push(i18n::link_video(active.summary()));
-            // 実際の fps はデバイスから取れない（video.rs の start_capture を参照）
+            // 実際の fps はデバイスから取れない（video/capture.rs の ActiveVideo の説明を参照）
             video
                 .details
                 .push(i18n::link_requested_fps(active.requested_fps));

@@ -2,7 +2,7 @@
 // テストの中だけ println! を許す。Cargo.toml の [lints.clippy] で
 // print_stdout / print_stderr を warn にしてアプリ本体への再混入を止めているが、
 // テストバイナリの標準出力は cargo が受け取るため cargo test -- --nocapture で読める。
-// 計測結果の出力（src/video.rs）はそれを利用している。
+// 計測結果の出力（src/video/convert.rs など）はそれを利用している。
 // クレートルートに置いているのは、テスト対象のモジュール側を触らずに済ませるため
 #![cfg_attr(test, allow(clippy::print_stdout))]
 
@@ -43,9 +43,15 @@ fn main() -> Result<(), eframe::Error> {
     // ログファイルも開けていない）ので、戻り値はここで捨てるしかない。
     let _ = logging::init();
 
-    // 設定から保存されたウィンドウサイズと位置を読み込む。
-    // ここでは読み込み結果を使わない。既定値の書き戻しは
-    // CaptureCardViewer::default 側だけで行うため。
+    // 設定から保存されたウィンドウの装飾・サイズ・位置を読み込む。
+    // ここでは読み込み結果（LoadOutcome）を使わない。既定値の書き戻しと
+    // 自動保存の可否は CaptureCardViewer::default 側だけで決めるため。
+    //
+    // 読み込みは default でもう一度走る。読めなかったファイルの error! と退避は
+    // こちらで先に起き、退避できたときは default 側が「ファイルが無い」を読んで
+    // Loaded になる（既定値で起動し、書き戻すのは同じ）。退避できなかったときは
+    // 2 回とも同じ BrokenFileLeftBehind になるので、書き戻さない判定は変わらない
+    // （error! はその分 2 回出る）。
     let (settings, _) = AppSettings::load();
     let mut viewport_builder = egui::ViewportBuilder::default().with_icon(load_icon());
 
