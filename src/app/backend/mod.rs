@@ -260,6 +260,8 @@ pub(super) mod mock {
     pub(in crate::app) struct MockVideoState {
         /// 成功させるまでに失敗させる回数。0 なら最初から成功する
         pub(in crate::app) failures_before_success: u32,
+        /// 失敗させるときに返すエラー。`None` なら `DeviceNotFound`（見つからない）
+        pub(in crate::app) failure: Option<VideoError>,
         /// `start_capture` を呼ばれた回数
         pub(in crate::app) start_calls: u32,
         /// `stop_capture` を呼ばれた回数
@@ -332,9 +334,9 @@ pub(super) mod mock {
                 if state.failures_before_success > 0 {
                     state.failures_before_success -= 1;
                     state.capturing = false;
-                    return Err(VideoError::DeviceNotFound(
-                        device_name.unwrap_or("（未指定）").to_string(),
-                    ));
+                    return Err(state.failure.clone().unwrap_or_else(|| {
+                        VideoError::DeviceNotFound(device_name.unwrap_or("（未指定）").to_string())
+                    }));
                 }
                 state.capturing = true;
                 // 開き直したら途絶の記録も喪失の知らせも消える（実装と同じ）
