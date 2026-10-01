@@ -110,7 +110,7 @@ cargo build --release
 | `src/recording/writer.rs` | Media Foundation の Sink Writer（`IMFSinkWriter`）の組み立て（H.264 と AAC の 2 ストリーム）と NV12 / 16bit PCM の書き込み、`Finalize`、エンコーダの遅れ（`backlog`）、使っているエンコーダの名前（`encoder_info`） |
 | `src/recording/sample_pool.rs` | Sink Writer とエンコーダ MFT へ渡す NV12 のサンプルの使い回し `SamplePool`。サンプルとバッファの参照が手元の分だけに戻ったものだけを次に使う。判定（`slot_state`）は純粋関数 |
 | `src/recording/convert.rs` | RGB → NV12 の画素変換（BT.709 / BT.601 リミテッド、色差は 2x2 の平均）。純粋関数 |
-| `src/recording/pts.rs` | 映像の PTS（受け取った時刻 − 録画の開始、単調増加）と、音声の PTS の計算（出力フレーム数 → 100ns、`AudioTap` の時刻と累計からの逆算、途切れたときの揃え方、無音で埋める先、ドリフトの測定）と、ドリフトの補正の判定（`decide_drift_correction` と、ずれの窓と基準の `DriftCorrector`、#288）。純粋関数 |
+| `src/recording/pts.rs` | 映像の PTS（受け取った時刻 − 録画の開始、単調増加）と、音声の PTS の計算（出力フレーム数 → 100ns、`AudioTap` の時刻と累計からの逆算、途切れたときの揃え方、無音で埋める先、ドリフトの測定）と、ドリフトの補正の判定（`decide_drift_correction` と、ずれの窓と基準の `DriftCorrector`、#288）、映像と音声のずれの補正（受け取った時刻に足す `offset_audio_time`、#404）。純粋関数 |
 | `src/recording/audio.rs` | 音声トラック `AudioTrack`（録画スレッドの中だけ）。`AudioTap` のリングから取り出し、録画用の `PassthroughConverter` で 48kHz 2ch へ寄せて 16bit PCM にし、PTS を付けた塊にする。開き直し・溢れ・音声が来ない間の揃え方、ドリフトの補正（ずれを測り、録画用の変換器のレート比を動かす。飛んだら揃え直す）と、停止時のドリフトのログ |
 | `src/recording/file_name.rs` | ファイル名の書式の検め（chrono の `Item::Error`、Windows で使えない文字、末尾の空白・ピリオド、予約デバイス名）と、同じ名前があるときの `_2` `_3` … |
 | `src/recording/storage.rs` | 保存先の空き容量（`GetDiskFreeSpaceExW`）と、止める境界（500MB） |
@@ -128,7 +128,7 @@ cargo build --release
 | `src/settings/video.rs` | `[video]`。`VideoSettings`、色空間・輝度レンジ・開き方の選択肢、映像調整の範囲と、それぞれの serde の補助 |
 | `src/settings/audio.rs` | `[audio]`。`AudioSettings`、サンプリングレート・チャンネル数の既定値、リングバッファの長さの範囲 |
 | `src/settings/screenshot.rs` | `[screenshot]`。出力先・保存形式・JPEG 品質の選択肢、保存先の既定値、保存するファイルのパス（`AppSettings::get_screenshot_path`） |
-| `src/settings/recording.rs` | `[recording]`。ビットレート・リプレイバッファの長さの範囲、保存先の既定値 |
+| `src/settings/recording.rs` | `[recording]`。ビットレート・リプレイバッファの長さ・映像と音声のずれの補正の範囲、保存先の既定値 |
 | `src/settings/ui.rs` | `[ui]`（音量・言語・ウィンドウ）と `[update]`。音量の範囲と言語の選択肢（`LanguageSetting`） |
 | `src/settings/hotkeys.rs` | `[hotkeys]` / `[hotkey_settings]`。既定の割り当て、旧版の `screenshot.hotkey` からの移行（`migrate_hotkeys`）、`AppSettings::hotkey` / `set_hotkey` |
 | `src/settings/preset.rs` | `[[presets]]`。適用と一致の判定（`matches_preset` / `resolved_active_preset`）、名前の検証、読み込んだ一覧の整え方（`sanitize_presets`）、`AppSettings` のプリセット操作 |
@@ -148,7 +148,7 @@ cargo build --release
 | `src/ui/device_tab.rs` | 「デバイス設定」タブの描画 |
 | `src/ui/audio_input.rs` | 「デバイス設定」タブの「オーディオ入力デバイス」のコンボボックス（先頭の「映像デバイスの音声 (DirectShow)」と WASAPI のデバイス）と、選べるか（`VideoPinChoice`、#394） |
 | `src/ui/screenshot_tab.rs` | 「スクリーンショット設定」タブの描画 |
-| `src/ui/recording_tab.rs` | 「録画」タブの描画（保存先、ファイル名の書式と例、映像のビットレート、ハードウェアエンコーダ、音声の有無とビットレート、リプレイバッファの ON / OFF とさかのぼる長さ） |
+| `src/ui/recording_tab.rs` | 「録画」タブの描画（保存先、ファイル名の書式と例、映像のビットレート、ハードウェアエンコーダ、音声の有無とビットレートと映像とのずれの補正、リプレイバッファの ON / OFF とさかのぼる長さ） |
 | `src/ui/hotkeys_tab.rs` | 「ホットキー」タブの描画と、割り当ての重複判定 |
 | `src/ui/hotkey_capture.rs` | ホットキー入力ダイアログ。確定の判定と描画 |
 | `src/ui/hotkey_keys.rs` | 入力ダイアログが使うキーの対応表（`hotkey_key_name`、`hotkey::parse` と同じ範囲）、割り当てさせない組み合わせ（`is_clipboard_command_chord`）、ホットキー文字列の組み立て |
