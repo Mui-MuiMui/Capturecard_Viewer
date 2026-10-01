@@ -192,7 +192,7 @@ sequenceDiagram
 
 - **RGB → NV12 は録画スレッドで行う純粋関数**（`src/recording/convert.rs`）。係数は `ColorMatrix` の逆向き（BT.709 / BT.601、リミテッドレンジ）。HD の判定は表示と同じ「幅 1280 または高さ 720 以上」。色差は 2x2 の平均。カラーバーを往復させて差が一定以内に収まることをユニットテストで確かめる
 - 変換先の Vec は録画スレッドで使い回す（録画スレッドは確保してよいが、1 秒に 60 回 3MB を確保し直す理由も無い）
-- 音声は入力の形（レート・チャンネル数）から 48kHz 2ch へ `PassthroughConverter`（`src/audio/convert.rs`）で寄せ、f32 → i16 は既存の `f32_to_i16` を使う。**変換器は録画用に 1 つ持ち、出力コールバックのものとは共有しない。** `PassthroughConverter` はレート比の補正（`ResampleTelemetry`）を受け取れるので、後でドリフト補正を足すときにそのまま使える（「PTS」の節）
+- 音声は入力の形（レート・チャンネル数）から 48kHz 2ch へ `PassthroughConverter`（`src/audio/convert.rs`）で寄せ、f32 → i16 は既存の `f32_to_i16`（`src/audio/sample.rs`）を使う。**変換器は録画用に 1 つ持ち、出力コールバックのものとは共有しない。** `PassthroughConverter` はレート比の補正（`ResampleTelemetry`）を受け取れるので、後でドリフト補正を足すときにそのまま使える（「PTS」の節）
 - 録画スレッドは `next_sample` ではなく `convert_buffered` を使う（②で足した）。`next_sample` は入力が尽きると組み立て途中の状態を捨てる（リアルタイムの出力で途切れたときの扱い）。録画は数 ms ごとに溜まった分を渡すので、そのたびに捨てると補間が途切れて雑音になる。`convert_buffered` は次の出力フレームに要る入力が揃っているときだけ組み立て、端数は次の呼び出しへ持ち越す
 - 途切れ（開き直し、溢れ、無音で埋めたあと）の後は変換器を作り直す。途切れの前後で補間を繋げない
 - どちらも `pub(crate)` にして `recording` から呼ぶ形になる。`audio` の中だけで使う決まり（`CLAUDE.md` の「モジュール構成」）に合わせ、外から使う経路は `audio/mod.rs` の `pub use` に集める
