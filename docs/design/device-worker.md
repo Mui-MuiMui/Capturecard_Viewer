@@ -21,16 +21,16 @@ flowchart LR
     dev -.->|VideoFrames / Atomic| ui
 ```
 
-**チャネルを通さない共有が 6 つある。** どれもデバイスを開く処理を挟まないので、コマンドの列に並べる理由がない。
+**チャネルを通さない共有が 4 つある。** 数えるのは、UI スレッドか録画スレッドがワーカーを通さずにデバイスのコールバックとやり取りする共有ハンドル（UI スレッドが作って `app::backend::BackendShared` に載せてワーカーへ渡し、開き直しても引き継ぐもの）。どれもデバイスを開く処理を挟まないので、コマンドの列に並べる理由がない。`src/app/worker.rs` の冒頭と `docs/ARCHITECTURE.md` の「チャネルでの隔離」も同じ数え方をしている。
 
 | 共有するもの | 型 | 触る側 |
 |---|---|---|
-| 映像フレーム | `video::VideoFrames`（`Arc<Mutex<FrameBuffer>>`） | フレームコールバックが書き、UI スレッドが読む |
-| 録画へ回す映像フレーム | `video::VideoTap`（`VideoFrames` の隣。`Arc<VideoFrame>` の SPSC リング） | 録画スレッドが録画中だけリングを差し込み、フレームコールバックが画面へ置いたのと同じ `Arc` を積む（待たない `try_lock`、満杯なら捨てて数える）。ワーカーは触らない（`docs/design/recording.md`） |
+| 映像フレーム | `video::VideoFrames`（`Arc<Mutex<FrameBuffer>>`。録画へ回す差し込み口 `video::VideoTap` を中に 1 つ持つ） | フレームコールバックが書き、UI スレッドが読む。`VideoTap` は録画スレッドが録画中だけリング（`Arc<VideoFrame>` の SPSC）を差し込み、フレームコールバックが画面へ置いたのと同じ `Arc` を積む（待たない `try_lock`、満杯なら捨てて数える）。ワーカーは触らない（`docs/design/recording.md`） |
 | 録画へ回す音声 | `audio::AudioTap`（`Arc` の中に f32 の SPSC リングの差し込み口と Atomic の観測値） | 録画スレッドが録画中だけリングを差し込み、入力コールバック（`process_input`）が f32 へ直した値を入力の形のまま積む（待たない `try_lock`、空きが足りなければそのコールバックの分を捨てて数える）。コールバックは累計のサンプル数と最後に積んだ時刻も書く。**ワーカーはストリームを開くたびに `begin_stream` で入力のレート・チャンネル数と開き直しの番号を書く**（コールバックが動き出す前）。`AudioControls` と同じく開き直しても引き継ぐ共有物で、`BackendShared` に載せて `AudioCapture` / `FakeAudioCapture` へ渡す（`docs/design/recording.md`） |
 | 色空間・レンジ・明るさ・コントラスト・彩度 | `Arc<video::SharedColorConversion>`（Atomic） | UI スレッドが書き、フレームコールバックが読む |
 | 音量・ミュート・パススルー | `Arc<audio::AudioControls>`（Atomic） | UI スレッドが書き、出力コールバックが読む |
-| 音声のリサンプル補正の水位・補正係数 | `Arc<audio::ResampleTelemetry>`（Atomic） | 出力コールバックが水位（直近の値と観測の窓）を書き、デバイスワーカーが `tick` の中で窓を読み出して補正係数を書く。**入出力の形が揃っているストリームでも作る**（#308。`AudioCapture::resample_telemetry()` が `None` を返すのは音声を開いていないときだけ。理由は `docs/design/audio.md` の「クロックドリフトは揃っている組み合わせでも補正する」） |
+
+**ワーカーの内側で閉じる共有は数に入れない。** 音声のリサンプル補正の水位・補正係数（`Arc<audio::ResampleTelemetry>`、Atomic）は、`AudioCapture` がストリームを開くたびに作り、出力コールバックが水位（直近の値と観測の窓）を書き、デバイスワーカーが `tick` の中で窓を読み出して補正係数を書く。UI へは `DeviceSnapshot` の `audio_resample` に写して渡す。**入出力の形が揃っているストリームでも作る**（#308。`AudioCapture::resample_telemetry()` が `None` を返すのは音声を開いていないときだけ。理由は `docs/design/audio.md` の「クロックドリフトは揃っている組み合わせでも補正する」）。フレームが届いたことを UI へ知らせる `RepaintWaker` も `BackendShared` に載るが、値を運ばず起こすだけの窓口なので数えない。
 
 **映像フレームを `DeviceEvent` で送らないこと。** 接続やデバイス列挙の後ろで待たされ、遅延が増える。
 
@@ -90,7 +90,7 @@ flowchart LR
 | `DirectShowCapture`（`src/video/directshow/mod.rs`） | `graph`（`CaptureGraph`。フィルターグラフとレンダラー）、`active` | `frames`、`color_conversion`、`repaint_waker`、COM の初期化 |
 | `AudioCapture`（`src/audio/capture.rs`） | `input_stream` / `output_stream`、`active`、`resample_telemetry`、`stream_error`、`underruns` | `host`、`controls` |
 
-ハンドル型にするとは、左の列を別の型へ出して `start_*` の戻り値にし、閉じるのをその値の drop に任せる形のこと。#102 でこの形を採らなかった理由は「`src/video.rs`（当時 2,451 行）の中身を動かさないと切り出せない」だった。#197 で `src/video/` / `src/audio/` に分けたあとは、左の列はどちらも `capture.rs` 1 ファイルに収まっている。切り出しは `capture.rs` と `backend.rs` とワーカーの中で済むので、この理由はもう当たらない。
+ハンドル型にするとは、左の列を別の型へ出して `start_*` の戻り値にし、閉じるのをその値の drop に任せる形のこと。#102 でこの形を採らなかった理由は「`src/video.rs`（当時 2,451 行）の中身を動かさないと切り出せない」だった。#197 で `src/video/` / `src/audio/` に分けたあとは、左の列はどちらも `capture.rs` 1 ファイルに収まっている。切り出しは `capture.rs` と `backend/` とワーカーの中で済むので、この理由はもう当たらない。
 
 **それでも、今はハンドル型にしない。** 理由は 2 つある。
 
