@@ -716,11 +716,22 @@ mod tests {
         // #388 の第 1 段の実機確認。音声ピンを繋いでも映像の fps が変わらないこと、
         // 60 秒流してアンダーランと捨てたフレームが増え続けないこと、録画に音声トラックが
         // 入り映像と長さが揃うことを数で見る
+        //
+        // 映像と音声のずれ（#398）を測るときは、録画の長さを CAPTURECARD_VIEWER_PIN_TEST_SECONDS
+        // （秒、既定 65）で伸ばし、CAPTURECARD_VIEWER_CONFIG_DIR を指定してログを残す。
+        // 停止時のドリフトの行（`AudioStats::log`）はアプリと同じロガーでそこへ書かれる
+        if std::env::var_os(crate::config_path::CONFIG_DIR_ENV).is_some() {
+            let _ = crate::logging::init();
+        }
+        let seconds = std::env::var("CAPTURECARD_VIEWER_PIN_TEST_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(65);
         let temp = tempfile::tempdir().expect("一時ディレクトリを作れること");
         let folder = std::env::var("CAPTURECARD_VIEWER_PIN_TEST_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| temp.path().to_path_buf());
-        let run = record_from_video_pin("GC551", (1920, 1080), 65, &folder);
+        let run = record_from_video_pin("GC551", (1920, 1080), seconds, &folder);
         let diff_ms = (run.audio_end - run.video_end) / 10_000;
         println!(
             "{}: 映像 {}、音声 {}（{diff_ms}ms）、fps {:?} → {:?}",
