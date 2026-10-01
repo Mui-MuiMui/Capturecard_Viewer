@@ -462,6 +462,7 @@ impl Drop for FrameSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ringbuf::traits::Consumer;
 
     #[test]
     fn first_time_only_first_take_returns_true() {
@@ -704,7 +705,7 @@ mod tests {
 
         assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], at));
 
-        let (tapped, tapped_at) = consumer.pop().expect("リングに 1 枚積まれている");
+        let (tapped, tapped_at) = consumer.try_pop().expect("リングに 1 枚積まれている");
         let shown = frames.latest().expect("画面側にも置かれている");
         assert!(Arc::ptr_eq(&tapped, &shown));
         assert_eq!(tapped_at, at);
@@ -723,7 +724,7 @@ mod tests {
 
         // 差し込まれていないので何も積まず、捨てた数にも入れない
         let mut consumer = tap.attach(1);
-        assert!(consumer.pop().is_none());
+        assert!(consumer.try_pop().is_none());
         assert_eq!(tap.dropped(), 0);
     }
 
@@ -745,7 +746,7 @@ mod tests {
         // 3 枚目の変換先を用意するときに 1 枚目を回収しようとして、リングが持っているので失敗する
         assert_eq!(tap.recycle_misses(), 1);
         // 取り出して手放せば、以降は回収できる
-        while consumer.pop().is_some() {}
+        while consumer.try_pop().is_some() {}
         assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
         assert_eq!(tap.recycle_misses(), 1);
     }

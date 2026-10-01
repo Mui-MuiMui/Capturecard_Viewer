@@ -90,6 +90,8 @@ pub enum ApplyError {
     },
     /// キャンセルされた。画面には出さない
     Cancelled,
+    /// 更新のスレッドが結果を送らずに終わった。ダウンロードの失敗とは限らないので分けてある
+    ThreadEnded,
 }
 
 impl fmt::Display for ApplyError {
@@ -114,6 +116,7 @@ impl fmt::Display for ApplyError {
                 i18n::update_replace_kept_nothing(old, new, source)
             }
             ApplyError::Cancelled => Text::UpdateCancelled.get().to_string(),
+            ApplyError::ThreadEnded => Text::UpdateThreadEnded.get().to_string(),
         };
         f.write_str(&text)
     }
@@ -682,5 +685,19 @@ mod tests {
                 .to_string()),
             "The download returned HTTP 404"
         );
+    }
+
+    // #315: スレッドが結果を返さずに終わったことを「ダウンロードできない」に分類せず、
+    // 言語も混ぜない
+    #[test]
+    fn thread_ended_display_is_its_own_localized_message() {
+        let japanese = i18n::with_language(i18n::Language::Japanese, || {
+            ApplyError::ThreadEnded.to_string()
+        });
+        assert_eq!(japanese, "更新のスレッドが結果を返さずに終わった");
+        let english = i18n::with_language(i18n::Language::English, || {
+            ApplyError::ThreadEnded.to_string()
+        });
+        assert_eq!(english, "The update thread ended without a result");
     }
 }

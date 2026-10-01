@@ -482,9 +482,7 @@ impl Recorder {
             Some(thread) => thread
                 .commands
                 .send(command)
-                .map_err(|_| RecordingError::Platform {
-                    reason: "録画スレッドが止まっている".to_string(),
-                }),
+                .map_err(|_| RecordingError::ThreadStopped),
             None => Ok(()),
         }
     }

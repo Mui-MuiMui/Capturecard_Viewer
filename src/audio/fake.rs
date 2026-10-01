@@ -18,11 +18,9 @@
 //! | Fake Audio Output 1 | 48kHz 2ch（入力と揃うので変換しない。ドリフト補正は動く） |
 //! | Fake Audio Output 2 | 44.1kHz 1ch（入力と揃わないので変換し、ドリフト補正も動く） |
 
-use cpal::{
-    SampleFormat, SampleRate, SupportedBufferSize, SupportedStreamConfig,
-    SupportedStreamConfigRange,
-};
+use cpal::{SampleFormat, SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange};
 use log::{debug, info, warn};
+use ringbuf::traits::Split;
 use ringbuf::HeapRb;
 use std::f64::consts::TAU;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -91,8 +89,8 @@ impl FakeDevice {
     fn configs(&self) -> Vec<SupportedStreamConfigRange> {
         vec![SupportedStreamConfigRange::new(
             self.channels,
-            SampleRate(self.sample_rate),
-            SampleRate(self.sample_rate),
+            self.sample_rate,
+            self.sample_rate,
             SupportedBufferSize::Unknown,
             SampleFormat::F32,
         )]
@@ -101,7 +99,7 @@ impl FakeDevice {
     fn default_config(&self) -> SupportedStreamConfig {
         SupportedStreamConfig::new(
             self.channels,
-            SampleRate(self.sample_rate),
+            self.sample_rate,
             SupportedBufferSize::Unknown,
             SampleFormat::F32,
         )
@@ -240,9 +238,9 @@ impl FakeAudioCapture {
             request.sample_rate,
             request.channels,
         );
-        let input_rate = input_config.sample_rate().0;
+        let input_rate = input_config.sample_rate();
         let input_channels = input_config.channels();
-        let output_rate = output_config.sample_rate().0;
+        let output_rate = output_config.sample_rate();
         let output_channels = output_config.channels();
 
         let buffer_size =
@@ -590,6 +588,7 @@ impl DiscardOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ringbuf::traits::Consumer;
 
     fn capture(input_count: u32, failures_before_success: u32) -> FakeAudioCapture {
         FakeAudioCapture::new(

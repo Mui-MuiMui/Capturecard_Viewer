@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use log::{debug, info, warn};
+use ringbuf::traits::Consumer;
 
 use super::audio::{AudioChunk, AudioTrack};
 use super::convert::{even_size, rgb_to_nv12, Nv12Matrix};
@@ -213,7 +214,7 @@ impl Session {
 
     /// リングに溜まっている分を書く。
     fn drain(&mut self) -> Result<(), RecordingError> {
-        while let Some((frame, received_at)) = self.consumer.as_mut().and_then(|c| c.pop()) {
+        while let Some((frame, received_at)) = self.consumer.as_mut().and_then(|c| c.try_pop()) {
             self.process(frame, received_at)?;
         }
         Ok(())
@@ -498,7 +499,8 @@ fn finishes_audio_after(error: &RecordingError) -> bool {
         | RecordingError::ReplayDiskShort { .. }
         | RecordingError::EncoderUnavailable { .. }
         | RecordingError::NoVideo
-        | RecordingError::Platform { .. } => false,
+        | RecordingError::Platform { .. }
+        | RecordingError::ThreadStopped => false,
     }
 }
 
@@ -676,6 +678,7 @@ mod tests {
             },
             RecordingError::NoVideo,
             RecordingError::Platform { reason: reason() },
+            RecordingError::ThreadStopped,
         ] {
             assert!(!finishes_audio_after(&error), "{error:?}");
         }

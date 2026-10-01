@@ -466,11 +466,7 @@ impl CaptureCardViewer {
                 Ok(ApplyMessage::Finished(result)) => break Some(result),
                 Err(TryRecvError::Empty) => break None,
                 // 結果を送らずにスレッドが終わった。失敗として扱う
-                Err(TryRecvError::Disconnected) => {
-                    break Some(Err(ApplyError::Network(
-                        "the update thread ended without a result".to_string(),
-                    )))
-                }
+                Err(TryRecvError::Disconnected) => break Some(Err(ApplyError::ThreadEnded)),
             }
         };
         let Some(result) = finished else {

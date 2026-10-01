@@ -16,18 +16,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use ringbuf::HeapRb;
+use ringbuf::traits::{Producer, Split};
+use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 use super::frame_buffer::VideoFrame;
 
 /// リングに積む 1 件。フレームと、それを受け取った時刻（録画の PTS の元）。
 pub type TappedFrame = (Arc<VideoFrame>, Instant);
 
-type TapRing = Arc<HeapRb<TappedFrame>>;
-type TapProducer = ringbuf::Producer<TappedFrame, TapRing>;
+type TapProducer = HeapProd<TappedFrame>;
 
 /// リングの読み手。録画スレッドが持つ。
-pub type VideoTapConsumer = ringbuf::Consumer<TappedFrame, TapRing>;
+pub type VideoTapConsumer = HeapCons<TappedFrame>;
 
 /// リングの容量（枚）。
 ///
@@ -127,7 +127,7 @@ impl VideoTap {
         }
         let pushed = match self.shared.slot.try_lock() {
             Ok(mut slot) => match slot.as_mut() {
-                Some(producer) => producer.push((frame, received_at)).is_ok(),
+                Some(producer) => producer.try_push((frame, received_at)).is_ok(),
                 // 旗を読んだあとに抜かれた
                 None => false,
             },
@@ -149,6 +149,7 @@ impl VideoTap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ringbuf::traits::Consumer;
 
     fn frame(marker: u8) -> Arc<VideoFrame> {
         Arc::new(VideoFrame {
@@ -173,7 +174,7 @@ mod tests {
         let at = Instant::now();
         tap.offer(frame(7), at);
 
-        let (received, received_at) = consumer.pop().expect("積んだ 1 枚が読める");
+        let (received, received_at) = consumer.try_pop().expect("積んだ 1 枚が読める");
         assert_eq!(received.data, vec![7u8; 12]);
         assert_eq!(received_at, at);
         assert_eq!(tap.dropped(), 0);
@@ -189,7 +190,7 @@ mod tests {
 
         // 容量 3 を超えた 2 枚は捨てて数える。待たない
         assert_eq!(tap.dropped(), 2);
-        let kept: Vec<u8> = std::iter::from_fn(|| consumer.pop())
+        let kept: Vec<u8> = std::iter::from_fn(|| consumer.try_pop())
             .map(|(f, _)| f.data[0])
             .collect();
         assert_eq!(kept, vec![0, 1, 2]);
@@ -205,8 +206,8 @@ mod tests {
 
         assert!(!tap.is_attached());
         // 抜く前に積んだ分は、録画スレッドが最後に書き切るために読める
-        assert_eq!(consumer.pop().map(|(f, _)| f.data[0]), Some(1));
-        assert!(consumer.pop().is_none());
+        assert_eq!(consumer.try_pop().map(|(f, _)| f.data[0]), Some(1));
+        assert!(consumer.try_pop().is_none());
     }
 
     #[test]
