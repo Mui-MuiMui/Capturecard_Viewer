@@ -94,7 +94,7 @@ impl AudioStats {
         let millis = |units: i64| units as f64 * 1000.0 / UNITS_PER_SECOND as f64;
         let drift = match self.drift {
             Some((by_clock, by_samples)) if by_clock > 0 => format!(
-                "途切れずに続いた最後の区間で、映像の時計（PC）の {:.3} 秒に対して音声のサンプル数 ÷ レートは {:.3} 秒（差 {:+.1}ms、{:+.0}ppm。負なら音声が映像より遅れていく）",
+                "途切れずに続いた最後の区間で、映像の時計（PC）の {:.3} 秒に対して音声のサンプル数 ÷ レートは {:.3} 秒（差 {:+.1}ms、{:+.0}ppm。負なら録画の音声が映像より先行していく）",
                 secs(by_clock),
                 secs(by_samples),
                 millis(by_samples - by_clock),

@@ -205,7 +205,8 @@ impl DriftSpan {
     }
 
     /// `(PC の時計での経過, サンプル数 ÷ レート)`。どちらも 100ns 単位。
-    /// 後者が前者より短ければ、音声が映像より遅れていく（入力デバイスの時計が遅い）。
+    /// 後者が前者より短ければ入力デバイスの時計が遅く、サンプル数で数える音声の PTS が実際の時刻より
+    /// 小さくなっていくので、録画の音声は映像より先行していく（#398 の実測で確かめた向き）。
     pub(super) fn measure(&self) -> (i64, i64) {
         let by_clock = self.end.last_push.saturating_sub(self.start.last_push);
         let samples = self
