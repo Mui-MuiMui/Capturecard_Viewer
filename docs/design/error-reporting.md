@@ -17,6 +17,7 @@
 - **文言はそのエラー型の `Display` が出す。** 文言を `status.rs` へ集めると、バリアントを増やすたびに離れた場所の `match` を足すことになり、実際に英語の文言（"Failed to build input stream: ..."）が残っていた。バリアントから文言への対応は中身のすぐ隣（`Display`）に置き、文字列の実体は多言語対応のために `crate::i18n` に置く（`docs/design/i18n.md`）
 - **`status.rs` が持つのは定型文（`ErrorSource::headline`）との連結と表示用の組み立てだけ。** 発生源ごとの文言をここで `match` しない
 - **設定のデバイスが Windows 側にも見えていないときの案内（#236）は、新しい発生源を作らず失敗の理由の前に添える。** `ErrorSource::Video` / `Audio` の 1 件として間引きも「接続状態」タブもそのまま効く。判定の条件は `docs/design/reconnect.md` の「列挙の結果をログへ出し、Windows 側にも無ければ知らせる」
+- **スクリーンショットの効果音の失敗（読み込めない・出力先を開けない）は `ErrorSource::ScreenshotSound` に載せ、画像の `ErrorSource::Screenshot` と分ける（#356）。** 同じ発生源だったころは、画像を保存できているのに定型文が「スクリーンショットを出力できません」になり、保存の成功（`errors.clear(Screenshot)`）が効果音の失敗まで消していた。エラー型は `ScreenshotError` のままで、発生源だけを呼び出し側（`app::screenshot_sound`）で選ぶ。出力先を開けない失敗は同じ理由が続く間 1 度だけ記録し（`should_report_sound_output`）、60 秒ごとの再通知もしない。撮影のたびに届く失敗で、画像は保存できているため。理由は「接続状態」タブに残る。開けるようになるか、適用した効果音を読み込めたら `errors.clear(ScreenshotSound)` で取り下げる。読み込めても出力先の失敗が続いている間は、記録をその理由へ戻す（トーストは出さない）
 - **UI へ渡す `DeviceEvent` は `String` のまま。** ワーカー（`app::worker_connect`）が `to_string()` で落として送る。いまの再試行（`ConnectRetry`）は失敗の理由で戦略を変えないため、種別を載せても読む側が無い。理由で分岐したくなったらここを enum へ広げる
 - **ホットキーの「登録できなかった理由」は 2 段になっている。** `HotkeyError` が理由そのもので、それを「どのキーを登録しようとしたか」と一緒に包んだのが `HotkeyAssignmentError`。設定画面の一覧（`ui::hotkeys_tab`）は同じアクションでもキーが変われば別の失敗として出すため、キー文字列を捨てられない
 - **`logging.rs` は `Result<_, String>` のまま。** ロガーを初期化する前の失敗なので `report_error` も `log` も使えず、`main.rs` が受けて捨てるだけになる。種別で分岐する読み手がいない
@@ -30,3 +31,5 @@
 値は `CaptureCardViewer::connection_status()` が作って `status::ConnectionStatus` で渡す。**描画中にデバイスへ問い合わせない。** ワーカーが定期的に書き出している `DeviceSnapshot`（`video::ActiveVideo` / `audio::ActiveAudio` を含む）を `update()` の先頭で 1 回読んであり、ここはその複製を組み替えるだけ。
 
 出すのは設定に書かれた値ではなく**デバイスが確定させた値**。設定画面では対応していない組み合わせも選べるため、要求した値と食い違う。例外はフレームレートで、nokhwa のバインディングが実際の値を取れないため要求した値を「要求フレームレート」として出している（`video/capture.rs` の `start_capture` のコメント）。
+
+映像・音声の枠の下に、**スクリーンショットの効果音の直近の失敗があるときだけ**「スクリーンショットの効果音」の枠を出す（#356）。効果音は繋ぎっぱなしのデバイスではないので、接続中・未接続の見出しは持たない。

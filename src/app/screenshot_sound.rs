@@ -13,9 +13,11 @@ use super::CaptureCardViewer;
 use crate::screenshot::ScreenshotError;
 use crate::screenshot_sound;
 use crate::status::ErrorSource;
+use chrono::Local;
 use log::{debug, warn};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// 効果音のスレッドから UI スレッドへ返すもの。
 pub(super) enum SoundMessage {
@@ -138,20 +140,26 @@ impl CaptureCardViewer {
 
     /// 再生スレッドが出力先を開けたかを取り込む。
     ///
-    /// **同じ理由が続く間は 1 度だけ報告する。** スクリーンショットの保存に成功すると
-    /// `ErrorSource::Screenshot` の記録が消える（`apply_screenshot_outcome`）ので、
-    /// `ErrorCenter` の間引きだけでは撮影のたびにトーストが出てしまう。
-    /// 出力先を開けたら記録を落とし、次に開けなくなったときはまた知らせる。
+    /// **同じ理由が続く間は 1 度だけ報告する。** 撮影のたびに鳴らそうとするので、
+    /// 出力デバイスが無いまま撮り続けると同じ失敗が撮影の回数だけ届く。
+    /// 一定時間ごとの再通知（`ErrorCenter` の間隔）も入れていない。画像は保存できて
+    /// いて、撮るたびに思い出させる必要が無いため。理由は「接続状態」タブに残る。
+    ///
+    /// 出力先を開けるようになったら記録を落とし（タブからも消える）、次に開けなく
+    /// なったときはまた知らせる。
     fn apply_sound_output(&mut self, outcome: Result<(), ScreenshotError>) {
         let reason = outcome.err().map(|e| e.to_string());
         let report = should_report_sound_output(self.sound_output_failure.as_deref(), &reason);
-        if let Some(reason) = &reason {
-            if report {
+        match &reason {
+            Some(reason) if report => {
                 warn!("効果音を鳴らせない: {}", reason);
-                self.report_error(ErrorSource::Screenshot, reason.clone());
-            } else {
-                debug!("効果音を鳴らせない（報告済み）: {}", reason);
+                self.report_error(ErrorSource::ScreenshotSound, reason.clone());
             }
+            Some(reason) => debug!("効果音を鳴らせない（報告済み）: {}", reason),
+            None if self.sound_output_failure.is_some() => {
+                self.errors.clear(ErrorSource::ScreenshotSound);
+            }
+            None => {}
         }
         self.sound_output_failure = reason;
     }
@@ -180,6 +188,27 @@ impl CaptureCardViewer {
                     return;
                 }
                 let Some(e) = error else {
+                    // 読み込めたので、前に読めなかった記録を取り下げる。ただし
+                    // 出力先を開けない失敗が続いている間は、記録をその理由へ戻す
+                    // （読めなかった記録が上書きしていることがあるため）。
+                    // 報告済みの理由なので、トーストは出さない
+                    match self.sound_output_failure.clone() {
+                        None => self.errors.clear(ErrorSource::ScreenshotSound),
+                        Some(reason) => {
+                            let latest = self
+                                .errors
+                                .latest(ErrorSource::ScreenshotSound)
+                                .map(|recorded| recorded.message.as_str());
+                            if latest != Some(reason.as_str()) {
+                                self.errors.record(
+                                    ErrorSource::ScreenshotSound,
+                                    reason,
+                                    Instant::now(),
+                                    Local::now(),
+                                );
+                            }
+                        }
+                    }
                     return;
                 };
                 warn!("効果音の適用: {}", e);
@@ -189,7 +218,7 @@ impl CaptureCardViewer {
                 if !matches!(e, ScreenshotError::SoundFileUndecodable { .. }) {
                     self.last_sound_file = None;
                 }
-                self.report_error(ErrorSource::Screenshot, e.to_string());
+                self.report_error(ErrorSource::ScreenshotSound, e.to_string());
             }
             SoundLoadPurpose::TestPlay { id, volume } => {
                 let accepted = match self.screenshot_manager.lock() {
@@ -206,7 +235,7 @@ impl CaptureCardViewer {
                 // 読めなければ内蔵音で鳴らし、理由をトーストへ出す
                 if let Some(e) = error {
                     warn!("テスト再生で効果音を読み込めない: {}", e);
-                    self.report_error(ErrorSource::Screenshot, e.to_string());
+                    self.report_error(ErrorSource::ScreenshotSound, e.to_string());
                 }
                 self.play_sound(data, volume);
             }
