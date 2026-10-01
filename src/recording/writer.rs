@@ -493,6 +493,41 @@ pub(super) fn memory_sample(
     Ok(sample)
 }
 
+/// 前の出力に使ったサンプルを次も使えるか。バッファが 1 つで、要る大きさ以上あるときだけ
+/// （`ConvertToContiguousBuffer` やエンコーダがバッファを差し替えていたら作り直す）。
+fn can_reuse_output(buffer_count: u32, max_length: u32, needed: u32) -> bool {
+    buffer_count == 1 && max_length >= needed
+}
+
+/// エンコーダ MFT の出力に使ったサンプルを、次の出力の受け口として片付ける
+/// （`encoder.rs` の `EncoderMft`）。使えないなら `false`。
+///
+/// 前の出力の時刻・長さ・キーフレームの印（`MFSampleExtension_CleanPoint` など）が次の出力に
+/// 残らないようにする。時刻と長さは消せないので 0 にする（`read_output` は取れなければ 0 と
+/// みなすので、新しく作ったサンプルと同じ読み方になる）。
+pub(super) fn reset_for_reuse(sample: &IMFSample, needed: u32) -> windows::core::Result<bool> {
+    let count = unsafe { sample.GetBufferCount() }?;
+    let buffer = if count == 1 {
+        Some(unsafe { sample.GetBufferByIndex(0) }?)
+    } else {
+        None
+    };
+    let max_length = match &buffer {
+        Some(buffer) => unsafe { buffer.GetMaxLength() }?,
+        None => 0,
+    };
+    let Some(buffer) = buffer.filter(|_| can_reuse_output(count, max_length, needed)) else {
+        return Ok(false);
+    };
+    unsafe {
+        sample.DeleteAllItems()?;
+        sample.SetSampleTime(0)?;
+        sample.SetSampleDuration(0)?;
+        buffer.SetCurrentLength(0)?;
+    }
+    Ok(true)
+}
+
 /// 16bit PCM の 1 秒あたりのバイト数（48kHz 2ch なら 192000）
 const PCM_BYTES_PER_SECOND: u32 = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS as u32 * 2;
 
@@ -543,8 +578,8 @@ mod tests {
     use crate::recording::convert::rgb_to_nv12;
     use tempfile::tempdir;
     use windows::Win32::Media::MediaFoundation::{
-        MFCreateSourceReaderFromURL, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-        MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+        MFCreateSourceReaderFromURL, MFSampleExtension_CleanPoint,
+        MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
     };
 
     fn params(width: u32, height: u32, fps: u32) -> WriterParams {
@@ -575,6 +610,35 @@ mod tests {
     fn pack_puts_the_first_value_in_the_high_bits() {
         assert_eq!(pack(1920, 1080), (1920u64 << 32) | 1080);
         assert_eq!(pack(1, 1), 0x0000_0001_0000_0001);
+    }
+
+    #[test]
+    fn can_reuse_output_needs_one_buffer_large_enough() {
+        assert!(can_reuse_output(1, 4096, 4096));
+        assert!(can_reuse_output(1, 8192, 4096));
+        // 大きさが変わって足りない、またはバッファが差し替えられていたら作り直す
+        assert!(!can_reuse_output(1, 4095, 4096));
+        assert!(!can_reuse_output(0, 0, 4096));
+        assert!(!can_reuse_output(2, 8192, 4096));
+    }
+
+    #[test]
+    #[ignore = "Media Foundation が必要（CI のランナーにあるかは未確認）"]
+    fn reset_for_reuse_clears_the_previous_output() {
+        // 実行: cargo test -- --ignored reset_for_reuse_clears_the_previous_output
+        let _com = ComApartment::enter(ComModel::MultiThreaded).expect("COM を初期化できる");
+        let _mf = MfPlatform::start().expect("MF を起こせる");
+        let sample = memory_sample(&[1, 2, 3, 4], 1234, 567).expect("サンプルを作れる");
+        unsafe { sample.SetUINT32(&MFSampleExtension_CleanPoint, 1) }.expect("印を付けられる");
+
+        assert!(reset_for_reuse(&sample, 4).expect("片付けられる"));
+        assert!(unsafe { sample.GetUINT32(&MFSampleExtension_CleanPoint) }.is_err());
+        assert_eq!(unsafe { sample.GetSampleTime() }.expect("時刻"), 0);
+        assert_eq!(unsafe { sample.GetSampleDuration() }.expect("長さ"), 0);
+        let buffer = unsafe { sample.GetBufferByIndex(0) }.expect("バッファ");
+        assert_eq!(unsafe { buffer.GetCurrentLength() }.expect("長さ"), 0);
+        // 要る大きさに足りなければ使わない
+        assert!(!reset_for_reuse(&sample, 5).expect("確かめられる"));
     }
 
     #[test]

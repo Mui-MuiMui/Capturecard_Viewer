@@ -49,7 +49,7 @@ use super::encoder_setup::{
     configure_audio, configure_video, enumerate, open_first, stream_ids, Transform,
 };
 use super::pts::{AUDIO_CHANNELS, AUDIO_SAMPLE_RATE};
-use super::writer::{allocated_string, WriterParams};
+use super::writer::{allocated_string, reset_for_reuse, WriterParams};
 use super::EncoderInfo;
 use crate::i18n::{self, Text};
 
@@ -149,6 +149,10 @@ pub(super) struct EncoderMft {
     produced: u64,
     /// 取り出したがまだ渡していない出力
     ready: Vec<EncodedSample>,
+    /// 出力を受け取るサンプル（呼び出し側がバッファを渡す型のとき）。中身は `read_output` で
+    /// 写し取るので、次の `ProcessOutput` に使い回す。同期型は 1 枚ごとに `ProcessOutput` を
+    /// 「出る → 入力が足りない」まで呼ぶので、使い回さないと 1 枚あたり数 MB を 2 回確保する
+    spare_output: Option<IMFSample>,
 }
 
 impl EncoderMft {
@@ -240,6 +244,7 @@ impl EncoderMft {
             sequence_header: None,
             produced: 0,
             ready: Vec::new(),
+            spare_output: None,
         };
         encoder
             .prepare(configure)
@@ -428,10 +433,15 @@ impl EncoderMft {
 
     /// `ProcessOutput` を 1 回呼ぶ。
     fn process_output(&mut self) -> Result<OutputResult, EncoderError> {
-        let sample = if self.provides_samples {
-            None
+        // 自分で渡したサンプルだけを使い回す。エンコーダが用意したものは持たない
+        let ours = !self.provides_samples;
+        let sample = if ours {
+            Some(
+                self.reusable_output_sample()
+                    .map_err(EncoderError::Encode)?,
+            )
         } else {
-            Some(self.output_sample().map_err(EncoderError::Encode)?)
+            None
         };
         let mut buffers = [MFT_OUTPUT_DATA_BUFFER {
             dwStreamID: self.output_stream,
@@ -450,10 +460,18 @@ impl EncoderMft {
                     let encoded = self.read_output(&sample).map_err(EncoderError::Encode)?;
                     self.produced += 1;
                     self.ready.push(encoded);
+                    if ours {
+                        // 中身は `EncodedSample` へ写し終えた。次の出力の受け口にする
+                        self.spare_output = Some(sample);
+                    }
                 }
                 Ok(OutputResult::Produced)
             }
             Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                // 何も書かれていないので、そのまま次に回す（以前はここで毎回捨てていた）
+                if ours {
+                    self.spare_output = sample;
+                }
                 Ok(OutputResult::NeedMoreInput)
             }
             Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
@@ -475,13 +493,30 @@ impl EncoderMft {
         }
     }
 
-    /// 出力を受け取るサンプル。エンコーダが大きさを教えてくれなければ見積もる。
-    fn output_sample(&self) -> windows::core::Result<IMFSample> {
-        let bytes = match (self.output_bytes, self.kind) {
+    /// 出力を受け取るサンプル。前に使ったものが残っていれば、印と長さを消して使い回す。
+    /// 使えなければ（`can_reuse_output`）作り直す。
+    fn reusable_output_sample(&mut self) -> windows::core::Result<IMFSample> {
+        let bytes = self.output_sample_bytes();
+        if let Some(sample) = self.spare_output.take() {
+            // 使い回せないか、片付けに失敗したら捨てて作り直す（以前と同じ確保に倒れるだけ）
+            if matches!(reset_for_reuse(&sample, bytes), Ok(true)) {
+                return Ok(sample);
+            }
+        }
+        self.output_sample(bytes)
+    }
+
+    /// 出力のバッファの大きさ。エンコーダが教えてくれなければ見積もる。
+    fn output_sample_bytes(&self) -> u32 {
+        match (self.output_bytes, self.kind) {
             (0, MediaKind::Video) => self.video_frame_bytes().unwrap_or(4 * 1024 * 1024),
             (0, MediaKind::Audio) => FALLBACK_AUDIO_OUTPUT_BYTES,
             (bytes, _) => bytes,
-        };
+        }
+    }
+
+    /// 出力を受け取るサンプルを新しく作る。
+    fn output_sample(&self, bytes: u32) -> windows::core::Result<IMFSample> {
         let alignment = self.output_alignment.saturating_sub(1);
         let buffer = unsafe { MFCreateAlignedMemoryBuffer(bytes, alignment) }?;
         let sample = unsafe { MFCreateSample() }?;
