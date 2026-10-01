@@ -37,7 +37,7 @@ WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の�
 
 ### 文書と実コードの食い違い
 
-この設計とは別に、裏取りの途中で見つけたもの。どれも挙動の話ではなく説明の古さ。この PR では直さず、起票を提案する。
+この設計とは別に、裏取りの途中で見つけたもの。どれも挙動の話ではなく説明の古さ。**5 件とも #395 で直した**（あわせて `device-worker.md` の「DirectShow で確かめたもの・確かめていないもの」へ GC551 の実機の結果を書き足した）。
 
 - `docs/ARCHITECTURE.md` の「音声パイプライン」の図は、レート・チャンネル変換をリングバッファの**手前**に置いている。実際はリングに入力の形のまま積み、変換は出力コールバックの中（`PassthroughConverter`）で行う（`docs/design/audio.md` の「入出力の形が違う場合は出力側で変換する」が正しい）
 - `docs/design/audio.md` の「ミュートは音量と別に持つ」は「`AudioCapture` の `muted`（`Arc<AtomicBool>`）」と書いているが、実際は `AudioControls::muted`（`AtomicBool`。`Arc<AudioControls>` ごと共有）
