@@ -165,6 +165,9 @@ pub(super) trait AudioBackend {
     /// 入力がリングバッファの満杯で捨てたフレーム数の累計。開いていなければ `None`
     fn dropped_frame_count(&self) -> Option<u32>;
 
+    /// cpal が知らせた入力の取りこぼし（`Xrun`）の累計。開いていなければ `None`
+    fn xrun_count(&self) -> Option<u32>;
+
     /// ストリームのエラー旗を読んで落とす。**読んだ時点で下りる**ので、
     /// 見送る場合は呼び出し側が保持する（`super::worker_timers`）
     fn take_stream_error(&self) -> bool;
@@ -482,6 +485,10 @@ pub(super) mod mock {
         }
 
         fn dropped_frame_count(&self) -> Option<u32> {
+            None
+        }
+
+        fn xrun_count(&self) -> Option<u32> {
             None
         }
 

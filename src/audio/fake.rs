@@ -133,6 +133,8 @@ pub struct FakeAudioCapture {
     underruns: Arc<AtomicU32>,
     /// 入力がリングバッファの満杯で捨てたフレーム数。`AudioCapture` と同じ扱い
     dropped_frames: Arc<AtomicU32>,
+    /// cpal が知らせた入力の取りこぼし（`Xrun`）の回数（Issue #377）。開き直すたびに新しい `Arc` へ差し替える
+    xruns: Arc<AtomicU32>,
 }
 
 impl FakeAudioCapture {
@@ -151,6 +153,7 @@ impl FakeAudioCapture {
             clock: Arc::new(Instant::now),
             underruns: Arc::new(AtomicU32::new(0)),
             dropped_frames: Arc::new(AtomicU32::new(0)),
+            xruns: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -315,6 +318,7 @@ impl FakeAudioCapture {
         self.resample_telemetry = resample_telemetry;
         self.underruns = underruns;
         self.dropped_frames = dropped_frames;
+        self.xruns = Arc::new(AtomicU32::new(0));
         self.active = Some(ActiveAudio {
             input_device: input.name,
             output_device: output.name,
@@ -356,6 +360,14 @@ impl FakeAudioCapture {
             .map(|_| self.dropped_frames.load(Ordering::Relaxed))
     }
 
+    /// 入力の取りこぼし（`Xrun`）の累計。フェイクは取りこぼさないので 0 のまま。
+    /// 開いていなければ `None`
+    pub fn xrun_count(&self) -> Option<u32> {
+        self.active
+            .as_ref()
+            .map(|_| self.xruns.load(Ordering::Relaxed))
+    }
+
     pub fn stop_capture(&mut self) {
         self.active = None;
         self.resample_telemetry = None;
@@ -375,6 +387,7 @@ impl FakeAudioCapture {
         self.opened_at = None;
         self.underruns = Arc::new(AtomicU32::new(0));
         self.dropped_frames = Arc::new(AtomicU32::new(0));
+        self.xruns = Arc::new(AtomicU32::new(0));
     }
 
     pub fn take_stream_error(&self) -> bool {
@@ -530,12 +543,14 @@ mod tests {
         assert_eq!(status.ratio, 1.0);
         assert!(capture.underrun_count().is_some());
         assert!(capture.dropped_frame_count().is_some());
+        assert_eq!(capture.xrun_count(), Some(0));
 
         capture.stop_capture();
         assert!(capture.active().is_none());
         assert!(capture.resample_status().is_none());
         assert!(capture.underrun_count().is_none());
         assert!(capture.dropped_frame_count().is_none());
+        assert!(capture.xrun_count().is_none());
     }
 
     #[test]

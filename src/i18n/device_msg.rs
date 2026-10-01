@@ -195,6 +195,17 @@ pub fn dropped_frame_count(count: u32) -> String {
     }
 }
 
+/// cpal が知らせた入力の取りこぼし（`Xrun`）の回数（Issue #377）。
+/// 音声を開いていない（`None`）ときは「-」を出す。
+pub fn xrun_count(count: Option<u32>) -> String {
+    match (language(), count) {
+        (Language::Japanese, Some(count)) => format!("入力の取りこぼし: {count} 回"),
+        (Language::Japanese, None) => "入力の取りこぼし: -".to_string(),
+        (Language::English, Some(count)) => format!("Input glitches (xrun): {count}"),
+        (Language::English, None) => "Input glitches (xrun): -".to_string(),
+    }
+}
+
 // ---- 「デバイス設定」タブ（ui/device_tab.rs / ui/capability.rs） ----
 
 pub fn video_capability_failed(reason: impl Display) -> String {
@@ -353,6 +364,16 @@ mod tests {
         assert_eq!(
             video_camera_open_failed("Cam", "busy"),
             "映像デバイス 'Cam' を開けない: busy"
+        );
+    }
+
+    #[test]
+    fn xrun_count_shows_the_number_or_a_dash() {
+        assert_eq!(xrun_count(Some(3)), "入力の取りこぼし: 3 回");
+        assert_eq!(xrun_count(None), "入力の取りこぼし: -");
+        assert_eq!(
+            with_language(Language::English, || xrun_count(Some(0))),
+            "Input glitches (xrun): 0"
         );
     }
 

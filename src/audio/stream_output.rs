@@ -81,7 +81,7 @@ where
             );
         },
         // 入力側と同じ理由で、旗を立てるだけにする
-        move |e| handle_stream_error("出力", &e, &stream_error),
+        move |e| handle_stream_error("出力", &e, &stream_error, None),
         None,
     )
 }

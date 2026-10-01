@@ -4,7 +4,7 @@
 //! 移行とプリセットの整え）、`SettingsError` をここに置く。各セクションの型と
 //! serde の補助は子モジュールに分けてある（映像 `video`、音声 `audio`、
 //! スクリーンショット `screenshot`、録画 `recording`、UI と更新 `ui`、
-//! ホットキー `hotkeys`、プリセット `preset`、読み書き `store`）。
+//! ホットキー `hotkeys`、プリセット `preset`、読み書き `store`、書き込み `write`、書き出し / 読み込み `transfer`）。
 //!
 //! 外から使う経路（`crate::settings::...`）はここの `pub use` に集める。
 //! 外からテストでしか使わない項目は再輸出しない（誰も使わない `pub use` が
@@ -25,8 +25,10 @@ mod screenshot;
 mod store;
 #[cfg(test)]
 mod testing;
+mod transfer;
 mod ui;
 mod video;
+mod write;
 
 pub use audio::{
     AudioSettings, DEFAULT_CHANNELS, DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS, MIN_BUFFER_MS,
@@ -49,7 +51,8 @@ pub use screenshot::{
     ScreenshotDestination, ScreenshotEncoding, ScreenshotFormat, ScreenshotSettings,
     DEFAULT_SOUND_FILE, MAX_JPEG_QUALITY, MIN_JPEG_QUALITY,
 };
-pub use store::{export_file_name, export_to, import_from, AutoSavePolicy};
+pub use store::AutoSavePolicy;
+pub use transfer::{export_file_name, export_to, import_from};
 pub use ui::{LanguageSetting, UiSettings, UpdateSettings, MAX_VOLUME, MIN_VOLUME};
 pub use video::{
     ColorRange, ColorSpace, VideoBackendSetting, VideoSettings, MAX_VIDEO_ADJUSTMENT,
