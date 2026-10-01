@@ -53,6 +53,11 @@ pub struct FormatCapability {
     pub name: String,
     /// そのフォーマットで開ける映像モードの一覧
     pub modes: Vec<VideoMode>,
+    /// デバイスがいま出している解像度。`modes` の中にあるものだけ入る。
+    ///
+    /// DirectShow の経路だけが `IAMStreamConfig::GetFormat` から埋める（入力信号の
+    /// 解像度を映すドライバーがある、#391）。Media Foundation とフェイクは `None`
+    pub current_resolution: Option<(u32, u32)>,
 }
 
 impl FormatCapability {
@@ -60,7 +65,18 @@ impl FormatCapability {
         Self {
             name: name.into(),
             modes,
+            current_resolution: None,
         }
+    }
+
+    /// いまの解像度を添える。`modes` に無い解像度は捨てる
+    pub fn with_current_resolution(mut self, current: Option<(u32, u32)>) -> Self {
+        self.current_resolution = current.filter(|&resolution| {
+            self.modes
+                .iter()
+                .any(|mode| mode.resolution() == resolution)
+        });
+        self
     }
 }
 

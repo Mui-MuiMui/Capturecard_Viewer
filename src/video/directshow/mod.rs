@@ -157,18 +157,20 @@ impl DirectShowCapture {
                 source: e.to_string(),
             },
         })?;
-        let Some(candidates) = candidates else {
+        let Some(queried) = candidates else {
             warn!(
                 "DirectShow のデバイス {} は IAMStreamConfig を持たないので、対応形式を出せない",
                 display
             );
             return Ok(Vec::new());
         };
-        let capabilities = devices::capabilities_from_candidates(&candidates);
+        let capabilities =
+            devices::capabilities_from_candidates(&queried.candidates, queried.current);
         debug!(
-            "DirectShow のデバイス能力の内訳（{}、{:.1}ms）: {}",
+            "DirectShow のデバイス能力の内訳（{}、{:.1}ms、いまの解像度: {:?}）: {}",
             display,
             elapsed_ms(start),
+            queried.current,
             capabilities
                 .iter()
                 .map(|capability| format!("{}: {} 件", capability.name, capability.modes.len()))
