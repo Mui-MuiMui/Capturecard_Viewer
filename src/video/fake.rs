@@ -31,6 +31,7 @@ use super::frame_buffer::VideoFrames;
 use super::frame_sink::FrameSink;
 use super::test_pattern::{burn_frame_number, description_for, pattern_for, render_pattern};
 use super::VideoError;
+use crate::audio::AudioPinState;
 use crate::repaint::RepaintWaker;
 
 /// フェイクの映像デバイスが名乗る名前の前半。後ろに 1 から始まる番号が付く
@@ -229,6 +230,8 @@ impl FakeVideoCapture {
             // 実機は nokhwa の列挙名（`YUYV`）が入るので揃える
             format: Some("YUYV".to_string()),
             requested_fps: mode.fps,
+            // 音声ピンを流すフェイクは第 2 段（`docs/design/directshow-audio.md` の (8)）
+            audio_pin: AudioPinState::NotApplicable,
         });
         Ok(())
     }

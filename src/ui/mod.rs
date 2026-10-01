@@ -534,6 +534,8 @@ mod tests {
                 saturation: 30,
             },
             audio: AudioSettings {
+                // 既定値（device）と異なる値にして、反映の有無を見分けられるようにする
+                input_source: crate::settings::AudioInputSource::VideoPin,
                 input_device_name: Some("Line In".to_string()),
                 output_device_name: Some("Speakers".to_string()),
                 sample_rate: Some(44100),

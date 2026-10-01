@@ -92,7 +92,7 @@ pub(super) fn record_until_size_changes(audio_device: bool) -> (i64, i64) {
     if audio_device {
         audio
             .start_passthrough(&PassthroughRequest {
-                input_device_name: Some("Fake Audio Input 1"),
+                input: crate::audio::PassthroughInput::Device(Some("Fake Audio Input 1")),
                 output_device_name: Some("Fake Audio Output 1"),
                 sample_rate: None,
                 channels: None,

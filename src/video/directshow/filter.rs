@@ -52,8 +52,10 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoTaskMemAlloc, IPersist_Impl, CLSCTX_INPROC_SERVER,
 };
 
+use super::audio_pin::{pin_format_of, AudioStream};
 use super::media_type::{sample_format_of, OwnedMediaType, SampleFormat};
 use super::video_stream::VideoStream;
+use crate::audio::{AudioPinFeed, PinFormat};
 use crate::video::frame_sink::FrameSink;
 
 /// このフィルターのクラス ID。登録はしないので、`GetClassID` に答えるためだけの値
@@ -102,12 +104,14 @@ impl Shared {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MediaKind {
     Video,
+    Audio,
 }
 
 /// 上流と接続したときの形式。媒体ごとに中身が違う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectedFormat {
     Video(SampleFormat),
+    Audio(PinFormat),
 }
 
 /// メディアタイプを読んで、ピンの媒体で受け取れる形式ならその形を返す。
@@ -117,12 +121,14 @@ enum ConnectedFormat {
 unsafe fn accepted_format(kind: MediaKind, mt: &AM_MEDIA_TYPE) -> Option<ConnectedFormat> {
     match kind {
         MediaKind::Video => unsafe { sample_format_of(mt) }.map(ConnectedFormat::Video),
+        MediaKind::Audio => unsafe { pin_format_of(mt) }.map(ConnectedFormat::Audio),
     }
 }
 
 /// ストリーミングスレッドだけが触る状態。媒体ごとの渡し先。
 enum StreamState {
     Video(VideoStream),
+    Audio(AudioStream),
 }
 
 impl StreamState {
@@ -133,6 +139,11 @@ impl StreamState {
             (StreamState::Video(stream), ConnectedFormat::Video(format)) => {
                 stream.format = Some(format);
             }
+            (StreamState::Audio(stream), ConnectedFormat::Audio(format)) => {
+                stream.format = Some(format);
+            }
+            (StreamState::Video(_), ConnectedFormat::Audio(_))
+            | (StreamState::Audio(_), ConnectedFormat::Video(_)) => {}
         }
     }
 
@@ -140,6 +151,8 @@ impl StreamState {
     fn receive(&mut self, sample: &IMediaSample, received_at: Instant) {
         match self {
             StreamState::Video(stream) => stream.receive(sample, received_at),
+            // 音声は受け取った時刻を使わない（録画の PTS は `AudioTap` が積んだ時刻で決まる）
+            StreamState::Audio(stream) => stream.receive(sample),
         }
     }
 }
@@ -655,6 +668,15 @@ impl Renderer {
         Self::new(MediaKind::Video, StreamState::Video(VideoStream::new(sink)))
     }
 
+    /// 音声のレンダラー。受け取った PCM を `feed` へ、グラフの番号 `graph` を
+    /// 添えて渡す（`AudioPinFeed::push`）
+    pub(super) fn audio(feed: AudioPinFeed, graph: u64) -> Self {
+        Self::new(
+            MediaKind::Audio,
+            StreamState::Audio(AudioStream::new(feed, graph)),
+        )
+    }
+
     fn new(kind: MediaKind, stream: StreamState) -> Self {
         let shared = Arc::new(Shared::default());
         let pin = ComObject::new(InputPin {
@@ -687,6 +709,25 @@ impl Renderer {
     pub(super) fn connected_video_format(&self) -> Option<SampleFormat> {
         match self.connected_format()? {
             ConnectedFormat::Video(format) => Some(format),
+            ConnectedFormat::Audio(_) => None,
         }
+    }
+
+    /// 音声のレンダラーが上流と接続できていれば、そのときの形式
+    pub(super) fn connected_audio_format(&self) -> Option<PinFormat> {
+        match self.connected_format()? {
+            ConnectedFormat::Audio(format) => Some(format),
+            ConnectedFormat::Video(_) => None,
+        }
+    }
+
+    /// 接続で決まったアロケーターの 1 バッファのバイト数（= 1 塊の上限）。
+    /// アロケーターが無い・読めないときは `None`
+    pub(super) fn allocator_buffer_bytes(&self) -> Option<u32> {
+        let allocator = self.pin.allocator.lock().ok()?.clone()?;
+        let props = unsafe { allocator.GetProperties() }.ok()?;
+        u32::try_from(props.cbBuffer)
+            .ok()
+            .filter(|bytes| *bytes > 0)
     }
 }

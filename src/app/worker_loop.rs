@@ -24,6 +24,7 @@
 
 use super::backend::{AudioBackend, BackendShared, DeviceBackends, VideoBackend};
 use super::monitor::{DeviceNotVisible, VideoLinkAction};
+use super::monitor_audio_pin::PinWait;
 use super::retry::ConnectRetry;
 use super::worker::{
     AudioTarget, DeviceCommand, DeviceConfig, DeviceEvent, DeviceSnapshot, RetryStatus,
@@ -195,6 +196,10 @@ pub(super) struct WorkerState {
     /// 出し直すために持つ。接続できたら消す
     pub(super) last_video_failure: Option<String>,
     pub(super) last_audio_failure: Option<String>,
+    /// 入力が映像デバイスの音声ピンなのに使えず、音声を開かずに待っている理由（#388）。
+    /// 理由が変わったときだけ開き直しの要求を立てるために持つ
+    /// （`monitor_audio_pin::should_resync_pin_audio`）。音声を開けたら消す
+    pub(super) audio_pin_wait: Option<PinWait>,
 }
 
 impl WorkerState {
@@ -232,6 +237,7 @@ impl WorkerState {
             audio_not_visible: None,
             last_video_failure: None,
             last_audio_failure: None,
+            audio_pin_wait: None,
         }
     }
 
@@ -367,6 +373,7 @@ pub(super) mod testing {
                 None,
                 None,
                 crate::settings::VideoBackendSetting::Auto,
+                false,
             ),
             audio: (
                 input_device.map(str::to_string),
@@ -374,6 +381,7 @@ pub(super) mod testing {
                 None,
                 None,
                 DEFAULT_BUFFER_MS,
+                crate::settings::AudioInputSource::Device,
             ),
             auto_reconnect: false,
         }

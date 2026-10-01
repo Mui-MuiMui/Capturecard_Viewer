@@ -140,6 +140,38 @@ pub fn audio_stream_play_failed(direction: &str, source: impl Display) -> String
     }
 }
 
+// ---- 映像デバイスの音声ピン（audio::PinFailure、app::monitor_audio_pin、#388） ----
+
+/// 音声ピンに繋げなかった理由（`PinFailure`）だけを 1 行で表す。
+pub fn audio_pin_failure(failure: &crate::audio::PinFailure) -> String {
+    use crate::audio::PinFailure;
+    match (failure, language()) {
+        (PinFailure::Connect(source), Language::Japanese) => {
+            format!("音声ピンとつなげない: {source}")
+        }
+        (PinFailure::Connect(source), Language::English) => {
+            format!("cannot connect the audio pin: {source}")
+        }
+        (PinFailure::Run(source), Language::Japanese) => {
+            format!("音声ピンをつなぐと映像を動かせないので外した: {source}")
+        }
+        (PinFailure::Run(source), Language::English) => {
+            format!("removed the audio pin because the video could not run with it: {source}")
+        }
+    }
+}
+
+/// 入力が音声ピンなのに、音声ピンに繋げなかったので音声を開かずに待つ理由。
+pub fn audio_pin_connect_failed(failure: &crate::audio::PinFailure) -> String {
+    let reason = audio_pin_failure(failure);
+    match language() {
+        Language::Japanese => format!("映像デバイスの音声ピンに繋げませんでした（{reason}）"),
+        Language::English => {
+            format!("Could not connect the audio pin of the video device ({reason})")
+        }
+    }
+}
+
 // ---- Windows 側にも見えていない（app::monitor::DeviceNotVisible） ----
 
 pub fn device_not_visible_not_listed(name: impl Display) -> String {

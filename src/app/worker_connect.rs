@@ -9,13 +9,14 @@
 //! **ここに時計やタイマーを置かない。** 「いつ試すか」は
 //! `super::retry::ConnectRetry`、「途絶したか」は `super::monitor` が決める。
 
+use super::backend::CaptureRequest;
 use super::monitor::{decide_device_not_visible, should_log_enumeration, DeviceNotVisible};
 use super::retry::backoff_delay;
 use super::worker::{DeviceConfig, DeviceEvent, VideoTarget};
 use super::worker_loop::WorkerState;
 use crate::audio::AudioDirection;
 use crate::i18n;
-use crate::settings::VideoBackendSetting;
+use crate::settings::{AudioInputSource, VideoBackendSetting};
 use log::{debug, info, warn};
 use std::fmt::Display;
 use std::time::Instant;
@@ -87,7 +88,9 @@ impl WorkerState {
             }
         }
 
-        if config.audio.0.is_none() {
+        // 入力が映像デバイスの音声ピンなら、WASAPI の入力は埋めない。
+        // 「映像デバイスの音声」を選んでいる間は入力デバイス名を書き換えない（#388）
+        if config.audio.0.is_none() && config.audio.5 == AudioInputSource::Device {
             let list = self.audio.list_input_devices();
             debug!("利用できる入力デバイス: {:?}", list);
             if let Some(name) = list.into_iter().next() {
@@ -112,7 +115,7 @@ impl WorkerState {
 
     /// 映像デバイスへの接続を 1 回だけ試す。
     pub(super) fn try_connect_video(&mut self, config: &DeviceConfig, now: Instant) {
-        let (_, resolution, format, fps, backend) = config.video.clone();
+        let (_, resolution, format, fps, backend, connect_audio_pin) = config.video.clone();
         let Some(device_name) = selected_video_device(config.video.0.as_deref()) else {
             self.hold_video_without_device(config);
             return;
@@ -124,13 +127,14 @@ impl WorkerState {
             attempt, device_name, backend
         );
 
-        let result = self.video.start_capture(
-            Some(device_name),
+        let result = self.video.start_capture(&CaptureRequest {
+            device_name: Some(device_name),
             resolution,
-            format.as_deref(),
+            format: format.as_deref(),
             fps,
             backend,
-        );
+            connect_audio_pin,
+        });
 
         match result {
             Ok(()) => {
@@ -282,17 +286,20 @@ impl WorkerState {
         // **入出力のどちらかの列挙に失敗したら、音声は判定しない。** 映像で
         // 失敗した経路があれば判定しないのと同じで、開けない理由が失敗した側に
         // あったかもしれない
+        // 入力が映像デバイスの音声ピンなら、入力は判定しない。比べる WASAPI の名前が無い（#388）
+        let configured_input = match config.audio.5 {
+            AudioInputSource::Device => config.audio.0.as_deref(),
+            AudioInputSource::VideoPin => None,
+        };
         let audio_notice = match (input.as_deref(), output.as_deref()) {
-            (Ok(input), Ok(output)) => {
-                decide_device_not_visible(audio_failures, config.audio.0.as_deref(), Some(input))
-                    .or_else(|| {
-                        decide_device_not_visible(
-                            audio_failures,
-                            config.audio.1.as_deref(),
-                            Some(output),
-                        )
-                    })
-            }
+            (Ok(input), Ok(output)) => decide_device_not_visible(
+                audio_failures,
+                configured_input,
+                Some(input),
+            )
+            .or_else(|| {
+                decide_device_not_visible(audio_failures, config.audio.1.as_deref(), Some(output))
+            }),
             _ => None,
         };
         self.set_video_not_visible(video_notice);

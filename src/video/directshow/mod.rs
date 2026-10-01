@@ -12,6 +12,7 @@
 //! | `devices.rs` | 列挙（`ICreateDevEnum`）、対応形式（`IAMStreamConfig::GetStreamCaps`）、いまの解像度（`GetFormat`）、開く解像度と形式の選び方 |
 //! | `graph.rs` | フィルターグラフの組み立て・開始・停止・破棄 |
 //! | `filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`）。媒体を問わない |
+//! | `audio_pin.rs` | 音声ピン（#388）。有無の記録、塊の長さの提案と接続、`Run` が通らないときに外してやり直す、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
 //! | `video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
 //! | `media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放（COM の初期化は `crate::com`） |
 //!
@@ -21,6 +22,7 @@
 //! 試し直すのは `app::backend::system`、#387）。言語によって変えない（設定に
 //! 残る識別子なので、画面の言語を切り替えると別のデバイスになってしまう）。
 
+mod audio_pin;
 mod devices;
 mod filter;
 mod graph;
@@ -28,6 +30,7 @@ mod media_type;
 mod video_stream;
 
 use log::{debug, info, warn};
+use std::cell::Cell;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -37,8 +40,10 @@ use super::color::SharedColorConversion;
 use super::frame_buffer::VideoFrames;
 use super::frame_sink::FrameSink;
 use super::{elapsed_ms, VideoError};
+use crate::audio::{AudioPinFeed, AudioPinState, PinConnection};
 use crate::com::{ComApartment, ComModel};
 use crate::repaint::RepaintWaker;
+use audio_pin::{AudioPinRequest, PinOutcome};
 use devices::DeviceEntry;
 use graph::{CaptureGraph, FormatRequest, GraphError};
 
@@ -66,18 +71,26 @@ pub struct DirectShowCapture {
     frames: VideoFrames,
     color_conversion: Arc<SharedColorConversion>,
     repaint_waker: RepaintWaker,
+    /// 音声ピンの差し込み口（#388）。音声のバックエンドと同じものを指す。グラフを
+    /// 組むたびに番号を配り、繋いだ音声ピンを書く
+    pin_feed: AudioPinFeed,
+    /// いまのグラフで、音声ピンから届いた塊の長さをログへ出したか。`link_state` が
+    /// `&self` で書くので `Cell`（触るのはワーカーだけ）
+    pin_chunk_logged: Cell<bool>,
     /// **最後に落とす。** グラフや名札（COM のオブジェクト）を手放してから
     /// COM の初期化を戻す。フィールドは宣言順に落ちるので、末尾に置いてある
     _com: Option<ComApartment>,
 }
 
 impl DirectShowCapture {
-    /// 引数の意味は `VideoCapture::new` と同じ。**デバイスワーカースレッドの
-    /// 中で作る**（ここでそのスレッドの COM を初期化する）。
+    /// 引数の意味は `VideoCapture::new` と同じ。`pin_feed` は音声ピンの差し込み口で、
+    /// 音声のバックエンド（`AudioCapture`）へ渡したものの複製。**デバイスワーカー
+    /// スレッドの中で作る**（ここでそのスレッドの COM を初期化する）。
     pub fn new(
         frames: VideoFrames,
         color_conversion: Arc<SharedColorConversion>,
         repaint_waker: RepaintWaker,
+        pin_feed: AudioPinFeed,
     ) -> Self {
         let com = match ComApartment::enter(ComModel::SingleThreaded) {
             Ok(com) => Some(com),
@@ -93,6 +106,8 @@ impl DirectShowCapture {
             frames,
             color_conversion,
             repaint_waker,
+            pin_feed,
+            pin_chunk_logged: Cell::new(false),
             _com: com,
         }
     }
@@ -184,12 +199,17 @@ impl DirectShowCapture {
 
     /// ストリームを開く。既に開いていれば閉じてから開き直す。
     /// `display` は表示名（「(DirectShow)」付き）。
+    ///
+    /// `connect_audio_pin` が真なら、同じグラフの音声ピンも繋ぐ（#388。
+    /// `[audio] input_source = "video_pin"` のときだけ真）。偽でも音声ピンの有無は
+    /// 調べて `ActiveVideo::audio_pin` に残す。
     pub fn start_capture(
         &mut self,
         display: &str,
         resolution: Option<(u32, u32)>,
         format: Option<&str>,
         fps: Option<u32>,
+        connect_audio_pin: bool,
     ) -> Result<(), VideoError> {
         self.stop_capture();
 
@@ -200,6 +220,9 @@ impl DirectShowCapture {
             self.repaint_waker.clone(),
         );
         let start = Instant::now();
+        // グラフごとに番号を配る。音声の差し込み先はこの番号と合うときだけ積まれる
+        let pin_graph = self.pin_feed.begin_graph();
+        self.pin_chunk_logged.set(false);
         let graph = CaptureGraph::start(
             &entry,
             FormatRequest {
@@ -208,6 +231,11 @@ impl DirectShowCapture {
                 fps,
             },
             sink,
+            AudioPinRequest {
+                connect: connect_audio_pin,
+                feed: &self.pin_feed,
+                graph: pin_graph,
+            },
         )
         .map_err(|e| match e {
             GraphError::Open(e) => VideoError::CameraOpenFailed {
@@ -220,12 +248,32 @@ impl DirectShowCapture {
             },
         })?;
 
+        let audio_pin = match graph.audio_pin().clone() {
+            PinOutcome::Missing => AudioPinState::Missing,
+            PinOutcome::Available => AudioPinState::Available,
+            PinOutcome::Failed(failure) => AudioPinState::Failed(failure),
+            PinOutcome::Connected {
+                format,
+                chunk_bytes,
+            } => {
+                let connection = PinConnection {
+                    graph: pin_graph,
+                    device: display.to_string(),
+                    format,
+                    chunk_bytes,
+                };
+                // 音声のバックエンドはここから形式と番号を読んで差し込む
+                self.pin_feed.set_connected(connection.clone());
+                AudioPinState::Connected(connection)
+            }
+        };
         let active = ActiveVideo {
             device_name: display.to_string(),
             api: CaptureApi::DirectShow,
             resolution: Some((graph.format.width, graph.format.height)),
             format: Some(graph.format_name().to_string()),
             requested_fps: graph.requested_fps,
+            audio_pin,
         };
         info!(
             "DirectShow の映像ストリームを開いた（デバイス: {}、実際の設定: {}、{}fps、{:.1}ms）",
@@ -243,13 +291,16 @@ impl DirectShowCapture {
     pub fn stop_capture(&mut self) {
         self.active = None;
         // 落とすとグラフが止まり（上流のストリーミングスレッドが止まるまで
-        // 待つ）、フィルターが外れる
+        // 待つ）、フィルターが外れる。音声ピンのストリーミングスレッドも止まる
         self.graph = None;
+        // 音声のバックエンドから見て、繋いだ音声ピンは無くなった
+        self.pin_feed.clear();
         // 止めてから消す。先に消すと、止まる前の 1 枚が残る
         self.frames.reset();
     }
 
     pub fn link_state(&self) -> VideoLinkState {
+        self.log_first_pin_chunk();
         VideoLinkState {
             capturing: self.graph.is_some(),
             since_last_frame: self.frames.since_last_frame(),
@@ -260,6 +311,32 @@ impl DirectShowCapture {
                 .as_ref()
                 .is_some_and(|graph| graph.poll_device_lost()),
         }
+    }
+
+    /// 繋いだ音声ピンから実際に届いた塊の長さを、グラフごとに 1 度だけログへ残す。
+    ///
+    /// アロケーターの大きさ（`音声ピンを繋いだ` のログ）は 1 塊の上限で、フィルターが
+    /// それより短く区切って渡してくることがある。`Receive` の中ではログを出せない
+    /// （確保が起きる）ので、ワーカーの監視の周期で読む `link_state` から出す。
+    fn log_first_pin_chunk(&self) {
+        if self.pin_chunk_logged.get() {
+            return;
+        }
+        let Some(AudioPinState::Connected(connection)) =
+            self.active.as_ref().map(|active| &active.audio_pin)
+        else {
+            return;
+        };
+        let Some(bytes) = self.pin_feed.observed_chunk_bytes() else {
+            return;
+        };
+        self.pin_chunk_logged.set(true);
+        info!(
+            "音声ピンから塊が届き始めた（ここまでで最も長い塊: {} バイト = {:?} ms、{}）",
+            bytes,
+            connection.format.chunk_ms(bytes),
+            connection.format.summary()
+        );
     }
 
     pub fn active(&self) -> Option<ActiveVideo> {
@@ -313,6 +390,7 @@ mod tests {
             VideoFrames::new(),
             Arc::new(SharedColorConversion::new()),
             RepaintWaker::default(),
+            AudioPinFeed::new(),
         )
     }
 
@@ -355,7 +433,7 @@ mod tests {
             .expect("DirectShow のデバイスがある");
         let display = display_name(&name);
         capture
-            .start_capture(&display, None, None, None)
+            .start_capture(&display, None, None, None, false)
             .expect("開ける");
         println!("開いた: {:?}", capture.active());
 
@@ -393,7 +471,7 @@ mod tests {
         println!("{display} のいまの解像度: {current:?}");
 
         capture
-            .start_capture(&display, None, None, None)
+            .start_capture(&display, None, None, None, false)
             .expect("開ける");
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
         while capture.frames.latest().is_none() && Instant::now() < deadline {
@@ -417,7 +495,7 @@ mod tests {
             .expect("OBS の仮想カメラがある");
         let display = display_name(&name);
         capture
-            .start_capture(&display, None, None, None)
+            .start_capture(&display, None, None, None, false)
             .expect("開ける");
         println!("開いた。30 秒以内に OBS 側で仮想カメラを止める");
 

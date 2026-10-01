@@ -51,7 +51,7 @@ fn dropped_frames(offered: usize, pushed: usize, channels: usize) -> usize {
 ///
 /// **エラーのコールバックから呼ぶので、ロックもアロケーションもしない。**
 /// `count_dropped_frames` と同じく `u32::MAX` で頭打ちにする。
-fn count_xrun(counter: &AtomicU32) {
+pub(super) fn count_xrun(counter: &AtomicU32) {
     let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(1))
     });

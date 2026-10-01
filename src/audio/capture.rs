@@ -7,8 +7,8 @@
 //! `passthrough_output` に分けてある。
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::SupportedStreamConfig;
-use log::{debug, info};
+use cpal::{SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange};
+use log::{debug, info, warn};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -17,11 +17,12 @@ use super::controls::AudioControls;
 use super::passthrough_output::{
     build_passthrough_output, find_device_by_name, make_ring, open_output_device, PassthroughOutput,
 };
+use super::pin_feed::{widened_buffer_ms, AudioPinFeed, PinSink};
 use super::resample::{ResampleStatus, ResampleTelemetry};
 use super::stream::{build_input_stream, StreamCounters};
 use super::stream_config::{choose_passthrough_configs, resolve_ranges};
 use super::tap::AudioTap;
-use super::{ActiveAudio, AudioDirection, AudioError};
+use super::{ActiveAudio, AudioDirection, AudioError, AudioInputRoute, WidenedBuffer};
 
 /// パススルーを開くときの要求。
 ///
@@ -30,7 +31,8 @@ use super::{ActiveAudio, AudioDirection, AudioError};
 /// 順番を取り違えてもコンパイルが通ってしまうため、名前で区別できる形に
 /// する意味もある。
 pub struct PassthroughRequest<'a> {
-    pub input_device_name: Option<&'a str>,
+    /// 入力の種類。WASAPI のデバイスか、映像デバイスの音声ピンか
+    pub input: PassthroughInput<'a>,
     pub output_device_name: Option<&'a str>,
     /// 設定画面で選んだサンプリングレート。`None` ならデバイスの既定に従う
     pub sample_rate: Option<u32>,
@@ -44,6 +46,18 @@ pub struct PassthroughRequest<'a> {
     /// 設定画面で選んだリングバッファの長さ（ミリ秒）。
     /// `settings::MIN_BUFFER_MS`〜`MAX_BUFFER_MS` の範囲
     pub buffer_ms: u32,
+}
+
+/// パススルーの入力の種類（`docs/design/directshow-audio.md` の (2)）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassthroughInput<'a> {
+    /// WASAPI の入力デバイス（cpal の入力ストリーム）。`None` は Windows の既定
+    Device(Option<&'a str>),
+    /// 映像デバイスの音声ピン。`graph` は差し込むグラフの番号で、ワーカーが
+    /// 映像の観測値（`ActiveVideo::audio_pin`）から読んで渡す。`AudioPinFeed` の
+    /// 繋いだ音声ピンと番号が合わなければ開かない。入力の対応設定（`input_capabilities`）と
+    /// 設定のレート・チャンネル数は使わず、音声ピンの形式で開く
+    VideoPin { graph: u64 },
 }
 
 /// リングバッファに確保するサンプル数を決める。
@@ -107,6 +121,9 @@ pub struct AudioCapture {
     /// 閉じるたびに新しいものへ差し替える**（`StreamCounters` の説明）。
     /// 読むのはデバイスワーカースレッド（`app::worker_loop`）だけ
     counters: StreamCounters,
+    /// 映像デバイスの音声ピンとの差し込み口（#388）。映像のバックエンドと同じものを
+    /// 指す。入力が音声ピンのときだけ差し込む
+    pin_feed: AudioPinFeed,
 }
 
 impl AudioCapture {
@@ -115,7 +132,7 @@ impl AudioCapture {
     /// **`cpal::Stream` はスレッドをまたげない（`!Send`）ので、実際に使う
     /// スレッドで作ること。** いまはデバイスワーカースレッドが唯一の持ち主で、
     /// `AudioControls` と録画の差し込み口（`AudioTap`）だけを UI スレッドと共有する。
-    pub fn new(controls: Arc<AudioControls>, tap: AudioTap) -> Self {
+    pub fn new(controls: Arc<AudioControls>, tap: AudioTap, pin_feed: AudioPinFeed) -> Self {
         let host = cpal::default_host();
         debug!("AudioCapture を作成した（ホスト: {:?}）", host.id());
 
@@ -128,6 +145,7 @@ impl AudioCapture {
             tap,
             resample_telemetry: None,
             counters: StreamCounters::default(),
+            pin_feed,
         }
     }
 
@@ -168,12 +186,27 @@ impl AudioCapture {
         device_name(&self.host.default_output_device()?)
     }
 
+    /// パススルーを開く。既に開いていれば閉じてから開き直す。
     pub fn start_passthrough(
         &mut self,
         request: &PassthroughRequest<'_>,
     ) -> Result<(), AudioError> {
+        self.stop_capture();
+        info!("音声パススルーを開始する");
+        match request.input {
+            PassthroughInput::Device(name) => self.start_from_device(request, name),
+            PassthroughInput::VideoPin { graph } => self.start_from_video_pin(request, graph),
+        }
+    }
+
+    /// WASAPI の入力デバイスから開く（今までの経路）。
+    fn start_from_device(
+        &mut self,
+        request: &PassthroughRequest<'_>,
+        input_device_name: Option<&str>,
+    ) -> Result<(), AudioError> {
         let PassthroughRequest {
-            input_device_name,
+            input: _,
             output_device_name,
             sample_rate: desired_sample_rate,
             channels: desired_channels,
@@ -181,9 +214,6 @@ impl AudioCapture {
             output_capabilities,
             buffer_ms,
         } = *request;
-
-        self.stop_capture();
-        info!("音声パススルーを開始する");
 
         let input_device = if let Some(name) = input_device_name {
             debug!("入力デバイスを名前で探す: {}", name);
@@ -274,8 +304,114 @@ impl AudioCapture {
             input_channels: input_config.channels(),
             output_sample_rate: output_config.sample_rate(),
             output_channels: output_config.channels(),
+            input_route: AudioInputRoute::Device,
+            widened_buffer: None,
         };
         self.commit(Some(input_stream), output_stream, counters, active)
+    }
+
+    /// 映像デバイスの音声ピンから開く（#388）。
+    ///
+    /// cpal の入力ストリームの代わりに、`AudioPinFeed` へリングを差し込む。
+    /// 入力の形は音声ピンの形式 1 つに決まり、出力はそれに揃えて開く
+    /// （`docs/design/directshow-audio.md` の (6)）。塊が長ければこのストリームに
+    /// 限ってリングを広げる（同「塊の長さ」）。
+    fn start_from_video_pin(
+        &mut self,
+        request: &PassthroughRequest<'_>,
+        graph: u64,
+    ) -> Result<(), AudioError> {
+        let connection = self
+            .pin_feed
+            .connection()
+            .filter(|connection| connection.graph == graph)
+            .ok_or(AudioError::VideoPinUnavailable)?;
+        let output = open_output_device(
+            &self.host,
+            request.output_device_name,
+            request.output_capabilities,
+        )?;
+        let format = connection.format;
+        info!(
+            "使用するデバイス - 入力: {} の音声ピン（{}）、出力: {}",
+            connection.device,
+            format.summary(),
+            output.name
+        );
+        let (rate, channels) = (format.sample_rate, format.channels);
+        let sample_format = format.cpal_sample_format();
+        let input_ranges = [SupportedStreamConfigRange::new(
+            channels,
+            rate,
+            rate,
+            SupportedBufferSize::Unknown,
+            sample_format,
+        )];
+        let input_default =
+            SupportedStreamConfig::new(channels, rate, SupportedBufferSize::Unknown, sample_format);
+        // 設定のレートとチャンネル数ではなく音声ピンの形式を希望値にして、出力を揃える
+        let (input_config, output_config) = choose_passthrough_configs(
+            &input_ranges,
+            &output.ranges,
+            input_default,
+            output.default,
+            Some(rate),
+            Some(channels),
+        );
+        log_configs(&input_config, &output_config);
+
+        let chunk_ms = connection
+            .chunk_bytes
+            .or_else(|| self.pin_feed.observed_chunk_bytes())
+            .and_then(|bytes| format.chunk_ms(bytes));
+        let buffer_ms = widened_buffer_ms(request.buffer_ms, chunk_ms);
+        let widened_buffer = (buffer_ms != request.buffer_ms).then(|| WidenedBuffer {
+            configured_ms: request.buffer_ms,
+            actual_ms: buffer_ms,
+            chunk_ms: chunk_ms.unwrap_or_default(),
+        });
+        if let Some(widened) = widened_buffer {
+            warn!(
+                "音声ピンの塊が {} ms と長いので、リングバッファを設定の {} ms から {} ms へ広げて開く",
+                widened.chunk_ms, widened.configured_ms, widened.actual_ms
+            );
+        }
+        let ring = make_ring(rate, usize::from(channels), buffer_ms);
+        let counters = StreamCounters::default();
+
+        // 録画へ入力の形と開き直しを知らせる。**差し込む前に書く**（cpal の経路の
+        // 「入力のコールバックが動き出す前に書く」に当たる）
+        self.tap.begin_stream(rate, channels);
+        let output_stream = build_passthrough_output(
+            &output,
+            &output_config,
+            (rate, channels),
+            &ring,
+            Arc::clone(&self.controls),
+            &counters,
+        )?;
+        let active = ActiveAudio {
+            input_device: connection.device.clone(),
+            output_device: output.name.clone(),
+            input_sample_rate: rate,
+            input_channels: channels,
+            output_sample_rate: output_config.sample_rate(),
+            output_channels: output_config.channels(),
+            input_route: AudioInputRoute::VideoPin { graph },
+            widened_buffer,
+        };
+        self.commit(None, output_stream, counters.clone(), active)?;
+        // 出力が動いてから差し込む。出力は目標水位まで無音を書いて待つ
+        self.pin_feed.attach(PinSink {
+            graph,
+            format,
+            producer: ring.producer,
+            tap: self.tap.clone(),
+            dropped_frames: counters.dropped_frames,
+            xruns: counters.xruns,
+            started: false,
+        });
+        Ok(())
     }
 
     /// 出力ストリームを動かし、開いたものを控える。入力の種類によらず共通の後半。
@@ -358,6 +494,8 @@ impl AudioCapture {
     }
 
     pub fn stop_capture(&mut self) {
+        // 音声ピンの差し込み先を抜いてから出力を落とす。以後 `Receive` は何も積まない
+        self.pin_feed.detach();
         self.active = None;
         self.resample_telemetry = None;
         if let Some(s) = self.input_stream.take() {

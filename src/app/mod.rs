@@ -12,6 +12,7 @@ mod error_report;
 mod hotkeys;
 mod menu;
 mod monitor;
+mod monitor_audio_pin;
 mod placeholder;
 mod recording;
 mod retry;

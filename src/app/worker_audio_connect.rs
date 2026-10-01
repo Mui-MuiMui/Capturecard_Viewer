@@ -7,12 +7,14 @@
 //! 見えていない」の判定の適用は `super::worker_connect` に置く。
 
 use super::monitor::{decide_audio_fallback, should_resync_audio_after_video, AudioFallbackAction};
+use super::monitor_audio_pin::{decide_pin_readiness, PinReadiness, PinWait};
 use super::retry::backoff_delay;
 use super::worker::{DeviceConfig, DeviceEvent};
 use super::worker_connect::failure_message;
 use super::worker_loop::WorkerState;
 use crate::audio::{self, AudioDirection, AudioError};
 use crate::i18n;
+use crate::settings::AudioInputSource;
 use log::{debug, info, warn};
 use std::time::Instant;
 
@@ -43,6 +45,8 @@ pub(super) fn failed_direction(error: &AudioError) -> AudioDirection {
         | AudioError::UnsupportedSampleFormat { direction, .. }
         | AudioError::StreamBuildFailed { direction, .. }
         | AudioError::StreamPlayFailed { direction, .. } => *direction,
+        // 音声ピンの入力が無かった。入力側の失敗として扱う
+        AudioError::VideoPinUnavailable => AudioDirection::Input,
     }
 }
 
@@ -73,17 +77,40 @@ impl WorkerState {
     /// **開けなくても、別のデバイスへは倒さない。** 失敗が続いたときの扱いは
     /// `monitor::decide_audio_fallback` を参照。
     pub(super) fn try_connect_audio(&mut self, config: &DeviceConfig, now: Instant) {
-        let (input_device_name, output_device_name, sample_rate, channels, buffer_ms) =
+        let (input_device_name, output_device_name, sample_rate, channels, buffer_ms, source) =
             config.audio.clone();
-        if !audio_input_is_selected(input_device_name.as_deref()) {
-            self.hold_audio_without_input(config);
-            return;
-        }
+        // 入力が音声ピンなら、映像の音声ピンが使えるかを先に見る。使えなければ
+        // 開かずに待つ（#304 の未指定と同じ形。`docs/design/directshow-audio.md` の (3)）
+        let pin_graph = match source {
+            AudioInputSource::Device => {
+                if !audio_input_is_selected(input_device_name.as_deref()) {
+                    self.hold_audio_without_input(config);
+                    return;
+                }
+                None
+            }
+            AudioInputSource::VideoPin => {
+                match decide_pin_readiness(self.video.active().as_ref()) {
+                    PinReadiness::Ready { graph } => Some(graph),
+                    PinReadiness::Wait(reason) => {
+                        self.hold_audio_for_pin(config, reason);
+                        return;
+                    }
+                }
+            }
+        };
+        self.audio_pin_wait = None;
         let attempt = self.audio_retry.attempts() + 1;
-        info!(
-            "音声デバイスへの接続を試す（{} 回目）- 入力: {:?}、出力: {:?}、バッファ: {} ms",
-            attempt, input_device_name, output_device_name, buffer_ms
-        );
+        match pin_graph {
+            Some(graph) => info!(
+                "音声デバイスへの接続を試す（{} 回目）- 入力: 映像デバイスの音声ピン（グラフ {}）、出力: {:?}、バッファ: {} ms",
+                attempt, graph, output_device_name, buffer_ms
+            ),
+            None => info!(
+                "音声デバイスへの接続を試す（{} 回目）- 入力: {:?}、出力: {:?}、バッファ: {} ms",
+                attempt, input_device_name, output_device_name, buffer_ms
+            ),
+        }
 
         // デバイスの列挙は実測で 300ms 前後かかる。設定値との突き合わせに要るのは
         // 最初の 1 回だけなので、再試行のたびには出さない
@@ -101,19 +128,30 @@ impl WorkerState {
         // 対応設定は `start_passthrough` が要る。**無ければここで取りに行く。**
         // 以前は UI スレッドで開いていたため、届くまで接続を見送る仕組みを
         // 持っていた。このスレッドは止まってよいので、素直に待てばよい
+        // 音声ピンの入力の対応設定は音声ピンの形式 1 つだけなので、問い合わせない（(6)）
         let input_key = audio::cache_key(input_device_name.as_deref());
         let output_key = audio::cache_key(output_device_name.as_deref());
-        self.ensure_audio_capabilities(AudioDirection::Input, &input_key);
+        if pin_graph.is_none() {
+            self.ensure_audio_capabilities(AudioDirection::Input, &input_key);
+        }
         self.ensure_audio_capabilities(AudioDirection::Output, &output_key);
 
+        let input = match pin_graph {
+            Some(graph) => audio::PassthroughInput::VideoPin { graph },
+            None => audio::PassthroughInput::Device(input_device_name.as_deref()),
+        };
         let result = self.audio.start_passthrough(&audio::PassthroughRequest {
-            input_device_name: input_device_name.as_deref(),
+            input,
             output_device_name: output_device_name.as_deref(),
             sample_rate,
             channels,
-            input_capabilities: self
-                .audio_capabilities
-                .get(&(AudioDirection::Input, input_key.clone())),
+            input_capabilities: pin_graph
+                .is_none()
+                .then(|| {
+                    self.audio_capabilities
+                        .get(&(AudioDirection::Input, input_key.clone()))
+                })
+                .flatten(),
             output_capabilities: self
                 .audio_capabilities
                 .get(&(AudioDirection::Output, output_key.clone())),
@@ -195,6 +233,30 @@ impl WorkerState {
         let reason = i18n::Text::AudioInputNotSelected.get().to_string();
         self.last_audio_failure = Some(reason.clone());
         self.emit(DeviceEvent::AudioFailed(reason));
+    }
+
+    /// 入力が映像デバイスの音声ピンなのに使えないので、音声を開かずに待つ（#388）。
+    ///
+    /// 扱いは `hold_audio_without_input` と同じ。開いているパススルーは閉じ
+    /// （出力だけを開いたまま無音を流し続けない）、再試行は取り下げ、理由を 1 度だけ
+    /// 返し、この設定を扱い済みとして記録する。**バックオフで再試行しない。**
+    /// どの理由も時間が経てば直るものではなく、直るのは映像の状態が変わったときで、
+    /// それは `tick` の監視（`monitor_audio_pin`）が拾って要求を立て直す。
+    fn hold_audio_for_pin(&mut self, config: &DeviceConfig, reason: PinWait) {
+        info!(
+            "入力が映像デバイスの音声ピンだが使えないので、音声を開かずに待つ: {:?}",
+            reason
+        );
+        self.audio_retry.cancel();
+        if self.audio.active().is_some() {
+            self.audio.stop_capture();
+        }
+        self.last_audio_target = Some(config.audio.clone());
+        self.audio_not_visible = None;
+        let message = reason.message();
+        self.audio_pin_wait = Some(reason);
+        self.last_audio_failure = Some(message.clone());
+        self.emit(DeviceEvent::AudioFailed(message));
     }
 
     /// 対応設定が手元に無ければ問い合わせる。
@@ -352,6 +414,157 @@ mod tests {
         for (error, expected) in cases {
             assert_eq!(failed_direction(&error), expected, "{error:?}");
         }
+    }
+
+    // ---- 入力が映像デバイスの音声ピン（#388） ----
+
+    /// 入力を映像デバイスの音声ピンにした設定（映像は「カメラ」、音声ピンを繋ぐ）
+    fn pin_config() -> DeviceConfig {
+        let mut config = config_for(Some("カメラ"), None);
+        config.video.5 = true;
+        config.audio.5 = AudioInputSource::VideoPin;
+        config
+    }
+
+    fn audio_failures(events: &std::sync::mpsc::Receiver<DeviceEvent>) -> Vec<String> {
+        super::super::worker_loop::testing::drain(events)
+            .into_iter()
+            .filter_map(|event| match event {
+                DeviceEvent::AudioFailed(reason) => Some(reason),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn worker_opens_pin_audio_with_the_graph_of_the_video() {
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| state.has_audio_pin = true);
+        let (mut state, _events) = mock_state(&video, &audio);
+        apply_config(&mut state, pin_config(), true);
+        state.tick(Instant::now());
+
+        // 映像を先に、音声ピンを繋ぐ指定付きで開き、その番号で音声を開く
+        assert_eq!(video.with(|state| state.last_connect_audio_pin), Some(true));
+        assert_eq!(audio.with(|state| state.start_calls), 1);
+        assert_eq!(audio.with(|state| state.pin_graph), Some(1));
+        // 音声ピンの入力の対応設定は問い合わせない（出力だけ）
+        assert_eq!(
+            audio.with(|state| state.capability_queries.clone()),
+            vec![AudioDirection::Output]
+        );
+    }
+
+    #[test]
+    fn worker_does_not_connect_the_pin_for_a_wasapi_input() {
+        // 入力の種類が device なら、音声ピンを繋がない（グラフを今と変えない）
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| state.has_audio_pin = true);
+        let (mut state, _events) = mock_state(&video, &audio);
+        apply_config(&mut state, config_for(Some("カメラ"), Some("入力")), true);
+        state.tick(Instant::now());
+
+        assert_eq!(
+            video.with(|state| state.last_connect_audio_pin),
+            Some(false)
+        );
+        assert_eq!(audio.with(|state| state.pin_graph), None);
+        assert!(audio.with(|state| state.running));
+    }
+
+    #[test]
+    fn worker_holds_pin_audio_when_the_video_has_no_pin() {
+        // モックの映像は既定で音声ピンを持たない（Media Foundation やフェイクと同じ）
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        let (mut state, events) = mock_state(&video, &audio);
+        apply_config(&mut state, pin_config(), true);
+        let base = Instant::now();
+        state.tick(base);
+
+        assert_eq!(audio.with(|state| state.start_calls), 0);
+        assert_eq!(state.audio_pin_wait, Some(PinWait::NoPin));
+        // 再試行はしない。理由は 1 度だけ返す
+        assert!(!state.audio_retry.is_active());
+        assert_eq!(audio_failures(&events), vec![PinWait::NoPin.message()]);
+        for step in 1..5 {
+            state.tick(base + Duration::from_secs(step));
+            apply_config(&mut state, pin_config(), false);
+        }
+        assert_eq!(audio.with(|state| state.start_calls), 0);
+        assert!(audio_failures(&events).is_empty(), "同じ理由を出し直さない");
+    }
+
+    #[test]
+    fn worker_opens_pin_audio_once_the_video_comes_back() {
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| {
+            state.has_audio_pin = true;
+            state.failures_before_success = 1;
+        });
+        let (mut state, _events) = mock_state(&video, &audio);
+        apply_config(&mut state, pin_config(), true);
+        let base = Instant::now();
+        state.tick(base);
+        // 映像が開けないので、音声は開かずに待つ
+        assert_eq!(state.audio_pin_wait, Some(PinWait::VideoNotOpen));
+        assert_eq!(audio.with(|state| state.start_calls), 0);
+
+        // 映像の再試行が通ったら、監視が音声の要求を立て、次の回で開く
+        state.tick(base + Duration::from_secs(10));
+        state.tick(base + Duration::from_secs(20));
+        assert_eq!(audio.with(|state| state.pin_graph), Some(2));
+        assert!(audio.with(|state| state.running));
+        assert_eq!(state.audio_pin_wait, None);
+    }
+
+    #[test]
+    fn worker_reopens_pin_audio_after_the_video_reopens() {
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| state.has_audio_pin = true);
+        let (mut state, _events) = mock_state(&video, &audio);
+        apply_config(&mut state, pin_config(), true);
+        let base = Instant::now();
+        state.tick(base);
+        assert_eq!(audio.with(|state| state.pin_graph), Some(1));
+
+        // 解像度を変えると映像だけが開き直り、番号が進む
+        let mut changed = pin_config();
+        changed.video.1 = Some((1920, 1080));
+        apply_config(&mut state, changed, false);
+        state.tick(base + Duration::from_secs(2));
+        assert_eq!(video.with(|state| state.start_calls), 2);
+        // 音声は古い番号のまま。監視が気付いて要求を立て、次の回で開き直す
+        state.tick(base + Duration::from_secs(4));
+        assert_eq!(audio.with(|state| state.start_calls), 2);
+        assert_eq!(audio.with(|state| state.pin_graph), Some(2));
+    }
+
+    #[test]
+    fn worker_closes_pin_audio_when_the_video_closes() {
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| state.has_audio_pin = true);
+        let (mut state, events) = mock_state(&video, &audio);
+        apply_config(&mut state, pin_config(), true);
+        let base = Instant::now();
+        state.tick(base);
+        assert!(audio.with(|state| state.running));
+        let _ = audio_failures(&events);
+
+        // 映像デバイスを未選択にすると映像が閉じる。音声も閉じて理由を出す
+        let mut closed = pin_config();
+        closed.video.0 = None;
+        apply_config(&mut state, closed, false);
+        state.tick(base + Duration::from_secs(2));
+        state.tick(base + Duration::from_secs(4));
+        assert!(!audio.with(|state| state.running));
+        assert_eq!(state.audio_pin_wait, Some(PinWait::VideoNotOpen));
+        assert!(audio_failures(&events).contains(&PinWait::VideoNotOpen.message()));
     }
 
     #[test]

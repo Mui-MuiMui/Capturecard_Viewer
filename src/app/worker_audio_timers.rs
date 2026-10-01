@@ -12,10 +12,12 @@ use super::monitor::{
     decide_audio_reconnect, default_audio_device_changed, should_poll_default_audio_device,
     AudioErrorAction,
 };
+use super::monitor_audio_pin::{decide_pin_readiness, should_resync_pin_audio};
 use super::worker::DeviceEvent;
 use super::worker_loop::WorkerState;
 use crate::audio::{self, AudioDirection};
 use crate::i18n;
+use crate::settings::AudioInputSource;
 use log::{debug, info, warn};
 use std::time::{Duration, Instant};
 
@@ -107,6 +109,39 @@ impl WorkerState {
                 water_level, target_level
             );
         }
+    }
+
+    /// 入力が映像デバイスの音声ピンのとき、映像の音声ピンの番号と音声が差し込んで
+    /// いる番号を比べ、違えば音声を開き直す要求を立てる（#388）。
+    ///
+    /// **映像を開き直す経路（切断からの再接続、設定の変更、右クリックの再接続、
+    /// #387 の自動の倒し込み）をここ 1 か所で拾う。** `try_connect_video` の成功の
+    /// 枝に書き足さないのはこのため。音声のストリームのエラーとして知らせる経路も
+    /// 使わない（5 秒の下限に掛かり、映像を開き直すたびに音が 5 秒戻らなくなる）。
+    /// 判定は `monitor_audio_pin::should_resync_pin_audio`。
+    pub(super) fn monitor_audio_pin(&mut self) {
+        let Some(config) = self.config.clone() else {
+            return;
+        };
+        if config.audio.5 != AudioInputSource::VideoPin {
+            return;
+        }
+        let readiness = decide_pin_readiness(self.video.active().as_ref());
+        let audio_route = self.audio.active().map(|active| active.input_route);
+        if !should_resync_pin_audio(
+            &readiness,
+            audio_route,
+            self.audio_pin_wait.as_ref(),
+            self.audio_retry.is_active(),
+        ) {
+            return;
+        }
+        info!(
+            "映像デバイスの音声ピンの状態が変わったので、音声を開き直す（音声: {:?}、映像: {:?}）",
+            audio_route, readiness
+        );
+        self.last_audio_target = None;
+        self.audio_retry.request_now(config.audio);
     }
 
     /// 音声ストリームのエラーを拾って、必要なら開き直す。

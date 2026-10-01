@@ -453,6 +453,23 @@ input_device_name = "Line In"
     }
 
     #[test]
+    fn matches_preset_different_audio_input_source_returns_false() {
+        // 入力の種類（#388）も `audio` の一部として比べる。適用すると入力の種類も
+        // 切り替わる（`docs/design/presets.md`）
+        let mut settings = AppSettings::default();
+        let preset = preset_named("画質優先", 1920, 1080, 30);
+        preset.apply_to(&mut settings);
+        settings.audio.input_source = crate::settings::AudioInputSource::VideoPin;
+        assert!(!matches_preset(&preset, &settings));
+
+        preset.apply_to(&mut settings);
+        assert_eq!(
+            settings.audio.input_source,
+            crate::settings::AudioInputSource::Device
+        );
+    }
+
+    #[test]
     fn matches_preset_ignores_auto_reconnect() {
         // 適用しない項目を比べないこと。比べると、自動再接続を
         // 切り替えただけで「（変更あり）」になる

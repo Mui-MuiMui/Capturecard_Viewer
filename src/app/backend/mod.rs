@@ -66,17 +66,7 @@ pub(super) trait VideoBackend {
     ) -> Result<DeviceCapabilities, VideoError>;
 
     /// ストリームを開く。既に開いていれば閉じてから開き直す。
-    ///
-    /// `backend` は設定の「映像の開き方」（`video.backend`）。経路が 1 つしか
-    /// ない実装（フェイク・モック）は見ない
-    fn start_capture(
-        &mut self,
-        device_name: Option<&str>,
-        resolution: Option<(u32, u32)>,
-        format: Option<&str>,
-        fps: Option<u32>,
-        backend: VideoBackendSetting,
-    ) -> Result<(), VideoError>;
+    fn start_capture(&mut self, request: &CaptureRequest<'_>) -> Result<(), VideoError>;
 
     /// ストリームを閉じる。開いていなければ何もしない
     fn stop_capture(&mut self);
@@ -102,6 +92,26 @@ pub(super) trait VideoBackend {
             .collect();
         VideoEnumeration::single("list_devices", names)
     }
+}
+
+/// 映像を開くときの要求。
+///
+/// 引数で渡していたが、「音声ピンを繋ぐか」（#388）を足して `self` を入れて
+/// 7 つになるので、`audio::PassthroughRequest` と同じく構造体へまとめた。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CaptureRequest<'a> {
+    /// 開くデバイスの名前。`None` なら先頭のデバイス
+    pub(super) device_name: Option<&'a str>,
+    pub(super) resolution: Option<(u32, u32)>,
+    pub(super) format: Option<&'a str>,
+    pub(super) fps: Option<u32>,
+    /// 設定の「映像の開き方」（`video.backend`）。経路が 1 つしかない実装
+    /// （フェイク・モック）は見ない
+    pub(super) backend: VideoBackendSetting,
+    /// DirectShow で開くとき、同じグラフの音声ピンも繋ぐか
+    /// （`[audio] input_source = "video_pin"` のときだけ真）。Media Foundation と
+    /// フェイクは見ない。自動で DirectShow へ倒すとき（#387）も同じ指定を渡す
+    pub(super) connect_audio_pin: bool,
 }
 
 /// 映像デバイスの列挙結果。経路（Media Foundation / DirectShow）ごとに分けて持つ。
@@ -286,6 +296,13 @@ pub(super) mod mock {
         pub(in crate::app) last_capabilities_backend: Option<VideoBackendSetting>,
         /// `active` が返す開いた解像度。`None` なら解像度を返さない（実機の観測値が無い形）
         pub(in crate::app) opened_resolution: Option<(u32, u32)>,
+        /// 最後に開こうとしたときの「音声ピンを繋ぐか」
+        pub(in crate::app) last_connect_audio_pin: Option<bool>,
+        /// 立てておくと、DirectShow のデバイスのように音声ピンを持つ。開くたびに
+        /// `audio_pin` を「繋いだ（番号 = `start_calls`）」か「あるが繋いでいない」へ書き換える
+        pub(in crate::app) has_audio_pin: bool,
+        /// `active` が返す音声ピンの状態。`has_audio_pin` が偽ならテストが書いた値のまま
+        pub(in crate::app) audio_pin: crate::audio::AudioPinState,
     }
 
     /// 映像バックエンドのモック。複製しても同じ中身を指す。
@@ -321,18 +338,22 @@ pub(super) mod mock {
             })
         }
 
-        fn start_capture(
-            &mut self,
-            device_name: Option<&str>,
-            _resolution: Option<(u32, u32)>,
-            _format: Option<&str>,
-            _fps: Option<u32>,
-            backend: VideoBackendSetting,
-        ) -> Result<(), VideoError> {
+        fn start_capture(&mut self, request: &CaptureRequest<'_>) -> Result<(), VideoError> {
+            let device_name = request.device_name;
             self.with(|state| {
                 state.start_calls += 1;
                 state.last_device_name = device_name.map(str::to_string);
-                state.last_backend = Some(backend);
+                state.last_backend = Some(request.backend);
+                state.last_connect_audio_pin = Some(request.connect_audio_pin);
+                if state.has_audio_pin {
+                    state.audio_pin = if request.connect_audio_pin {
+                        crate::audio::AudioPinState::Connected(mock_pin_connection(u64::from(
+                            state.start_calls,
+                        )))
+                    } else {
+                        crate::audio::AudioPinState::Available
+                    };
+                }
                 if state.failures_before_success > 0 {
                     state.failures_before_success -= 1;
                     state.capturing = false;
@@ -373,8 +394,23 @@ pub(super) mod mock {
                     resolution: state.opened_resolution,
                     format: None,
                     requested_fps: 0,
+                    audio_pin: state.audio_pin.clone(),
                 })
             })
+        }
+    }
+
+    /// 音声ピンを持つモックが「繋いだ」ときの中身。番号以外は GC551 の形
+    pub(in crate::app) fn mock_pin_connection(graph: u64) -> crate::audio::PinConnection {
+        crate::audio::PinConnection {
+            graph,
+            device: "モックの音声ピン付きカメラ".to_string(),
+            format: crate::audio::PinFormat {
+                sample_rate: 48_000,
+                channels: 2,
+                sample_type: crate::audio::PinSampleType::I16,
+            },
+            chunk_bytes: Some(1920),
         }
     }
 
@@ -396,6 +432,8 @@ pub(super) mod mock {
         pub(in crate::app) capability_queries: Vec<AudioDirection>,
         /// `start_passthrough` を失敗させるときの向き。`None` なら入力
         pub(in crate::app) failure_direction: Option<AudioDirection>,
+        /// 最後に開いたときの音声ピンの番号。WASAPI の入力で開いたら `None`
+        pub(in crate::app) pin_graph: Option<u64>,
     }
 
     /// 音声バックエンドのモック。
@@ -440,10 +478,14 @@ pub(super) mod mock {
 
         fn start_passthrough(
             &mut self,
-            _request: &PassthroughRequest<'_>,
+            request: &PassthroughRequest<'_>,
         ) -> Result<(), AudioError> {
             self.with(|state| {
                 state.start_calls += 1;
+                state.pin_graph = match request.input {
+                    crate::audio::PassthroughInput::VideoPin { graph } => Some(graph),
+                    crate::audio::PassthroughInput::Device(_) => None,
+                };
                 if state.failures_before_success > 0 {
                     state.failures_before_success -= 1;
                     state.running = false;
@@ -472,6 +514,11 @@ pub(super) mod mock {
                     output_sample_rate: 48_000,
                     input_channels: 2,
                     output_channels: 2,
+                    input_route: match state.pin_graph {
+                        Some(graph) => crate::audio::AudioInputRoute::VideoPin { graph },
+                        None => crate::audio::AudioInputRoute::Device,
+                    },
+                    widened_buffer: None,
                 })
             })
         }

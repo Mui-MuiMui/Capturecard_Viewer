@@ -9,7 +9,9 @@
 //! ここはそれを trait に包むのと、環境変数の解釈だけを持つ。置き場所の理由は
 //! `docs/design/device-worker.md` の「フェイクデバイス（#142）」。
 
-use super::{AudioBackend, BackendShared, DeviceBackends, VideoBackend, VideoEnumeration};
+use super::{
+    AudioBackend, BackendShared, CaptureRequest, DeviceBackends, VideoBackend, VideoEnumeration,
+};
 use crate::audio::{
     ActiveAudio, AudioCapabilities, AudioDirection, AudioError, FakeAudioCapture, FakeAudioOptions,
     PassthroughRequest, ResampleStatus, ResampleTelemetry,
@@ -201,16 +203,17 @@ impl VideoBackend for FakeVideoCapture {
         FakeVideoCapture::capabilities(self, device_name)
     }
 
-    fn start_capture(
-        &mut self,
-        device_name: Option<&str>,
-        resolution: Option<(u32, u32)>,
-        format: Option<&str>,
-        fps: Option<u32>,
-        // フェイクの経路は 1 つだけなので、開き方の設定は見ない
-        _backend: VideoBackendSetting,
-    ) -> Result<(), VideoError> {
-        FakeVideoCapture::start_capture(self, device_name, resolution, format, fps)
+    fn start_capture(&mut self, request: &CaptureRequest<'_>) -> Result<(), VideoError> {
+        // フェイクの経路は 1 つだけなので、開き方の設定は見ない。音声ピンを
+        // 流すフェイクは第 2 段なので、音声ピンを繋ぐ指定もまだ見ない
+        // （`docs/design/directshow-audio.md` の (8)）
+        FakeVideoCapture::start_capture(
+            self,
+            request.device_name,
+            request.resolution,
+            request.format,
+            request.fps,
+        )
     }
 
     fn stop_capture(&mut self) {

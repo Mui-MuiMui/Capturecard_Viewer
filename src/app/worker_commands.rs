@@ -25,10 +25,11 @@ fn carry_resolved_resolution(incoming: &mut VideoTarget, opened: Option<&VideoTa
     let Some(opened) = opened else {
         return;
     };
-    let (name, resolution, format, fps, backend) = incoming;
+    let (name, resolution, format, fps, backend, connect_audio_pin) = incoming;
     if resolution.is_none()
         && opened.1.is_some()
-        && (&*name, &*format, &*fps, &*backend) == (&opened.0, &opened.2, &opened.3, &opened.4)
+        && (&*name, &*format, &*fps, &*backend, &*connect_audio_pin)
+            == (&opened.0, &opened.2, &opened.3, &opened.4, &opened.5)
     {
         *resolution = opened.1;
     }
@@ -156,6 +157,7 @@ mod tests {
             Some("YUY2".to_string()),
             Some(60),
             VideoBackendSetting::Auto,
+            false,
         );
         let mut stale = opened.clone();
         stale.1 = None;
