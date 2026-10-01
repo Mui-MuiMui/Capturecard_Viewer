@@ -22,7 +22,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use log::info;
+use log::{debug, info};
 use ringbuf::traits::{Consumer, Observer};
 
 use super::pts::{
@@ -132,7 +132,8 @@ impl AudioStats {
     ///
     /// - **入力デバイスの時計のずれ**: 途切れずに続いた区間での「映像の時計（PC）での経過」と
     ///   「音声のサンプル数 ÷ レート」の差。補正しなければ、録画の中で音が映像からずれていく量
-    ///   （ドリフト）。2 点の時刻から出すので 10ms ほどの粒度がある
+    ///   （ドリフト）。2 点の時刻から出すので 10ms ほどの粒度があり、入力デバイスが落とした
+    ///   サンプルも差に入る（GC551 では時計のずれより落としたサンプルのほうが大きかった）
     /// - **ドリフトの補正**（#288）: 掛けた補正の平均（ppm）と足した長さ、補正しても残ったずれ
     ///   （直近 5 秒の平均）。残ったずれが、録画の中で音が映像からずれた量になる
     ///
@@ -142,7 +143,7 @@ impl AudioStats {
         let millis = |units: i64| units as f64 * 1000.0 / UNITS_PER_SECOND as f64;
         let drift = match self.drift {
             Some((by_clock, by_samples)) if by_clock > 0 => format!(
-                "入力デバイスの時計: 途切れずに続いた最後の区間で、映像の時計（PC）の {:.3} 秒に対して音声のサンプル数 ÷ レートは {:.3} 秒（差 {:+.1}ms、{:+.0}ppm。負なら補正しないと録画の音声が映像より先行していく）",
+                "入力デバイスの時計: 途切れずに続いた最後の区間で、映像の時計（PC）の {:.3} 秒に対して音声のサンプル数 ÷ レートは {:.3} 秒（差 {:+.1}ms、{:+.0}ppm。入力デバイスが落としたサンプルも差に入る。負なら補正しないと録画の音声が映像より先行していく）",
                 secs(by_clock),
                 secs(by_samples),
                 millis(by_samples - by_clock),
@@ -314,7 +315,24 @@ impl AudioTrack {
         // フレームの分は数十 µs なので無視する）
         let consumed = self.next_index.saturating_sub(self.input.len() as u64);
         let offset = audio_units(self.produced_frames).saturating_sub(timing.time_of(consumed));
-        match self.corrector.observe(now, offset) {
+        let decision = self.corrector.observe(now, offset);
+        if let (Some(decision), Some(error)) = (decision, self.corrector.last_error()) {
+            // 窓（5 秒）ごとに 1 行。実機で補正の動きを追うため（`docs/design/recording.md` の「ドリフト」）
+            let span_ppm = self
+                .drift
+                .map(|span| span.measure())
+                .and_then(|(clock, samples)| {
+                    (clock > 0).then(|| (samples - clock) as f64 / clock as f64 * 1_000_000.0)
+                });
+            debug!(
+                "録画の音声のずれ: {:.1} 秒、基準からの動き {:+.2}ms、入力デバイスの時計（揃え直してから） {:+.0}ppm → {:?}",
+                now as f64 / UNITS_PER_SECOND as f64,
+                error as f64 / 10_000.0,
+                span_ppm.unwrap_or(0.0),
+                decision
+            );
+        }
+        match decision {
             Some(DriftDecision::Correct(correction)) => self.set_correction(correction),
             Some(DriftDecision::Realign) => {
                 // サンプルが落ちた。補正の窓に混ざった飛びで決めた係数は捨て、次に届いた
