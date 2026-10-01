@@ -594,10 +594,15 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_secs(2));
             timestamp_probe::VIDEO.reset();
             timestamp_probe::AUDIO.reset();
+            timestamp_probe::set_recording(true);
             std::thread::sleep(std::time::Duration::from_secs(seconds));
+            // 記録を止め、グラフを止めてから読む。`record` は番号を取ってから値を
+            // 書くので、流れている間に読むと最後の行が書きかけになりうる。記録を
+            // 先に止めるのは、止める途中に届くサンプルを数えないため
+            timestamp_probe::set_recording(false);
+            capture.stop_capture();
             let video = timestamp_probe::VIDEO.take();
             let audio = timestamp_probe::AUDIO.take();
-            capture.stop_capture();
             let video_lag = timestamp_probe::report("映像", &video);
             let audio_lag = timestamp_probe::report("音声", &audio);
             if let (Some(v), Some(a)) = (video_lag, audio_lag) {

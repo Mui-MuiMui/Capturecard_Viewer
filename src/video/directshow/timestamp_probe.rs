@@ -3,7 +3,7 @@
 //! レンダラーの `Receive` に届いたサンプルの到着時刻（`Receive` の入口の
 //! `Instant`）と `IMediaSample::GetTime` の値を、映像と音声それぞれの
 //! 固定長の表へ書く。`Receive` から呼ばれるので、表は Atomic だけで作り、
-//! ロックもアロケーションもしない。書くのは `BASE` を置いてからだけで、
+//! ロックもアロケーションもしない。書くのは `BASE` を置き、`set_recording(true)` の間だけで、
 //! 計測しないテストでは何もしない。
 //!
 //! 使うのは `#[ignore]` のテスト `sample_timestamps_track_the_arrival_time`
@@ -48,6 +48,14 @@ pub(super) static AUDIO: Probe = Probe::new();
 pub(super) static BASE: OnceLock<Instant> = OnceLock::new();
 /// 真なら、グラフに基準時計を付ける（`SetSyncSource(NULL)` の代わりに `SetDefaultSyncSource`）
 static DEFAULT_CLOCK: AtomicBool = AtomicBool::new(false);
+/// 偽の間は記録しない。測る区間の頭で立て、終わりで下ろす
+static RECORDING: AtomicBool = AtomicBool::new(false);
+
+/// 記録を始めるか止める。止めたあとグラフを止めれば（`Stop` はストリーミングスレッドが
+/// 抜けるまで戻らない）、書きかけの行は残らない
+pub(super) fn set_recording(value: bool) {
+    RECORDING.store(value, Ordering::Release);
+}
 
 pub(super) fn use_default_clock() -> bool {
     DEFAULT_CLOCK.load(Ordering::Relaxed)
@@ -70,6 +78,9 @@ impl Probe {
 
     /// `Receive` から呼ぶ。表が埋まったら捨てる。
     pub(super) fn record(&self, at: Instant, hresult: i32, start: i64, end: i64) {
+        if !RECORDING.load(Ordering::Acquire) {
+            return;
+        }
         let Some(base) = BASE.get() else {
             return;
         };
