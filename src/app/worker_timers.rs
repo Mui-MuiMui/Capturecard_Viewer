@@ -30,6 +30,7 @@ impl WorkerState {
         self.monitor_audio_stream(now);
         self.poll_default_audio_device(now);
         self.adjust_resample_correction(now);
+        self.log_audio_counters(now);
     }
 
     /// 期限が来ているデバイスの接続を 1 回だけ試す。

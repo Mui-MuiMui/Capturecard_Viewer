@@ -40,6 +40,11 @@ const RESAMPLE_WARN_INTERVAL: Duration = Duration::from_secs(30);
 /// バッファ長そのものが実情に合っていない可能性がある
 const RESAMPLE_WARN_RELATIVE_ERROR: f64 = 0.5;
 
+/// 音声の観測値をデバッグログへ出す間隔。「接続状態」タブを開かなくても、
+/// アンダーランや捨てたフレームが増え続けていないかをログで追えるようにする
+/// （#388 の実機確認。`device-debug` skill のログの読み方とも揃う）
+const AUDIO_COUNTERS_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
 impl WorkerState {
     /// 音声のクロックドリフト補正。水位を見て、レート比の補正係数を
     /// `RESAMPLE_CORRECTION_INTERVAL` ごとに動かす。
@@ -109,6 +114,33 @@ impl WorkerState {
                 water_level, target_level
             );
         }
+    }
+
+    /// 開いている音声の観測値（アンダーラン・捨てたフレーム・入力の取りこぼし・
+    /// 水位）を `AUDIO_COUNTERS_LOG_INTERVAL` ごとにデバッグログへ出す。
+    /// 開いていなければ何もしない。数は開き直すと 0 から数え直す。
+    pub(super) fn log_audio_counters(&mut self, now: Instant) {
+        let Some(active) = self.audio.active() else {
+            return;
+        };
+        let due = self
+            .last_audio_counters_log
+            .is_none_or(|last| now.saturating_duration_since(last) >= AUDIO_COUNTERS_LOG_INTERVAL);
+        if !due {
+            return;
+        }
+        self.last_audio_counters_log = Some(now);
+        let resample = self.audio.resample_status();
+        debug!(
+            "音声の観測値（入力の経路: {:?}）: アンダーラン {:?} 回、捨てたフレーム {:?}、入力の取りこぼし {:?} 回、水位 {:?} / 目標 {:?}、補正 {:?}",
+            active.input_route,
+            self.audio.underrun_count(),
+            self.audio.dropped_frame_count(),
+            self.audio.xrun_count(),
+            resample.map(|status| status.water_level),
+            resample.map(|status| status.target_level),
+            resample.map(|status| status.ratio)
+        );
     }
 
     /// 入力が映像デバイスの音声ピンのとき、映像の音声ピンの番号と音声が差し込んで

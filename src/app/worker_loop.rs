@@ -182,6 +182,8 @@ pub(super) struct WorkerState {
     /// 水位が目標から大きく外れている旨の `warn` を最後に出した時刻。
     /// 連打を防ぐための記録
     pub(super) last_resample_warn: Option<Instant>,
+    /// 音声の観測値（アンダーラン・捨てたフレーム・取りこぼし）を最後にログへ出した時刻
+    pub(super) last_audio_counters_log: Option<Instant>,
 
     /// 起動時の列挙をまだログへ出していないか。起動直後の `ApplyConfig` で立つ
     pub(super) startup_enumeration_pending: bool,
@@ -231,6 +233,7 @@ impl WorkerState {
             audio_capabilities: HashMap::new(),
             last_resample_correction: None,
             last_resample_warn: None,
+            last_audio_counters_log: None,
             startup_enumeration_pending: false,
             enumeration_logged_failures: (0, 0),
             video_not_visible: None,
