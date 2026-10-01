@@ -721,7 +721,9 @@ mod tests {
         // （秒、既定 65）で伸ばし、CAPTURECARD_VIEWER_CONFIG_DIR を指定してログを残す。
         // 停止時のドリフトの行（`AudioStats::log`）はアプリと同じロガーでそこへ書かれる
         if std::env::var_os(crate::config_path::CONFIG_DIR_ENV).is_some() {
-            let _ = crate::logging::init();
+            // ログを残すために指定したので、残せないなら測る意味が無い。続けずに落とす
+            let log = crate::logging::init().expect("指定したフォルダにログを作れる");
+            println!("ログ: {}", log.display());
         }
         let seconds = std::env::var("CAPTURECARD_VIEWER_PIN_TEST_SECONDS")
             .ok()
