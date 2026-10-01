@@ -12,6 +12,7 @@ use crate::status::{self, ErrorSource};
 use crate::video::{frame_len_status, FrameLenStatus, FrameStats, VideoFrame};
 use eframe::egui;
 use log::warn;
+use std::sync::Arc;
 
 /// 映像エリア（映像が無いときのプレースホルダーを含む）が受け付ける操作。
 ///
@@ -118,6 +119,31 @@ fn is_drawable_frame(frame: &VideoFrame) -> bool {
     frame_len_status(frame.data.len(), frame.width, frame.height) == FrameLenStatus::Exact
 }
 
+/// テクスチャへ渡す画像を作る。前に渡した画像を egui が手放していれば、その画素の
+/// Vec へ詰め直して返す（容量が足りていれば確保は起きない）。握られていれば新しく作る。
+/// egui はテクスチャの更新を描画の終わりにレンダラーへ渡し、渡し終えたら `Arc` を
+/// 手放すので、次のフレームでは普通は使い回せる。**呼び出し側は `is_drawable_frame` で長さを確かめてから呼ぶこと**
+/// （`as_chunks` は余りを黙って捨てるので、ここでは長さの食い違いに気づけない）。
+fn reuse_or_new_color_image(
+    previous: Option<Arc<egui::ColorImage>>,
+    frame: &VideoFrame,
+) -> Arc<egui::ColorImage> {
+    if let Some(mut image) = previous {
+        if let Some(target) = Arc::get_mut(&mut image) {
+            target.size = [frame.width, frame.height];
+            target.pixels.clear();
+            let (rgb, _) = frame.data.as_chunks::<3>();
+            target.pixels.extend(
+                rgb.iter()
+                    .map(|&[r, g, b]| egui::Color32::from_rgb(r, g, b)),
+            );
+            return image;
+        }
+    }
+    let image = egui::ColorImage::from_rgb([frame.width, frame.height], &frame.data);
+    Arc::new(image)
+}
+
 impl CaptureCardViewer {
     /// 新着フレームがあればテクスチャへ取り込む。取り込んだら `true`。
     ///
@@ -152,7 +178,11 @@ impl CaptureCardViewer {
                 return false;
             }
 
-            let image = egui::ColorImage::from_rgb([frame.width, frame.height], &frame.data);
+            // 前に渡した画像の Vec を使い回す。1080p で約 8MB を毎フレーム確保・
+            // 解放しないため。手元にも `Arc` を 1 つ残しておき、egui が手放したら
+            // 次のフレームで詰め直す
+            let image = reuse_or_new_color_image(self.video_image.take(), &frame);
+            self.video_image = Some(Arc::clone(&image));
             if let Some(texture) = &mut self.video_texture {
                 texture.set(image, texture_options);
             } else {
@@ -698,5 +728,72 @@ mod tests {
         // 帯を出すかどうかは「接続状態」タブの注意書きと同じ判定を使う
         assert!(status::fake_devices_notice(false).is_none());
         assert!(status::fake_devices_notice(true).is_some());
+    }
+
+    fn rgb_frame(width: usize, height: usize, data: Vec<u8>) -> VideoFrame {
+        VideoFrame {
+            data,
+            ..frame(width, height, 0)
+        }
+    }
+
+    // 画像の大きさと、画素を RGBA の並びにしたもの。期待値をベタ書きで比べるため
+    fn size_and_rgba(image: &egui::ColorImage) -> ([usize; 2], Vec<[u8; 4]>) {
+        let pixels = image.pixels.iter().map(|pixel| pixel.to_array()).collect();
+        (image.size, pixels)
+    }
+
+    #[test]
+    fn reuse_or_new_color_image_without_previous_converts_rgb() {
+        let frame = rgb_frame(2, 1, vec![10, 20, 30, 40, 50, 60]);
+        let image = reuse_or_new_color_image(None, &frame);
+        assert_eq!(
+            size_and_rgba(&image),
+            ([2, 1], vec![[10, 20, 30, 255], [40, 50, 60, 255]])
+        );
+    }
+
+    #[test]
+    fn reuse_or_new_color_image_refills_unshared_previous_in_place() {
+        // egui が手放した後（手元の `Arc` だけ）なら、同じ画像を詰め直して返す
+        let first = reuse_or_new_color_image(None, &rgb_frame(2, 1, vec![0; 6]));
+        let first_ptr = Arc::as_ptr(&first);
+        let pixels_ptr = first.pixels.as_ptr();
+
+        let frame = rgb_frame(1, 2, vec![1, 2, 3, 4, 5, 6]);
+        let second = reuse_or_new_color_image(Some(first), &frame);
+
+        assert_eq!(Arc::as_ptr(&second), first_ptr);
+        // 同じ画素数なので Vec も確保し直していない
+        assert_eq!(second.pixels.as_ptr(), pixels_ptr);
+        assert_eq!(
+            size_and_rgba(&second),
+            ([1, 2], vec![[1, 2, 3, 255], [4, 5, 6, 255]])
+        );
+    }
+
+    #[test]
+    fn reuse_or_new_color_image_grows_when_frame_gets_larger() {
+        // 解像度が上がったら同じ画像のまま広げる。古い画素が残らない
+        let first = reuse_or_new_color_image(None, &rgb_frame(1, 1, vec![9, 9, 9]));
+        let second = reuse_or_new_color_image(Some(first), &rgb_frame(2, 1, (0..6).collect()));
+        assert_eq!(
+            size_and_rgba(&second),
+            ([2, 1], vec![[0, 1, 2, 255], [3, 4, 5, 255]])
+        );
+    }
+
+    #[test]
+    fn reuse_or_new_color_image_leaves_shared_previous_untouched() {
+        // egui がまだ握っている画像は書き換えず、新しく作る
+        let first = reuse_or_new_color_image(None, &rgb_frame(1, 1, vec![7, 7, 7]));
+        let held_by_egui = Arc::clone(&first);
+
+        let frame = rgb_frame(1, 1, vec![1, 2, 3]);
+        let second = reuse_or_new_color_image(Some(first), &frame);
+
+        assert!(!Arc::ptr_eq(&second, &held_by_egui));
+        assert_eq!(size_and_rgba(&held_by_egui), ([1, 1], vec![[7, 7, 7, 255]]));
+        assert_eq!(size_and_rgba(&second), ([1, 1], vec![[1, 2, 3, 255]]));
     }
 }

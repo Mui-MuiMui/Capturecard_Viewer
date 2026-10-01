@@ -22,7 +22,10 @@ nokhwa = { version = "0.10", features = ["input-msmf", "output-threaded", "decod
 # realtime は音声のスレッドを MMCSS（Pro Audio）で優先させる。0.15 は常に
 # THREAD_PRIORITY_TIME_CRITICAL へ上げていたが、0.18 からはこのフィーチャが要る
 cpal = { version = "0.18", features = ["realtime"] }
-confy = "0.6"
+# 設定ファイルの読み書き（src/settings/store.rs）。confy は 0.6 から 2.0 へ上げずに外し、
+# toml を直接使う（docs/DEPENDENCIES.md の第 3 段）。置き場所は dirs で決める
+# （src/config_path.rs）。toml 自体は embed-resource（ビルド時）が既に使っている
+toml = "1.1"
 # ログのファサード。出力先の実装は src/logging.rs にある
 log = "0.4.34"
 serde = { version = "1.0", features = ["derive"] }
@@ -57,10 +60,9 @@ semver = "1.0"
 # 更新の適用（src/update/apply.rs）。ダウンロードした exe を SHA256SUMS.txt と照合する
 sha2 = "0.11"
 
-# テスト専用。設定の TOML を直接読み書きして検証するため
+# テスト専用。一時フォルダで設定ファイルなどの読み書きを検証するため
 [dev-dependencies]
 tempfile = "3.27"
-toml = "1.1"
 
 [build-dependencies]
 embed-resource = "3.0"

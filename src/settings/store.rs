@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 // 設定ファイルをどう読めたか。起動時に既定値を書き戻してよいかの判断に使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadOutcome {
-    // 読み込めた。初回起動で confy が既定値のファイルを作った場合も含む
+    // 読み込めた。初回起動などでファイルがまだ無く、既定値を返した場合も含む
     Loaded,
     // 読み込めなかったので既定値で起動した。読めなかったファイルは退避済みか、
     // そもそも存在しなかった。どちらもディスクに壊れたファイルは残っていない
@@ -140,9 +140,8 @@ pub fn export_file_name(date: &impl Datelike) -> String {
 
 // 設定を、指定した場所へ TOML として書き出す。
 //
-// **confy の `store_path` をそのまま使う。** 書式を `%AppData%` の設定ファイルと
-// 揃えたいためで、ここだけ別の toml 実装で書くと、confy が書式を変えたときに
-// 書き出したファイルを読み戻せない組み合わせが生まれる。
+// **書式は `%AppData%` の設定ファイルと同じ（`serialize_settings`）。** 別の
+// 書き方にすると、書き出したファイルを読み戻せない組み合わせが生まれる。
 //
 // 書き方は `save()` と同じく、書き出し先と同じフォルダの一時ファイルへ書いて
 // rename で置き換える（Issue #361）。選んだファイルへ直接書くと、書き込み中に
@@ -159,9 +158,8 @@ pub fn export_to(path: &Path, settings: &AppSettings) -> Result<(), SettingsErro
 // 読めた場合は `AppSettings` へのパースを通っているので、知らない値は
 // 既定へ倒れ、旧版のホットキーも移行済みになっている（`RawAppSettings`）。
 //
-// **`confy::load_path` はファイルが無いと既定値で新しく作る。** 読み込みの
-// つもりで呼んだ結果、選んだ場所に既定値のファイルが増えるのは意図と違うので、
-// 先に存在を確かめてから渡す。
+// 先にメタデータで「無い」「ファイルではない」を分けておく。読んだときの
+// 失敗と区別が付かないと、ユーザーは置き場所を疑って直しようがなくなる。
 //
 // 確かめ方に `Path::is_file()` を使わないのは、**実在するのにメタデータを
 // 取れない場合も `false` を返す**ため。権限の無いファイルを選んだときに
@@ -169,7 +167,7 @@ pub fn export_to(path: &Path, settings: &AppSettings) -> Result<(), SettingsErro
 pub fn import_from(path: &Path) -> Result<AppSettings, SettingsError> {
     match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => {}
-        // ディレクトリやデバイスファイル。confy へ渡しても読めない
+        // ディレクトリやデバイスファイル。読もうとしても読めない
         Ok(_) => return Err(SettingsError::NotAFile(path.to_path_buf())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(SettingsError::FileNotFound(path.to_path_buf()))
@@ -182,10 +180,35 @@ pub fn import_from(path: &Path) -> Result<AppSettings, SettingsError> {
         }
     }
 
-    confy::load_path(path).map_err(|e| SettingsError::ImportFailed {
-        path: path.to_path_buf(),
-        source: e.to_string(),
+    std::fs::read_to_string(path)
+        .map_err(|e| e.to_string())
+        .and_then(|contents| parse_settings(&contents))
+        .map_err(|source| SettingsError::ImportFailed {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+// 設定ファイルの中身（TOML）を `AppSettings` へ読む。
+//
+// 1.2.x までは confy 0.6（内部は toml 0.8）で読み書きしていた。toml 1.x へ
+// 変えても、旧版が書いたファイルはそのまま読め、書き出す内容もバイト単位で
+// 同じだった（`docs/DEPENDENCIES.md` の第 3 段）。
+//
+// 失敗の理由は 1 行にまとめる。toml のエラーの `Display` は該当行の抜き出しを
+// 含む複数行で、設定の読み込みの失敗はトーストにも出るため。
+fn parse_settings(contents: &str) -> Result<AppSettings, String> {
+    toml::from_str(contents).map_err(|e| {
+        let full = e.to_string();
+        // 1 行目は「TOML parse error at line L, column C」
+        let position = full.lines().next().unwrap_or_default();
+        format!("{}: {}", position, e.message().trim())
     })
+}
+
+// 設定を、設定ファイルに書く TOML にする。保存と書き出しで共通。
+fn serialize_settings(settings: &AppSettings) -> Result<String, String> {
+    toml::to_string_pretty(settings).map_err(|e| e.to_string())
 }
 
 // 設定ファイルが空（0 バイトか空白だけ）か。
@@ -232,9 +255,9 @@ fn temp_token(attempt: u32) -> u64 {
 // 名前が衝突したときに別の名前で試す回数
 const TEMP_ATTEMPTS: u32 = 8;
 
-// 一時ファイルを排他的に（`create_new`）作り、そのパスを返す。既にある
-// ファイルは開かないので、ここから返るのは自分が作ったものだけ。
-fn create_temp_file(path: &Path) -> std::io::Result<PathBuf> {
+// 一時ファイルを排他的に（`create_new`）作り、そのパスと開いたファイルを返す。
+// 既にあるファイルは開かないので、ここから返るのは自分が作ったものだけ。
+fn create_temp_file(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
     let mut last_error = None;
     for attempt in 0..TEMP_ATTEMPTS {
         let temp_path = temp_path_for(path, temp_token(attempt));
@@ -243,7 +266,7 @@ fn create_temp_file(path: &Path) -> std::io::Result<PathBuf> {
             .create_new(true)
             .open(&temp_path)
         {
-            Ok(_) => return Ok(temp_path),
+            Ok(file) => return Ok((temp_path, file)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(e),
             Err(e) => return Err(e),
         }
@@ -253,15 +276,11 @@ fn create_temp_file(path: &Path) -> std::io::Result<PathBuf> {
 
 // 設定を一時ファイルへ書き、ディスクへ書き切ってから本来のファイルと置き換える。
 //
-// confy の `store_path` を本来のファイルへ直接使うと、`truncate` で開いてから
-// 書き込むため、途中で止まると 0 バイトか書きかけのファイルが残る（Issue #317）。
+// 本来のファイルを `truncate` で開いて直接書くと、途中で止まったとき 0 バイトか
+// 書きかけのファイルが残る（Issue #317。confy 0.6 の `store_path` がそうだった）。
 // 置き換えを rename にすれば、ディスクに残るのは古い内容か新しい内容の
 // どちらかになる。Windows の `std::fs::rename` は置き換え先があっても
 // `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` で差し替える。
-//
-// 一時ファイルへの書き込みには confy の `store_path` をそのまま使う。書式を
-// 読み込み（confy）に揃えるため。このクレートが
-// 直接使う toml と confy が内部で使う toml は版が違う。
 fn write_atomically(path: &Path, settings: &AppSettings) -> Result<(), SettingsError> {
     replace_atomically(path, settings).map_err(|source| SettingsError::SaveFailed {
         path: path.to_path_buf(),
@@ -272,21 +291,24 @@ fn write_atomically(path: &Path, settings: &AppSettings) -> Result<(), SettingsE
 // `write_atomically` と `export_to` の本体。失敗の理由だけを返し、どの
 // `SettingsError` にするかは呼び出し側が決める。
 fn replace_atomically(path: &Path, settings: &AppSettings) -> Result<(), String> {
-    // 名前を排他的に確保してから書く。confy は `truncate` で開き直して書くが、
-    // 開くのは自分で作ったファイルだけ
-    let temp_path = create_temp_file(path).map_err(|e| e.to_string())?;
+    use std::io::Write;
 
-    let written = confy::store_path(&temp_path, settings)
-        .map_err(|e| e.to_string())
+    // 書けない設定なら一時ファイルを作る前に止める
+    let contents = serialize_settings(settings)?;
+
+    // 名前を排他的に確保し、そのとき開いたファイルへ書く。開くのは自分で
+    // 作ったファイルだけ
+    let (temp_path, mut file) = create_temp_file(path).map_err(|e| e.to_string())?;
+
+    let synced = file
+        .write_all(contents.as_bytes())
         // rename の前にディスクへ書き切る。書き切る前に置き換えると、
         // 電源断のあとに中身の無いファイルへ置き換わっていることがある
-        .and_then(|()| {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&temp_path)
-                .and_then(|file| file.sync_all())
-                .map_err(|e| e.to_string())
-        })
+        .and_then(|()| file.sync_all());
+    // 置き換えや削除の前に閉じておく
+    drop(file);
+    let written = synced
+        .map_err(|e| e.to_string())
         .and_then(|()| std::fs::rename(&temp_path, path).map_err(|e| e.to_string()));
 
     if let Err(source) = written {
@@ -307,7 +329,7 @@ impl AppSettings {
     // ファイルを既定値で上書きしてしまい、証跡ごと消える。
     pub fn load() -> (Self, LoadOutcome) {
         // 置き場所は環境変数 CAPTURECARD_VIEWER_CONFIG_DIR で差し替えられる
-        // （crate::config_path）。指定が無ければ confy の既定
+        // （crate::config_path）。指定が無ければ %AppData% の下
         let path = match crate::config_path::config_file_path() {
             Ok(path) => path,
             // 設定ファイルの置き場所が分からず、退避を試みることすらできない。
@@ -328,18 +350,12 @@ impl AppSettings {
     //
     // パスを引数にしているのは、一時フォルダのファイルでテストするため。
     fn load_from(path: &Path) -> (Self, LoadOutcome) {
-        // 読めないファイルはここで判定せず、confy の失敗として扱う
-        let blank = std::fs::read(path)
-            .map(|contents| is_blank_config(&contents))
-            .unwrap_or(false);
-        let loaded = if blank {
-            Err("設定ファイルが空（0 バイトか空白だけ）".to_string())
-        } else {
-            confy::load_path(path).map_err(|e| e.to_string())
-        };
-
-        match loaded {
-            Ok(settings) => (settings, LoadOutcome::Loaded),
+        match read_config_file(path) {
+            Ok(Some(settings)) => (settings, LoadOutcome::Loaded),
+            // 初回起動などでまだ無い。既定値で起動し、起動時の保存が作る
+            // （`save` が親のフォルダも作る）。confy 0.6 はここで既定値の
+            // ファイルを書いていた
+            Ok(None) => (Self::default(), LoadOutcome::Loaded),
             Err(e) => {
                 error!("設定ファイルを読み込めないため既定値で起動する: {}", e);
 
@@ -380,8 +396,38 @@ impl AppSettings {
     pub fn save(&self) -> Result<(), SettingsError> {
         let path =
             crate::config_path::config_file_path().map_err(SettingsError::LocationUnavailable)?;
-        write_atomically(&path, self)
+        self.save_to(&path)
     }
+
+    // 指定したパスへ保存する。`save` の本体。パスを引数にしているのは
+    // `load_from` と同じくテストのため。
+    fn save_to(&self, path: &Path) -> Result<(), SettingsError> {
+        // 初回起動では `%AppData%\capturecard_viewer\config` がまだ無い
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| SettingsError::SaveFailed {
+                path: path.to_path_buf(),
+                source: e.to_string(),
+            })?;
+        }
+        write_atomically(path, self)
+    }
+}
+
+// 設定ファイルを読む。ファイルが無ければ `Ok(None)`。
+//
+// 空のファイルと読めないファイルは `Err`（理由はログに出す文言）。呼び出し側が
+// 退避して既定値で起動する。
+fn read_config_file(path: &Path) -> Result<Option<AppSettings>, String> {
+    let contents = match std::fs::read(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    if is_blank_config(&contents) {
+        return Err("設定ファイルが空（0 バイトか空白だけ）".to_string());
+    }
+    let contents = String::from_utf8(contents).map_err(|e| e.to_string())?;
+    parse_settings(&contents).map(Some)
 }
 
 #[cfg(test)]
@@ -671,6 +717,82 @@ mod tests {
     }
 
     #[test]
+    fn load_from_legacy_file_migrates_the_hotkey() {
+        // 旧版が書いた設定ファイルを、起動時の読み込みでもそのまま読めること
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("default-config.toml");
+        fs::write(&path, LEGACY_CONFIG).expect("書けること");
+
+        let (settings, outcome) = AppSettings::load_from(&path);
+
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
+    }
+
+    #[test]
+    fn load_from_missing_file_returns_defaults_without_creating_it() {
+        // 初回起動。既定値で読めたことにし、ファイルは起動時の保存が作る
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("config").join("default-config.toml");
+
+        let (settings, outcome) = AppSettings::load_from(&path);
+
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert!(outcome.may_write_defaults_on_startup());
+        assert_eq!(settings.video.fps, AppSettings::default().video.fps);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn load_from_broken_toml_backs_it_up() {
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("default-config.toml");
+        fs::write(&path, "これは TOML ではない [[[").expect("書けること");
+
+        let (_, outcome) = AppSettings::load_from(&path);
+
+        assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
+        assert!(dir.path().join("default-config.toml.bak").exists());
+    }
+
+    #[test]
+    fn parse_settings_error_is_a_single_line_with_the_position() {
+        // トーストに出るので 1 行にまとめる。位置は残す
+        let err = parse_settings("これは TOML ではない [[[").expect_err("エラーになること");
+
+        assert!(!err.contains('\n'), "複数行になっている: {err}");
+        assert!(err.contains("line 1"), "位置が無い: {err}");
+    }
+
+    #[test]
+    fn serialize_settings_round_trips() {
+        let settings: AppSettings = toml::from_str(FULL_CONFIG).expect("読めること");
+
+        let written = serialize_settings(&settings).expect("書けること");
+        let reloaded = parse_settings(&written).expect("読み戻せること");
+
+        assert_eq!(serialize_settings(&reloaded).unwrap(), written);
+    }
+
+    #[test]
+    fn save_to_creates_the_missing_folder() {
+        // 初回起動では設定ファイルのフォルダがまだ無い
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir
+            .path()
+            .join("capturecard_viewer")
+            .join("config")
+            .join("default-config.toml");
+
+        AppSettings::default()
+            .save_to(&path)
+            .expect("保存できること");
+
+        assert!(path.is_file());
+        assert!(!has_own_temp_file(&path));
+    }
+
+    #[test]
     fn write_atomically_replaces_the_file_and_leaves_no_temp_file() {
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("default-config.toml");
@@ -818,8 +940,8 @@ mod tests {
 
     #[test]
     fn import_from_missing_file_returns_error_without_creating_it() {
-        // confy の load_path はファイルが無いと既定値で作ってしまう。
-        // 読み込みのつもりで選んだ場所にファイルが増えないこと
+        // 1.2.x まで使っていた confy の load_path はファイルが無いと既定値で
+        // 作っていた。読み込みのつもりで選んだ場所にファイルが増えないこと
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("missing.toml");
 

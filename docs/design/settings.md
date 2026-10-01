@@ -15,14 +15,14 @@
 `load()` は `(AppSettings, LoadOutcome)` を返す。`LoadOutcome` は退避まで含めて成功したかを表し、**退避できなかった場合に起動時の書き戻しを止めるためにある。** 退避に失敗すると読めなかったファイルがディスクに残るので、そこへ既定値を `save()` すると証跡ごと潰れる。`CaptureCardViewer::default` の起動時保存は `may_write_defaults_on_startup()` で守ってあるので、**起動経路に `save()` を足すときは同じ判断を通すこと。** 設定ダイアログからの明示的な保存は、ユーザーの意思なので抑止していない。
 ## 置き場所の差し替え
 
-設定ファイルの置き場所は既定で confy が決める `%AppData%\capturecard_viewer\config\default-config.toml`。環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` にフォルダを指定すると、`<フォルダ>\default-config.toml` を使い、ログもそのフォルダの `logs\` に出す（`src/config_path.rs`、Issue #290）。複数のエージェントが並行してアプリを起動したとき、全員が同じ `%AppData%` の設定ファイルを読み書きして退避と復元が交差し、設定が壊れたため足した。開発者向けで、設定ファイルには保存しない。
+設定ファイルの置き場所は既定で `%AppData%\capturecard_viewer\config\default-config.toml`（`dirs::config_dir()` の下。1.2.x まで使っていた confy 0.6 と同じ場所で、ずらすと既存の設定ファイルを見失う。`docs/DEPENDENCIES.md` の第 3 段）。環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` にフォルダを指定すると、`<フォルダ>\default-config.toml` を使い、ログもそのフォルダの `logs\` に出す（`src/config_path.rs`、Issue #290）。複数のエージェントが並行してアプリを起動したとき、全員が同じ `%AppData%` の設定ファイルを読み書きして退避と復元が交差し、設定が壊れたため足した。開発者向けで、設定ファイルには保存しない。
 
 - **絶対パスだけを使う。** 相対パスはカレントディレクトリ基準にも exe の置き場所基準にもせず、WARN を出して既定の置き場所へ倒す（`docs/design/assets.md`）
 - フォルダが無ければ作る。作れない（同じ名前のファイルがあるなど）ときも既定の置き場所へ倒して WARN を出す
 - 環境変数を読むのは最初の問い合わせの 1 回だけで、以後は同じ結果を使う。設定とログで置き場所が食い違わないようにするため
 - 使っている設定ファイルのパスはログの先頭近くに出る。差し替えたときと差し替えを使えなかったときは WARN
 
-**設定ファイルのパスを confy から直接引かないこと。** `AppSettings::load` / `save` とログの置き場所は `config_path` を通しているので、`confy::load(APP_NAME, ..)` のような経路を足すと差し替えが効かなくなる。
+**設定ファイルのパスを `config_path` 以外から引かないこと。** `AppSettings::load` / `save` とログの置き場所は `config_path` を通しているので、`dirs::config_dir()` から直接組み立てるような経路を足すと差し替えが効かなくなる。
 
 ## 設定の保存はデバウンスされる
 
@@ -34,14 +34,16 @@
 
 ## 保存は一時ファイルを経由して置き換える
 
-`AppSettings::save()` は、同じフォルダの一時ファイル（`default-config.toml.<乱数>.tmp`）へ書いて `sync_all` でディスクへ書き切り、`rename` で本来のファイルと置き換える（`src/settings/store.rs` の `write_atomically`、Issue #317）。confy の `store_path` を本来のファイルへ直接使っていたころは、`truncate` で開いてから書くため、書き込み中の強制終了や電源断で 0 バイトか書きかけのファイルが残った。rename なら、ディスクに残るのは古い内容か新しい内容のどちらかになる。
+`AppSettings::save()` は、同じフォルダの一時ファイル（`default-config.toml.<乱数>.tmp`）へ書いて `sync_all` でディスクへ書き切り、`rename` で本来のファイルと置き換える（`src/settings/store.rs` の `write_atomically`、Issue #317）。confy 0.6 の `store_path` で本来のファイルへ直接書いていたころは、`truncate` で開いてから書くため、書き込み中の強制終了や電源断で 0 バイトか書きかけのファイルが残った。rename なら、ディスクに残るのは古い内容か新しい内容のどちらかになる。
 
 - 「その他」タブの「設定を書き出す」（`export_to`）も同じ処理を通す。一時ファイルはユーザーが選んだ書き出し先と同じフォルダに置く（Issue #361）
 - 一時ファイルを同じフォルダに置くのは、rename が同じボリュームの中でだけ置き換えとして働くため
-- 一時ファイルへの書き込みには confy の `store_path` をそのまま使う。書式を読み込み（confy）に揃えるため。このクレートが直接使う toml（1.x）と confy が内部で使う toml（0.8）は版が違う
+- 書く内容は `toml` 1.x の `to_string_pretty`（`serialize_settings`）。読み込みも同じ `toml` 1.x（`parse_settings`）。1.2.x まで使っていた confy 0.6（内部は `toml` 0.8）と書き出す内容はバイト単位で同じで、互いに読める（`docs/DEPENDENCIES.md` の第 3 段、Issue #302）
+- 開いた一時ファイルのハンドルへそのまま書き、`sync_all` してから閉じて rename する。書き込みのためにパスから開き直さない
+- 保存（`save`）は設定ファイルのフォルダが無ければ作る。初回起動ではまだ無いため。書き出し（`export_to`）は作らない（ユーザーが選んだフォルダ）
 - 失敗したら一時ファイルを消す。元のファイルは手付かずで残る
 - 一時ファイルは乱数入りの名前で `create_new`（排他的に作る）で作り、消すのは自分で作ったものだけにする。もともと同じ名前の `.tmp` があっても上書きも削除もしない（Issue #369）。起動時に前回の残りを消す処理は無い
-- 読み込みは confy の `load_path` のまま
+- 読み込み（`load`）はファイルが無ければ既定値を返すだけで、ファイルは作らない。起動時の書き戻しが作る（confy 0.6 の `load_path` は読み込みの中で既定値を書いていた）。読めなかった理由は `toml` の位置（行と列）と理由を 1 行にまとめる
 
 ### 保存の失敗が続く間は間隔を伸ばし、知らせるのは初回だけ
 

@@ -9,8 +9,13 @@
 //!
 //! **毎フレーム呼ばれるので、ロックはフレームバッファの 1 回だけ（録画中は録画の
 //! リングの待たない `try_lock` が 1 回増える）、アロケーションは置き換えたフレームを
-//! 回収できなかったときだけにする**
-//! （`docs/design/video-pipeline.md`）。
+//! 回収できなかったときだけにする**（`docs/design/video-pipeline.md`）。回収できた
+//! フレームは画素の Vec だけでなく `Arc` ごと使い回す（`fill_recycled`）。例外は
+//! デコーダに任せる経路で、`push_decoded` はデコーダが確保した Vec を受け取り、
+//! `push_mjpeg` もデコーダの内部で確保が起きる。
+//!
+//! **フレームバッファのロックの中では解放も起こさない。** 置き換えたフレームは
+//! ロックの中で `recyclable` へ移すだけにし、手放すのは次のフレームでロックの外。
 
 use log::{info, trace, warn};
 use std::sync::{Arc, Mutex};
@@ -18,7 +23,9 @@ use std::time::Instant;
 
 use super::color::{adjusted_color_matrix, color_matrix_for, ColorMatrix, SharedColorConversion};
 use super::convert::{bgr24_stride, bgr24_to_rgb, mjpeg_to_rgb, yuy2_to_rgb_naive};
-use super::frame_buffer::{frame_len_status, FrameBuffer, FrameLenStatus, VideoFrame, VideoFrames};
+use super::frame_buffer::{
+    fill_recycled, frame_len_status, FrameBuffer, FrameLenStatus, VideoFrame, VideoFrames,
+};
 use super::tap::VideoTap;
 use super::yuv420::{yuv420_frame_len, yuv420_to_rgb, Yuv420Layout};
 use crate::repaint::RepaintWaker;
@@ -68,7 +75,7 @@ pub(super) struct FrameSink {
     /// 録画へ映像を回す差し込み口。録画中だけ、画面へ置いたのと同じ `Arc` を積む
     tap: VideoTap,
     /// 直前に置き換えられたフレーム。UI スレッドが手放していれば
-    /// 中の Vec を次の変換先として回収し、毎フレームの確保を避ける。
+    /// `Arc` ごと次の変換先として回収し、毎フレームの確保を避ける。
     /// 1 世代ぶん遅らせて回収するのは、置き換えた直後のフレームは
     /// UI スレッドがテクスチャ化のために掴んでいることが多いため。
     recyclable: Option<Arc<VideoFrame>>,
@@ -107,20 +114,27 @@ impl FrameSink {
         }
     }
 
-    /// 次の変換先にする Vec。回収できたものがあれば使い回し、無ければ空
-    /// （変換側がリサイズするので、その時だけ確保が起きる）。
+    /// 回収待ちのフレームを取り出し、使い回せればその中身へ `fill` で書く
+    /// （`fill_recycled`）。幅と高さもここで付ける。**フレームバッファのロックの
+    /// 前に呼ぶ**ので、置き換えたフレームの解放が起きてもロックの外になる。
     ///
     /// 回収できなかった回数は、録画中だけ `VideoTap` が数える。録画スレッドが
     /// リングから取った `Arc` を持ち続けると増える（`docs/design/recording.md`）。
-    fn recycled_buffer(&mut self) -> Vec<u8> {
-        match self.recyclable.take().map(Arc::try_unwrap) {
-            Some(Ok(previous)) => previous.data,
-            Some(Err(_)) => {
-                self.tap.note_recycle_miss();
-                Vec::new()
-            }
-            None => Vec::new(),
+    fn fill_frame<R>(
+        &mut self,
+        width: usize,
+        height: usize,
+        fill: impl FnOnce(&mut Vec<u8>) -> R,
+    ) -> (Arc<VideoFrame>, R) {
+        let (frame, result, missed) = fill_recycled(self.recyclable.take(), |target| {
+            target.width = width;
+            target.height = height;
+            fill(&mut target.data)
+        });
+        if missed {
+            self.tap.note_recycle_miss();
         }
+        (frame, result)
     }
 
     /// YUY2 のフレームを自前の変換（高速パス）で RGB に直して積む。
@@ -153,22 +167,13 @@ impl FrameSink {
             return false;
         }
 
-        // 回収できた Vec があれば使い回し、無ければ新規に確保する
-        let mut rgb = self.recycled_buffer();
+        // 回収できたフレームがあれば使い回し、無ければ新規に確保する
         let matrix = self.current_matrix(width, height);
-        yuy2_to_rgb_naive(width, height, src, &matrix, &mut rgb);
+        let (frame, ()) = self.fill_frame(width, height, |rgb| {
+            yuy2_to_rgb_naive(width, height, src, &matrix, rgb)
+        });
 
-        self.push(
-            VideoFrame {
-                width,
-                height,
-                data: rgb,
-            },
-            received_at,
-            true,
-            YUY2_FORMAT_NAME,
-            matrix.name,
-        )
+        self.push(frame, received_at, true, YUY2_FORMAT_NAME, matrix.name)
     }
 
     /// いまの設定で使う係数表。色空間・レンジ・映像調整を畳み込んだもの。
@@ -210,20 +215,11 @@ impl FrameSink {
             }
             return false;
         }
-        let mut rgb = self.recycled_buffer();
         let matrix = self.current_matrix(width, height);
-        yuv420_to_rgb(layout, width, height, src, &matrix, &mut rgb);
-        self.push(
-            VideoFrame {
-                width,
-                height,
-                data: rgb,
-            },
-            received_at,
-            true,
-            layout.name(),
-            matrix.name,
-        )
+        let (frame, ()) = self.fill_frame(width, height, |rgb| {
+            yuv420_to_rgb(layout, width, height, src, &matrix, rgb)
+        });
+        self.push(frame, received_at, true, layout.name(), matrix.name)
     }
 
     /// DirectShow の RGB24（BGR の並び、行は 4 バイト境界）を RGB に並べ替えて積む。
@@ -251,19 +247,10 @@ impl FrameSink {
             }
             return false;
         }
-        let mut rgb = self.recycled_buffer();
-        bgr24_to_rgb(width, height, stride, bottom_up, src, &mut rgb);
-        self.push(
-            VideoFrame {
-                width,
-                height,
-                data: rgb,
-            },
-            received_at,
-            false,
-            "RGB24",
-            RGB_MATRIX_NAME,
-        )
+        let (frame, ()) = self.fill_frame(width, height, |rgb| {
+            bgr24_to_rgb(width, height, stride, bottom_up, src, rgb)
+        });
+        self.push(frame, received_at, false, "RGB24", RGB_MATRIX_NAME)
     }
 
     /// MJPEG の 1 フレームを展開して積む。
@@ -271,6 +258,7 @@ impl FrameSink {
     /// **この経路でも色空間・色レンジ・映像調整は効かない**（`push_decoded` と
     /// 同じ）。展開先の Vec は使い回すが、デコーダの内部では確保が起きる
     /// （`convert::mjpeg_to_rgb`）。壊れたフレームは捨て、初回だけ記録する。
+    /// **捨てるときも展開先は手放さず、次のフレームの変換先として残す。**
     pub(super) fn push_mjpeg(
         &mut self,
         width: usize,
@@ -278,8 +266,11 @@ impl FrameSink {
         src: &[u8],
         received_at: Instant,
     ) -> bool {
-        let mut rgb = self.recycled_buffer();
-        if let Err(reason) = mjpeg_to_rgb(width, height, src, &mut rgb) {
+        let (frame, decoded) =
+            self.fill_frame(width, height, |rgb| mjpeg_to_rgb(width, height, src, rgb));
+        if let Err(reason) = decoded {
+            // 誰にも渡していないので他に持ち主はいない。次のフレームで使い回す
+            self.recyclable = Some(frame);
             if self.decode_error_notice.take() {
                 warn!(
                     "MJPEG のフレームを展開できないので破棄した（{}x{}、{} バイト）: {}。以降は記録しない",
@@ -291,17 +282,7 @@ impl FrameSink {
             }
             return false;
         }
-        self.push(
-            VideoFrame {
-                width,
-                height,
-                data: rgb,
-            },
-            received_at,
-            false,
-            "MJPEG",
-            DECODER_MATRIX_NAME,
-        )
+        self.push(frame, received_at, false, "MJPEG", DECODER_MATRIX_NAME)
     }
 
     /// デコーダが RGB に直したフレームを積む（汎用パス）。
@@ -353,12 +334,13 @@ impl FrameSink {
                 return false;
             }
         }
+        // デコーダが確保した Vec はそのまま使う。回収したフレームは `Arc` だけを
+        // 使い回し、中にあった古い Vec はここ（ロックの外）で手放す。以前は回収
+        // せずに積んでいたので、置き換えた 2 世代前のフレームの解放がフレーム
+        // バッファのロックの中で起きていた
+        let (frame, ()) = self.fill_frame(width, height, |data| *data = rgb);
         self.push(
-            VideoFrame {
-                width,
-                height,
-                data: rgb,
-            },
+            frame,
             received_at,
             false,
             source_format,
@@ -367,9 +349,12 @@ impl FrameSink {
     }
 
     /// フレームバッファへ置き、置けたら UI スレッドを起こす。
+    ///
+    /// `frame` は `fill_frame` で作ったもの。回収待ち（`recyclable`）はそこで
+    /// 取り出し済みなので、ロックの中の代入で古いフレームが解放されることはない。
     fn push(
         &mut self,
-        frame: VideoFrame,
+        frame: Arc<VideoFrame>,
         received_at: Instant,
         used_fast: bool,
         source_format: &'static str,
@@ -377,8 +362,6 @@ impl FrameSink {
     ) -> bool {
         let decode_ms = received_at.elapsed().as_secs_f32() * 1000.0;
         let (width, height) = (frame.width, frame.height);
-        // `Arc` に包むのはロックの外で済ませる（包むときに小さな確保が起きる）
-        let frame = Arc::new(frame);
         // 録画中だけ、同じフレームの `Arc` を複製しておく（参照の数が増えるだけで確保は無い）
         let tapped = self.tap.is_attached().then(|| Arc::clone(&frame));
         // フレームバッファへ置けたか。置けたときだけ UI スレッドを
@@ -411,6 +394,8 @@ impl FrameSink {
                 true
             }
             Err(_) => {
+                // 置けなかったフレームは次の変換先として残す（毎フレーム確保し直さない）
+                self.recyclable = Some(frame);
                 if self.lock_error_notice.take() {
                     warn!(
                         "フレームバッファのロックを取得できないのでフレームを捨てた。以降は記録しない"
@@ -737,5 +722,66 @@ mod tests {
         while consumer.try_pop().is_some() {}
         assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
         assert_eq!(tap.recycle_misses(), 1);
+    }
+
+    fn sink_for(frames: &VideoFrames) -> FrameSink {
+        let color = Arc::new(SharedColorConversion::new());
+        FrameSink::new(frames, color, RepaintWaker::default())
+    }
+
+    #[test]
+    fn frame_sink_reuses_the_frame_replaced_two_pushes_ago() {
+        // 1 世代遅らせて回収するので、3 枚目は 1 枚目と同じ `Arc` に書かれる
+        let frames = VideoFrames::new();
+        let mut sink = sink_for(&frames);
+        assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
+        let first = Arc::as_ptr(&frames.latest().expect("1 枚目"));
+        assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
+        assert!(sink.push_yuy2(2, 1, &[235, 128, 235, 128], Instant::now()));
+
+        let third = frames.latest().expect("3 枚目");
+        assert_eq!(Arc::as_ptr(&third), first);
+        assert_eq!(third.data, vec![254; 6]);
+    }
+
+    #[test]
+    fn frame_sink_does_not_overwrite_a_frame_still_held_elsewhere() {
+        // UI スレッドが握り続けているフレームは、回収の順番が来ても書き換えない
+        let frames = VideoFrames::new();
+        let mut sink = sink_for(&frames);
+        assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
+        let held = frames.latest().expect("1 枚目");
+        assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
+        assert!(sink.push_yuy2(2, 1, &[235, 128, 235, 128], Instant::now()));
+
+        assert_eq!(held.data, vec![0; 6]);
+        let third = frames.latest().expect("3 枚目");
+        assert!(!Arc::ptr_eq(&third, &held));
+        assert_eq!(third.data, vec![254; 6]);
+    }
+
+    #[test]
+    fn frame_sink_push_mjpeg_keeps_the_buffer_when_decoding_fails() {
+        // 展開に失敗しても変換先は捨てず、次のフレームで使い回す
+        let frames = VideoFrames::new();
+        let mut sink = sink_for(&frames);
+        assert!(!sink.push_mjpeg(2, 1, &[0, 1, 2, 3], Instant::now()));
+        assert!(frames.latest().is_none());
+        assert!(sink.recyclable.is_some());
+    }
+
+    #[test]
+    fn frame_sink_push_decoded_takes_the_recyclable_before_the_lock() {
+        // デコーダの経路でも回収待ちをロックの前に取り出し、`Arc` を使い回す
+        let frames = VideoFrames::new();
+        let mut sink = sink_for(&frames);
+        assert!(sink.push_decoded(1, 1, vec![1, 2, 3], Instant::now(), "NV12"));
+        let first = Arc::as_ptr(&frames.latest().expect("1 枚目"));
+        assert!(sink.push_decoded(1, 1, vec![4, 5, 6], Instant::now(), "NV12"));
+        assert!(sink.push_decoded(1, 1, vec![7, 8, 9], Instant::now(), "NV12"));
+
+        let third = frames.latest().expect("3 枚目");
+        assert_eq!(Arc::as_ptr(&third), first);
+        assert_eq!(third.data, vec![7, 8, 9]);
     }
 }

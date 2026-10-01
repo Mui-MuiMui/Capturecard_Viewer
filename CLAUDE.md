@@ -10,7 +10,7 @@
 
 - キャプチャーデバイスは Windows Media Foundation 経由で Web カメラとして扱う（nokhwa）。Media Foundation に出ないデバイス（OBS の仮想カメラなど）は DirectShow で扱い、名前に「(DirectShow)」を添える
 - 音声は WASAPI 経由の入力 → リングバッファ → 出力のパススルー（cpal）
-- 設定は `%AppData%\capturecard_viewer\config\default-config.toml`（confy）
+- 設定は `%AppData%\capturecard_viewer\config\default-config.toml`（`toml` で読み書きする。`src/settings/store.rs`）
 
 ## ビルドと検証
 
@@ -73,7 +73,7 @@ cargo build --release
 | `src/video/capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の取得 |
 | `src/video/color.rs` | YCbCr→RGB の係数表とその選び方、映像調整の畳み込み、設定の共有（`SharedColorConversion`） |
 | `src/video/convert.rs` | YUY2→RGB24 の画素変換と、DirectShow の RGB24（BGR）/ MJPEG の展開 |
-| `src/video/frame_buffer.rs` | `FrameBuffer`（`Arc` によるフレーム共有と世代番号）と観測値（`FrameStats`）、画素データの長さの判定（`frame_len_status`） |
+| `src/video/frame_buffer.rs` | `FrameBuffer`（`Arc` によるフレーム共有と世代番号）と観測値（`FrameStats`）、画素データの長さの判定（`frame_len_status`）、置き換えたフレームを `Arc` ごと使い回すか（`fill_recycled`） |
 | `src/video/tap.rs` | 録画へ映像を回す差し込み口 `VideoTap`。録画中だけ、`FrameSink` が画面へ置いたのと同じ `Arc<VideoFrame>` を容量 3 のリングへ積む（待たない `try_lock`、満杯なら捨てて数える）。Vec の回収に失敗した回数も録画中だけ数える |
 | `src/audio/mod.rs` | 音声モジュールの入口。`ActiveAudio` / `AudioDirection` / `AudioError` と能力キャッシュのキー（`cache_key` / `device_name_from_key`）、外から使う経路（`crate::audio::...`）の `pub use` |
 | `src/audio/capabilities.rs` | デバイスの対応設定の取得（`query_capabilities`）と、設定画面に出す選択肢の組み立て（`selectable_*` / `ChoiceSource`） |
@@ -126,7 +126,7 @@ cargo build --release
 | `src/settings/preset.rs` | `[[presets]]`。適用と一致の判定（`matches_preset` / `resolved_active_preset`）、名前の検証、読み込んだ一覧の整え方（`sanitize_presets`）、`AppSettings` のプリセット操作 |
 | `src/settings/store.rs` | 設定ファイルの読み書き（`AppSettings::load` / `save`。保存は一時ファイルへ書いて rename で置き換える `write_atomically`）、読めなかったファイル・空のファイルの退避、`LoadOutcome` / `AutoSavePolicy`、書き出し / 読み込み（`export_to` / `import_from`）。置き場所は `config_path` を呼ぶだけ |
 | `src/settings/testing.rs` | テストが複数のファイルから使う設定ファイルの例（`FULL_CONFIG` / `LEGACY_CONFIG`）と `without_key`、保存先の候補の例（`#[cfg(test)]`） |
-| `src/config_path.rs` | 設定ファイルとログの置き場所（`ConfigLocation`）。既定は confy の置き場所で、環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で差し替える。解釈（`parse_config_dir` / `resolve`）は純粋関数 |
+| `src/config_path.rs` | 設定ファイルとログの置き場所（`ConfigLocation`）。既定は `%AppData%` の下（1.2.x まで使っていた confy と同じ場所）で、環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で差し替える。解釈（`parse_config_dir` / `resolve`）は純粋関数 |
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |
 | `src/ui/mod.rs` | 設定ダイアログの入口 `show_settings_dialog` と、タブをまたいで使うイベント型・注意書きのヘルパー（`warning_label` / `notice_label` / `status_badge`）。外から使う経路（`crate::ui::...`）の `pub use` もここ |
 | `src/ui/state.rs` | `SettingsDialogState`。ドラフトの保持、操作の受け止め、`SettingsDialogView` の切り出し |

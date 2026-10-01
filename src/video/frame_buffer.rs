@@ -344,6 +344,35 @@ impl VideoFrames {
     }
 }
 
+/// 置き換えたフレーム `previous` を使い回せれば、その中身へ `fill` で書いて返す。
+/// 他にも持ち主がいれば（UI スレッドがテクスチャ化のために、または録画のリングが
+/// 握っている）、そちらは書き換えずに新しく作る。`FrameSink` が使う。
+///
+/// 返り値の 3 つ目は「回収しようとしたが他に持ち主がいた」か。`VideoTap` が録画中
+/// だけ数える。**使い回したときは確保が起きない**（`fill` の中で Vec が足りずに
+/// 広げる場合を除く）。他に持ち主がいたフレームは参照の数を減らして手放すだけで、
+/// 最後の持ち主になっていても解放は呼び出し元（ロックの外）で起きる。
+pub(super) fn fill_recycled<R>(
+    previous: Option<Arc<VideoFrame>>,
+    fill: impl FnOnce(&mut VideoFrame) -> R,
+) -> (Arc<VideoFrame>, R, bool) {
+    let mut missed = false;
+    if let Some(mut frame) = previous {
+        if let Some(target) = Arc::get_mut(&mut frame) {
+            let result = fill(target);
+            return (frame, result, false);
+        }
+        missed = true;
+    }
+    let mut fresh = VideoFrame {
+        width: 0,
+        height: 0,
+        data: Vec::new(),
+    };
+    let result = fill(&mut fresh);
+    (Arc::new(fresh), result, missed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,5 +668,54 @@ mod tests {
             Arc::try_unwrap(replaced).is_ok(),
             "取り出し側が保持していなければ Vec を回収できる"
         );
+    }
+
+    fn frame_of(data: Vec<u8>) -> Arc<VideoFrame> {
+        Arc::new(VideoFrame {
+            width: 1,
+            height: 1,
+            data,
+        })
+    }
+
+    #[test]
+    fn fill_recycled_reuses_unshared_frame_in_place() {
+        // 他に持ち主がいなければ `Arc` も Vec も使い回す（確保が起きない）
+        let previous = frame_of(vec![1, 2, 3]);
+        let arc_ptr = Arc::as_ptr(&previous);
+        let data_ptr = previous.data.as_ptr();
+
+        let (frame, (), missed) = fill_recycled(Some(previous), |target| {
+            target.data.copy_from_slice(&[4, 5, 6]);
+        });
+
+        assert!(!missed);
+        assert_eq!(Arc::as_ptr(&frame), arc_ptr);
+        assert_eq!(frame.data.as_ptr(), data_ptr);
+        assert_eq!(frame.data, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn fill_recycled_leaves_shared_frame_untouched() {
+        // UI スレッドや録画のリングが握っているフレームは書き換えず、新しく作る
+        let previous = frame_of(vec![1, 2, 3]);
+        let held = Arc::clone(&previous);
+
+        let (frame, (), missed) = fill_recycled(Some(previous), |target| {
+            target.data.extend_from_slice(&[4, 5, 6]);
+        });
+
+        assert!(missed);
+        assert!(!Arc::ptr_eq(&frame, &held));
+        assert_eq!(held.data, vec![1, 2, 3]);
+        assert_eq!(frame.data, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn fill_recycled_without_previous_is_not_a_miss() {
+        // 最初のフレームは回収するものが無いだけで、取りこぼしではない
+        let (frame, (), missed) = fill_recycled(None, |target| target.data.push(7));
+        assert!(!missed);
+        assert_eq!(frame.data, vec![7]);
     }
 }
