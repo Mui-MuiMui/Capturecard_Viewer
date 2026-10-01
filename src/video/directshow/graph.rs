@@ -278,7 +278,7 @@ impl CaptureGraph {
         let mut audio = audio_pin::attach(&graph, &builder, &source, audio);
         if let Err(e) = audio_pin::run_with_fallback(&graph, &control, &mut audio) {
             let _ = unsafe { control.Stop() };
-            Self::remove_audio(&graph, &audio);
+            Self::remove_audio(&graph, &mut audio);
             Self::tear_down(&graph, &source, &renderer.filter);
             return Err(GraphError::Stream(e));
         }
@@ -370,11 +370,9 @@ impl CaptureGraph {
         let _ = unsafe { graph.RemoveFilter(source) };
     }
 
-    /// 音声のレンダラーを入れていれば外す。`tear_down` の前に呼ぶ。
-    fn remove_audio(graph: &IGraphBuilder, audio: &AttachedAudio) {
-        if let Some(renderer) = &audio.renderer {
-            let _ = unsafe { graph.RemoveFilter(&renderer.filter) };
-        }
+    /// 音声のレンダラーを入れていれば、音声ピンからの鎖ごと外す。`tear_down` の前に呼ぶ。
+    fn remove_audio(graph: &IGraphBuilder, audio: &mut AttachedAudio) {
+        audio_pin::detach(graph, audio);
     }
 
     /// グラフを組んだときの音声ピンの結果（`ActiveVideo::audio_pin` の材料）。
@@ -443,7 +441,7 @@ impl Drop for CaptureGraph {
                 e
             ),
         }
-        Self::remove_audio(&self.graph, &self.audio);
+        Self::remove_audio(&self.graph, &mut self.audio);
         Self::tear_down(&self.graph, &self.source, &self.renderer.filter);
     }
 }

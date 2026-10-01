@@ -14,7 +14,7 @@
 //! キャプチャーフィルターが音声ピンのために持つストリーミングスレッドから
 //! 呼ばれる。後者ではロックを待たず、確保もしない（`AudioPinFeed::push`）。
 
-use std::mem::size_of;
+use std::mem::{size_of, ManuallyDrop};
 use std::ptr;
 
 use windows::core::{Interface, GUID};
@@ -22,7 +22,7 @@ use windows::Win32::Foundation::S_OK;
 use windows::Win32::Media::DirectShow::{
     IAMBufferNegotiation, IAMStreamConfig, IBaseFilter, ICaptureGraphBuilder2, IGraphBuilder,
     IMediaControl, IMediaSample, IPin, ALLOCATOR_PROPERTIES, AUDIO_STREAM_CONFIG_CAPS,
-    PINDIR_OUTPUT,
+    PINDIR_OUTPUT, PIN_INFO,
 };
 use windows::Win32::Media::MediaFoundation::{
     FORMAT_WaveFormatEx, MEDIATYPE_Audio, AM_MEDIA_TYPE, PIN_CATEGORY_CAPTURE,
@@ -213,6 +213,8 @@ pub(super) struct AttachedAudio {
     pub(super) outcome: PinOutcome,
     /// 繋いでいれば音声のレンダラー。グラフを捨てるときに外す
     pub(super) renderer: Option<Renderer>,
+    /// 繋いでいればキャプチャーフィルターの音声ピン。外すときに接続を切る
+    pin: Option<IPin>,
 }
 
 /// 音声ピンを探す。キャプチャーのカテゴリで見つからなければ、カテゴリを問わず探す
@@ -340,6 +342,7 @@ pub(super) fn attach(
     let unattached = |outcome| AttachedAudio {
         outcome,
         renderer: None,
+        pin: None,
     };
     let Some(pin) = find_audio_pin(builder, source) else {
         log::debug!("DirectShow の映像デバイスに音声ピンが無い");
@@ -356,12 +359,13 @@ pub(super) fn attach(
     let renderer = Renderer::audio(request.feed.clone(), request.graph);
     if let Err(e) = connect_renderer(graph, builder, source, &renderer) {
         log::warn!("DirectShow の音声ピンに繋げないので、映像だけで開く: {}", e);
-        let _ = unsafe { graph.RemoveFilter(&renderer.filter) };
+        // 途中まで繋がった（変換フィルターだけ入った）ことがあるので、鎖ごと外す
+        remove_chain(graph, &pin, &renderer.filter);
         return unattached(PinOutcome::Failed(PinFailure::Connect(e.to_string())));
     }
     let Some(format) = renderer.connected_audio_format() else {
         log::warn!("DirectShow の音声ピンと繋がった形式を読めないので、映像だけで開く");
-        let _ = unsafe { graph.RemoveFilter(&renderer.filter) };
+        remove_chain(graph, &pin, &renderer.filter);
         return unattached(PinOutcome::Failed(PinFailure::Connect(
             windows::core::Error::from_hresult(
                 windows::Win32::Media::DirectShow::VFW_E_NOT_CONNECTED,
@@ -397,6 +401,7 @@ pub(super) fn attach(
             chunk_bytes,
         },
         renderer: Some(renderer),
+        pin: Some(pin),
     }
 }
 
@@ -461,10 +466,56 @@ pub(super) fn run_with_fallback(
         first
     );
     let _ = unsafe { control.Stop() };
-    // 外すとピンの接続が切れる
-    let _ = unsafe { graph.RemoveFilter(&renderer.filter) };
+    if let Some(pin) = audio.pin.take() {
+        remove_chain(graph, &pin, &renderer.filter);
+    } else {
+        let _ = unsafe { graph.RemoveFilter(&renderer.filter) };
+    }
     audio.outcome = PinOutcome::Failed(PinFailure::Run(first.to_string()));
     unsafe { control.Run() }
+}
+
+/// 繋いでいれば、音声ピンから音声のレンダラーまでを外す。グラフを捨てるとき
+/// （`CaptureGraph` の `Drop` と組み立ての失敗）に、映像のフィルターより先に呼ぶ。
+pub(super) fn detach(graph: &IGraphBuilder, audio: &mut AttachedAudio) {
+    let Some(renderer) = audio.renderer.take() else {
+        return;
+    };
+    match audio.pin.take() {
+        Some(pin) => remove_chain(graph, &pin, &renderer.filter),
+        None => {
+            let _ = unsafe { graph.RemoveFilter(&renderer.filter) };
+        }
+    }
+}
+
+/// 音声ピンの接続を切り、間に挟まった変換フィルター（あれば）と音声の
+/// レンダラーをグラフから外す。
+///
+/// **レンダラーを外すだけでは足りない。** `RenderStream` が ACM Wrapper などの
+/// 変換フィルターを挟んでいると、キャプチャーフィルターの音声ピンはその変換
+/// フィルターと繋がったまま残り、`Run` のやり直しでも音声ピンが動いてしまう。
+/// 変換フィルターが 2 段以上でも、音声ピンを切れば残りへは何も流れない。
+fn remove_chain(graph: &IGraphBuilder, pin: &IPin, renderer: &IBaseFilter) {
+    if let Ok(peer) = unsafe { pin.ConnectedTo() } {
+        let downstream = peer_filter(&peer);
+        let _ = unsafe { graph.Disconnect(&peer) };
+        let _ = unsafe { graph.Disconnect(pin) };
+        // 繋がっていた相手がレンダラーでなければ変換フィルター。外すとその先の
+        // 接続（レンダラーとの間）も切れる
+        if let Some(filter) = downstream.filter(|filter| filter.as_raw() != renderer.as_raw()) {
+            let _ = unsafe { graph.RemoveFilter(&filter) };
+        }
+    }
+    let _ = unsafe { graph.RemoveFilter(renderer) };
+}
+
+/// ピンの持ち主のフィルター。
+fn peer_filter(pin: &IPin) -> Option<IBaseFilter> {
+    let mut info = PIN_INFO::default();
+    unsafe { pin.QueryPinInfo(&mut info) }.ok()?;
+    // 受け取ったフィルターは参照が 1 つ足されているので、ここで引き取って落とす
+    ManuallyDrop::into_inner(info.pFilter)
 }
 
 #[cfg(test)]
