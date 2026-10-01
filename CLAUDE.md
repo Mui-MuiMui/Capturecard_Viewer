@@ -67,12 +67,13 @@ cargo build --release
 | `src/video/directshow/graph.rs` | DirectShow のフィルターグラフの組み立て・開始・停止・破棄（`CaptureGraph`） |
 | `src/video/directshow/filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`）。`Receive` から `FrameSink` へ渡す |
 | `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
-| `src/video/frame_sink.rs` | フレームコールバックの本体 `FrameSink`（YUY2→RGB、`FrameBuffer` へ積む、`RepaintWaker` で UI を起こす）。実機（Media Foundation / DirectShow）とフェイクで共有する。DirectShow の RGB24 / MJPEG の受け口もここ |
+| `src/video/frame_sink.rs` | フレームコールバックの本体 `FrameSink`（YUY2→RGB、`FrameBuffer` へ積む、`RepaintWaker` で UI を起こす）。実機（Media Foundation / DirectShow）とフェイクで共有する。DirectShow の RGB24 / MJPEG / 4:2:0 の YUV（NV12 / I420 / YV12）の受け口もここ |
 | `src/video/fake.rs` | 実機なしで動くフェイクの映像デバイス `FakeVideoCapture`。テストパターンを指定 fps で吐く生成スレッド、切断・接続失敗のシナリオ |
 | `src/video/test_pattern.rs` | フェイクが吐くテストパターン（カラーバー、ベタ塗り、フレーム番号の焼き込み）の描画。純粋関数 |
 | `src/video/capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の取得 |
 | `src/video/color.rs` | YCbCr→RGB の係数表とその選び方、映像調整の畳み込み、設定の共有（`SharedColorConversion`） |
 | `src/video/convert.rs` | YUY2→RGB24 の画素変換と、DirectShow の RGB24（BGR）/ MJPEG の展開 |
+| `src/video/yuv420.rs` | 4:2:0 の YUV（NV12 / I420 / YV12）→ RGB24 の画素変換（`yuv420_to_rgb`、面の並び `Yuv420Layout`）。1 画素の式と係数表は YUY2 と同じで、違うのは色差の置き方だけ。`FrameSink` が呼ぶ |
 | `src/video/frame_buffer.rs` | `FrameBuffer`（`Arc` によるフレーム共有と世代番号）と観測値（`FrameStats`）、画素データの長さの判定（`frame_len_status`）、置き換えたフレームを `Arc` ごと使い回すか（`fill_recycled`） |
 | `src/video/tap.rs` | 録画へ映像を回す差し込み口 `VideoTap`。録画中だけ、`FrameSink` が画面へ置いたのと同じ `Arc<VideoFrame>` を容量 3 のリングへ積む（待たない `try_lock`、満杯なら捨てて数える）。Vec の回収に失敗した回数も録画中だけ数える |
 | `src/audio/mod.rs` | 音声モジュールの入口。`ActiveAudio` / `AudioDirection` / `AudioError` と能力キャッシュのキー（`cache_key` / `device_name_from_key`）、外から使う経路（`crate::audio::...`）の `pub use` |
@@ -154,6 +155,7 @@ cargo build --release
 | `src/update/swap.rs` | 更新の適用のうちファイルの置き換え。exe の隣の一時名（`ExePaths`）、フォルダに書けるかの確認、`.old` / `.new` を使った差し替えと失敗時の戻し方（`swap_in` / `recovery_for` / `roll_back`）、前回の残りの後片付け |
 | `src/update/checksum.rs` | `SHA256SUMS.txt` の行の読み方（`find_checksum`）と、大文字小文字を区別しない照合（`checksum_matches`） |
 | `src/update/overrides.rs` | 更新の確認を試すための環境変数（`CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` / `CAPTURECARD_VIEWER_UPDATE_API_URL`）の解釈（`CheckOverrides`） |
+| `src/overlay.rs` | 操作したときだけ数秒出て消える OSD（フルスクリーンの切り替え、音量、失敗や録画の保存のトーストなど）。期限と描画の `TransientOverlay` と、中身の `OverlayContent`（テキストだけ / バー付き）。常設の統計 OSD は `app/video_overlay.rs` の側 |
 | `src/repaint.rs` | 次の再描画までの間隔の判定（`next_repaint_delay`）と、UI スレッド以外から再描画を促す窓口（`RepaintWaker`） |
 | `src/i18n/mod.rs` | 画面に出す文字列の入口。現在の言語（`Language` と `static LANGUAGE`）を持ち、`set_language` で切り替える。外から使う経路（`crate::i18n::...`）の `pub use` もここ |
 | `src/i18n/text.rs` | 引数を取らない文字列の表（`texts!` が `Text` のキーと言語ごとの `match` を作る） |
