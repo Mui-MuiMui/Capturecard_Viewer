@@ -2,24 +2,24 @@
 //!
 //! **`cpal::Stream` はスレッドをまたげない（`!Send`）ので、この型を持つのは
 //! デバイスワーカースレッドだけ**（`docs/design/device-worker.md`）。設定の
-//! 選択は `stream_config`、ストリームの組み立ては `stream` に分けてある。
+//! 選択は `stream_config`、入力ストリームの組み立ては `stream`、出力側
+//! （出力デバイス・リングバッファ・出力ストリーム）の組み立ては
+//! `passthrough_output` に分けてある。
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat};
+use cpal::SupportedStreamConfig;
 use log::{debug, info};
-use ringbuf::traits::Split;
-use ringbuf::HeapRb;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use super::capabilities::{device_name, AudioCapabilities};
 use super::controls::AudioControls;
-use super::convert::PassthroughConverter;
+use super::passthrough_output::{
+    build_passthrough_output, find_device_by_name, make_ring, open_output_device, PassthroughOutput,
+};
 use super::resample::{ResampleStatus, ResampleTelemetry};
-use super::sample::{f32_to_i16, f32_to_i32, f32_to_u16, i16_to_f32, i32_to_f32, u16_to_f32};
-use super::stream::build_input_stream_with;
+use super::stream::{build_input_stream, StreamCounters};
 use super::stream_config::{choose_passthrough_configs, resolve_ranges};
-use super::stream_output::{build_output_stream_with, OutputSignals};
 use super::tap::AudioTap;
 use super::{ActiveAudio, AudioDirection, AudioError};
 
@@ -103,32 +103,10 @@ pub struct AudioCapture {
     /// 入出力の形が揃っていても作る（Issue #308）。デバイスワーカーが `tick` の中で
     /// 数秒ごとに読み書きする（`app::worker_timers`）
     resample_telemetry: Option<Arc<ResampleTelemetry>>,
-    // 稼働中のストリームでエラーが起きたことを表す旗。
-    //
-    // cpal のエラーコールバックはデバイスが消えた（`DeviceNotAvailable`）
-    // ときにも呼ばれるが、呼ばれるのは cpal のストリームスレッドなので
-    // そこから再接続を始められない。旗を立てるだけにして、デバイスワーカー
-    // スレッドが毎ループ回収する。
-    //
-    // **ストリームを開き直すたびに新しい `Arc` へ差し替える。** 使い回すと、
-    // 閉じたストリームのエラーコールバックが後から旗を立て、開き直した直後の
-    // 正常なストリームを切断と誤判定する
-    //
-    // 読むのはデバイスワーカースレッド（`app::worker_loop`）だけ
-    stream_error: Arc<AtomicBool>,
-    /// 出力コールバックがリングバッファから取り出せなかった回数（コールバック
-    /// 1 回につき最大 1 回）。**バッファ長（`buffer_ms`）を詰めすぎていないかを
-    /// 耳ではなく数で判断するために置いてある。**
-    ///
-    /// `stream_error` と同じく、ストリームを開き直すたびに新しい `Arc` へ
-    /// 差し替えて 0 から数え直す。使い回すと、閉じたストリームが最後に数えた分が
-    /// 開き直した直後の値として残ってしまう
-    underruns: Arc<AtomicU32>,
-    /// 入力コールバックがリングバッファの満杯で捨てたフレーム数（Issue #350）。
-    /// `underruns` と同じく、開き直すたびに新しい `Arc` へ差し替えて 0 から数え直す
-    dropped_frames: Arc<AtomicU32>,
-    /// cpal が知らせた入力の取りこぼし（`Xrun`）の回数（Issue #377）。開き直すたびに新しい `Arc` へ差し替える
-    xruns: Arc<AtomicU32>,
+    /// いま開いているストリームの旗と数え手。**ストリームを開き直すたびと
+    /// 閉じるたびに新しいものへ差し替える**（`StreamCounters` の説明）。
+    /// 読むのはデバイスワーカースレッド（`app::worker_loop`）だけ
+    counters: StreamCounters,
 }
 
 impl AudioCapture {
@@ -149,10 +127,7 @@ impl AudioCapture {
             controls,
             tap,
             resample_telemetry: None,
-            stream_error: Arc::new(AtomicBool::new(false)),
-            underruns: Arc::new(AtomicU32::new(0)),
-            dropped_frames: Arc::new(AtomicU32::new(0)),
-            xruns: Arc::new(AtomicU32::new(0)),
+            counters: StreamCounters::default(),
         }
     }
 
@@ -210,35 +185,22 @@ impl AudioCapture {
         self.stop_capture();
         info!("音声パススルーを開始する");
 
-        // デバイス取得の簡素化
         let input_device = if let Some(name) = input_device_name {
             debug!("入力デバイスを名前で探す: {}", name);
-            self.find_device_by_name(name, AudioDirection::Input)?
+            find_device_by_name(&self.host, name, AudioDirection::Input)?
         } else {
             debug!("既定の入力デバイスを使う");
             self.host
                 .default_input_device()
                 .ok_or(AudioError::NoDefaultDevice(AudioDirection::Input))?
         };
+        let output = open_output_device(&self.host, output_device_name, output_capabilities)?;
 
-        let output_device = if let Some(name) = output_device_name {
-            debug!("出力デバイスを名前で探す: {}", name);
-            self.find_device_by_name(name, AudioDirection::Output)?
-        } else {
-            debug!("既定の出力デバイスを使う");
-            self.host
-                .default_output_device()
-                .ok_or(AudioError::NoDefaultDevice(AudioDirection::Output))?
-        };
-
-        // デバイス名をログ出力
         let input_device_name =
             device_name(&input_device).unwrap_or_else(|| "Unknown Input".to_string());
-        let output_device_name =
-            device_name(&output_device).unwrap_or_else(|| "Unknown Output".to_string());
         info!(
             "使用するデバイス - 入力: {}、出力: {}",
-            input_device_name, output_device_name
+            input_device_name, output.name
         );
 
         // デバイスの既定設定。希望値が無いときの基準であり、
@@ -250,223 +212,51 @@ impl AudioCapture {
                     direction: AudioDirection::Input,
                     source: e.to_string(),
                 })?;
-
-        let output_default =
-            output_device
-                .default_output_config()
-                .map_err(|e| AudioError::DefaultConfigFailed {
-                    direction: AudioDirection::Output,
-                    source: e.to_string(),
-                })?;
-
-        // 対応設定の一覧。**先にワーカーが取ってあればそれを使う。**
-        // WASAPI の列挙は 300ms 前後かかるため、開くたびにここで走らせると、
-        // ワーカーがその分だけ次のコマンドを処理できなくなる
+        // 対応設定の一覧。**先にワーカーが取ってあればそれを使う**（出力と同じ理由）
         let input_ranges = resolve_ranges(input_capabilities, AudioDirection::Input, || {
             input_device
                 .supported_input_configs()
                 .map(|it| it.collect())
         });
-        let output_ranges = resolve_ranges(output_capabilities, AudioDirection::Output, || {
-            output_device
-                .supported_output_configs()
-                .map(|it| it.collect())
-        });
 
         let (input_config, output_config) = choose_passthrough_configs(
             &input_ranges,
-            &output_ranges,
+            &output.ranges,
             input_default,
-            output_default,
+            output.default,
             desired_sample_rate,
             desired_channels,
         );
+        log_configs(&input_config, &output_config);
 
-        info!(
-            "音声の設定 - 入力: {}Hz {}ch ({:?})、出力: {}Hz {}ch ({:?})",
+        let ring = make_ring(
             input_config.sample_rate(),
-            input_config.channels(),
-            input_config.sample_format(),
-            output_config.sample_rate(),
-            output_config.channels(),
-            output_config.sample_format()
+            usize::from(input_config.channels()),
+            buffer_ms,
         );
-
-        // リングバッファの長さは設定で選べる（`settings::AudioSettings::buffer_ms`）。
-        // 小さいほど遅延が減るが、出力コールバックが間に合わずアンダーランが
-        // 出やすくなる。容量は目標水位の 2 倍にして、入力が先行しても後れても
-        // 同じだけ余裕を持たせる
-        let sample_rate = input_config.sample_rate();
-        let channels = input_config.channels() as usize;
-        let buffer_size = ring_buffer_samples(sample_rate, channels, buffer_ms);
-        let capacity = buffer_size * 2;
-        // 出力が最初に待つ水位と、クロックドリフト補正が保つ水位。これが遅延になる
-        let target_level = target_water_level(capacity, channels);
-
-        let ring = HeapRb::<f32>::new(capacity);
-        let (producer, consumer) = ring.split();
-
-        let producer = Arc::new(Mutex::new(producer));
-        let consumer = Arc::new(Mutex::new(consumer));
-
-        debug!(
-            "リングバッファを作成した（{} サンプル、{} ms 相当 × 2、目標水位 {} サンプル）",
-            capacity, buffer_ms, target_level
-        );
-
-        // このストリーム専用のエラー旗。開き直すたびに作り直す
-        let stream_error = Arc::new(AtomicBool::new(false));
-        // アンダーランの数え手も同じく作り直す（開き直したら 0 から）
-        let underruns = Arc::new(AtomicU32::new(0));
-        // 満杯で捨てたフレームの数え手も同じく作り直す
-        let dropped_frames = Arc::new(AtomicU32::new(0));
-        // 取りこぼしの回数の数え手も同じく作り直す
-        let xruns = Arc::new(AtomicU32::new(0));
+        // このストリーム専用の旗と数え手。開き直すたびに作り直す
+        let counters = StreamCounters::default();
 
         // 録画へ入力の形と開き直しを知らせる。**入力のコールバックが動き出す前に書く。**
         // 録画スレッドはここを境に、前のストリームのサンプルと分けて扱う
         self.tap
             .begin_stream(input_config.sample_rate(), input_config.channels());
 
-        // 入力ストリーム。デバイスのサンプル型ごとに正規化の仕方が違うので明示的に分ける
-        let input_stream_config = input_config.config();
-        let input_stream = match input_config.sample_format() {
-            SampleFormat::F32 => build_input_stream_with::<f32>(
-                &input_device,
-                &input_stream_config,
-                producer.clone(),
-                self.tap.clone(),
-                stream_error.clone(),
-                dropped_frames.clone(),
-                xruns.clone(),
-                |sample| sample,
-            ),
-            SampleFormat::I16 => build_input_stream_with::<i16>(
-                &input_device,
-                &input_stream_config,
-                producer.clone(),
-                self.tap.clone(),
-                stream_error.clone(),
-                dropped_frames.clone(),
-                xruns.clone(),
-                i16_to_f32,
-            ),
-            SampleFormat::U16 => build_input_stream_with::<u16>(
-                &input_device,
-                &input_stream_config,
-                producer.clone(),
-                self.tap.clone(),
-                stream_error.clone(),
-                dropped_frames.clone(),
-                xruns.clone(),
-                u16_to_f32,
-            ),
-            SampleFormat::I32 => build_input_stream_with::<i32>(
-                &input_device,
-                &input_stream_config,
-                producer.clone(),
-                self.tap.clone(),
-                stream_error.clone(),
-                dropped_frames.clone(),
-                xruns.clone(),
-                i32_to_f32,
-            ),
-            other => {
-                return Err(AudioError::UnsupportedSampleFormat {
-                    direction: AudioDirection::Input,
-                    format: other,
-                })
-            }
-        }
-        .map_err(|e| AudioError::StreamBuildFailed {
-            direction: AudioDirection::Input,
-            source: e.to_string(),
-        })?;
-
-        // 出力ストリーム
-        let output_signals = OutputSignals {
-            error: stream_error.clone(),
-            underruns: underruns.clone(),
-        };
-        let controls = Arc::clone(&self.controls);
-        let output_stream_config = output_config.config();
-
-        // 入出力の形が違う場合の変換器。**ここで作る（ストリームの構築時）。**
-        // 補間に使うバッファを先に確保しておかないと、出力コールバックの中で
-        // アロケーションが起きる。出力はリングバッファが目標水位まで溜まって
-        // から取り出し始める（入力と出力を同時に始めてよいのはこのため）
-        let make_converter = || {
-            PassthroughConverter::new(
-                input_config.sample_rate(),
-                input_config.channels(),
-                output_config.sample_rate(),
-                output_config.channels(),
-            )
-            .with_prebuffer(target_level)
-        };
-        // クロックドリフト補正は**入出力の形が揃っていても行う**（Issue #308）。
-        // 公称レートが同じでも、キャプチャーカードと出力デバイスは別の時計で動く。
-        // 目標水位はリングバッファの半分（`target_water_level`）に置く
-        if make_converter().is_identity() {
-            debug!("入出力の形が同じなので変換しない（クロックドリフト補正だけ行う）");
-        } else {
-            info!(
-                "入出力の形が違うので変換する - レート比: {:.4}、チャンネル: {} -> {}",
-                f64::from(input_config.sample_rate()) / f64::from(output_config.sample_rate()),
-                input_config.channels(),
-                output_config.channels()
-            );
-        }
-        let resample_telemetry = Some(Arc::new(ResampleTelemetry::new(target_level)));
-
-        let output_stream = match output_config.sample_format() {
-            SampleFormat::F32 => build_output_stream_with::<f32>(
-                &output_device,
-                &output_stream_config,
-                consumer.clone(),
-                controls,
-                output_signals.clone(),
-                make_converter().with_telemetry(resample_telemetry.clone()),
-                |sample| sample,
-            ),
-            SampleFormat::I16 => build_output_stream_with::<i16>(
-                &output_device,
-                &output_stream_config,
-                consumer.clone(),
-                controls,
-                output_signals.clone(),
-                make_converter().with_telemetry(resample_telemetry.clone()),
-                f32_to_i16,
-            ),
-            SampleFormat::U16 => build_output_stream_with::<u16>(
-                &output_device,
-                &output_stream_config,
-                consumer.clone(),
-                controls,
-                output_signals.clone(),
-                make_converter().with_telemetry(resample_telemetry.clone()),
-                f32_to_u16,
-            ),
-            SampleFormat::I32 => build_output_stream_with::<i32>(
-                &output_device,
-                &output_stream_config,
-                consumer.clone(),
-                controls,
-                output_signals.clone(),
-                make_converter().with_telemetry(resample_telemetry.clone()),
-                f32_to_i32,
-            ),
-            other => {
-                return Err(AudioError::UnsupportedSampleFormat {
-                    direction: AudioDirection::Output,
-                    format: other,
-                })
-            }
-        }
-        .map_err(|e| AudioError::StreamBuildFailed {
-            direction: AudioDirection::Output,
-            source: e.to_string(),
-        })?;
+        let input_stream = build_input_stream(
+            &input_device,
+            &input_config,
+            ring.producer.clone(),
+            self.tap.clone(),
+            &counters,
+        )?;
+        let output_stream = build_passthrough_output(
+            &output,
+            &output_config,
+            (input_config.sample_rate(), input_config.channels()),
+            &ring,
+            Arc::clone(&self.controls),
+            &counters,
+        )?;
 
         // ストリーム開始。**入力が溜まるのを sleep で待たない。** 出力コールバックが
         // 目標水位まで無音を書いて待つので、ここでは続けて開始するだけでよい
@@ -477,33 +267,41 @@ impl AudioCapture {
                 direction: AudioDirection::Input,
                 source: e.to_string(),
             })?;
-        output_stream
+        let active = ActiveAudio {
+            input_device: input_device_name,
+            output_device: output.name.clone(),
+            input_sample_rate: input_config.sample_rate(),
+            input_channels: input_config.channels(),
+            output_sample_rate: output_config.sample_rate(),
+            output_channels: output_config.channels(),
+        };
+        self.commit(Some(input_stream), output_stream, counters, active)
+    }
+
+    /// 出力ストリームを動かし、開いたものを控える。入力の種類によらず共通の後半。
+    /// 出力を動かせなければ、入力のストリーム（あれば）もここで落とす。
+    fn commit(
+        &mut self,
+        input_stream: Option<cpal::Stream>,
+        output: PassthroughOutput,
+        counters: StreamCounters,
+        active: ActiveAudio,
+    ) -> Result<(), AudioError> {
+        output
+            .stream
             .play()
             .map_err(|e| AudioError::StreamPlayFailed {
                 direction: AudioDirection::Output,
                 source: e.to_string(),
             })?;
-
-        self.input_stream = Some(input_stream);
-        self.output_stream = Some(output_stream);
-        // 監視の対象を、いま開いたストリームの旗へ差し替える
-        self.stream_error = stream_error;
-        // デバイスワーカーが `tick` の中で読み書きする対象も差し替える
-        self.resample_telemetry = resample_telemetry;
-        // 数え手も、いま開いたストリームのものへ差し替える
-        self.underruns = underruns;
-        self.dropped_frames = dropped_frames;
-        self.xruns = xruns;
+        self.input_stream = input_stream;
+        self.output_stream = Some(output.stream);
+        // デバイスワーカーが `tick` の中で読み書きする対象を差し替える
+        self.resample_telemetry = Some(output.telemetry);
+        // 監視の対象と数え手も、いま開いたストリームのものへ差し替える
+        self.counters = counters;
         // 接続状態の表示用に、実際に開いた内容を控える
-        self.active = Some(ActiveAudio {
-            input_device: input_device_name,
-            output_device: output_device_name,
-            input_sample_rate: input_config.sample_rate(),
-            input_channels: input_config.channels(),
-            output_sample_rate: output_config.sample_rate(),
-            output_channels: output_config.channels(),
-        });
-
+        self.active = Some(active);
         info!("音声パススルーを開始した");
         Ok(())
     }
@@ -533,30 +331,30 @@ impl AudioCapture {
             })
     }
 
-    /// 統計 OSD と「接続状態」タブへ出す、アンダーランの累計回数。
-    ///
-    /// 音声を開いていなければ `None`。閉じている間の 0 を「開いていて一度も
-    /// 落ちていない」と読み違えさせないため、開いているときだけ数を返す。
-    pub fn underrun_count(&self) -> Option<u32> {
+    /// 開いているときだけ数え手の値を返す。閉じている間の 0 を「開いていて
+    /// 一度も起きていない」と読み違えさせないため
+    fn count_while_open(&self, counter: &AtomicU32) -> Option<u32> {
         self.active
             .as_ref()
-            .map(|_| self.underruns.load(Ordering::Relaxed))
+            .map(|_| counter.load(Ordering::Relaxed))
+    }
+
+    /// 統計 OSD と「接続状態」タブへ出す、アンダーランの累計回数。
+    /// 音声を開いていなければ `None`
+    pub fn underrun_count(&self) -> Option<u32> {
+        self.count_while_open(&self.counters.underruns)
     }
 
     /// 「接続状態」タブへ出す、入力がリングバッファの満杯で捨てたフレーム数の累計。
     /// `underrun_count` と同じく、開いていなければ `None`
     pub fn dropped_frame_count(&self) -> Option<u32> {
-        self.active
-            .as_ref()
-            .map(|_| self.dropped_frames.load(Ordering::Relaxed))
+        self.count_while_open(&self.counters.dropped_frames)
     }
 
-    /// 「接続状態」タブへ出す、cpal が知らせた入力の取りこぼし（`Xrun`）の累計。
+    /// 「接続状態」タブへ出す、入力の取りこぼしの累計。
     /// `underrun_count` と同じく、開いていなければ `None`
     pub fn xrun_count(&self) -> Option<u32> {
-        self.active
-            .as_ref()
-            .map(|_| self.xruns.load(Ordering::Relaxed))
+        self.count_while_open(&self.counters.xruns)
     }
 
     pub fn stop_capture(&mut self) {
@@ -569,12 +367,8 @@ impl AudioCapture {
             let _ = s.pause();
         }
         // 閉じたストリームのエラーコールバックが後から立てる旗を読まないよう、
-        // 監視対象を新しいものへ差し替える
-        self.stream_error = Arc::new(AtomicBool::new(false));
-        // 同じ理由で、数え手も新しいものへ差し替える
-        self.underruns = Arc::new(AtomicU32::new(0));
-        self.dropped_frames = Arc::new(AtomicU32::new(0));
-        self.xruns = Arc::new(AtomicU32::new(0));
+        // 監視対象を新しいものへ差し替える。数え手も同じ理由で差し替える
+        self.counters = StreamCounters::default();
     }
 
     /// 稼働中のストリームでエラーが起きていたかを返し、旗を下ろす。
@@ -584,36 +378,21 @@ impl AudioCapture {
     /// `&self` なのは、デバイスワーカースレッドが `Mutex` の可変借用を取らずに
     /// 毎ループ確認できるようにするため
     pub fn take_stream_error(&self) -> bool {
-        self.stream_error.swap(false, Ordering::Relaxed)
+        self.counters.error.swap(false, Ordering::Relaxed)
     }
+}
 
-    /// 名前でデバイスを探す。向きを `bool` ではなく `AudioDirection` で受けるのは、
-    /// 見つからなかったときのエラーに入力・出力のどちらかを載せるため。
-    fn find_device_by_name(
-        &self,
-        name: &str,
-        direction: AudioDirection,
-    ) -> Result<Device, AudioError> {
-        let iter = match direction {
-            AudioDirection::Input => self.host.input_devices(),
-            AudioDirection::Output => self.host.output_devices(),
-        }
-        .map_err(|e| AudioError::DeviceEnumerationFailed {
-            direction,
-            source: e.to_string(),
-        })?;
-        for d in iter {
-            if let Some(n) = device_name(&d) {
-                if n == name {
-                    return Ok(d);
-                }
-            }
-        }
-        Err(AudioError::DeviceNotFound {
-            direction,
-            name: name.to_string(),
-        })
-    }
+/// 実際に開く入出力の設定をログへ残す。
+fn log_configs(input: &SupportedStreamConfig, output: &SupportedStreamConfig) {
+    info!(
+        "音声の設定 - 入力: {}Hz {}ch ({:?})、出力: {}Hz {}ch ({:?})",
+        input.sample_rate(),
+        input.channels(),
+        input.sample_format(),
+        output.sample_rate(),
+        output.channels(),
+        output.sample_format()
+    );
 }
 
 impl Drop for AudioCapture {

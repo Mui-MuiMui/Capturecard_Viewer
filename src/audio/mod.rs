@@ -11,6 +11,7 @@
 //! | `capture.rs` | `AudioCapture`。パススルーの開始と停止、観測値の取り出し |
 //! | `stream.rs` | cpal の入力ストリームの組み立てと入力のコールバック、リングバッファの型、ストリームのエラーの扱い |
 //! | `stream_output.rs` | cpal の出力ストリームの組み立てと出力のコールバック、アンダーランの数え方 |
+//! | `passthrough_output.rs` | パススルーの出力側の組み立て（出力デバイス、リングバッファ、変換器と補正を付けた出力ストリーム）。入力の種類によらず共有する |
 //! | `convert.rs` | 入出力の形が違う場合の変換（線形補間とミックス） |
 //! | `sample.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32） |
 //! | `resample.rs` | クロックドリフト補正の共有状態と、補正係数の決め方 |
@@ -25,6 +26,7 @@ mod controls;
 mod convert;
 mod fake;
 mod fake_stream;
+mod passthrough_output;
 mod resample;
 mod sample;
 mod stream;

@@ -10,14 +10,16 @@
 //! 同じものを呼ぶ。
 
 use cpal::traits::DeviceTrait;
-use cpal::Device;
+use cpal::{Device, SampleFormat};
 use log::{error, warn};
 use ringbuf::traits::{Observer, Producer};
 use ringbuf::{HeapCons, HeapProd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::sample::{i16_to_f32, i32_to_f32, u16_to_f32};
 use super::tap::AudioTap;
+use super::{AudioDirection, AudioError};
 
 /// リングバッファの内部表現は f32 に統一する。デバイス側のサンプル型は
 /// 入力で f32 へ正規化し、出力で書き戻す。
@@ -135,6 +137,101 @@ where
     )
 }
 
+/// 入力ストリームを、デバイスのサンプル型に合わせて組み立てる。
+///
+/// サンプル型ごとに f32 への正規化の仕方が違うので明示的に分ける。扱えない
+/// 型（`stream_config::sample_format_priority` が `None` を返すもの）は失敗にする。
+pub(super) fn build_input_stream(
+    device: &Device,
+    config: &cpal::SupportedStreamConfig,
+    producer: Arc<Mutex<AudioProducer>>,
+    tap: AudioTap,
+    counters: &StreamCounters,
+) -> Result<cpal::Stream, AudioError> {
+    let stream_config = config.config();
+    let error = counters.error.clone();
+    let dropped = counters.dropped_frames.clone();
+    let xruns = counters.xruns.clone();
+    let direction = AudioDirection::Input;
+    match config.sample_format() {
+        SampleFormat::F32 => build_input_stream_with::<f32>(
+            device,
+            &stream_config,
+            producer,
+            tap,
+            error,
+            dropped,
+            xruns,
+            |sample| sample,
+        ),
+        SampleFormat::I16 => build_input_stream_with::<i16>(
+            device,
+            &stream_config,
+            producer,
+            tap,
+            error,
+            dropped,
+            xruns,
+            i16_to_f32,
+        ),
+        SampleFormat::U16 => build_input_stream_with::<u16>(
+            device,
+            &stream_config,
+            producer,
+            tap,
+            error,
+            dropped,
+            xruns,
+            u16_to_f32,
+        ),
+        SampleFormat::I32 => build_input_stream_with::<i32>(
+            device,
+            &stream_config,
+            producer,
+            tap,
+            error,
+            dropped,
+            xruns,
+            i32_to_f32,
+        ),
+        other => {
+            return Err(AudioError::UnsupportedSampleFormat {
+                direction,
+                format: other,
+            })
+        }
+    }
+    .map_err(|e| AudioError::StreamBuildFailed {
+        direction,
+        source: e.to_string(),
+    })
+}
+
+/// 1 本のパススルーに付く旗と数え手。**ストリームを開き直すたびに作り直す。**
+///
+/// 使い回すと、閉じたストリームのコールバックが後から立てた旗や数えた分が、
+/// 開き直した直後の値として残ってしまう（`AudioCapture` は開くたびと閉じるたびに
+/// `StreamCounters::default()` へ差し替える）。
+#[derive(Clone, Default)]
+pub(super) struct StreamCounters {
+    /// 稼働中のストリームでエラーが起きたことを表す旗。
+    ///
+    /// cpal のエラーコールバックはデバイスが消えた（`DeviceNotAvailable`）
+    /// ときにも呼ばれるが、呼ばれるのは cpal のストリームスレッドなので
+    /// そこから再接続を始められない。旗を立てるだけにして、デバイスワーカー
+    /// スレッドが毎ループ回収する
+    pub(super) error: Arc<AtomicBool>,
+    /// 出力コールバックがリングバッファから取り出せなかった回数（コールバック
+    /// 1 回につき最大 1 回）。**バッファ長（`buffer_ms`）を詰めすぎていないかを
+    /// 耳ではなく数で判断するために置いてある。**
+    pub(super) underruns: Arc<AtomicU32>,
+    /// 入力がリングバッファの満杯で捨てたフレーム数（Issue #350）
+    pub(super) dropped_frames: Arc<AtomicU32>,
+    /// 入力の取りこぼしの回数。cpal の入力なら `Xrun`（Issue #377）、DirectShow の
+    /// 音声ピンならサンプルの不連続の印（`IMediaSample::IsDiscontinuity`）
+    pub(super) xruns: Arc<AtomicU32>,
+}
+
 /// 入力コールバック 1 回分の処理。デバイスのサンプルを f32 へ直して
 /// リングバッファへ積む。録画中なら同じ値を録画のリング（`AudioTap`）にも積む。
 ///
@@ -159,8 +256,37 @@ pub(super) fn process_input<T: Copy>(
     dropped: &AtomicU32,
     to_f32: impl Fn(T) -> f32,
 ) {
+    process_input_iter(
+        data.iter().copied(),
+        channels,
+        producer,
+        tap,
+        dropped,
+        to_f32,
+    );
+}
+
+/// `process_input` の本体。サンプルをスライスではなく、長さの分かる
+/// イテレーターで受ける。
+///
+/// **DirectShow の音声ピン（`super::pin_feed`）がバイト列から 1 つずつ読み出して
+/// 渡すためにある。** バイト列の並び（アラインメント）を前提にせずに済み、
+/// 確保も起きない。cpal とフェイクの経路は `process_input` がスライスを渡す。
+pub(super) fn process_input_iter<T, I>(
+    data: I,
+    channels: usize,
+    producer: &Mutex<AudioProducer>,
+    tap: &AudioTap,
+    dropped: &AtomicU32,
+    to_f32: impl Fn(T) -> f32,
+) where
+    I: IntoIterator<Item = T>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let data = data.into_iter();
+    let len = data.len();
     let mut passthrough = producer.try_lock().ok();
-    let mut recording = tap.writer(data.len());
+    let mut recording = tap.writer(len);
     if passthrough.is_none() && recording.is_none() {
         return;
     }
@@ -168,12 +294,12 @@ pub(super) fn process_input<T: Copy>(
     // フレームは積まない。空きは出力側が読むと増えるだけで減らないので、
     // ここで数えた分は必ず入る
     let mut room = passthrough.as_ref().map_or(0, |prod| {
-        whole_frame_samples(prod.vacant_len().min(data.len()), channels)
+        whole_frame_samples(prod.vacant_len().min(len), channels)
     });
     if passthrough.is_some() {
-        count_dropped_frames(dropped, dropped_frames(data.len(), room, channels));
+        count_dropped_frames(dropped, dropped_frames(len, room, channels));
     }
-    for &sample in data {
+    for sample in data {
         let value = to_f32(sample);
         if room > 0 {
             if let Some(prod) = passthrough.as_mut() {
