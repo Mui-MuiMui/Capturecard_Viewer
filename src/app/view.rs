@@ -120,12 +120,9 @@ fn is_drawable_frame(frame: &VideoFrame) -> bool {
 }
 
 /// テクスチャへ渡す画像を作る。前に渡した画像を egui が手放していれば、その画素の
-/// Vec へ詰め直して返す（容量が足りていれば確保は起きない）。まだ握られていれば
-/// 新しく作る。
-///
-/// egui はテクスチャの更新を描画の終わりにレンダラーへ渡し、渡し終えたら
-/// `Arc` を手放す。次のフレームでここへ来るころには、手元の `Arc` だけが残って
-/// いるのが普通。**呼び出し側は `is_drawable_frame` で長さを確かめてから呼ぶこと**
+/// Vec へ詰め直して返す（容量が足りていれば確保は起きない）。握られていれば新しく作る。
+/// egui はテクスチャの更新を描画の終わりにレンダラーへ渡し、渡し終えたら `Arc` を
+/// 手放すので、次のフレームでは普通は使い回せる。**呼び出し側は `is_drawable_frame` で長さを確かめてから呼ぶこと**
 /// （`as_chunks` は余りを黙って捨てるので、ここでは長さの食い違いに気づけない）。
 fn reuse_or_new_color_image(
     previous: Option<Arc<egui::ColorImage>>,
@@ -735,17 +732,25 @@ mod tests {
 
     fn rgb_frame(width: usize, height: usize, data: Vec<u8>) -> VideoFrame {
         VideoFrame {
-            width,
-            height,
             data,
+            ..frame(width, height, 0)
         }
     }
 
+    // 画像の大きさと、画素を RGBA の並びにしたもの。期待値をベタ書きで比べるため
+    fn size_and_rgba(image: &egui::ColorImage) -> ([usize; 2], Vec<[u8; 4]>) {
+        let pixels = image.pixels.iter().map(|pixel| pixel.to_array()).collect();
+        (image.size, pixels)
+    }
+
     #[test]
-    fn reuse_or_new_color_image_without_previous_matches_from_rgb() {
+    fn reuse_or_new_color_image_without_previous_converts_rgb() {
         let frame = rgb_frame(2, 1, vec![10, 20, 30, 40, 50, 60]);
         let image = reuse_or_new_color_image(None, &frame);
-        assert_eq!(*image, egui::ColorImage::from_rgb([2, 1], &frame.data));
+        assert_eq!(
+            size_and_rgba(&image),
+            ([2, 1], vec![[10, 20, 30, 255], [40, 50, 60, 255]])
+        );
     }
 
     #[test]
@@ -761,16 +766,21 @@ mod tests {
         assert_eq!(Arc::as_ptr(&second), first_ptr);
         // 同じ画素数なので Vec も確保し直していない
         assert_eq!(second.pixels.as_ptr(), pixels_ptr);
-        assert_eq!(*second, egui::ColorImage::from_rgb([1, 2], &frame.data));
+        assert_eq!(
+            size_and_rgba(&second),
+            ([1, 2], vec![[1, 2, 3, 255], [4, 5, 6, 255]])
+        );
     }
 
     #[test]
     fn reuse_or_new_color_image_grows_when_frame_gets_larger() {
         // 解像度が上がったら同じ画像のまま広げる。古い画素が残らない
         let first = reuse_or_new_color_image(None, &rgb_frame(1, 1, vec![9, 9, 9]));
-        let frame = rgb_frame(2, 2, (0..12).collect());
-        let second = reuse_or_new_color_image(Some(first), &frame);
-        assert_eq!(*second, egui::ColorImage::from_rgb([2, 2], &frame.data));
+        let second = reuse_or_new_color_image(Some(first), &rgb_frame(2, 1, (0..6).collect()));
+        assert_eq!(
+            size_and_rgba(&second),
+            ([2, 1], vec![[0, 1, 2, 255], [3, 4, 5, 255]])
+        );
     }
 
     #[test]
@@ -783,10 +793,7 @@ mod tests {
         let second = reuse_or_new_color_image(Some(first), &frame);
 
         assert!(!Arc::ptr_eq(&second, &held_by_egui));
-        assert_eq!(
-            *held_by_egui,
-            egui::ColorImage::from_rgb([1, 1], &[7, 7, 7])
-        );
-        assert_eq!(*second, egui::ColorImage::from_rgb([1, 1], &frame.data));
+        assert_eq!(size_and_rgba(&held_by_egui), ([1, 1], vec![[7, 7, 7, 255]]));
+        assert_eq!(size_and_rgba(&second), ([1, 1], vec![[1, 2, 3, 255]]));
     }
 }
