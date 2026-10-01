@@ -9,7 +9,7 @@
 //!
 //! | ファイル | 役割 |
 //! |---|---|
-//! | `devices.rs` | 列挙（`ICreateDevEnum`）、対応形式（`IAMStreamConfig::GetStreamCaps`）、開く形式の選び方 |
+//! | `devices.rs` | 列挙（`ICreateDevEnum`）、対応形式（`IAMStreamConfig::GetStreamCaps`）、いまの解像度（`GetFormat`）、開く解像度と形式の選び方 |
 //! | `graph.rs` | フィルターグラフの組み立て・開始・停止・破棄 |
 //! | `filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`） |
 //! | `media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放（COM の初期化は `crate::com`） |
@@ -157,18 +157,20 @@ impl DirectShowCapture {
                 source: e.to_string(),
             },
         })?;
-        let Some(candidates) = candidates else {
+        let Some(queried) = candidates else {
             warn!(
                 "DirectShow のデバイス {} は IAMStreamConfig を持たないので、対応形式を出せない",
                 display
             );
             return Ok(Vec::new());
         };
-        let capabilities = devices::capabilities_from_candidates(&candidates);
+        let capabilities =
+            devices::capabilities_from_candidates(&queried.candidates, queried.current);
         debug!(
-            "DirectShow のデバイス能力の内訳（{}、{:.1}ms）: {}",
+            "DirectShow のデバイス能力の内訳（{}、{:.1}ms、いまの解像度: {:?}）: {}",
             display,
             elapsed_ms(start),
+            queried.current,
             capabilities
                 .iter()
                 .map(|capability| format!("{}: {} 件", capability.name, capability.modes.len()))
@@ -367,6 +369,40 @@ mod tests {
         assert!(!capture.link_state().capturing);
         assert!(capture.frames.latest().is_none());
     }
+
+    #[test]
+    #[ignore = "DirectShow のキャプチャーボード（AVerMedia GC551 など）に入力信号を入れておく"]
+    fn start_capture_without_resolution_opens_the_current_resolution() {
+        // 実行: cargo test start_capture_without_resolution -- --ignored --nocapture
+        // 解像度が未指定（初回）なら、デバイスのいまの解像度で開く（#391）。GC551 は
+        // 入力信号の解像度を返し、それ以外で開くと警告画面になる
+        let mut capture = capture();
+        let name = capture
+            .list_friendly_names()
+            .into_iter()
+            .next()
+            .expect("DirectShow のデバイスがある");
+        let display = display_name(&name);
+        let entry = DirectShowCapture::find(&display).expect("見つかる");
+        let current = graph::query_candidates(&entry)
+            .expect("対応形式を読める")
+            .and_then(|queried| queried.current)
+            .expect("いまの解像度を読める");
+        println!("{display} のいまの解像度: {current:?}");
+
+        capture
+            .start_capture(&display, None, None, None)
+            .expect("開ける");
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while capture.frames.latest().is_none() && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let frame = capture.frames.latest().expect("5 秒以内にフレームが届く");
+        // 警告画面も同じ大きさのフレームとして届くので、映っているかは目で確かめる
+        assert_eq!((frame.width as u32, frame.height as u32), current);
+        capture.stop_capture();
+    }
+
     #[test]
     #[ignore = "OBS の仮想カメラが必要。開始したあと 30 秒以内に OBS 側で仮想カメラを止める（または OBS を終了する）"]
     fn link_state_reports_device_lost_when_the_source_goes_away() {

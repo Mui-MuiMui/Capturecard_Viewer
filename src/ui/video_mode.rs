@@ -19,6 +19,11 @@ use crate::video::{DeviceCapabilities, VideoMode};
 /// 直前の設定を手掛かりにする。前の値が無い（初回など）ときは、対応する中で
 /// 最大の解像度・最高の FPS を選ぶ。
 ///
+/// **ただしデバイスがいまの解像度を教えてくれるなら（`current_resolution`、
+/// DirectShow の経路だけ）、前の解像度よりそちらを手掛かりにする**（#391）。
+/// 入力信号と違う解像度で開くと警告画面しか出さないボードがあり、前のデバイスの
+/// 1280x720 を引き継ぐと映らないため。FPS は前の値に近いものを選ぶ。
+///
 /// **フォーマットだけを入れ直してはいけない。** 解像度と FPS が前のデバイスの
 /// 値のまま残ると、新しいデバイスが対応していない組み合わせが画面に出て、
 /// `start_capture` が `Closest` で寄せた実際の設定と表示が食い違う。
@@ -32,10 +37,12 @@ pub fn select_default_video_mode(
         .iter()
         .find(|capability| !capability.modes.is_empty())?;
 
+    // デバイスのいまの解像度があれば、前の解像度の代わりに手掛かりにする（#391）
+    let anchor_resolution = capability.current_resolution.or(previous_resolution);
     let &mode = capability
         .modes
         .iter()
-        .min_by_key(|&&mode| video_mode_rank(mode, previous_resolution, previous_fps))?;
+        .min_by_key(|&&mode| video_mode_rank(mode, anchor_resolution, previous_fps))?;
 
     Some((capability.name.clone(), mode.resolution(), mode.fps))
 }
@@ -283,6 +290,64 @@ mod tests {
         assert_eq!(
             select_default_video_mode(&caps, None, None),
             Some(("MJPEG".to_string(), (1280, 720), 60))
+        );
+    }
+
+    #[test]
+    fn select_default_video_mode_prefers_current_resolution_over_previous() {
+        // DirectShow のボードが入力信号の 1920x1080 を返している。前のデバイスの
+        // 1280x720 を引き継ぐと警告画面になるので、いまの解像度を選ぶ（#391）
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "YUY2",
+            vec![
+                VideoMode::new(1920, 1080, 60),
+                VideoMode::new(1920, 1080, 15),
+                VideoMode::new(1280, 720, 60),
+            ],
+        )
+        .with_current_resolution(Some((1920, 1080)))];
+
+        assert_eq!(
+            select_default_video_mode(&caps, Some((1280, 720)), Some(60)),
+            Some(("YUY2".to_string(), (1920, 1080), 60))
+        );
+    }
+
+    #[test]
+    fn select_default_video_mode_current_resolution_keeps_nearest_fps() {
+        // 解像度はいまの値、FPS は前の値に近いもの
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "YUY2",
+            vec![
+                VideoMode::new(1920, 1080, 60),
+                VideoMode::new(1920, 1080, 30),
+                VideoMode::new(1280, 720, 30),
+            ],
+        )
+        .with_current_resolution(Some((1920, 1080)))];
+
+        assert_eq!(
+            select_default_video_mode(&caps, Some((1280, 720)), Some(30)),
+            Some(("YUY2".to_string(), (1920, 1080), 30))
+        );
+    }
+
+    #[test]
+    fn select_default_video_mode_ignores_current_resolution_outside_modes() {
+        // 一覧に無い解像度は `with_current_resolution` が捨てるので、前の値で選ぶ
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "YUY2",
+            vec![
+                VideoMode::new(1920, 1080, 60),
+                VideoMode::new(1280, 720, 60),
+            ],
+        )
+        .with_current_resolution(Some((3840, 2160)))];
+
+        assert_eq!(caps[0].current_resolution, None);
+        assert_eq!(
+            select_default_video_mode(&caps, Some((1280, 720)), Some(60)),
+            Some(("YUY2".to_string(), (1280, 720), 60))
         );
     }
 

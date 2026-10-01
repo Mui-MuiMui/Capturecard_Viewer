@@ -284,6 +284,8 @@ pub(super) mod mock {
         pub(in crate::app) capabilities: HashMap<VideoBackendSetting, DeviceCapabilities>,
         /// 最後に対応形式を問い合わせたときの「映像の開き方」
         pub(in crate::app) last_capabilities_backend: Option<VideoBackendSetting>,
+        /// `active` が返す開いた解像度。`None` なら解像度を返さない（実機の観測値が無い形）
+        pub(in crate::app) opened_resolution: Option<(u32, u32)>,
     }
 
     /// 映像バックエンドのモック。複製しても同じ中身を指す。
@@ -368,7 +370,7 @@ pub(super) mod mock {
                 state.capturing.then(|| ActiveVideo {
                     device_name: state.last_device_name.clone().unwrap_or_default(),
                     api: crate::video::capture::CaptureApi::Fake,
-                    resolution: None,
+                    resolution: state.opened_resolution,
                     format: None,
                     requested_fps: 0,
                 })

@@ -8,14 +8,28 @@
 //!
 //! 開き直しが要るかの差分判定はワーカー側が持つ。UI は毎回そのまま送る。
 
-use super::worker::{DeviceCommand, DeviceConfig, DeviceEvent};
+use super::worker::{DeviceCommand, DeviceConfig, DeviceEvent, VideoTarget};
 use super::CaptureCardViewer;
 use crate::audio::AudioDirection;
+use crate::settings::VideoSettings;
 use crate::status::ErrorSource;
 use crate::ui;
 use crate::video::VideoAdjustments;
 use log::warn;
 use std::time::Instant;
+
+/// 開いた解像度（`VideoResolutionResolved`）を設定へ書き戻してよいか（#391）。
+///
+/// **設定の解像度がまだ未指定で、名前・形式・fps・開き方が開いたときの相手と
+/// 同じときだけ。** 届くまでの間に利用者が解像度を選んだ、あるいは別の
+/// デバイスへ切り替えたなら、そちらを残す（別のデバイスの解像度を書かない）。
+fn should_store_resolved_resolution(video: &VideoSettings, target: &VideoTarget) -> bool {
+    video.resolution.is_none()
+        && video.device_name == target.0
+        && video.format == target.2
+        && video.fps == target.3
+        && video.backend == target.4
+}
 
 impl CaptureCardViewer {
     /// 設定値を適用し直す必要があるかを判定する。
@@ -86,6 +100,28 @@ impl CaptureCardViewer {
             DeviceEvent::DefaultDevicesResolved { video, input } => {
                 self.store_resolved_devices(video, input);
             }
+            DeviceEvent::VideoResolutionResolved { target, resolution } => {
+                self.store_resolved_resolution(&target, resolution);
+            }
+        }
+    }
+
+    /// 解像度が未指定のまま開いた映像の、実際の解像度を設定へ書き戻す（#391）。
+    /// 書くかどうかは `should_store_resolved_resolution`。
+    fn store_resolved_resolution(&mut self, target: &VideoTarget, resolution: (u32, u32)) {
+        let changed = match self.settings.lock() {
+            Ok(mut settings) if should_store_resolved_resolution(&settings.video, target) => {
+                settings.video.resolution = Some(resolution);
+                true
+            }
+            Ok(_) => false,
+            Err(_) => {
+                warn!("開いた解像度の書き戻しで settings のロックを取得できない");
+                return;
+            }
+        };
+        if changed {
+            self.mark_settings_dirty();
         }
     }
 
@@ -100,6 +136,10 @@ impl CaptureCardViewer {
         if let Ok(mut settings) = self.settings.lock() {
             if let Some(name) = video {
                 settings.video.device_name = Some(name);
+                // ワーカーは解像度を未指定にして開く（#391）。こちらも揃えないと、
+                // 次に送る設定の解像度（既定の 1280x720）で開き直されてしまう。
+                // 開いた解像度は `VideoResolutionResolved` で届く
+                settings.video.resolution = None;
                 changed = true;
             }
             if let Some(name) = input {
@@ -329,6 +369,55 @@ mod tests {
             &"F5".to_string(),
             &Some("F5".to_string())
         ));
+    }
+
+    /// 初回に解像度を外したあとの設定と、それで開いたときの接続対象
+    fn first_run_video() -> (VideoSettings, VideoTarget) {
+        let video = VideoSettings {
+            device_name: Some("ボード".to_string()),
+            resolution: None,
+            ..VideoSettings::default()
+        };
+        let target = DeviceConfig::from_settings(&crate::settings::AppSettings {
+            video: video.clone(),
+            ..Default::default()
+        })
+        .video;
+        (video, target)
+    }
+
+    #[test]
+    fn should_store_resolved_resolution_when_the_target_matches() {
+        let (video, target) = first_run_video();
+        assert!(should_store_resolved_resolution(&video, &target));
+    }
+
+    #[test]
+    fn should_not_store_resolved_resolution_once_chosen() {
+        // 届くまでの間に利用者が解像度を選んだら、そちらを残す
+        let (mut video, target) = first_run_video();
+        video.resolution = Some((1280, 720));
+        assert!(!should_store_resolved_resolution(&video, &target));
+    }
+
+    #[test]
+    fn should_not_store_resolved_resolution_for_another_target() {
+        use crate::settings::VideoBackendSetting;
+        let (video, target) = first_run_video();
+        let changes: [fn(&mut VideoSettings); 4] = [
+            |video| video.device_name = Some("別のボード".to_string()),
+            |video| video.format = Some("MJPEG".to_string()),
+            |video| video.fps = Some(30),
+            |video| video.backend = VideoBackendSetting::DirectShow,
+        ];
+        for (index, change) in changes.into_iter().enumerate() {
+            let mut changed = video.clone();
+            change(&mut changed);
+            assert!(
+                !should_store_resolved_resolution(&changed, &target),
+                "変更 {index} のあとでも書き戻している"
+            );
+        }
     }
 
     #[test]

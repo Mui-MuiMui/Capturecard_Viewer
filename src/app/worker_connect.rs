@@ -11,7 +11,7 @@
 
 use super::monitor::{decide_device_not_visible, should_log_enumeration, DeviceNotVisible};
 use super::retry::backoff_delay;
-use super::worker::{DeviceConfig, DeviceEvent};
+use super::worker::{DeviceConfig, DeviceEvent, VideoTarget};
 use super::worker_loop::WorkerState;
 use crate::audio::AudioDirection;
 use crate::i18n;
@@ -64,13 +64,25 @@ impl WorkerState {
     /// 決めた名前は `DefaultDevicesResolved` で UI スレッドへ返し、設定へ
     /// 書き戻してもらう。**返す前にこの場の `config` も書き換える。**
     /// 往復を待つと、最初の接続がその分だけ遅れる。
+    ///
+    /// **映像の名前を埋めたら、解像度は未指定にする**（#391）。設定の解像度は
+    /// 既定の 1280x720 で、このデバイスに合わせて選んだ値ではない。入力信号と
+    /// 違う解像度で開くと警告画面しか出さないボード（AVerMedia GC551）では、
+    /// それで開くと「繋がっているのに映らない」になる。未指定なら DirectShow は
+    /// デバイスのいまの解像度で開き、Media Foundation はこれまでどおり 1280x720 を
+    /// 要求する。開いた解像度は接続後に `VideoResolutionResolved` で返す。
     pub(super) fn resolve_default_devices(&mut self, config: &mut DeviceConfig) {
         let mut resolved_video = None;
         let mut resolved_input = None;
 
         if config.video.0.is_none() {
             if let Some((name, _)) = self.video.list_devices().into_iter().next() {
+                info!(
+                    "映像デバイスの既定を {} にし、解像度はデバイスに合わせる",
+                    name
+                );
                 config.video.0 = Some(name.clone());
+                config.video.1 = None;
                 resolved_video = Some(name);
             }
         }
@@ -128,6 +140,7 @@ impl WorkerState {
                 self.last_video_failure = None;
                 self.last_video_target = Some(config.video.clone());
                 self.emit(DeviceEvent::VideoConnected);
+                self.report_resolved_resolution(&config.video);
                 // 途絶から復帰したのであれば、音声も同時に戻っているはず。
                 // **旗はここで落とす。** 残すと、以降の接続のたびに音声を
                 // 開き直してしまう
@@ -155,6 +168,39 @@ impl WorkerState {
                 );
             }
         }
+    }
+
+    /// 解像度が未指定の要求で開けたら、実際に開いた解像度を UI へ返す（#391）。
+    ///
+    /// **返す前に、この場の設定と「開いている相手」も開いた解像度にする。**
+    /// UI が書き戻した設定（解像度あり）が届いたときに、差分ありとみなして
+    /// 開き直さないため。書き戻す前の設定（解像度なし）が遅れて届いた場合は
+    /// `worker_commands` の `carry_resolved_resolution` が引き継ぐ。
+    fn report_resolved_resolution(&mut self, target: &VideoTarget) {
+        if target.1.is_some() {
+            return;
+        }
+        let Some(resolution) = self.video.active().and_then(|active| active.resolution) else {
+            return;
+        };
+        info!(
+            "解像度が未指定だったので、開いた解像度 {}x{} を設定へ書き戻してもらう",
+            resolution.0, resolution.1
+        );
+        let mut resolved = target.clone();
+        resolved.1 = Some(resolution);
+        if let Some(config) = self
+            .config
+            .as_mut()
+            .filter(|config| config.video == *target)
+        {
+            config.video = resolved.clone();
+        }
+        self.last_video_target = Some(resolved);
+        self.emit(DeviceEvent::VideoResolutionResolved {
+            target: target.clone(),
+            resolution,
+        });
     }
 
     /// 映像デバイスが選ばれていないので、開いているストリームを閉じて待つ（#334）。
@@ -627,6 +673,108 @@ mod tests {
                 Ok(direct_show)
             )]
         );
+    }
+
+    // 初回に映像デバイスを埋めたときの解像度（#391）。設定の 1280x720 は既定値で、
+    // 入力と違う解像度では警告画面しか出さないボードがあるので、未指定で開いて
+    // 開いた解像度を UI へ返す
+
+    /// 設定ファイルが無い初回の設定（デバイス未選択、解像度は既定の 1280x720）
+    fn first_run_config() -> DeviceConfig {
+        let mut config = config_for(None, Some("モック入力"));
+        config.video.1 = Some((1280, 720));
+        config.video.2 = Some("YUY2".to_string());
+        config.video.3 = Some(60);
+        config
+    }
+
+    fn resolved_resolutions(events: &[DeviceEvent]) -> Vec<(VideoTarget, (u32, u32))> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::VideoResolutionResolved { target, resolution } => {
+                    Some((target.clone(), *resolution))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn first_run_state() -> (
+        WorkerState,
+        std::sync::mpsc::Receiver<DeviceEvent>,
+        MockVideoBackend,
+    ) {
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| {
+            state.devices = vec![("キャプチャーボード".to_string(), String::new())];
+            state.opened_resolution = Some((1920, 1080));
+        });
+        audio.with(|state| state.input_devices = vec!["モック入力".to_string()]);
+        let (state, events) = mock_state(&video, &audio);
+        (state, events, video)
+    }
+
+    #[test]
+    fn first_run_opens_the_resolved_video_device_without_a_resolution() {
+        let (mut state, events, _video) = first_run_state();
+        apply_config(&mut state, first_run_config(), true);
+
+        let config = state.config.as_ref().expect("設定を覚えていること");
+        assert_eq!(config.video.0.as_deref(), Some("キャプチャーボード"));
+        assert_eq!(config.video.1, None, "解像度はデバイスに任せること");
+        // 形式と fps は触らない
+        assert_eq!(config.video.2.as_deref(), Some("YUY2"));
+        assert_eq!(config.video.3, Some(60));
+
+        // 返すイベントは開いたときの接続対象（解像度なし）を運ぶ。UI はこれと
+        // 設定を突き合わせてから書き戻す
+        let opened = config.video.clone();
+        state.tick(Instant::now());
+        let events = drain(&events);
+        assert_eq!(resolved_resolutions(&events), vec![(opened, (1920, 1080))]);
+        let config = state.config.as_ref().expect("設定を覚えていること");
+        assert_eq!(config.video.1, Some((1920, 1080)));
+        assert_eq!(state.last_video_target.as_ref(), Some(&config.video));
+    }
+
+    #[test]
+    fn first_run_does_not_reopen_for_the_written_back_or_stale_settings() {
+        let (mut state, events, video) = first_run_state();
+        apply_config(&mut state, first_run_config(), true);
+        let base = Instant::now();
+        state.tick(base);
+        assert_eq!(video.with(|state| state.start_calls), 1);
+        drain(&events);
+
+        // UI が書き戻す前の設定（解像度なし）が遅れて届いても開き直さない
+        let mut stale = first_run_config();
+        stale.video.0 = Some("キャプチャーボード".to_string());
+        stale.video.1 = None;
+        apply_config(&mut state, stale.clone(), false);
+        // 書き戻したあとの設定（開いた解像度）でも開き直さない
+        let mut written = stale;
+        written.video.1 = Some((1920, 1080));
+        apply_config(&mut state, written, false);
+        state.tick(base + Duration::from_secs(6));
+        assert_eq!(video.with(|state| state.start_calls), 1);
+        assert!(resolved_resolutions(&drain(&events)).is_empty());
+    }
+
+    #[test]
+    fn explicit_resolution_is_not_reported_back() {
+        // 利用者が選んだ解像度で開いたときは書き戻さない
+        let (mut state, events, _video) = first_run_state();
+        let mut config = first_run_config();
+        config.video.0 = Some("キャプチャーボード".to_string());
+        apply_config(&mut state, config, true);
+        assert_eq!(
+            state.config.as_ref().map(|config| config.video.1),
+            Some(Some((1280, 720)))
+        );
+        state.tick(Instant::now());
+        assert!(resolved_resolutions(&drain(&events)).is_empty());
     }
 
     #[test]

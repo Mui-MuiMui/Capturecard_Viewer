@@ -36,7 +36,7 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 
-use super::devices::{self, choose_candidate, DeviceEntry, StreamCandidate};
+use super::devices::{self, choose_candidate, target_resolution, DeviceEntry, StreamCandidate};
 use super::filter::Renderer;
 use super::media_type::{
     delete_media_type, interval_within_caps, set_avg_time_per_frame, SampleFormat,
@@ -121,19 +121,29 @@ fn create_graph() -> windows::core::Result<(IGraphBuilder, ICaptureGraphBuilder2
     Ok((graph, builder))
 }
 
-/// デバイスの対応形式を読む。能力の問い合わせ（`DirectShowCapture::capabilities`）用。
+/// 能力の問い合わせで読めたもの。
+pub(super) struct QueriedCandidates {
+    pub(super) candidates: Vec<StreamCandidate>,
+    /// ドライバーが返すいまの解像度（`devices::current_resolution`）
+    pub(super) current: Option<(u32, u32)>,
+}
+
+/// デバイスの対応形式といまの解像度を読む。能力の問い合わせ
+/// （`DirectShowCapture::capabilities`）用。
 ///
 /// フィルターをグラフに入れてから `IAMStreamConfig` を探す。グラフに
 /// 入っていないと `FindInterface` が答えないフィルターがあるため。
 pub(super) fn query_candidates(
     entry: &DeviceEntry,
-) -> Result<Option<Vec<StreamCandidate>>, GraphError> {
+) -> Result<Option<QueriedCandidates>, GraphError> {
     let source = devices::bind_filter(entry).map_err(GraphError::Open)?;
     let (graph, builder) = create_graph().map_err(GraphError::Open)?;
     unsafe { graph.AddFilter(&source, windows::core::w!("Capture Source")) }
         .map_err(GraphError::Open)?;
-    let candidates =
-        devices::stream_config(&builder, &source).map(|config| devices::read_candidates(&config));
+    let candidates = devices::stream_config(&builder, &source).map(|config| QueriedCandidates {
+        current: devices::current_resolution(&config),
+        candidates: devices::read_candidates(&config),
+    });
     // グラフから外してから手放す。外すとピンの接続も切れる
     let _ = unsafe { graph.RemoveFilter(&source) };
     Ok(candidates)
@@ -144,10 +154,24 @@ pub(super) fn query_candidates(
 /// 失敗してもグラフは組める（フィルターの既定の形式で流れる）ので、
 /// ここでは記録するだけで止めない。
 fn apply_format(config: &IAMStreamConfig, request: FormatRequest<'_>) -> Option<u32> {
+    // いまの解像度は SetFormat より前に読む。設定したあとは設定した値が返る
+    let current = devices::current_resolution(config);
     let candidates = devices::read_candidates(config);
-    let Some((chosen, fps)) =
-        choose_candidate(&candidates, request.resolution, request.format, request.fps)
-    else {
+    let resolution = target_resolution(&candidates, request.resolution, request.format, current);
+    if resolution != request.resolution {
+        log::info!(
+            "DirectShow のデバイスで開く解像度を、{}ので、デバイスのいまの解像度 {} にする",
+            match request.resolution {
+                Some((w, h)) => format!("設定の {w}x{h} がこのデバイスに無い"),
+                None => "解像度が未指定な".to_string(),
+            },
+            resolution.map_or_else(|| "（不明）".to_string(), |(w, h)| format!("{w}x{h}"))
+        );
+    }
+    // fps の扱いは変えない。解像度が未指定のときは、これまでどおり 60fps を要求する
+    // （`choose_candidate` は解像度が未指定なら fps の指定を見ない）
+    let fps = request.resolution.and(request.fps);
+    let Some((chosen, fps)) = choose_candidate(&candidates, resolution, request.format, fps) else {
         log::warn!(
             "DirectShow のデバイスに受け取れる形式が無いので、フィルターの既定の形式で開く（{} 件の対応形式を読めた）",
             candidates.len()
