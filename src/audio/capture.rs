@@ -7,7 +7,7 @@
 //! `passthrough_output` に分けてある。
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange};
+use cpal::SupportedStreamConfig;
 use log::{debug, info, warn};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -339,16 +339,8 @@ impl AudioCapture {
             output.name
         );
         let (rate, channels) = (format.sample_rate, format.channels);
-        let sample_format = format.cpal_sample_format();
-        let input_ranges = [SupportedStreamConfigRange::new(
-            channels,
-            rate,
-            rate,
-            SupportedBufferSize::Unknown,
-            sample_format,
-        )];
-        let input_default =
-            SupportedStreamConfig::new(channels, rate, SupportedBufferSize::Unknown, sample_format);
+        let input_ranges = [format.stream_config_range()];
+        let input_default = format.stream_config();
         // 設定のレートとチャンネル数ではなく音声ピンの形式を希望値にして、出力を揃える
         let (input_config, output_config) = choose_passthrough_configs(
             &input_ranges,

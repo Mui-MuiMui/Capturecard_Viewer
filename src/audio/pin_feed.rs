@@ -23,9 +23,11 @@
 //! ワーカーの中で閉じた共有で、UI スレッドは触らない（`ResampleTelemetry` と
 //! 同じ扱い。`docs/design/device-worker.md`）。
 
+use cpal::{SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::capabilities::AudioCapabilities;
 use super::sample::i16_to_f32;
 use super::stream::{count_xrun, process_input_iter, AudioProducer};
 use super::tap::AudioTap;
@@ -81,6 +83,39 @@ impl PinFormat {
             PinSampleType::I16 => cpal::SampleFormat::I16,
             PinSampleType::F32 => cpal::SampleFormat::F32,
         }
+    }
+
+    /// 入力の対応設定としてのこの形式 1 つ（最小 = 最大 = このレート）。
+    /// 音声ピンの入力は繋いだ形式でしか開かない（`docs/design/directshow-audio.md` の (6)）
+    pub(super) fn stream_config_range(self) -> SupportedStreamConfigRange {
+        SupportedStreamConfigRange::new(
+            self.channels,
+            self.sample_rate,
+            self.sample_rate,
+            SupportedBufferSize::Unknown,
+            self.cpal_sample_format(),
+        )
+    }
+
+    /// 入力の既定の設定としてのこの形式。`stream_config_range` と同じ形
+    pub(super) fn stream_config(self) -> SupportedStreamConfig {
+        SupportedStreamConfig::new(
+            self.channels,
+            self.sample_rate,
+            SupportedBufferSize::Unknown,
+            self.cpal_sample_format(),
+        )
+    }
+
+    /// 設定ダイアログのサンプリングレートとチャンネル数の選択肢に使う、入力の
+    /// 対応設定（この形式 1 つ）。入力が音声ピンのときは、ワーカーへ入力の対応設定を
+    /// 問い合わせずにこれを使う（#394）
+    pub fn capabilities(self) -> AudioCapabilities {
+        AudioCapabilities::new(
+            vec![self.stream_config_range()],
+            self.sample_rate,
+            self.channels,
+        )
     }
 
     /// ログと「接続状態」タブに出す 1 行（「48000Hz 2ch 16bit」）

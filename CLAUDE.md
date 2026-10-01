@@ -43,13 +43,14 @@ cargo build --release
 | `src/app/worker_commands.rs` | デバイスワーカーのコマンドの受け口（`handle`）。設定の受け取りと開き直しの要求、最小化中のホットキーの代役（音量・ミュート）、即時の再接続 |
 | `src/app/worker_timers.rs` | ワーカーがタイマーで回す監視の入口（`tick`）。再試行の期限、フレームの途絶 |
 | `src/app/worker_audio_timers.rs` | ワーカーがタイマーで回す監視のうち音声まわり。音声ストリームのエラー、Windows の既定デバイスの切り替え、クロックドリフト補正、映像の音声ピンの番号が変わったときの開き直し（`monitor_audio_pin`）、観測値のデバッグログ |
-| `src/app/worker_connect.rs` | ワーカーが行うデバイス操作のうち映像側と列挙。映像を開く・閉じる、列挙、映像の能力の問い合わせ、既定デバイス名の確定。列挙の結果のログと「Windows 側にも見えていない」の判定の適用 |
+| `src/app/worker_connect.rs` | ワーカーが行うデバイス操作のうち映像側と列挙。映像を開く・閉じる、列挙、映像の能力の問い合わせ、既定の映像デバイス名の確定。列挙の結果のログと「Windows 側にも見えていない」の判定の適用 |
 | `src/app/worker_audio_connect.rs` | ワーカーが行うデバイス操作のうち音声側。音声を開く（`try_connect_audio`）、入力が未指定のときと音声ピンが使えないときに開かずに待つ、映像の復帰に合わせた開き直し、対応設定の問い合わせ |
+| `src/app/worker_default_input.rs` | 入力が未設定のまま起動したときの入力の既定（#394）。最初の映像の試行のあとに、音声ピンがあれば `video_pin`、無ければ WASAPI の先頭に決める（`settle_default_input`）。決めるまでと UI の書き戻しが届くまで音声を理由なしで待たせる（`DefaultInput`） |
 | `src/app/backend/mod.rs` | ワーカーがデバイスに触るときの入口の trait（`VideoBackend` / `AudioBackend` / `DeviceBackends`）と、本番かフェイクかを環境変数で選ぶ `backends_from_env`。テスト用のモックもここ（`#[cfg(test)]`） |
 | `src/app/backend/system.rs` | 本番のバックエンド `SystemBackends`。映像は `VideoCapture`（Media Foundation）と `DirectShowCapture` を `SystemVideo` で束ね、音声は `AudioCapture` を trait に載せる。一覧の突き合わせ（`merge_video_devices`）とどちらで開くかの判定（`route_for`） |
 | `src/app/backend/fake.rs` | フェイクのバックエンド `FakeBackends`。`FakeVideoCapture` / `FakeAudioCapture` を trait に載せる実装と、環境変数（`CAPTURECARD_VIEWER_FAKE_DEVICES` / `CAPTURECARD_VIEWER_FAKE_SCENARIO`）の解釈 |
 | `src/app/monitor.rs` | 切断や既定デバイスの切り替え、列挙をログへ出す回と「Windows 側にも見えていない」の**判定**（純粋関数）。ワーカーが使う |
-| `src/app/monitor_audio_pin.rs` | 音声の入力が映像デバイスの音声ピンのときの**判定**（純粋関数）。開くか待つか（`decide_pin_readiness`）、映像の開き直しに合わせて音声を開き直すか（`should_resync_pin_audio`）。`monitor.rs` が 800 行に近いので分けた |
+| `src/app/monitor_audio_pin.rs` | 音声の入力が映像デバイスの音声ピンのときの**判定**（純粋関数）。開くか待つか（`decide_pin_readiness`）、映像の開き直しに合わせて音声を開き直すか（`should_resync_pin_audio`）、設定ダイアログで選べるか（`pin_choice`）、初回の入力の既定を音声ピンにするか（`default_input_uses_pin`）。`monitor.rs` が 800 行に近いので分けた |
 | `src/app/retry.rs` | `ConnectRetry` とバックオフ。「いつ試してよいか」だけを持つ。ワーカーが持つ |
 | `src/app/capabilities.rs` | デバイス一覧のキャッシュと、デバイス能力・対応設定の取得要求（ワーカーへ流すところまで） |
 | `src/app/screenshot.rs` | 撮影、保存スレッドの管理、結果の取り込み |
@@ -71,7 +72,7 @@ cargo build --release
 | `src/video/directshow/audio_pin.rs` | 映像デバイスの音声ピン（#388）。有無の記録、10ms の塊の提案と接続、`Run` が通らないときに外してやり直す（`run_with_fallback`）、`WAVEFORMATEX` の読み取り（`pin_format_from_wave`）、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
 | `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
 | `src/video/frame_sink.rs` | フレームコールバックの本体 `FrameSink`（YUY2→RGB、`FrameBuffer` へ積む、`RepaintWaker` で UI を起こす）。実機（Media Foundation / DirectShow）とフェイクで共有する。DirectShow の RGB24 / MJPEG / 4:2:0 の YUV（NV12 / I420 / YV12）の受け口もここ |
-| `src/video/fake.rs` | 実機なしで動くフェイクの映像デバイス `FakeVideoCapture`。テストパターンを指定 fps で吐く生成スレッド、切断・接続失敗のシナリオ |
+| `src/video/fake.rs` | 実機なしで動くフェイクの映像デバイス `FakeVideoCapture`。テストパターンを指定 fps で吐く生成スレッド、切断・接続失敗のシナリオ、音声ピンを持つシナリオ（`with_audio_pin`、#394） |
 | `src/video/test_pattern.rs` | フェイクが吐くテストパターン（カラーバー、ベタ塗り、フレーム番号の焼き込み）の描画。純粋関数 |
 | `src/video/capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の取得 |
 | `src/video/color.rs` | YCbCr→RGB の係数表とその選び方、映像調整の畳み込み、設定の共有（`SharedColorConversion`） |
@@ -91,7 +92,7 @@ cargo build --release
 | `src/audio/resample.rs` | クロックドリフト補正の共有状態（`ResampleTelemetry`）と補正係数の決め方（`decide_resample_correction`） |
 | `src/audio/controls.rs` | `AudioControls`。音量・パススルー・ミュートの共有状態 |
 | `src/audio/fake.rs` | 実機なしで動くフェイクの音声デバイス `FakeAudioCapture`。デバイスの一覧と形、開く・閉じる、観測値、接続失敗・ストリームのエラーのシナリオ |
-| `src/audio/fake_stream.rs` | フェイクの音声デバイスが立てる入出力のスレッドの本体。正弦波の入力（`SineInput`）と書き込みを捨てる出力（`DiscardOutput`）、経過時間に合わせて回す `run_paced` |
+| `src/audio/fake_stream.rs` | フェイクの音声デバイスが立てる入出力のスレッドの本体。正弦波の入力（`SineInput`）と書き込みを捨てる出力（`DiscardOutput`）、経過時間に合わせて回す `run_paced`、フェイクの映像デバイスの音声ピンへ正弦波を流す `FakePinSource`（#394） |
 | `src/audio/tap.rs` | 録画へ音声を回す差し込み口 `AudioTap`。録画中だけ、入力コールバックが f32 へ直した値を入力の形のまま 1 秒ぶんのリングへ積む（待たない `try_lock`、空きが足りなければそのコールバックの分を捨てて数える）。累計のサンプル数・最後に積んだ時刻・入力の形・開き直しの番号・途切れた位置を Atomic で持つ |
 | `src/audio/pin_feed.rs` | DirectShow の映像デバイスの音声ピンと `AudioCapture` をつなぐ差し込み口 `AudioPinFeed`（#388）。音声ピンの `Receive` が受け取った PCM を、グラフの番号が合うときだけ待たない `try_lock` で `process_input_iter` へ渡す。音声ピンの状態（`AudioPinState`）・形式（`PinFormat`）、塊の長さに合わせたリングの広げ方（`widened_buffer_ms`）もここ |
 | `src/recording/mod.rs` | 録画の入口。`RecordingError`（文言は `Display` から `crate::i18n`）、`EncoderInfo`、経過時間の書式（`format_elapsed`）、外から使う経路（`crate::recording::...`）の `pub use` |
@@ -145,6 +146,7 @@ cargo build --release
 | `src/ui/capability.rs` | `CapabilityCache`（デバイス能力の取得状態）と、そこから作る選択肢まわりの表示 |
 | `src/ui/video_mode.rs` | デバイスを切り替えたときに選び直すビデオの既定値（`select_default_video_mode`） |
 | `src/ui/device_tab.rs` | 「デバイス設定」タブの描画 |
+| `src/ui/audio_input.rs` | 「デバイス設定」タブの「オーディオ入力デバイス」のコンボボックス（先頭の「映像デバイスの音声 (DirectShow)」と WASAPI のデバイス）と、選べるか（`VideoPinChoice`、#394） |
 | `src/ui/screenshot_tab.rs` | 「スクリーンショット設定」タブの描画 |
 | `src/ui/recording_tab.rs` | 「録画」タブの描画（保存先、ファイル名の書式と例、映像のビットレート、ハードウェアエンコーダ、音声の有無とビットレート、リプレイバッファの ON / OFF とさかのぼる長さ） |
 | `src/ui/hotkeys_tab.rs` | 「ホットキー」タブの描画と、割り当ての重複判定 |
@@ -172,7 +174,7 @@ cargo build --release
 
 `src/app/` の子モジュールは**基本どれも `impl CaptureCardViewer` を足す形**で、状態そのものは `app/mod.rs` の構造体 1 つに集めてある。**子モジュール側にフィールドや `static` を持たせないこと。** 他の子モジュールから呼ぶメソッドにだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
-**例外はデバイスワーカーの 8 つ**（`worker.rs` / `worker_loop.rs` / `worker_commands.rs` / `worker_timers.rs` / `worker_audio_timers.rs` / `worker_connect.rs` / `worker_audio_connect.rs` / `backend/`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_commands.rs` / `worker_timers.rs` / `worker_audio_timers.rs` / `worker_connect.rs` / `worker_audio_connect.rs` がそこへ `impl` を足す（コマンドの受け口の `worker_commands.rs` も同じ）。`backend/` はアプリの状態（`CaptureCardViewer` / `WorkerState` に属するもの）を持たず、デバイスの入口の trait とその実装だけを持つ。テスト用のモックだけは自分の中に観測用の値を抱える。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
+**例外はデバイスワーカーの 9 つ**（`worker.rs` / `worker_loop.rs` / `worker_commands.rs` / `worker_timers.rs` / `worker_audio_timers.rs` / `worker_connect.rs` / `worker_audio_connect.rs` / `worker_default_input.rs` / `backend/`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_commands.rs` / `worker_timers.rs` / `worker_audio_timers.rs` / `worker_connect.rs` / `worker_audio_connect.rs` / `worker_default_input.rs` がそこへ `impl` を足す（コマンドの受け口の `worker_commands.rs` も同じ）。`backend/` はアプリの状態（`CaptureCardViewer` / `WorkerState` に属するもの）を持たず、デバイスの入口の trait とその実装だけを持つ。テスト用のモックだけは自分の中に観測用の値を抱える。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
 
 `src/video/` の子モジュールは**役割で分けてあるだけで、状態はそれぞれのファイルが定義する型が持つ。** 他のファイルから呼ぶ項目にだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。**外から使う経路（`crate::video::...`）は `video/mod.rs` の `pub use` に集める。** ただし**呼び出し側のテストからしか参照されない項目は再輸出しない。** テストを含まないビルドで誰も使わない `pub use` が残り、`unused_imports` の警告になるため。そういう項目（`FormatCapability` / `IntervalStats`）は置いてある子モジュールを `pub(crate) mod` にして、`crate::video::capabilities::FormatCapability` のように子モジュールの経路で参照する。`src/ui/` と同じ考え方。
 
@@ -195,7 +197,7 @@ cargo build --release
 | `docs/design/reconnect.md` | 切断の検出、バックオフでの再試行、音声のフォールバックを外した経緯、Windows の既定デバイスの追従 |
 | `docs/design/video-pipeline.md` | `FrameBuffer` と世代番号、色変換への映像調整の畳み込み、再描画の間隔と `RepaintWaker`、UI にあるが効かない設定 |
 | `docs/design/audio.md` | 入出力の形が違う場合の変換、クロックドリフト補正、対応設定の取得、ミュート |
-| `docs/design/directshow-audio.md` | DirectShow の映像デバイスの音声ピンから音声を取り込む設計（#388）。**第 1 段（設定ファイルの `input_source = "video_pin"` で鳴る・録画に入る、#393）を実装済み。UI は第 2 段。** 受け口のフィルター、`AudioCapture` の入力の種類と `AudioPinFeed`、映像のグラフと音声の寿命、`[audio] input_source`、UI、対応設定、ドリフトと録画の PTS、段階分け |
+| `docs/design/directshow-audio.md` | DirectShow の映像デバイスの音声ピンから音声を取り込む設計（#388）。**第 1 段（設定ファイルの `input_source = "video_pin"` で鳴る・録画に入る、#393）と第 2 段（設定ダイアログの項目・初回の既定・フェイクの音声ピン、#394）を実装済み。** 受け口のフィルター、`AudioCapture` の入力の種類と `AudioPinFeed`、映像のグラフと音声の寿命、`[audio] input_source`、UI、対応設定、ドリフトと録画の PTS、段階分け |
 | `docs/design/settings.md` | `#[serde(default)]`、デバウンス保存、壊れた設定ファイルと `AutoSavePolicy` |
 | `docs/design/settings-dialog.md` | ドラフトの編集、イベントで返す形、`commit_draft` の決まり、「その他」タブの書き出し / 読み込み / 初期化 |
 | `docs/design/hotkeys.md` | アクションごとの割り当て、旧形式からの移行、差分での登録 |

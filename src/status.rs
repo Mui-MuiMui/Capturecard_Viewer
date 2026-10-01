@@ -321,6 +321,19 @@ pub fn format_underrun_count(count: Option<u32>) -> String {
     }
 }
 
+/// 統計 OSD の音声の行。アンダーランの行（`format_underrun_count`）に、入力が
+/// 映像デバイスの音声ピンなら「（音声ピン）」を添える（#394）。経路が違うと
+/// アンダーランの出方も変わりうるので、OSD だけを見て比べるときに取り違えないため。
+/// 詳しい経路は「接続状態」タブに出す
+pub fn format_osd_audio_line(underruns: Option<u32>, via_audio_pin: bool) -> String {
+    let line = format_underrun_count(underruns);
+    if via_audio_pin {
+        i18n::via_audio_pin(&line)
+    } else {
+        line
+    }
+}
+
 /// 「接続状態」タブへ出す、入力がリングバッファの満杯で捨てたフレーム数の行。
 ///
 /// `DeviceSnapshot.audio_dropped_frames` をそのまま渡す。音声を開いていない
@@ -759,6 +772,15 @@ mod tests {
         // 音声を開いていない間に 0 と出すと、開いていて一度も途切れて
         // いない状態と読み分けられない
         assert_eq!(format_underrun_count(None), "アンダーラン: -");
+    }
+
+    #[test]
+    fn format_osd_audio_line_marks_the_audio_pin() {
+        assert_eq!(
+            format_osd_audio_line(Some(3), true),
+            "アンダーラン: 3 回（音声ピン）"
+        );
+        assert_eq!(format_osd_audio_line(Some(3), false), "アンダーラン: 3 回");
     }
 
     #[test]

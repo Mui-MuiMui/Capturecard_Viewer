@@ -13,8 +13,8 @@ use super::{
     AudioBackend, BackendShared, CaptureRequest, DeviceBackends, VideoBackend, VideoEnumeration,
 };
 use crate::audio::{
-    ActiveAudio, AudioCapabilities, AudioDirection, AudioError, FakeAudioCapture, FakeAudioOptions,
-    PassthroughRequest, ResampleStatus, ResampleTelemetry,
+    ActiveAudio, AudioCapabilities, AudioDirection, AudioError, AudioPinFeed, FakeAudioCapture,
+    FakeAudioOptions, PassthroughRequest, ResampleStatus, ResampleTelemetry,
 };
 use crate::settings::VideoBackendSetting;
 use crate::video::{
@@ -29,7 +29,8 @@ use std::time::Duration;
 pub(super) const FAKE_DEVICES_ENV: &str = "CAPTURECARD_VIEWER_FAKE_DEVICES";
 
 /// フェイクに起こさせる出来事を指定する環境変数。
-/// `disconnect:<秒>` / `reopen-fail:<秒>` / `fail:<回数>` / `audio-error:<秒>` をカンマで区切って並べる
+/// `disconnect:<秒>` / `reopen-fail:<秒>` / `fail:<回数>` / `audio-error:<秒>` / `audio-pin`
+/// をカンマで区切って並べる
 pub(super) const FAKE_SCENARIO_ENV: &str = "CAPTURECARD_VIEWER_FAKE_SCENARIO";
 
 /// 名乗れる台数の上限。設定画面の一覧が埋まらない程度にとどめる
@@ -46,6 +47,9 @@ pub(super) struct FakeScenario {
     pub(super) failures_before_success: u32,
     /// 音声を開いてからこの時間が経つとストリームのエラーを立てる
     pub(super) audio_error_after: Option<Duration>,
+    /// 映像デバイスが音声ピンを持つ（`audio-pin`、#394）。DirectShow で開いた
+    /// AVerMedia GC551 のように、音声ピンを繋ぐ指定で開くと正弦波を流す
+    pub(super) audio_pin: bool,
 }
 
 /// フェイクを組み立てる役。`DeviceWorker::spawn` が `SystemBackends` の
@@ -102,6 +106,17 @@ impl DeviceBackends for FakeBackends {
                 stream_error_after: self.scenario.audio_error_after,
             },
         );
+        // 音声ピンの差し込み口は本番（`SystemBackends::create`）と同じく 1 つ作って
+        // 映像と音声へ複製を渡す。ワーカーの中で閉じた共有（#394）
+        let (video, audio) = if self.scenario.audio_pin {
+            let feed = AudioPinFeed::new();
+            (
+                video.with_audio_pin(feed.clone()),
+                audio.with_pin_feed(feed),
+            )
+        } else {
+            (video, audio)
+        };
         (Box::new(video), Box::new(audio))
     }
 }
@@ -144,6 +159,11 @@ fn parse_scenario(value: Option<&str>) -> FakeScenario {
         .map(str::trim)
         .filter(|item| !item.is_empty())
     {
+        // 引数を取らない項目
+        if item.eq_ignore_ascii_case("audio-pin") {
+            scenario.audio_pin = true;
+            continue;
+        }
         let parsed = item.split_once(':').and_then(|(key, arg)| {
             let arg = arg.trim();
             match key.trim().to_ascii_lowercase().as_str() {
@@ -181,7 +201,7 @@ fn parse_scenario(value: Option<&str>) -> FakeScenario {
         });
         if parsed.is_none() {
             warn!(
-                "{} の '{}' を読めないので無視する（書式は disconnect:<秒> / reopen-fail:<秒> / fail:<回数> / audio-error:<秒>）",
+                "{} の '{}' を読めないので無視する（書式は disconnect:<秒> / reopen-fail:<秒> / fail:<回数> / audio-error:<秒> / audio-pin）",
                 FAKE_SCENARIO_ENV, item
             );
         }
@@ -204,15 +224,15 @@ impl VideoBackend for FakeVideoCapture {
     }
 
     fn start_capture(&mut self, request: &CaptureRequest<'_>) -> Result<(), VideoError> {
-        // フェイクの経路は 1 つだけなので、開き方の設定は見ない。音声ピンを
-        // 流すフェイクは第 2 段なので、音声ピンを繋ぐ指定もまだ見ない
-        // （`docs/design/directshow-audio.md` の (8)）
-        FakeVideoCapture::start_capture(
+        // フェイクの経路は 1 つだけなので、開き方の設定は見ない。音声ピンを繋ぐ指定は
+        // シナリオ audio-pin のときだけ効く（#394）
+        FakeVideoCapture::start_capture_with_pin(
             self,
             request.device_name,
             request.resolution,
             request.format,
             request.fps,
+            request.connect_audio_pin,
         )
     }
 
@@ -345,6 +365,7 @@ mod tests {
                 failures_before_success: 0,
                 audio_error_after: None,
                 reopen_fail_for: None,
+                audio_pin: false,
             }
         );
         assert_eq!(
@@ -354,6 +375,7 @@ mod tests {
                 failures_before_success: 3,
                 audio_error_after: None,
                 reopen_fail_for: None,
+                audio_pin: false,
             }
         );
         // カンマで並べられる。大文字小文字と前後の空白は問わない
@@ -364,6 +386,7 @@ mod tests {
                 failures_before_success: 2,
                 audio_error_after: None,
                 reopen_fail_for: None,
+                audio_pin: false,
             }
         );
     }
@@ -377,8 +400,24 @@ mod tests {
                 failures_before_success: 1,
                 audio_error_after: Some(Duration::from_secs(3)),
                 reopen_fail_for: None,
+                audio_pin: false,
             }
         );
+    }
+
+    #[test]
+    fn parse_scenario_reads_audio_pin_without_an_argument() {
+        assert_eq!(
+            parse_scenario(Some("fail:1, Audio-Pin")),
+            FakeScenario {
+                failures_before_success: 1,
+                audio_pin: true,
+                ..FakeScenario::default()
+            }
+        );
+        // 引数を付けると読めない項目として捨てる（打ち間違いに気付けるよう警告する）
+        assert!(!parse_scenario(Some("audio-pin:1")).audio_pin);
+        assert!(!parse_scenario(None).audio_pin);
     }
 
     #[test]
@@ -411,6 +450,7 @@ mod tests {
                 failures_before_success: 1,
                 audio_error_after: None,
                 reopen_fail_for: None,
+                audio_pin: false,
             }
         );
         assert_eq!(
@@ -526,6 +566,132 @@ mod tests {
         assert_eq!(active_video.as_deref(), Some("Fake Camera 2"));
 
         // 終了で生成スレッドまで止まる（join できる）こと
+        command_tx.send(DeviceCommand::Shutdown).expect("送れる");
+        handle.join().expect("ワーカーが終わる");
+    }
+
+    #[test]
+    fn first_run_with_an_audio_pin_opens_audio_from_the_video_pin() {
+        // 設定 → ワーカー → 音声ピンで開く、の通し（#394）。設定ファイルが無い初回の
+        // 設定（映像も入力も未設定）から始め、ワーカーが返した既定を UI と同じ関数
+        // （`device::apply_resolved_devices`）で設定へ書き戻して送り直す。音声ピンを
+        // 持つフェイクの映像（audio-pin）なら、入力が「映像デバイスの音声」に決まり、
+        // 映像の正弦波が音声ピンの差し込み口を通ってパススルーと録画の差し込み口へ届く
+        use crate::app::device::apply_resolved_devices;
+        use crate::app::worker::{DeviceCommand, DeviceConfig, DeviceEvent, DeviceSnapshot};
+        use crate::audio::{AudioControls, AudioInputRoute, AudioTap};
+        use crate::repaint::RepaintWaker;
+        use crate::settings::{AppSettings, AudioInputSource};
+        use crate::video::{SharedColorConversion, VideoFrames};
+        use std::sync::mpsc::channel;
+        use std::sync::RwLock;
+        use std::time::Instant;
+
+        let backends = FakeBackends::from_env_values(Some("1"), Some("audio-pin")).expect("有効");
+        let audio_tap = AudioTap::new();
+        let _attachment = audio_tap.attach(audio_tap.one_second_capacity());
+        let (command_tx, command_rx) = channel();
+        let (event_tx, event_rx) = channel();
+        let snapshot = Arc::new(RwLock::new(DeviceSnapshot::default()));
+        let handle = {
+            let snapshot = Arc::clone(&snapshot);
+            let audio_tap = audio_tap.clone();
+            std::thread::spawn(move || {
+                crate::app::worker_loop::run(
+                    command_rx,
+                    event_tx,
+                    snapshot,
+                    BackendShared {
+                        frames: VideoFrames::new(),
+                        color_conversion: Arc::new(SharedColorConversion::new()),
+                        audio_controls: Arc::new(AudioControls::default()),
+                        audio_tap,
+                        repaint_waker: RepaintWaker::new(),
+                    },
+                    Box::new(backends),
+                );
+            })
+        };
+
+        let mut settings = AppSettings::default();
+        settings.video.device_name = None;
+        settings.audio.input_device_name = None;
+        let send = |settings: &AppSettings, initial: bool| {
+            command_tx
+                .send(DeviceCommand::ApplyConfig {
+                    config: Box::new(DeviceConfig::from_settings(settings)),
+                    initial,
+                })
+                .expect("送れる");
+        };
+        send(&settings, true);
+
+        let via_pin = |snapshot: &RwLock<DeviceSnapshot>| {
+            snapshot
+                .read()
+                .expect("読める")
+                .active_audio
+                .as_ref()
+                .map(|a| a.input_route)
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut events = Vec::new();
+        while Instant::now() < deadline {
+            for event in event_rx.try_iter() {
+                if let DeviceEvent::DefaultDevicesResolved {
+                    video,
+                    input,
+                    input_source,
+                } = &event
+                {
+                    // UI スレッドの `store_resolved_devices` と同じく書き戻して送り直す
+                    if apply_resolved_devices(
+                        &mut settings,
+                        video.clone(),
+                        input.clone(),
+                        *input_source,
+                    ) {
+                        send(&settings, false);
+                    }
+                }
+                events.push(event);
+            }
+            if matches!(via_pin(&snapshot), Some(AudioInputRoute::VideoPin { .. }))
+                && audio_tap.snapshot().samples_total > 0
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(settings.video.device_name.as_deref(), Some("Fake Camera 1"));
+        assert_eq!(settings.audio.input_source, AudioInputSource::VideoPin);
+        assert_eq!(settings.audio.input_device_name, None);
+        assert!(
+            matches!(via_pin(&snapshot), Some(AudioInputRoute::VideoPin { .. })),
+            "音声ピンで開いていない: {events:?}"
+        );
+        assert!(
+            audio_tap.snapshot().samples_total > 0,
+            "音声ピンの正弦波が録画の差し込み口へ届いていない"
+        );
+        // 初回の既定を決めている間も、映像の開き直しを待つ間も、理由を出さない
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, DeviceEvent::AudioFailed(_))),
+            "{events:?}"
+        );
+        let active_video = snapshot.read().expect("読める").active_video.clone();
+        assert!(
+            matches!(
+                active_video.map(|active| active.audio_pin),
+                Some(crate::audio::AudioPinState::Connected(_))
+            ),
+            "映像の音声ピンが繋がっていない"
+        );
+
+        audio_tap.detach();
         command_tx.send(DeviceCommand::Shutdown).expect("送れる");
         handle.join().expect("ワーカーが終わる");
     }

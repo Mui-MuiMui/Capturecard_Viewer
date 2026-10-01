@@ -4,13 +4,15 @@
 //!
 //! `super::worker_connect` と同じく `WorkerState` に生やす形で、デバイス
 //! ワーカースレッドの上でだけ走る。映像側と列挙のログ、「Windows 側にも
-//! 見えていない」の判定の適用は `super::worker_connect` に置く。
+//! 見えていない」の判定の適用は `super::worker_connect` に、初回の入力の既定の
+//! 決め方は `super::worker_default_input` に置く。
 
 use super::monitor::{decide_audio_fallback, should_resync_audio_after_video, AudioFallbackAction};
-use super::monitor_audio_pin::{decide_pin_readiness, PinReadiness, PinWait};
+use super::monitor_audio_pin::{decide_pin_readiness, waits_silently, PinReadiness, PinWait};
 use super::retry::backoff_delay;
 use super::worker::{DeviceConfig, DeviceEvent};
 use super::worker_connect::failure_message;
+use super::worker_default_input::{input_is_undecided, DefaultInput};
 use super::worker_loop::WorkerState;
 use crate::audio::{self, AudioDirection, AudioError};
 use crate::i18n;
@@ -77,6 +79,11 @@ impl WorkerState {
     /// **開けなくても、別のデバイスへは倒さない。** 失敗が続いたときの扱いは
     /// `monitor::decide_audio_fallback` を参照。
     pub(super) fn try_connect_audio(&mut self, config: &DeviceConfig, now: Instant) {
+        // 初回の既定を決めている間は、理由を出さずに待つ（#394）
+        if self.default_input != DefaultInput::Settled && input_is_undecided(&config.audio) {
+            self.hold_audio_for_default_input(config);
+            return;
+        }
         let (input_device_name, output_device_name, sample_rate, channels, buffer_ms, source) =
             config.audio.clone();
         // 入力が音声ピンなら、映像の音声ピンが使えるかを先に見る。使えなければ
@@ -242,6 +249,10 @@ impl WorkerState {
     /// 返し、この設定を扱い済みとして記録する。**バックオフで再試行しない。**
     /// どの理由も時間が経てば直るものではなく、直るのは映像の状態が変わったときで、
     /// それは `tick` の監視（`monitor_audio_pin`）が拾って要求を立て直す。
+    ///
+    /// 音声ピンを繋ぐための映像の開き直しがまだ済んでいないだけなら、理由は出さない
+    /// （`monitor_audio_pin::waits_silently`、#394）。すぐに繋がるので、入力を
+    /// 切り替えるたびに一瞬トーストが出るのを避ける。
     fn hold_audio_for_pin(&mut self, config: &DeviceConfig, reason: PinWait) {
         info!(
             "入力が映像デバイスの音声ピンだが使えないので、音声を開かずに待つ: {:?}",
@@ -253,8 +264,14 @@ impl WorkerState {
         }
         self.last_audio_target = Some(config.audio.clone());
         self.audio_not_visible = None;
+        let video_reopen_pending = self.last_video_target.as_ref() != Some(&config.video);
+        let silent = waits_silently(&reason, video_reopen_pending);
         let message = reason.message();
         self.audio_pin_wait = Some(reason);
+        if silent {
+            debug!("音声ピンを繋ぐための映像の開き直しを待つ。理由は出さない");
+            return;
+        }
         self.last_audio_failure = Some(message.clone());
         self.emit(DeviceEvent::AudioFailed(message));
     }

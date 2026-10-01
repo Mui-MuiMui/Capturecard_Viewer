@@ -14,7 +14,7 @@
 | DirectShow のストリーミングスレッド | 1（映像を DirectShow で開いている間。「(DirectShow)」のデバイスのほか、映像の開き方を DirectShow にしたとき（#237）と、開き方が自動で Media Foundation から倒したとき（#387）は印の無いデバイスも含む） | 上流のフィルターが作る。上の行の代わりに立ち、自前のレンダラーの `IMemInputPin::Receive` から同じ `FrameSink` へ渡す。ロックもアロケーションもしない（`docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」） |
 | DirectShow の音声ピンのストリーミングスレッド | 1（入力が映像デバイスの音声ピンで、DirectShow で開いている間。映像ピンと同じスレッドのこともある） | キャプチャーフィルターが音声ピンのために作る（#388）。cpal の入力コールバックの代わりに立ち、音声のレンダラーの `Receive` から `AudioPinFeed::push` で `process_input_iter` を呼ぶ。ロックは `try_lock` だけで待たず、アロケーションもしない。受け取れないときも失敗を返さない。**デバイスに触る使い捨てのスレッドには当たらない**（作るのはフィルター。`docs/design/directshow-audio.md`） |
 | cpal の入力コールバック／出力コールバック | 各 1（再生中） | cpal が作る。リングバッファの読み書き。入力が音声ピンのときは出力だけ |
-| フェイクの映像生成（`fake-video`） / 音声入力・出力（`fake-audio-in` / `fake-audio-out`） | 映像 1、音声 各 1（開いている間） | 環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` で起動したときだけ、上の 2 行の代わりに立つ。ワーカーが開くときに起こし、閉じるときに join する（`docs/design/device-worker.md` の「フェイクデバイス（#142）」） |
+| フェイクの映像生成（`fake-video`） / 音声入力・出力（`fake-audio-in` / `fake-audio-out`） / 音声ピン（`fake-audio-pin`） | 映像 1、音声 各 1（開いている間）。音声ピンはシナリオ `audio-pin` で音声ピンを繋いで開いている間だけ 1（その間 `fake-audio-in` は立たない） | 環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` で起動したときだけ、上の 2 行の代わりに立つ。ワーカーが開くときに起こし、閉じるときに join する（`docs/design/device-worker.md` の「フェイクデバイス（#142）」）。`fake-audio-pin` は DirectShow の音声ピンのストリーミングスレッドの代役（#394） |
 | ホットキーリスナー | 1 | `HotkeyManager::new` で起動し、`Drop` で join する。低レベルキーボードフックを持ち、そのメッセージループを回す |
 | 効果音再生 | 再生ごと | rodio による再生。出力先を開けたかを mpsc で UI スレッドへ返す（ログは出さない） |
 | スクリーンショットの保存 | 撮影ごと | JPEG / PNG エンコードとファイル書き出し、設定によってはクリップボードへの転送 |

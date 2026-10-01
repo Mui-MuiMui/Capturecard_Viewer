@@ -10,6 +10,7 @@
 //!
 //! | ファイル | 役割 |
 //! |---|---|
+//! | `audio_input.rs` | 「オーディオ入力デバイス」のコンボボックス（「映像デバイスの音声」と WASAPI のデバイス）と、選べるか（`VideoPinChoice`） |
 //! | `capability.rs` | デバイス能力のキャッシュと、そこから作る選択肢まわりの表示 |
 //! | `state.rs` | `SettingsDialogState`（ドラフトの保持と操作の受け止め） |
 //! | `draft.rs` | ドラフトの反映（`commit_draft`） |
@@ -26,6 +27,7 @@
 //! | `status_tab.rs` | 「接続状態」タブ |
 //! | `update_dialog.rs` | 新しい版を知らせ、更新の進み具合を出すダイアログ |
 
+mod audio_input;
 mod capability;
 mod device_tab;
 mod draft;
@@ -49,6 +51,7 @@ mod video_mode;
 // なので、誰も使わない再輸出は `unused_imports` の警告になる。
 // `commit_draft` や `select_default_video_mode` のような項目は、使う側が
 // 子モジュールの経路（`self::draft::commit_draft`）で参照する
+pub use self::audio_input::VideoPinChoice;
 pub use self::capability::{AudioCapabilityCache, VideoCapabilityKey};
 pub use self::draft_import::{draft_from_defaults, draft_from_imported};
 pub use self::hotkey_capture::{show_hotkey_capture_dialog, HotkeyDialogEvent};
@@ -455,6 +458,7 @@ pub fn show_settings_dialog(
                         draft,
                         view.video_capabilities,
                         &view.audio_capabilities,
+                        view.video_pin,
                         devices,
                         &mut events,
                     ),

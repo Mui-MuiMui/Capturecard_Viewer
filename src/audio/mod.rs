@@ -17,7 +17,7 @@
 //! | `resample.rs` | クロックドリフト補正の共有状態と、補正係数の決め方 |
 //! | `controls.rs` | 音量・パススルー・ミュートの共有状態 |
 //! | `fake.rs` | 実機なしで動くフェイクの音声デバイス（正弦波の入力と、書き込みを捨てる出力）。環境変数で有効にしたときだけ使う |
-//! | `fake_stream.rs` | フェイクの入出力のスレッドの本体（正弦波を吐く入力と、書き込みを捨てる出力） |
+//! | `fake_stream.rs` | フェイクの入出力のスレッドの本体（正弦波を吐く入力と、書き込みを捨てる出力）と、フェイクの映像デバイスの音声ピン（`FakePinSource`、#394） |
 //! | `pin_feed.rs` | DirectShow の映像デバイスの音声ピンと `AudioCapture` をつなぐ差し込み口（`AudioPinFeed`）。音声ピンの `Receive` が受け取った PCM を `process_input_iter` へ渡す。音声ピンの状態（`AudioPinState`）と形式もここ |
 //! | `tap.rs` | 録画へ音声を回す差し込み口（`AudioTap`）。録画中だけ、入力コールバックが f32 へ直した値を入力の形のまま録画のリングへも積む。PTS を決めるための累計・時刻・入力の形・開き直しの番号も持つ |
 
@@ -47,6 +47,7 @@ pub use capabilities::{
 pub use capture::{AudioCapture, PassthroughInput, PassthroughRequest};
 pub use controls::AudioControls;
 pub use fake::{FakeAudioCapture, FakeAudioOptions};
+pub use fake_stream::FakePinSource;
 pub use pin_feed::{
     AudioPinFeed, AudioPinState, PinConnection, PinFailure, PinFormat, PinSampleType,
 };

@@ -7,7 +7,7 @@
 //! `worker_audio_connect`（開くか待つか）と `worker_audio_timers`（開き直すか）。
 //! 理由は `docs/design/directshow-audio.md` の (3)。
 
-use crate::audio::{AudioInputRoute, AudioPinState, PinFailure};
+use crate::audio::{AudioInputRoute, AudioPinState, PinFailure, PinFormat};
 use crate::i18n::{self, Text};
 use crate::video::capture::CaptureApi;
 use crate::video::ActiveVideo;
@@ -101,10 +101,56 @@ pub(super) fn should_resync_pin_audio(
     }
 }
 
+/// 設定ダイアログで「映像デバイスの音声 (DirectShow)」を選べるか（#394）。
+///
+/// 選べるのは、いま開いている映像に音声ピンがあるとき（繋いでいる・繋いでいない・
+/// 繋げなかった）だけ。`Ok` には繋いでいる音声ピンの形式を入れる。サンプリング
+/// レートとチャンネル数の選択肢をこの形式 1 つで作るためで、繋いでいない間は
+/// `None`（入力側の制約なし）。選べないときは理由を返す
+/// （`docs/design/directshow-audio.md` の (5)、(6)）。
+pub(super) fn pin_choice(video: Option<&ActiveVideo>) -> Result<Option<PinFormat>, PinWait> {
+    match decide_pin_readiness(video) {
+        PinReadiness::Ready { .. } => Ok(video.and_then(|video| match &video.audio_pin {
+            AudioPinState::Connected(connection) => Some(connection.format),
+            _ => None,
+        })),
+        PinReadiness::Wait(PinWait::NotConnected | PinWait::ConnectFailed(_)) => Ok(None),
+        PinReadiness::Wait(reason) => Err(reason),
+    }
+}
+
+/// 入力が未設定のまま起動したとき、最初の映像の試行の結果から入力を
+/// 「映像デバイスの音声」に決めるか（#394）。
+///
+/// 映像が開けていて音声ピンがある（初回は繋がずに開くので、ふつうは「あるが
+/// 繋いでいない」）ときだけ真。Media Foundation で開いた・ピンが無い・映像が
+/// 開けなかったときは偽で、今までどおり WASAPI の列挙の先頭に決める
+/// （`docs/design/directshow-audio.md` の (4) の「初回の既定」）。
+pub(super) fn default_input_uses_pin(video: Option<&ActiveVideo>) -> bool {
+    video.is_some_and(|video| {
+        matches!(
+            video.audio_pin,
+            AudioPinState::Available | AudioPinState::Connected(_)
+        )
+    })
+}
+
+/// 音声ピンを待つ理由を、通知せずに待ってよいか（#394）。
+///
+/// 「音声ピンを繋ぐために映像を開き直すのを待っている」（`NotConnected`）で、
+/// まだ映像の開き直しが済んでいない（`video_reopen_pending`。設定の映像の接続対象と
+/// いま開いている相手が違う）なら、すぐに繋がるので理由を出さない。入力を
+/// 「映像デバイスの音声」へ切り替えた直後と、初回の既定で決まった直後は、映像の
+/// 開き直しに「成功から 1 秒」の下限が掛かり、その間に音声の試行が先に来る。
+/// 映像が開き直ると状態が変わり、`tick` の監視が音声の要求を立て直す。
+pub(super) fn waits_silently(reason: &PinWait, video_reopen_pending: bool) -> bool {
+    *reason == PinWait::NotConnected && video_reopen_pending
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::{PinConnection, PinFormat, PinSampleType};
+    use crate::audio::{PinConnection, PinSampleType};
 
     fn video(api: CaptureApi, audio_pin: AudioPinState) -> ActiveVideo {
         ActiveVideo {
@@ -260,5 +306,69 @@ mod tests {
         ] {
             assert!(!reason.message().is_empty(), "{reason:?}");
         }
+    }
+
+    #[test]
+    fn pin_choice_is_selectable_while_the_video_has_an_audio_pin() {
+        let format = PinFormat {
+            sample_rate: 48_000,
+            channels: 2,
+            sample_type: PinSampleType::I16,
+        };
+        let active = video(CaptureApi::DirectShow, connected(1));
+        assert_eq!(pin_choice(Some(&active)), Ok(Some(format)));
+        // 繋いでいない・繋げなかったときも選べる。形式は分からないので制約にしない
+        for pin in [
+            AudioPinState::Available,
+            AudioPinState::Failed(PinFailure::Connect("E_FAIL".to_string())),
+        ] {
+            let active = video(CaptureApi::DirectShow, pin);
+            assert_eq!(pin_choice(Some(&active)), Ok(None));
+        }
+    }
+
+    #[test]
+    fn pin_choice_gives_the_reason_when_not_selectable() {
+        assert_eq!(pin_choice(None), Err(PinWait::VideoNotOpen));
+        let media_foundation = video(CaptureApi::MediaFoundation, AudioPinState::NotApplicable);
+        assert_eq!(
+            pin_choice(Some(&media_foundation)),
+            Err(PinWait::MediaFoundation)
+        );
+        let missing = video(CaptureApi::DirectShow, AudioPinState::Missing);
+        assert_eq!(pin_choice(Some(&missing)), Err(PinWait::NoPin));
+    }
+
+    #[test]
+    fn default_input_uses_pin_only_when_the_opened_video_has_one() {
+        assert!(default_input_uses_pin(Some(&video(
+            CaptureApi::DirectShow,
+            AudioPinState::Available
+        ))));
+        assert!(default_input_uses_pin(Some(&video(
+            CaptureApi::DirectShow,
+            connected(1)
+        ))));
+        assert!(!default_input_uses_pin(None));
+        for (api, pin) in [
+            (CaptureApi::MediaFoundation, AudioPinState::NotApplicable),
+            (CaptureApi::DirectShow, AudioPinState::Missing),
+            (
+                CaptureApi::DirectShow,
+                AudioPinState::Failed(PinFailure::Run("E_FAIL".to_string())),
+            ),
+        ] {
+            assert!(!default_input_uses_pin(Some(&video(api, pin))));
+        }
+    }
+
+    #[test]
+    fn waits_silently_only_for_a_pending_reopen() {
+        assert!(waits_silently(&PinWait::NotConnected, true));
+        // 開き直しが済んだのにまだ繋がっていないなら、理由を出す
+        assert!(!waits_silently(&PinWait::NotConnected, false));
+        // ほかの理由は開き直しを待っても直らない
+        assert!(!waits_silently(&PinWait::NoPin, true));
+        assert!(!waits_silently(&PinWait::VideoNotOpen, true));
     }
 }

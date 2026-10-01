@@ -29,6 +29,7 @@ mod worker_audio_connect;
 mod worker_audio_timers;
 mod worker_commands;
 mod worker_connect;
+mod worker_default_input;
 mod worker_loop;
 mod worker_timers;
 
@@ -443,7 +444,7 @@ impl eframe::App for CaptureCardViewer {
         // 「接続状態」タブはここから引く（ロックを取り直さない）。
         // **イベントを取り込んだ後に読む。** ワーカーはイベントを送る前に
         // 観測値を書き出すので、この順なら少なくともそのイベントの時点の値が入る
-        self.device_snapshot = self.device.snapshot();
+        self.refresh_device_snapshot();
 
         // 別スレッドで行ったスクリーンショットの保存結果を取り込む。
         // 失敗はここでトーストになる

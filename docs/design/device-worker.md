@@ -56,12 +56,12 @@ eframe は最小化されたウィンドウの再描画要求を捨てるため�
 
 ## デバイスに触る入口は trait 1 枚で仕切る
 
-**ワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。** `worker_loop` / `worker_commands` / `worker_connect` / `worker_audio_connect` / `worker_timers` / `worker_audio_timers` はどれも `Box<dyn ..>` を持つだけで、`VideoCapture` / `AudioCapture` という具体型を知らない。実装を選ぶのは `DeviceWorker::spawn` の 1 か所（`backend::backends_from_env`。既定は `SystemBackends`、環境変数を指定したときだけフェイク）で、そこが `BackendShared`（フレーム・色変換・音量・録画の音声の差し込み口・再描画の窓口）と一緒にワーカースレッドへ送り、**組み立てはあちら側で行う**（`cpal::Stream` が `!Send` なので、作る場所は使うスレッドでなければならない）。
+**ワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。** `worker_loop` / `worker_commands` / `worker_connect` / `worker_audio_connect` / `worker_default_input` / `worker_timers` / `worker_audio_timers` はどれも `Box<dyn ..>` を持つだけで、`VideoCapture` / `AudioCapture` という具体型を知らない。実装を選ぶのは `DeviceWorker::spawn` の 1 か所（`backend::backends_from_env`。既定は `SystemBackends`、環境変数を指定したときだけフェイク）で、そこが `BackendShared`（フレーム・色変換・音量・録画の音声の差し込み口・再描画の窓口）と一緒にワーカースレッドへ送り、**組み立てはあちら側で行う**（`cpal::Stream` が `!Send` なので、作る場所は使うスレッドでなければならない）。
 
 ```mermaid
 flowchart LR
     spawn["DeviceWorker::spawn<br/>（UI スレッド）"]
-    loop["worker_loop / worker_commands / worker_connect / worker_audio_connect<br/>worker_timers / worker_audio_timers"]
+    loop["worker_loop / worker_commands / worker_connect / worker_audio_connect<br/>worker_default_input / worker_timers / worker_audio_timers"]
     trait["VideoBackend / AudioBackend"]
     real["SystemVideo（VideoCapture + DirectShowCapture）/ AudioCapture<br/>app/backend/system.rs"]
     mock["モック（テスト専用）"]
@@ -176,7 +176,8 @@ WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の�
 - **どこで失敗しても映像は止めない。** 繋げなければ音声のレンダラーを外して `AudioPinState::Failed` を残す。繋いだせいで `Run` が通らなければ、音声のレンダラーを外して 1 度だけやり直す
 - `AudioPinFeed` はグラフごとに番号を配る（`begin_graph`）。`Receive` は自分のグラフの番号と差し込み先の番号が合うときだけ積むので、映像を開き直したあとに古いグラフが積むことはない
 - ワーカーは**音声ピンが使えないとき開かずに待つ**（`hold_audio_for_pin`。#304 の `hold_audio_without_input` と同じ形）。**映像を開き直したら音声も開き直す。** 要求を立てるのは `tick` の監視（`worker_audio_timers::monitor_audio_pin`。判定は `monitor_audio_pin.rs` の純粋関数）で、映像の音声ピンの番号と音声が差し込んでいる番号を比べる。理由は `docs/design/reconnect.md` の「映像の開き直しに合わせて音声も開き直す（音声ピン）」
-- trait に「音声ピンを問い合わせる」メソッドは足さない。観測値の 1 項目（`ActiveVideo::audio_pin` / `ActiveAudio::input_route`）にしてあり、モックはそれを返すだけで「待つ / 開く / 映像の開き直しで開き直す」を CI に載せている（`worker_audio_connect.rs` のテスト）。フェイクの音声ピンは第 2 段
+- trait に「音声ピンを問い合わせる」メソッドは足さない。観測値の 1 項目（`ActiveVideo::audio_pin` / `ActiveAudio::input_route`）にしてあり、モックはそれを返すだけで「待つ / 開く / 映像の開き直しで開き直す」を CI に載せている（`worker_audio_connect.rs` のテスト）。フェイクの音声ピン（`CAPTURECARD_VIEWER_FAKE_SCENARIO=audio-pin`、#394）は映像のフェイクが正弦波を `AudioPinFeed` へ流し、設定からワーカー、音声ピンで開くまでを通しで CI に載せている（`app/backend/fake.rs` のテスト）
+- 入力が未設定のまま起動したら、入力は最初の映像の試行のあとに決める（`worker_default_input.rs`、#394）。映像に音声ピンがあれば「映像デバイスの音声」、無ければ WASAPI の列挙の先頭。**ワーカーは UI から来た映像の接続対象（音声ピンを繋ぐか）を書き換えない。** `video_pin` に決めたら UI が書き戻した設定を待って映像を開き直す（初回だけ 1 度開き直る）。決めるまでと書き戻しが届くまでは音声を理由なしで待たせる
 
 #### DirectShow で確かめたもの・確かめていないもの
 

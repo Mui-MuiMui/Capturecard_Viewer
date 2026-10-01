@@ -65,7 +65,7 @@ flowchart TD
 | `platform` | Windows 固有処理（フォント、アイコン、モニタ情報） | 汎用ロジック |
 | `logging` | ログの初期化と出力先 | — |
 
-`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_commands.rs`（コマンドの受け口）/ `worker_connect.rs` / `worker_audio_connect.rs`（デバイス操作）/ `worker_timers.rs` / `worker_audio_timers.rs`（再試行・切断監視・既定デバイスの追従などタイマー駆動の監視）と、デバイスの入口の trait を持つ `backend/` で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
+`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_commands.rs`（コマンドの受け口）/ `worker_connect.rs` / `worker_audio_connect.rs` / `worker_default_input.rs`（デバイス操作）/ `worker_timers.rs` / `worker_audio_timers.rs`（再試行・切断監視・既定デバイスの追従などタイマー駆動の監視）と、デバイスの入口の trait を持つ `backend/` で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
 
 ## 状態管理
 
@@ -378,7 +378,7 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 | 目指す姿 | 現状 | 対応するタスク |
 |---|---|---|
-| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `placeholder` / `video_overlay` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_commands` / `worker_connect` / `worker_audio_connect` / `worker_timers` / `worker_audio_timers` / `backend` / `monitor` / `retry` / `capabilities` / `screenshot` / `screenshot_sound` / `recording` / `settings_dialog` / `settings_store` / `update` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
+| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `placeholder` / `video_overlay` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_commands` / `worker_connect` / `worker_audio_connect` / `worker_default_input` / `worker_timers` / `worker_audio_timers` / `backend` / `monitor` / `retry` / `capabilities` / `screenshot` / `screenshot_sound` / `recording` / `settings_dialog` / `settings_store` / `update` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
 | イベント駆動 | 2 秒ごとに設定を再適用するポーリング | apply_settings の 2 秒ごとの再登録 |
 | チャネルでの隔離 | UI と `device` ワーカーの間はコマンドとイベントを mpsc でやり取りする。**この境界で**チャネルを通さず共有するのは 4 つ（映像フレーム `VideoFrames`（録画へ回す `VideoTap` を含む）、色変換と映像調整 `SharedColorConversion`、音量・ミュート・パススルー `AudioControls`、録画へ回す音声 `AudioTap`）。数えるのは UI スレッドか録画スレッドがワーカーを通さずにデバイスのコールバックとやり取りする共有ハンドル（`BackendShared` に載せて渡すもの）で、`docs/design/device-worker.md` と `src/app/worker.rs` も同じ数え方。これとは別に観測値は `Arc<RwLock<DeviceSnapshot>>` に写して読む。`settings` や `screenshot_manager` のようにデバイスを跨がない共有はこの話の外 | 完了 |
 | UI をブロックしない | デバイスを開く・閉じる・列挙する処理も含めてワーカースレッドへ移した。スクリーンショットのエンコードは撮影ごとのスレッド。`update()` に残るブロッキングは `rfd` のファイルダイアログだけ | 完了 |

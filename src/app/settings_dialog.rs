@@ -4,8 +4,10 @@
 //! 持たせないため（`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
 //! ディスクへの書き出しそのものは `super::settings_store`。
 
+use super::monitor_audio_pin::pin_choice;
 use super::update::CheckOrigin;
 use super::CaptureCardViewer;
+use crate::audio::PinFormat;
 use crate::i18n::{self, Text};
 use crate::overlay::OverlayContent;
 use crate::settings;
@@ -23,6 +25,24 @@ use std::time::{Duration, Instant};
 const PRESET_OSD_DURATION: Duration = Duration::from_millis(1500);
 
 impl CaptureCardViewer {
+    /// デバイスワーカーの観測値を読み直す。`update()` の先頭で 1 回だけ呼ぶ。
+    ///
+    /// 設定ダイアログを開いていれば、「映像デバイスの音声 (DirectShow)」を選べるかも
+    /// 観測値（`DeviceSnapshot::active_video`）から作り直してダイアログへ渡す（#394）。
+    /// 観測値の複製から作るだけで、デバイスには問い合わせない。描画はこれを
+    /// `SettingsDialogView` の借用で読む。
+    pub(super) fn refresh_device_snapshot(&mut self) {
+        self.device_snapshot = self.device.snapshot();
+        if !self.show_settings {
+            return;
+        }
+        let choice = match pin_choice(self.device_snapshot.active_video.as_ref()) {
+            Ok(format) => ui::VideoPinChoice::Selectable(format.map(PinFormat::capabilities)),
+            Err(reason) => ui::VideoPinChoice::Unavailable(reason.message()),
+        };
+        self.settings_dialog.set_video_pin(choice);
+    }
+
     /// プリセットを実行中の設定へ適用する。
     ///
     /// 変わるのは `video` と `audio` だけ。デバイスを開き直すかどうかは

@@ -52,14 +52,11 @@ fn log_listing<E: Display>(trigger: &str, source: &str, result: &Result<Vec<Stri
 }
 
 impl WorkerState {
-    /// 未設定のデバイス名を、列挙結果の先頭で埋める。**起動直後の 1 回だけ。**
+    /// 未設定の映像デバイス名を、列挙結果の先頭で埋める。**起動直後の 1 回だけ。**
     ///
-    /// **入力デバイスは出力と違い、未設定のままにしない。** 出力の既定は
-    /// 「スピーカー」でまず無害だが、入力の既定は環境依存（ノート PC ならほぼ
-    /// 確実に内蔵マイク）で、パススルーがそのままマイクの音をスピーカーへ
-    /// 流してしまう。#134（PR #147）で切断時に同じことが起きる不具合を
-    /// 直したばかりで、初回起動で同じ誤動作を起こすわけにいかない。
-    ///
+    /// **入力はここで決めない。** 最初の映像の試行のあとに、映像に音声ピンが
+    /// あるかを見て決める（`worker_audio_connect` の `settle_default_input`、#394）。
+    /// 入力を未設定のままにしない理由（既定の入力は内蔵マイクになりうる）はそちら。
     /// 出力は `None`（Windows の既定デバイス）のままにする。
     ///
     /// 決めた名前は `DefaultDevicesResolved` で UI スレッドへ返し、設定へ
@@ -73,48 +70,37 @@ impl WorkerState {
     /// デバイスのいまの解像度で開き、Media Foundation はこれまでどおり 1280x720 を
     /// 要求する。開いた解像度は接続後に `VideoResolutionResolved` で返す。
     pub(super) fn resolve_default_devices(&mut self, config: &mut DeviceConfig) {
-        let mut resolved_video = None;
-        let mut resolved_input = None;
-
-        if config.video.0.is_none() {
-            if let Some((name, _)) = self.video.list_devices().into_iter().next() {
-                info!(
-                    "映像デバイスの既定を {} にし、解像度はデバイスに合わせる",
-                    name
-                );
-                config.video.0 = Some(name.clone());
-                config.video.1 = None;
-                resolved_video = Some(name);
-            }
-        }
-
-        // 入力が映像デバイスの音声ピンなら、WASAPI の入力は埋めない。
-        // 「映像デバイスの音声」を選んでいる間は入力デバイス名を書き換えない（#388）
-        if config.audio.0.is_none() && config.audio.5 == AudioInputSource::Device {
-            let list = self.audio.list_input_devices();
-            debug!("利用できる入力デバイス: {:?}", list);
-            if let Some(name) = list.into_iter().next() {
-                info!("入力デバイスの既定を {} にした", name);
-                config.audio.0 = Some(name.clone());
-                resolved_input = Some(name);
-            }
-        }
-
         // 出力は埋めない。`None` のまま Windows の既定デバイスへ任せる
         if config.audio.1.is_none() {
             debug!("出力デバイスは既定（自動選択）にする");
         }
-
-        if resolved_video.is_some() || resolved_input.is_some() {
-            self.emit(DeviceEvent::DefaultDevicesResolved {
-                video: resolved_video,
-                input: resolved_input,
-            });
+        if config.video.0.is_some() {
+            return;
         }
+        let Some((name, _)) = self.video.list_devices().into_iter().next() else {
+            return;
+        };
+        info!(
+            "映像デバイスの既定を {} にし、解像度はデバイスに合わせる",
+            name
+        );
+        config.video.0 = Some(name.clone());
+        config.video.1 = None;
+        self.emit(DeviceEvent::DefaultDevicesResolved {
+            video: Some(name),
+            input: None,
+            input_source: None,
+        });
     }
 
-    /// 映像デバイスへの接続を 1 回だけ試す。
+    /// 映像デバイスへの接続を 1 回だけ試す。試したあとで、初回の入力の既定を
+    /// 決める（開けたか・音声ピンがあるかで決まる。`settle_default_input`、#394）。
     pub(super) fn try_connect_video(&mut self, config: &DeviceConfig, now: Instant) {
+        self.connect_video_once(config, now);
+        self.settle_default_input();
+    }
+
+    fn connect_video_once(&mut self, config: &DeviceConfig, now: Instant) {
         let (_, resolution, format, fps, backend, connect_audio_pin) = config.video.clone();
         let Some(device_name) = selected_video_device(config.video.0.as_deref()) else {
             self.hold_video_without_device(config);

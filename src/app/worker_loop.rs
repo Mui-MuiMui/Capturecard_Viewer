@@ -30,6 +30,7 @@ use super::worker::{
     AudioTarget, DeviceCommand, DeviceConfig, DeviceEvent, DeviceSnapshot, RetryStatus,
     SharedSnapshot, VideoTarget,
 };
+use super::worker_default_input::DefaultInput;
 use crate::audio::{AudioCapabilities, AudioControls, AudioDirection};
 use crate::repaint::RepaintWaker;
 use log::{debug, trace, warn};
@@ -202,6 +203,9 @@ pub(super) struct WorkerState {
     /// 理由が変わったときだけ開き直しの要求を立てるために持つ
     /// （`monitor_audio_pin::should_resync_pin_audio`）。音声を開けたら消す
     pub(super) audio_pin_wait: Option<PinWait>,
+    /// 入力が未設定のまま起動したときの、入力の既定の決まり方（#394）。
+    /// 決めている間は音声を理由なしで待たせる（`worker_audio_connect::DefaultInput`）
+    pub(super) default_input: DefaultInput,
 }
 
 impl WorkerState {
@@ -241,6 +245,7 @@ impl WorkerState {
             last_video_failure: None,
             last_audio_failure: None,
             audio_pin_wait: None,
+            default_input: DefaultInput::Settled,
         }
     }
 
@@ -694,17 +699,56 @@ mod tests {
             initial: true,
         });
 
+        // 映像の名前は受け取ったその場で埋める。入力は最初の映像の試行のあと（#394）
         match drain(&events).into_iter().next() {
-            Some(DeviceEvent::DefaultDevicesResolved { video, input }) => {
+            Some(DeviceEvent::DefaultDevicesResolved {
+                video,
+                input,
+                input_source,
+            }) => {
                 assert_eq!(video.as_deref(), Some("モックカメラ"));
-                assert_eq!(input.as_deref(), Some("モック入力"));
+                assert_eq!(input, None);
+                assert_eq!(input_source, None);
             }
             other => panic!("埋めた名前が返らない: {:?}", other),
         }
-        // 往復を待たずに、その場の設定も書き換わっていること
         let config = state.config.as_ref().expect("設定を覚えていること");
         assert_eq!(config.video.0.as_deref(), Some("モックカメラ"));
+        assert_eq!(config.audio.0, None);
+
+        // モックの映像は音声ピンを持たないので、入力は WASAPI の列挙の先頭に決まる
+        state.tick(Instant::now());
+        let events = drain(&events);
+        let resolved: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::DefaultDevicesResolved {
+                    video,
+                    input,
+                    input_source,
+                } => Some((video.clone(), input.clone(), *input_source)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resolved,
+            vec![(
+                None,
+                Some("モック入力".to_string()),
+                Some(crate::settings::AudioInputSource::Device)
+            )]
+        );
+        // 決めるまでの間に「入力が選ばれていない」を出さない
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, DeviceEvent::AudioFailed(_))),
+            "{events:?}"
+        );
+        // 往復を待たずに、その場の設定も書き換わって音声が開いていること
+        let config = state.config.as_ref().expect("設定を覚えていること");
         assert_eq!(config.audio.0.as_deref(), Some("モック入力"));
         assert_eq!(config.audio.1, None, "出力は既定のままにすること");
+        assert!(audio.with(|state| state.running));
     }
 }
