@@ -359,6 +359,12 @@ impl CaptureGraph {
         // 変換フィルターなど）がタイムスタンプまで待ってから渡してくることがあり、
         // その分だけ遅れる。キャプチャーは届いた順にすぐ出せばよい
         let filter: IMediaFilter = graph.cast()?;
+        // 実機の計測（#406）だけは基準時計を付けたグラフも組めるようにする。
+        // 基準時計が無いとサンプルにタイムスタンプが付かないため
+        #[cfg(test)]
+        if super::timestamp_probe::use_default_clock() {
+            return unsafe { graph.SetDefaultSyncSource() };
+        }
         unsafe { filter.SetSyncSource(None::<&IReferenceClock>)? };
         Ok(())
     }

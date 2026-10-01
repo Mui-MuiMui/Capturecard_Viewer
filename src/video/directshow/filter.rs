@@ -149,6 +149,20 @@ impl StreamState {
 
     /// サンプル 1 つを渡し先へ渡す。
     fn receive(&mut self, sample: &IMediaSample, received_at: Instant) {
+        // 実機の計測（#406）。到着時刻とタイムスタンプを Atomic の表へ書くだけ
+        #[cfg(test)]
+        {
+            let (mut start, mut end) = (0i64, 0i64);
+            let hr = match unsafe { sample.GetTime(&mut start, &mut end) } {
+                Ok(()) => 0,
+                Err(e) => e.code().0,
+            };
+            let probe = match self {
+                StreamState::Video(_) => &super::timestamp_probe::VIDEO,
+                StreamState::Audio(_) => &super::timestamp_probe::AUDIO,
+            };
+            probe.record(received_at, hr, start, end);
+        }
         match self {
             StreamState::Video(stream) => stream.receive(sample, received_at),
             // 音声は受け取った時刻を使わない（録画の PTS は `AudioTap` が積んだ時刻で決まる）
