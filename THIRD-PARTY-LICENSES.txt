@@ -29,7 +29,7 @@ file at the root of the repository.
 1. LICENSE OVERVIEW
 ================================================================================
 
-  MIT (MIT License): 197
+  MIT (MIT License): 185
   Unicode-3.0 (Unicode License v3): 19
   Apache-2.0 (Apache License 2.0): 18
   MPL-2.0 (Mozilla Public License 2.0): 12
@@ -157,10 +157,6 @@ color_quant 1.1.0
   License: MIT
   Repository: https://github.com/image-rs/color_quant.git
 
-confy 0.6.1
-  License: MIT OR X11 OR Apache-2.0
-  Repository: https://github.com/rust-cli/confy
-
 const-oid 0.10.2
   License: Apache-2.0 OR MIT
   Repository: https://github.com/RustCrypto/formats
@@ -209,17 +205,9 @@ digest 0.11.3
   License: MIT OR Apache-2.0
   Repository: https://github.com/RustCrypto/traits
 
-directories 5.0.1
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/soc/directories-rs
-
 dirs 7.0.0
   License: MIT OR Apache-2.0
   Repository: https://codeberg.org/dirs/dirs-rs
-
-dirs-sys 0.4.1
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/dirs-dev/dirs-sys-rs
 
 dirs-sys 0.5.0
   License: MIT OR Apache-2.0
@@ -272,10 +260,6 @@ encoding_rs 0.8.41
 epaint 0.26.2
   License: (MIT OR Apache-2.0) AND OFL-1.1 AND LicenseRef-UFL-1.0
   Repository: https://github.com/emilk/egui/tree/master/crates/epaint
-
-equivalent 1.0.2
-  License: Apache-2.0 OR MIT
-  Repository: https://github.com/indexmap-rs/equivalent
 
 error-code 3.4.0
   License: BSL-1.0
@@ -345,10 +329,6 @@ glutin_wgl_sys 0.5.0
   License: Apache-2.0
   Repository: https://github.com/rust-windowing/glutin
 
-hashbrown 0.17.1
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/rust-lang/hashbrown
-
 http 1.5.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/hyperium/http
@@ -404,10 +384,6 @@ image 0.24.9
 image 0.25.10
   License: MIT OR Apache-2.0
   Repository: https://github.com/image-rs/image
-
-indexmap 2.14.2
-  License: Apache-2.0 OR MIT
-  Repository: https://github.com/indexmap-rs/indexmap
 
 itoa 1.0.18
   License: MIT OR Apache-2.0
@@ -653,10 +629,6 @@ serde_json 1.0.151
   License: MIT OR Apache-2.0
   Repository: https://github.com/serde-rs/json
 
-serde_spanned 0.6.9
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/toml-rs/toml
-
 serde_spanned 1.1.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
@@ -773,15 +745,7 @@ tinystr 0.8.4
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-toml 0.8.23
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/toml-rs/toml
-
 toml 1.1.6+spec-1.1.0
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/toml-rs/toml
-
-toml_datetime 0.6.11
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
@@ -789,15 +753,7 @@ toml_datetime 1.1.1+spec-1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
-toml_edit 0.22.27
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/toml-rs/toml
-
 toml_parser 1.1.3+spec-1.1.0
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/toml-rs/toml
-
-toml_write 0.1.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
@@ -968,10 +924,6 @@ windows_x86_64_msvc 0.53.1
 winit 0.29.15
   License: Apache-2.0
   Repository: https://github.com/rust-windowing/winit
-
-winnow 0.7.15
-  License: MIT
-  Repository: https://github.com/winnow-rs/winnow
 
 winnow 1.0.4
   License: MIT
@@ -3076,39 +3028,6 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - hashbrown 0.17.1
-
-Copyright (c) 2016 Amanieu d'Antras
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
   - lock_api 0.4.14
   - nasm-rs 0.3.2
   - parking_lot 0.12.5
@@ -3167,72 +3086,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
-  - indexmap 2.14.2
-
-Copyright (c) 2016--2017
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
-  - equivalent 1.0.2
-
-Copyright (c) 2016--2023
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
 
 
 ================================================================================
@@ -3626,34 +3479,6 @@ THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - directories 5.0.1
-
-Copyright (c) 2018 directories-rs contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
-  - dirs-sys 0.4.1
   - dirs-sys 0.5.0
   - dirs 7.0.0
 
@@ -4103,42 +3928,10 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - confy 0.6.1
-
-Copyright (c) 2024 Rust CLI Working Group
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
-  - serde_spanned 0.6.9
   - serde_spanned 1.1.1
-  - toml 0.8.23
   - toml 1.1.6+spec-1.1.0
-  - toml_datetime 0.6.11
   - toml_datetime 1.1.1+spec-1.1.0
-  - toml_edit 0.22.27
   - toml_parser 1.1.3+spec-1.1.0
-  - toml_write 0.1.2
   - toml_writer 1.1.2+spec-1.1.0
 
 Copyright (c) Individual contributors
@@ -5168,7 +4961,6 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - winnow 0.7.15
   - winnow 1.0.4
 
 Permission is hereby granted, free of charge, to any person obtaining

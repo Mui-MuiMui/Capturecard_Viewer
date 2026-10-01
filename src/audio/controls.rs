@@ -1,6 +1,6 @@
 //! 音量・パススルー・ミュートの共有状態。
 //!
-//! 出力コールバック（`stream::build_output_stream_with`）が 1 回ごとに読み、
+//! 出力コールバック（`stream_output::build_output_stream_with`）が 1 回ごとに読み、
 //! UI スレッドが書く。ストリームを開き直しても中身は引き継ぐ。
 
 use log::trace;

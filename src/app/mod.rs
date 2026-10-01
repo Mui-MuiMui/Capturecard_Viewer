@@ -26,6 +26,7 @@ mod window;
 mod worker;
 mod worker_audio_connect;
 mod worker_audio_timers;
+mod worker_commands;
 mod worker_connect;
 mod worker_loop;
 mod worker_timers;

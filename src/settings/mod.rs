@@ -108,7 +108,7 @@ impl fmt::Display for SettingsError {
 
 impl std::error::Error for SettingsError {}
 
-// confy が設定ファイルの置き場所を決めるのに使う名前。
+// 設定ファイルの置き場所（crate::config_path が %AppData% の下に組み立てる）に使う名前。
 // ここがずれると既存の設定ファイルを見失うため、1 箇所にまとめてある。
 // ログの出力先も同じデータディレクトリを基準に決めるので、logging から参照する。
 pub(crate) const APP_NAME: &str = "capturecard_viewer";

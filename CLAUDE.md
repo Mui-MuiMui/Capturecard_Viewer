@@ -10,7 +10,7 @@
 
 - キャプチャーデバイスは Windows Media Foundation 経由で Web カメラとして扱う（nokhwa）。Media Foundation に出ないデバイス（OBS の仮想カメラなど）は DirectShow で扱い、名前に「(DirectShow)」を添える
 - 音声は WASAPI 経由の入力 → リングバッファ → 出力のパススルー（cpal）
-- 設定は `%AppData%\capturecard_viewer\config\default-config.toml`（confy）
+- 設定は `%AppData%\capturecard_viewer\config\default-config.toml`（`toml` で読み書きする。`src/settings/store.rs`）
 
 ## ビルドと検証
 
@@ -39,7 +39,8 @@ cargo build --release
 | `src/app/window.rs` | 最前面表示、タイトルバーの有無、装飾なしのときの端のドラッグによるリサイズ、大きさのリセット、フルスクリーンの切り替え |
 | `src/app/device.rs` | `apply_settings`（設定をワーカーへ渡す）と、ワーカーから届いたイベントの取り込み |
 | `src/app/worker.rs` | デバイスワーカーとやり取りする型（コマンド / イベント / `DeviceConfig` / `DeviceSnapshot`）と、UI 側の窓口 `DeviceWorker` |
-| `src/app/worker_loop.rs` | デバイスワーカースレッドの本体。`WorkerState` の定義、コマンドの受け口、待ち時間の決定、観測値の書き出し |
+| `src/app/worker_loop.rs` | デバイスワーカースレッドの本体。`WorkerState` の定義、待ち時間の決定、観測値の書き出し |
+| `src/app/worker_commands.rs` | デバイスワーカーのコマンドの受け口（`handle`）。設定の受け取りと開き直しの要求、最小化中のホットキーの代役（音量・ミュート）、即時の再接続 |
 | `src/app/worker_timers.rs` | ワーカーがタイマーで回す監視の入口（`tick`）。再試行の期限、フレームの途絶 |
 | `src/app/worker_audio_timers.rs` | ワーカーがタイマーで回す監視のうち音声まわり。音声ストリームのエラー、Windows の既定デバイスの切り替え、クロックドリフト補正 |
 | `src/app/worker_connect.rs` | ワーカーが行うデバイス操作のうち映像側と列挙。映像を開く・閉じる、列挙、映像の能力の問い合わせ、既定デバイス名の確定。列挙の結果のログと「Windows 側にも見えていない」の判定の適用 |
@@ -78,11 +79,14 @@ cargo build --release
 | `src/audio/capabilities.rs` | デバイスの対応設定の取得（`query_capabilities`）と、設定画面に出す選択肢の組み立て（`selectable_*` / `ChoiceSource`） |
 | `src/audio/stream_config.rs` | 対応設定の中から実際に開く設定を選ぶ（`select_best_config` / `select_aligned_configs`）。扱えるサンプル型の一覧もここ |
 | `src/audio/capture.rs` | `AudioCapture`。パススルーの開始と停止、観測値（実際に開いた内容・アンダーラン・リサンプル）の取り出し |
-| `src/audio/stream.rs` | cpal のストリームの組み立てと入出力のコールバック（本体は `process_input` / `process_output` で、フェイクと共有する）、リングバッファの型、アンダーランの数え方 |
-| `src/audio/convert.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32）と、レート・チャンネル数が違う場合の変換（`PassthroughConverter`） |
+| `src/audio/stream.rs` | cpal の入力ストリームの組み立てと入力のコールバック（本体は `process_input` で、フェイクと共有する）、リングバッファの型、ストリームのエラーの扱い（`handle_stream_error`）、満杯で捨てたフレームの数え方 |
+| `src/audio/stream_output.rs` | cpal の出力ストリームの組み立てと出力のコールバック（本体は `process_output` で、フェイクと共有する）、`OutputSignals`、アンダーランの数え方 |
+| `src/audio/convert.rs` | レート・チャンネル数が違う場合の変換（`PassthroughConverter`） |
+| `src/audio/sample.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32）。純粋関数 |
 | `src/audio/resample.rs` | クロックドリフト補正の共有状態（`ResampleTelemetry`）と補正係数の決め方（`decide_resample_correction`） |
 | `src/audio/controls.rs` | `AudioControls`。音量・パススルー・ミュートの共有状態 |
-| `src/audio/fake.rs` | 実機なしで動くフェイクの音声デバイス `FakeAudioCapture`。正弦波の入力と書き込みを捨てる出力のスレッド |
+| `src/audio/fake.rs` | 実機なしで動くフェイクの音声デバイス `FakeAudioCapture`。デバイスの一覧と形、開く・閉じる、観測値、接続失敗・ストリームのエラーのシナリオ |
+| `src/audio/fake_stream.rs` | フェイクの音声デバイスが立てる入出力のスレッドの本体。正弦波の入力（`SineInput`）と書き込みを捨てる出力（`DiscardOutput`）、経過時間に合わせて回す `run_paced` |
 | `src/audio/tap.rs` | 録画へ音声を回す差し込み口 `AudioTap`。録画中だけ、入力コールバックが f32 へ直した値を入力の形のまま 1 秒ぶんのリングへ積む（待たない `try_lock`、空きが足りなければそのコールバックの分を捨てて数える）。累計のサンプル数・最後に積んだ時刻・入力の形・開き直しの番号・途切れた位置を Atomic で持つ |
 | `src/recording/mod.rs` | 録画の入口。`RecordingError`（文言は `Display` から `crate::i18n`）、`EncoderInfo`、経過時間の書式（`format_elapsed`）、外から使う経路（`crate::recording::...`）の `pub use` |
 | `src/recording/recorder.rs` | 録画スレッドの窓口 `Recorder`（UI スレッドが 1 つ持つ）。録画かリプレイバッファが ON のときにスレッドを起こし、どちらも無くなったら止めて join する（スレッドは自分から抜けない）。`RecordingCommand` / `RecordingEvent` / `RecordingSummary` / `RecordingTelemetry`（録画中の値は録画を始めたときからの差） |
@@ -122,7 +126,7 @@ cargo build --release
 | `src/settings/preset.rs` | `[[presets]]`。適用と一致の判定（`matches_preset` / `resolved_active_preset`）、名前の検証、読み込んだ一覧の整え方（`sanitize_presets`）、`AppSettings` のプリセット操作 |
 | `src/settings/store.rs` | 設定ファイルの読み書き（`AppSettings::load` / `save`。保存は一時ファイルへ書いて rename で置き換える `write_atomically`）、読めなかったファイル・空のファイルの退避、`LoadOutcome` / `AutoSavePolicy`、書き出し / 読み込み（`export_to` / `import_from`）。置き場所は `config_path` を呼ぶだけ |
 | `src/settings/testing.rs` | テストが複数のファイルから使う設定ファイルの例（`FULL_CONFIG` / `LEGACY_CONFIG`）と `without_key`、保存先の候補の例（`#[cfg(test)]`） |
-| `src/config_path.rs` | 設定ファイルとログの置き場所（`ConfigLocation`）。既定は confy の置き場所で、環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で差し替える。解釈（`parse_config_dir` / `resolve`）は純粋関数 |
+| `src/config_path.rs` | 設定ファイルとログの置き場所（`ConfigLocation`）。既定は `%AppData%` の下（1.2.x まで使っていた confy と同じ場所）で、環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で差し替える。解釈（`parse_config_dir` / `resolve`）は純粋関数 |
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |
 | `src/ui/mod.rs` | 設定ダイアログの入口 `show_settings_dialog` と、タブをまたいで使うイベント型・注意書きのヘルパー（`warning_label` / `notice_label` / `status_badge`）。外から使う経路（`crate::ui::...`）の `pub use` もここ |
 | `src/ui/state.rs` | `SettingsDialogState`。ドラフトの保持、操作の受け止め、`SettingsDialogView` の切り出し |
@@ -152,18 +156,19 @@ cargo build --release
 | `src/i18n/mod.rs` | 画面に出す文字列の入口。現在の言語（`Language` と `static LANGUAGE`）を持ち、`set_language` で切り替える。外から使う経路（`crate::i18n::...`）の `pub use` もここ |
 | `src/i18n/text.rs` | 引数を取らない文字列の表（`texts!` が `Text` のキーと言語ごとの `match` を作る） |
 | `src/i18n/msg.rs` | 引数を取る文字列。1 関数が 1 件で、言語ごとに文全体を組み立てる |
+| `src/i18n/device_msg.rs` | 引数を取る文字列のうち、デバイス（映像・音声）の接続と状態で使うもの（映像・音声のエラー、「Windows 側にも見えていない」、接続状態の観測値、「デバイス設定」タブ、「接続状態」タブ）。書き方は `msg.rs` と同じ |
 | `src/i18n/update_msg.rs` | 引数を取る文字列のうち、更新の確認と適用で使うもの。書き方は `msg.rs` と同じ |
 | `src/i18n/recording_msg.rs` | 引数を取る文字列のうち、録画で使うもの。書き方は `msg.rs` と同じ |
 
 `src/app/` の子モジュールは**基本どれも `impl CaptureCardViewer` を足す形**で、状態そのものは `app/mod.rs` の構造体 1 つに集めてある。**子モジュール側にフィールドや `static` を持たせないこと。** 他の子モジュールから呼ぶメソッドにだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
-**例外はデバイスワーカーの 7 つ**（`worker.rs` / `worker_loop.rs` / `worker_timers.rs` / `worker_audio_timers.rs` / `worker_connect.rs` / `worker_audio_connect.rs` / `backend/`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_timers.rs` / `worker_audio_timers.rs` / `worker_connect.rs` / `worker_audio_connect.rs` がそこへ `impl` を足す。`backend/` はアプリの状態（`CaptureCardViewer` / `WorkerState` に属するもの）を持たず、デバイスの入口の trait とその実装だけを持つ。テスト用のモックだけは自分の中に観測用の値を抱える。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
+**例外はデバイスワーカーの 8 つ**（`worker.rs` / `worker_loop.rs` / `worker_commands.rs` / `worker_timers.rs` / `worker_audio_timers.rs` / `worker_connect.rs` / `worker_audio_connect.rs` / `backend/`）。こちらは UI スレッドとは別のスレッドで動くので、状態を `CaptureCardViewer` に置けない。`worker_loop.rs` の `WorkerState` へ同じやり方で集めてあり、`worker_commands.rs` / `worker_timers.rs` / `worker_audio_timers.rs` / `worker_connect.rs` / `worker_audio_connect.rs` がそこへ `impl` を足す（コマンドの受け口の `worker_commands.rs` も同じ）。`backend/` はアプリの状態（`CaptureCardViewer` / `WorkerState` に属するもの）を持たず、デバイスの入口の trait とその実装だけを持つ。テスト用のモックだけは自分の中に観測用の値を抱える。1 ファイル 800 行以内を目安にし、超えそうなら分け方を見直す。
 
 `src/video/` の子モジュールは**役割で分けてあるだけで、状態はそれぞれのファイルが定義する型が持つ。** 他のファイルから呼ぶ項目にだけ `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。**外から使う経路（`crate::video::...`）は `video/mod.rs` の `pub use` に集める。** ただし**呼び出し側のテストからしか参照されない項目は再輸出しない。** テストを含まないビルドで誰も使わない `pub use` が残り、`unused_imports` の警告になるため。そういう項目（`FormatCapability` / `IntervalStats`）は置いてある子モジュールを `pub(crate) mod` にして、`crate::video::capabilities::FormatCapability` のように子モジュールの経路で参照する。`src/ui/` と同じ考え方。
 
 `src/ui/` の子モジュールは**どれも状態を持たず、書き換えるのもドラフトだけ。** 起きたことは `SettingsEvent` / `HotkeyDialogEvent` の列で返す。ダイアログの状態は `state.rs` の `SettingsDialogState` 1 つに集めてある。**外から使う経路（`crate::ui::...`）は `ui/mod.rs` の `pub use` に集める。** `ui` の中だけで使う項目は再輸出せず、子モジュールの経路で参照する（`mod ui;` 自体が私有なので、誰も使わない再輸出は `unused_imports` の警告になる）。
 
-`src/audio/` の子モジュールで**状態を持つのは `capture.rs` の `AudioCapture`、`fake.rs` の `FakeAudioCapture` と、スレッドをまたいで共有する `AudioControls` / `ResampleTelemetry` / `AudioTap` だけ。** 残りは純粋関数か、cpal のストリームを組み立てて返すだけにする。**外から使う経路（`crate::audio::...`）は `audio/mod.rs` の `pub use` に集める**（`ui/mod.rs` と同じ理由で、誰も使わない再輸出は警告になる）。子モジュール同士で使うものには `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
+`src/audio/` の子モジュールで**状態を持つのは `capture.rs` の `AudioCapture`、`fake.rs` の `FakeAudioCapture`（とその入出力のスレッドだけが持つ `fake_stream.rs` の `SineInput` / `DiscardOutput`）と、スレッドをまたいで共有する `AudioControls` / `ResampleTelemetry` / `AudioTap` だけ。** 残りは純粋関数か、cpal のストリームを組み立てて返すだけにする。**外から使う経路（`crate::audio::...`）は `audio/mod.rs` の `pub use` に集める**（`ui/mod.rs` と同じ理由で、誰も使わない再輸出は警告になる）。子モジュール同士で使うものには `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
 `src/recording/` の子モジュールで**状態を持つのは `recorder.rs` の `Recorder`（UI スレッドの窓口）と、録画スレッドの中だけにあるもの（`recorder_loop.rs` の `Worker`、1 回の録画 `Session` / `ReplayRecording`、リプレイバッファ `ReplayPipeline` とそのリング `EncodedRing`、音声トラック `AudioTrack`、`SinkWriter` / `PassthroughWriter` / `EncoderMft`）だけ。** 変換・PTS・ファイル名・空き容量の判定、リングのどこから書くか・どこで捨てるかは純粋関数にする。**録画スレッドから `error!` を出さず、失敗は `RecordingEvent` で UI スレッドへ返す**（`docs/design/threads.md`）。外から使う経路は `recording/mod.rs` の `pub use` に集める。
 
