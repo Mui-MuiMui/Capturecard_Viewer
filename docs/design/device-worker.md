@@ -88,7 +88,7 @@ flowchart LR
 |---|---|---|
 | `VideoCapture`（`src/video/capture.rs`） | `camera`（`CallbackCamera`）、`active` | `frames`、`color_conversion`、`repaint_waker` |
 | `DirectShowCapture`（`src/video/directshow/mod.rs`） | `graph`（`CaptureGraph`。フィルターグラフと映像・音声のレンダラー）、`active`、`AudioPinFeed` に配るグラフの番号 | `frames`、`color_conversion`、`repaint_waker`、`pin_feed`、COM の初期化 |
-| `AudioCapture`（`src/audio/capture.rs`） | `input_stream`（入力が音声ピンなら無し）/ `output_stream`、`active`、`resample_telemetry`、`counters`（`StreamCounters`。エラーの旗・アンダーラン・捨てたフレーム・取りこぼしの数え手）、音声ピンの差し込み先（開くたびに `AudioPinFeed` へ差し込み、閉じるたびに抜く） | `host`、`controls`、`tap`、`pin_feed` |
+| `AudioCapture`（`src/audio/capture.rs`） | `input_stream`（入力が音声ピンなら無し）/ `output_stream`、`active`、`resample_telemetry`、`counters`（`StreamCounters`。エラーの旗 `error`・アンダーラン `underruns`・捨てたフレーム `dropped_frames`（#350）・取りこぼし `xruns`（#377）の数え手）、音声ピンの差し込み先（開くたびに `AudioPinFeed` へ差し込み、閉じるたびに抜く） | `host`、`controls`、`tap`、`pin_feed` |
 
 ハンドル型にするとは、左の列を別の型へ出して `start_*` の戻り値にし、閉じるのをその値の drop に任せる形のこと。#102 でこの形を採らなかった理由は「`src/video.rs`（当時 2,451 行）の中身を動かさないと切り出せない」だった。#197 で `src/video/` / `src/audio/` に分けたあとは、左の列はどちらも `capture.rs` 1 ファイルに収まっている。切り出しは `capture.rs` と `backend/` とワーカーの中で済むので、この理由はもう当たらない。
 
@@ -178,9 +178,9 @@ WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の�
 - ワーカーは**音声ピンが使えないとき開かずに待つ**（`hold_audio_for_pin`。#304 の `hold_audio_without_input` と同じ形）。**映像を開き直したら音声も開き直す。** 要求を立てるのは `tick` の監視（`worker_audio_timers::monitor_audio_pin`。判定は `monitor_audio_pin.rs` の純粋関数）で、映像の音声ピンの番号と音声が差し込んでいる番号を比べる。理由は `docs/design/reconnect.md` の「映像の開き直しに合わせて音声も開き直す（音声ピン）」
 - trait に「音声ピンを問い合わせる」メソッドは足さない。観測値の 1 項目（`ActiveVideo::audio_pin` / `ActiveAudio::input_route`）にしてあり、モックはそれを返すだけで「待つ / 開く / 映像の開き直しで開き直す」を CI に載せている（`worker_audio_connect.rs` のテスト）。フェイクの音声ピンは第 2 段
 
-#### DirectShow では確かめていないもの
+#### DirectShow で確かめたもの・確かめていないもの
 
-手元で確かめたのは OBS の仮想カメラ（YUY2 / NV12 / I420 を出す。#143 の時点で受け取れたのは YUY2 だけ）だけ。**NV12 / I420 / YV12 の受け口（#228）は実機では未確認（OBS の仮想カメラは YV12 を出さない）。DirectShow 専用の実機のキャプチャーボード、MJPEG / RGB24 を出すデバイス、途中で形式が変わるデバイス、変換フィルターが間に入る組み合わせは試していない。** 抜き差しの検出は、グラフのイベント（`EC_DEVICE_LOST` など、#229）とフレームの途絶（3 秒）の 2 本立て（`docs/design/reconnect.md` の「切断の検出と再接続」）。イベントがどの機器で実際に届くかは確かめていない（OBS の仮想カメラの停止で確かめる手順は `docs/MANUAL-TEST.md` の「DirectShow のデバイス（#143）」）。
+確かめたのは OBS の仮想カメラ（YUY2 / NV12 / I420 を出す。#143 の時点で受け取れたのは YUY2 だけ）と、実機の AVerMedia GC551（2026-10-01）。GC551 は Media Foundation では開けず、開き方が自動なら DirectShow へ倒して 1280x720 / 1920x1080 の YUY2 60fps で開く（#387、`docs/design/reconnect.md`）。入力と違う解像度では警告画面を送ってくるので、開く解像度を入力に合わせる（#391、`docs/design/video-pipeline.md`）。同じフィルターの音声ピンから 48kHz 2ch 16bit の PCM を受け取り、鳴らすことと録画に入ることも確かめた（#393、`docs/design/directshow-audio.md`）。**NV12 / I420 / YV12 の受け口（#228）は実機では未確認（OBS の仮想カメラは YV12 を出さず、GC551 は YUY2 で開く）。MJPEG / RGB24 を出すデバイス、途中で形式が変わるデバイス、変換フィルターが間に入る組み合わせは試していない。** 抜き差しの検出は、グラフのイベント（`EC_DEVICE_LOST` など、#229）とフレームの途絶（3 秒）の 2 本立て（`docs/design/reconnect.md` の「切断の検出と再接続」）。イベントがどの機器で実際に届くかは確かめていない（OBS の仮想カメラの停止で確かめる手順は `docs/MANUAL-TEST.md` の「DirectShow のデバイス（#143）」）。
 
 ### フェイクデバイス（#142）
 

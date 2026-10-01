@@ -261,13 +261,13 @@ flowchart LR
     in["オーディオ入力<br/>(WASAPI)"]
     incb["入力コールバック"]
     fmt["サンプル形式の正規化<br/>F32 / I16 / U16 / I32"]
-    conv["レート・チャンネル変換<br/>揃えられるなら揃える"]
-    ring["リングバッファ<br/>長さは設定可能"]
-    gate["パススルー判定<br/>音量適用"]
+    ring["リングバッファ<br/>入力の形のまま積む<br/>長さは設定可能"]
     outcb["出力コールバック"]
+    conv["レート・チャンネル変換<br/>PassthroughConverter<br/>揃えられるなら揃える"]
+    gate["パススルー判定<br/>ミュート・音量適用"]
     out["オーディオ出力<br/>(WASAPI)"]
 
-    in --> incb --> fmt --> conv --> ring --> gate --> outcb --> out
+    in --> incb --> fmt --> ring --> outcb --> conv --> gate --> out
     ring -.->|バッファ水位| drift["クロックドリフト補正"]
     drift -.-> conv
 ```
