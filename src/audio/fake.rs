@@ -9,7 +9,7 @@
 //! 形の変換（`PassthroughConverter`）・クロックドリフト補正の水位
 //! （`ResampleTelemetry`）・音量とミュート（`AudioControls`）・アンダーランの
 //! 数え方は、cpal のコールバックと同じ関数（`stream::process_input` /
-//! `process_output`）を通る。cpal のコールバックスレッドの代わりに、
+//! `stream_output::process_output`）を通る。cpal のコールバックスレッドの代わりに、
 //! 10ms ごとに起きるスレッドを入力と出力に 1 本ずつ立てる。
 //!
 //! | デバイス | 形 |
@@ -34,8 +34,9 @@ use super::capture::{ring_buffer_samples, target_water_level, PassthroughRequest
 use super::controls::AudioControls;
 use super::convert::PassthroughConverter;
 use super::resample::{ResampleStatus, ResampleTelemetry};
-use super::stream::{process_input, process_output, AudioConsumer, AudioProducer};
+use super::stream::{process_input, AudioConsumer, AudioProducer};
 use super::stream_config::{choose_passthrough_configs, resolve_ranges};
+use super::stream_output::process_output;
 use super::tap::AudioTap;
 use super::{ActiveAudio, AudioDirection, AudioError};
 

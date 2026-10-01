@@ -78,7 +78,8 @@ cargo build --release
 | `src/audio/capabilities.rs` | デバイスの対応設定の取得（`query_capabilities`）と、設定画面に出す選択肢の組み立て（`selectable_*` / `ChoiceSource`） |
 | `src/audio/stream_config.rs` | 対応設定の中から実際に開く設定を選ぶ（`select_best_config` / `select_aligned_configs`）。扱えるサンプル型の一覧もここ |
 | `src/audio/capture.rs` | `AudioCapture`。パススルーの開始と停止、観測値（実際に開いた内容・アンダーラン・リサンプル）の取り出し |
-| `src/audio/stream.rs` | cpal のストリームの組み立てと入出力のコールバック（本体は `process_input` / `process_output` で、フェイクと共有する）、リングバッファの型、アンダーランの数え方 |
+| `src/audio/stream.rs` | cpal の入力ストリームの組み立てと入力のコールバック（本体は `process_input` で、フェイクと共有する）、リングバッファの型、ストリームのエラーの扱い（`handle_stream_error`）、満杯で捨てたフレームの数え方 |
+| `src/audio/stream_output.rs` | cpal の出力ストリームの組み立てと出力のコールバック（本体は `process_output` で、フェイクと共有する）、`OutputSignals`、アンダーランの数え方 |
 | `src/audio/convert.rs` | レート・チャンネル数が違う場合の変換（`PassthroughConverter`） |
 | `src/audio/sample.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32）。純粋関数 |
 | `src/audio/resample.rs` | クロックドリフト補正の共有状態（`ResampleTelemetry`）と補正係数の決め方（`decide_resample_correction`） |

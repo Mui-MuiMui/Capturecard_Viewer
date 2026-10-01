@@ -9,7 +9,8 @@
 //! | `capabilities.rs` | デバイスの対応設定の取得と、設定画面に出す選択肢の組み立て |
 //! | `stream_config.rs` | 対応設定の中から、実際に開く設定を選ぶ |
 //! | `capture.rs` | `AudioCapture`。パススルーの開始と停止、観測値の取り出し |
-//! | `stream.rs` | cpal のストリームの組み立てと、入出力のコールバック |
+//! | `stream.rs` | cpal の入力ストリームの組み立てと入力のコールバック、リングバッファの型、ストリームのエラーの扱い |
+//! | `stream_output.rs` | cpal の出力ストリームの組み立てと出力のコールバック、アンダーランの数え方 |
 //! | `convert.rs` | 入出力の形が違う場合の変換（線形補間とミックス） |
 //! | `sample.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32） |
 //! | `resample.rs` | クロックドリフト補正の共有状態と、補正係数の決め方 |
@@ -26,6 +27,7 @@ mod resample;
 mod sample;
 mod stream;
 mod stream_config;
+mod stream_output;
 mod tap;
 
 // `audio` の外から使うものだけを並べる。**使われていない再輸出は
@@ -321,7 +323,7 @@ mod tests {
     // ここの `pub(super)` な関数は、子モジュールのテストからも使う共通の
     // 土台（`use crate::audio::tests::discrete_range;`）。対応設定を組み立てる
     // 補助は `capabilities` と `stream_config` の両方のテストが要るので、
-    // 同じものを両方へ写さずここへ置いてある
+    // 同じものを両方へ写さずここへ置いてある（リングバッファの `ring` も同じ理由）
 
     /// テスト用の対応設定。`supported_input_configs()` が返す形を模す。
     pub(super) fn config_range(
@@ -346,5 +348,21 @@ mod tests {
         format: SampleFormat,
     ) -> SupportedStreamConfigRange {
         config_range(channels, rate, rate, format)
+    }
+
+    /// `process_input` / `process_output` に渡すリングバッファ一式。入力側
+    /// （`stream`）と出力側（`stream_output`）の両方のテストが使う
+    pub(super) fn ring(
+        capacity: usize,
+    ) -> (
+        std::sync::Mutex<stream::AudioProducer>,
+        std::sync::Mutex<stream::AudioConsumer>,
+    ) {
+        use ringbuf::traits::Split;
+        let (producer, consumer) = ringbuf::HeapRb::<f32>::new(capacity).split();
+        (
+            std::sync::Mutex::new(producer),
+            std::sync::Mutex::new(consumer),
+        )
     }
 }
