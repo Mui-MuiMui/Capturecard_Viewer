@@ -123,18 +123,13 @@ impl CaptureCardViewer {
             fake_devices: self.device.fake_devices(),
             video,
             audio,
+            screenshot_sound_error: self.status_error(ErrorSource::ScreenshotSound),
         }
     }
 
     /// 「接続状態」タブに出す直近の失敗。`(整形済みの文言, 発生時刻)`。
-    ///
-    /// トーストやプレースホルダーと違い、ここでは切り詰めない。
-    /// 原因を調べるための場所なので、全文が読めるほうがよい。
     fn status_error(&self, source: ErrorSource) -> Option<(String, String)> {
         let recorded = self.errors.latest(source)?;
-        Some((
-            status::format_message(source, &recorded.message),
-            recorded.time_text(),
-        ))
+        Some(status::recorded_error_line(source, recorded))
     }
 }

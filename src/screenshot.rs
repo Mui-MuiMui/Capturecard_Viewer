@@ -6,10 +6,11 @@ use std::path::PathBuf;
 
 /// スクリーンショットまわりの処理が失敗した理由。
 ///
-/// クリップボードへのコピーと効果音の読み込みを 1 つの enum にまとめてある。
-/// どちらも `ErrorSource::Screenshot` として同じ経路で表示され、呼び出し側は
-/// 出力先の種類で処理を分けないため（`app::screenshot` の
-/// `summarize_screenshot_delivery`）。
+/// クリップボードへのコピーと効果音の読み込み・再生を 1 つの enum にまとめてある。
+/// 型は共通だが、画面に出すときの発生源は分けてある。画像の出力（フレームと
+/// クリップボード）は `ErrorSource::Screenshot`、効果音（`Sound*`）は
+/// `ErrorSource::ScreenshotSound`（Issue #356）。画像を保存できているのに
+/// 「スクリーンショットを出力できません」と出さないため。
 ///
 /// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
 /// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事。
