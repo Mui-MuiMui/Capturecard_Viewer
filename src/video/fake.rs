@@ -31,11 +31,27 @@ use super::frame_buffer::VideoFrames;
 use super::frame_sink::FrameSink;
 use super::test_pattern::{burn_frame_number, description_for, pattern_for, render_pattern};
 use super::VideoError;
-use crate::audio::AudioPinState;
+use crate::audio::{
+    AudioPinFeed, AudioPinState, FakePinSource, PinConnection, PinFormat, PinSampleType,
+};
 use crate::repaint::RepaintWaker;
 
 /// フェイクの映像デバイスが名乗る名前の前半。後ろに 1 から始まる番号が付く
 const DEVICE_NAME_PREFIX: &str = "Fake Camera";
+
+/// フェイクの音声ピンの形式。実機（AVerMedia GC551）と同じ 48kHz 2ch 16bit
+const PIN_FORMAT: PinFormat = PinFormat {
+    sample_rate: 48_000,
+    channels: 2,
+    sample_type: PinSampleType::I16,
+};
+
+/// フェイクの音声ピンの 1 塊（10ms ぶん）。実機の提案どおりの大きさ
+const PIN_CHUNK_BYTES: u32 = 1920;
+
+/// フェイクの音声ピンが流す正弦波の周波数。フェイクの WASAPI の入力（440Hz の倍数）と
+/// 聞き分けられるようにずらしてある
+const PIN_FREQUENCY_HZ: f64 = 660.0;
 
 /// 開ける映像モード。解像度の大きい順、同じ解像度なら fps の大きい順
 /// （実機の `get_device_capabilities` と同じ並び）。
@@ -94,6 +110,10 @@ pub struct FakeVideoCapture {
     disconnected_at: Option<Instant>,
     stream: Option<FakeVideoStream>,
     active: Option<ActiveVideo>,
+    /// シナリオ audio-pin（#394）: 音声ピンを持つ。持つなら差し込み口を共有する
+    audio_pin: Option<AudioPinFeed>,
+    /// 音声ピンを繋いで開いている間だけ動く、正弦波を流すスレッド
+    pin_source: Option<FakePinSource>,
 }
 
 impl FakeVideoCapture {
@@ -114,7 +134,17 @@ impl FakeVideoCapture {
             disconnected_at: None,
             stream: None,
             active: None,
+            audio_pin: None,
+            pin_source: None,
         }
+    }
+
+    /// シナリオ audio-pin を足す（#394）。DirectShow で開いた映像デバイスのように
+    /// 音声ピンを持ち、繋ぐ指定で開いたら正弦波を `feed` へ流す。`feed` は音声の
+    /// フェイク（`FakeAudioCapture::with_pin_feed`）と同じものを渡す
+    pub fn with_audio_pin(mut self, feed: AudioPinFeed) -> Self {
+        self.audio_pin = Some(feed);
+        self
     }
 
     /// シナリオ reopen-fail を足す。途絶（disconnect）のあと `reopen_fail` の間は
@@ -141,12 +171,28 @@ impl FakeVideoCapture {
         Ok(vec![FormatCapability::new("YUY2", MODES.to_vec())])
     }
 
+    /// 音声ピンを繋がずに開く。録画のテストが使う入口で、ワーカーは
+    /// `start_capture_with_pin` を通す
+    #[cfg(test)]
     pub fn start_capture(
         &mut self,
         device_name: Option<&str>,
         resolution: Option<(u32, u32)>,
         format: Option<&str>,
         fps: Option<u32>,
+    ) -> Result<(), VideoError> {
+        self.start_capture_with_pin(device_name, resolution, format, fps, false)
+    }
+
+    /// `start_capture` に、音声ピンを繋ぐかを足したもの（#394）。音声ピンを
+    /// 持たない（シナリオ audio-pin が無い）ときは `connect_audio_pin` を見ない
+    pub fn start_capture_with_pin(
+        &mut self,
+        device_name: Option<&str>,
+        resolution: Option<(u32, u32)>,
+        format: Option<&str>,
+        fps: Option<u32>,
+        connect_audio_pin: bool,
     ) -> Result<(), VideoError> {
         self.stop_capture();
 
@@ -223,6 +269,7 @@ impl FakeVideoCapture {
             handle,
             opened_at: Instant::now(),
         });
+        let audio_pin = self.open_audio_pin(&name, connect_audio_pin);
         self.active = Some(ActiveVideo {
             device_name: name,
             api: CaptureApi::Fake,
@@ -230,14 +277,55 @@ impl FakeVideoCapture {
             // 実機は nokhwa の列挙名（`YUYV`）が入るので揃える
             format: Some("YUYV".to_string()),
             requested_fps: mode.fps,
-            // 音声ピンを流すフェイクは第 2 段（`docs/design/directshow-audio.md` の (8)）
-            audio_pin: AudioPinState::NotApplicable,
+            audio_pin,
         });
         Ok(())
     }
 
+    /// 音声ピンを用意する（シナリオ audio-pin、#394）。実機の DirectShow と同じく、
+    /// 開くたびにグラフの番号を配り、繋ぐ指定のときだけ繋いで正弦波を流す。
+    /// 流すスレッドを起こせなければ、実機で繋げなかったときと同じく映像は止めない
+    fn open_audio_pin(&mut self, device: &str, connect: bool) -> AudioPinState {
+        let Some(feed) = self.audio_pin.clone() else {
+            return AudioPinState::NotApplicable;
+        };
+        let graph = feed.begin_graph();
+        if !connect {
+            return AudioPinState::Available;
+        }
+        match FakePinSource::spawn(feed.clone(), graph, PIN_FORMAT, PIN_FREQUENCY_HZ) {
+            Ok(source) => {
+                let connection = PinConnection {
+                    graph,
+                    device: device.to_string(),
+                    format: PIN_FORMAT,
+                    chunk_bytes: Some(PIN_CHUNK_BYTES),
+                };
+                feed.set_connected(connection.clone());
+                self.pin_source = Some(source);
+                info!(
+                    "フェイクの音声ピンを繋いだ（グラフ {}、{}）",
+                    graph,
+                    PIN_FORMAT.summary()
+                );
+                AudioPinState::Connected(connection)
+            }
+            Err(e) => {
+                warn!("フェイクの音声ピンを流すスレッドを起こせない: {}", e);
+                AudioPinState::Failed(crate::audio::PinFailure::Connect(e.to_string()))
+            }
+        }
+    }
+
     pub fn stop_capture(&mut self) {
         self.active = None;
+        // 映像のグラフを止めると音声ピンも止まる（実機と同じ順）
+        if let Some(source) = self.pin_source.take() {
+            source.stop();
+        }
+        if let Some(feed) = &self.audio_pin {
+            feed.clear();
+        }
         if let Some(stream) = self.stream.take() {
             if let Some(ago) =
                 disconnected_ago(stream.opened_at.elapsed(), self.options.disconnect_after)
@@ -627,5 +715,41 @@ mod tests {
             "フレームが止まっていない: {:?}",
             state.since_last_frame
         );
+    }
+
+    #[test]
+    fn fake_video_audio_pin_connects_only_when_asked_and_streams_chunks() {
+        // シナリオ audio-pin（#394）。繋がずに開けば「あるが繋いでいない」、繋ぐ指定なら
+        // 番号を配って繋ぎ、10ms の塊を差し込み口へ流す。閉じれば繋いだ記録が消える
+        let feed = AudioPinFeed::new();
+        let (capture, _frames) = capture(TWO_DEVICES);
+        let mut capture = capture.with_audio_pin(feed.clone());
+        capture
+            .start_capture_with_pin(None, None, None, None, false)
+            .expect("開ける");
+        let pin = capture.active().map(|active| active.audio_pin);
+        assert_eq!(pin, Some(AudioPinState::Available));
+        assert_eq!(feed.connection(), None);
+
+        capture
+            .start_capture_with_pin(None, None, None, None, true)
+            .expect("開ける");
+        let Some(AudioPinState::Connected(connection)) =
+            capture.active().map(|active| active.audio_pin)
+        else {
+            panic!("繋いでいない");
+        };
+        assert_eq!(connection.graph, 2, "開くたびに番号を配る");
+        assert_eq!(connection.format, PIN_FORMAT);
+        assert_eq!(feed.connection(), Some(connection));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while feed.observed_chunk_bytes().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(feed.observed_chunk_bytes().is_some(), "塊が届いていない");
+
+        capture.stop_capture();
+        assert_eq!(feed.connection(), None);
+        assert!(capture.pin_source.is_none());
     }
 }

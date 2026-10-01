@@ -5,16 +5,18 @@
 //! フレームを処理する。入力は正弦波を吐いて `stream::process_input` へ、出力は
 //! `stream_output::process_output` で取り出して捨てる。どちらも本物と同じ関数を通る。
 
-use log::debug;
+use log::{debug, warn};
 use std::f64::consts::TAU;
 use std::sync::atomic::AtomicU32;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::controls::AudioControls;
 use super::convert::PassthroughConverter;
+use super::pin_feed::{AudioPinFeed, PinFormat};
+use super::sample::f32_to_i16;
 use super::stream::{process_input, AudioConsumer, AudioProducer};
 use super::stream_output::process_output;
 use super::tap::AudioTap;
@@ -125,6 +127,73 @@ impl SineInput {
         });
         debug!("フェイクの音声入力のスレッドを終えた");
     }
+}
+
+/// フェイクの映像デバイスの音声ピン（#394）。正弦波を DirectShow の音声ピンと同じ
+/// 形（16bit 整数の PCM のバイト列）にして `AudioPinFeed` へ流すスレッド。
+///
+/// 実機ではキャプチャーフィルターのストリーミングスレッドが `Receive` から
+/// `AudioPinFeed::push` を呼ぶ。その代わりに `TICK`（10ms）ごとに起きて同じ関数を呼ぶ。
+/// 持ち主は `video::FakeVideoCapture`（映像を開いている間だけ動く）。
+pub struct FakePinSource {
+    stop: Sender<()>,
+    handle: JoinHandle<()>,
+}
+
+impl FakePinSource {
+    /// 流し始める。`graph` は映像が配ったグラフの番号で、`format` の
+    /// サンプルの型は 16bit 整数だけを受け付ける（フェイクの形は GC551 と同じ）
+    pub fn spawn(
+        feed: AudioPinFeed,
+        graph: u64,
+        format: PinFormat,
+        frequency_hz: f64,
+    ) -> Result<Self, AudioError> {
+        let (stop, stop_rx) = mpsc::channel();
+        let handle = spawn_named("fake-audio-pin", AudioDirection::Input, move || {
+            run_pin_source(&stop_rx, &feed, graph, format, frequency_hz)
+        })?;
+        Ok(Self { stop, handle })
+    }
+
+    /// 止めて、スレッドが終わるまで待つ
+    pub fn stop(self) {
+        drop(self.stop);
+        if self.handle.join().is_err() {
+            warn!("フェイクの音声ピンのスレッドが異常終了していた");
+        }
+    }
+}
+
+fn run_pin_source(
+    stop: &Receiver<()>,
+    feed: &AudioPinFeed,
+    graph: u64,
+    format: PinFormat,
+    frequency_hz: f64,
+) {
+    let channels = usize::from(format.channels);
+    let capacity =
+        (f64::from(format.sample_rate) * MAX_CHUNK.as_secs_f64()) as usize * channels.max(1);
+    let mut samples = vec![0.0f32; capacity];
+    let mut bytes = vec![0u8; capacity * 2];
+    let mut phase = 0.0;
+    run_paced(stop, format.sample_rate, |frames| {
+        let len = (frames * channels).min(samples.len());
+        let chunk = &mut samples[..len];
+        fill_sine(
+            chunk,
+            channels,
+            format.sample_rate,
+            frequency_hz,
+            &mut phase,
+        );
+        for (sample, out) in chunk.iter().zip(bytes.as_chunks_mut::<2>().0) {
+            *out = f32_to_i16(*sample).to_le_bytes();
+        }
+        feed.push(graph, format, &bytes[..len * 2], false);
+    });
+    debug!("フェイクの音声ピンのスレッドを終えた");
 }
 
 /// 書き込みを捨てる出力。cpal の出力コールバックの代わり。

@@ -35,6 +35,7 @@ use super::capture::{
 use super::controls::AudioControls;
 use super::convert::PassthroughConverter;
 use super::fake_stream::{spawn_named, DiscardOutput, SineInput};
+use super::pin_feed::{AudioPinFeed, PinSink};
 use super::resample::{ResampleStatus, ResampleTelemetry};
 use super::stream_config::{choose_passthrough_configs, resolve_ranges};
 use super::tap::AudioTap;
@@ -101,9 +102,9 @@ impl FakeDevice {
 
 /// 開いているストリーム。入出力のスレッドと、それぞれを止める送り口。
 struct FakeAudioStream {
-    stop_input: Sender<()>,
+    /// 入力のスレッド。音声ピンの入力（#394）では立てない（映像のフェイクが流す）
+    input: Option<(Sender<()>, JoinHandle<()>)>,
     stop_output: Sender<()>,
-    input: JoinHandle<()>,
     output: JoinHandle<()>,
 }
 
@@ -137,6 +138,9 @@ pub struct FakeAudioCapture {
     dropped_frames: Arc<AtomicU32>,
     /// cpal が知らせた入力の取りこぼし（`Xrun`）の回数（Issue #377）。開き直すたびに新しい `Arc` へ差し替える
     xruns: Arc<AtomicU32>,
+    /// シナリオ audio-pin（#394）: 映像のフェイクと共有する音声ピンの差し込み口。
+    /// 音声ピンの入力で開くときは、本物と同じくここへリングを差し込む
+    pin_feed: Option<AudioPinFeed>,
 }
 
 impl FakeAudioCapture {
@@ -156,7 +160,16 @@ impl FakeAudioCapture {
             underruns: Arc::new(AtomicU32::new(0)),
             dropped_frames: Arc::new(AtomicU32::new(0)),
             xruns: Arc::new(AtomicU32::new(0)),
+            pin_feed: None,
         }
+    }
+
+    /// シナリオ audio-pin を足す（#394）。`feed` は映像のフェイク
+    /// （`FakeVideoCapture::with_audio_pin`）と同じものを渡す。`FakeAudioOptions` に
+    /// 足さないのは、録画のテストが構造体リテラルで組んでいるため
+    pub fn with_pin_feed(mut self, feed: AudioPinFeed) -> Self {
+        self.pin_feed = Some(feed);
+        self
     }
 
     /// シナリオの期限の判定に使う時計を差し替える。テスト専用
@@ -201,14 +214,35 @@ impl FakeAudioCapture {
     ) -> Result<(), AudioError> {
         self.stop_capture();
 
-        // フェイクの映像は音声ピンを持たない（`AudioPinState::NotApplicable`）ので、
-        // ワーカーは音声ピンの入力で開きに来ない。来たら開けないと返す
-        let input_name = match request.input {
-            PassthroughInput::Device(name) => name,
-            PassthroughInput::VideoPin { .. } => return Err(AudioError::VideoPinUnavailable),
+        // 音声ピンの入力（#394）は、映像のフェイクが繋いだ音声ピンの形を入力の形にする。
+        // 本物と同じく、番号の合う音声ピンが無ければ開かない
+        let (input, pin) = match request.input {
+            PassthroughInput::Device(name) => (self.find(AudioDirection::Input, name)?, None),
+            PassthroughInput::VideoPin { graph } => {
+                let connection = self
+                    .pin_feed
+                    .as_ref()
+                    .and_then(AudioPinFeed::connection)
+                    .filter(|connection| connection.graph == graph)
+                    .ok_or(AudioError::VideoPinUnavailable)?;
+                let device = FakeDevice {
+                    name: connection.device.clone(),
+                    sample_rate: connection.format.sample_rate,
+                    channels: connection.format.channels,
+                    frequency_hz: 0.0,
+                };
+                (device, Some(connection))
+            }
         };
-        let input = self.find(AudioDirection::Input, input_name)?;
         let output = self.find(AudioDirection::Output, request.output_device_name)?;
+        // 音声ピンなら、設定の値ではなく音声ピンの形式を希望値にして出力を揃える（本物と同じ）
+        let (desired_rate, desired_channels) = match &pin {
+            Some(connection) => (
+                Some(connection.format.sample_rate),
+                Some(connection.format.channels),
+            ),
+            None => (request.sample_rate, request.channels),
+        };
 
         if self.remaining_failures > 0 {
             self.remaining_failures -= 1;
@@ -237,8 +271,8 @@ impl FakeAudioCapture {
             &output_ranges,
             input.default_config(),
             output.default_config(),
-            request.sample_rate,
-            request.channels,
+            desired_rate,
+            desired_channels,
         );
         let input_rate = input_config.sample_rate();
         let input_channels = input_config.channels();
@@ -258,6 +292,7 @@ impl FakeAudioCapture {
         let stream_error = Arc::new(AtomicBool::new(false));
         let underruns = Arc::new(AtomicU32::new(0));
         let dropped_frames = Arc::new(AtomicU32::new(0));
+        let xruns = Arc::new(AtomicU32::new(0));
 
         // 出力は目標水位まで溜まってから取り出し始める。本物と同じく、入力と
         // 出力のスレッドは同時に起こしてよい
@@ -271,16 +306,7 @@ impl FakeAudioCapture {
         // 録画へ入力の形と開き直しを知らせる。入力のスレッドを起こす前に書く（本物と同じ）
         self.tap.begin_stream(input_rate, input_channels);
 
-        let (stop_input, input_rx) = mpsc::channel();
         let (stop_output, output_rx) = mpsc::channel();
-        let sine = SineInput {
-            producer,
-            tap: self.tap.clone(),
-            dropped_frames: Arc::clone(&dropped_frames),
-            sample_rate: input_rate,
-            channels: input_channels,
-            frequency_hz: input.frequency_hz,
-        };
         let sink = DiscardOutput {
             consumer,
             controls: Arc::clone(&self.controls),
@@ -289,35 +315,69 @@ impl FakeAudioCapture {
             sample_rate: output_rate,
             channels: output_channels,
         };
-        let input_handle = spawn_named("fake-audio-in", AudioDirection::Input, move || {
-            sine.run(input_rx)
-        })?;
-        let output_handle = match spawn_named("fake-audio-out", AudioDirection::Output, move || {
+        let output_handle = spawn_named("fake-audio-out", AudioDirection::Output, move || {
             sink.run(output_rx)
-        }) {
-            Ok(handle) => handle,
-            Err(e) => {
-                // 入力だけ動いたまま残さない
-                drop(stop_input);
-                let _ = input_handle.join();
-                return Err(e);
+        })?;
+
+        let input_route = match &pin {
+            // 音声ピン: 入力のスレッドは立てず、出力が動いてから差し込む（本物と同じ順）
+            Some(connection) => {
+                if let Some(feed) = &self.pin_feed {
+                    feed.attach(PinSink {
+                        graph: connection.graph,
+                        format: connection.format,
+                        producer: Arc::clone(&producer),
+                        tap: self.tap.clone(),
+                        dropped_frames: Arc::clone(&dropped_frames),
+                        xruns: Arc::clone(&xruns),
+                        started: false,
+                    });
+                }
+                AudioInputRoute::VideoPin {
+                    graph: connection.graph,
+                }
+            }
+            None => AudioInputRoute::Device,
+        };
+        let input_thread = match pin {
+            Some(_) => None,
+            None => {
+                let (stop_input, input_rx) = mpsc::channel();
+                let sine = SineInput {
+                    producer,
+                    tap: self.tap.clone(),
+                    dropped_frames: Arc::clone(&dropped_frames),
+                    sample_rate: input_rate,
+                    channels: input_channels,
+                    frequency_hz: input.frequency_hz,
+                };
+                match spawn_named("fake-audio-in", AudioDirection::Input, move || {
+                    sine.run(input_rx)
+                }) {
+                    Ok(handle) => Some((stop_input, handle)),
+                    Err(e) => {
+                        // 出力だけ動いたまま残さない
+                        drop(stop_output);
+                        let _ = output_handle.join();
+                        return Err(e);
+                    }
+                }
             }
         };
 
         info!(
-            "フェイクの音声デバイスを開いた - 入力: {} {}Hz {}ch（{}Hz の正弦波）、出力: {} {}Hz {}ch",
+            "フェイクの音声デバイスを開いた - 入力: {} {}Hz {}ch（{:?}）、出力: {} {}Hz {}ch",
             input.name,
             input_rate,
             input_channels,
-            input.frequency_hz,
+            input_route,
             output.name,
             output_rate,
             output_channels
         );
         self.stream = Some(FakeAudioStream {
-            stop_input,
+            input: input_thread,
             stop_output,
-            input: input_handle,
             output: output_handle,
         });
         self.stream_error = stream_error;
@@ -326,7 +386,7 @@ impl FakeAudioCapture {
         self.resample_telemetry = resample_telemetry;
         self.underruns = underruns;
         self.dropped_frames = dropped_frames;
-        self.xruns = Arc::new(AtomicU32::new(0));
+        self.xruns = xruns;
         self.active = Some(ActiveAudio {
             input_device: input.name,
             output_device: output.name,
@@ -334,7 +394,7 @@ impl FakeAudioCapture {
             input_channels,
             output_sample_rate: output_rate,
             output_channels,
-            input_route: AudioInputRoute::Device,
+            input_route,
             widened_buffer: None,
         });
         Ok(())
@@ -381,12 +441,19 @@ impl FakeAudioCapture {
     pub fn stop_capture(&mut self) {
         self.active = None;
         self.resample_telemetry = None;
+        // 音声ピンの差し込み先は、出力を落とす前に抜く（本物と同じ順）
+        if let Some(feed) = &self.pin_feed {
+            feed.detach();
+        }
         if let Some(stream) = self.stream.take() {
-            drop(stream.stop_input);
+            let input = stream.input.map(|(stop, handle)| {
+                drop(stop);
+                handle
+            });
             drop(stream.stop_output);
             // 両方を先に join する。`||` で繋ぐと、入力が異常終了していたときに
             // 出力の `JoinHandle` が join されずに捨てられる
-            let input_panicked = stream.input.join().is_err();
+            let input_panicked = input.is_some_and(|handle| handle.join().is_err());
             let output_panicked = stream.output.join().is_err();
             if input_panicked || output_panicked {
                 warn!("フェイクの音声のスレッドが異常終了していた");
@@ -691,5 +758,43 @@ mod tests {
                 name: "スピーカー".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn fake_audio_opens_from_the_video_pin_with_a_matching_graph() {
+        // シナリオ audio-pin（#394）。番号の合う音声ピンへ差し込み、PCM を録画の差し込み口へ回す
+        use super::super::pin_feed::{PinConnection, PinFormat, PinSampleType};
+        let feed = AudioPinFeed::new();
+        let mut capture = capture(1, 0).with_pin_feed(feed.clone());
+        let tap = capture.tap.clone();
+        let format = PinFormat {
+            sample_rate: 48_000,
+            channels: 2,
+            sample_type: PinSampleType::I16,
+        };
+        let graph = feed.begin_graph();
+        feed.set_connected(PinConnection {
+            graph,
+            device: "Fake Camera 1".to_string(),
+            format,
+            chunk_bytes: Some(1920),
+        });
+        let mut pin_request = request(None, None);
+        pin_request.input = PassthroughInput::VideoPin { graph: graph + 1 };
+        assert_eq!(
+            capture.start_passthrough(&pin_request),
+            Err(AudioError::VideoPinUnavailable)
+        );
+
+        let _attachment = tap.attach(tap.one_second_capacity());
+        pin_request.input = PassthroughInput::VideoPin { graph };
+        capture.start_passthrough(&pin_request).expect("開ける");
+        let active = capture.active().expect("開いている");
+        assert_eq!(active.input_route, AudioInputRoute::VideoPin { graph });
+        assert_eq!(active.input_summary(), "48000Hz 2ch");
+        feed.push(graph, format, &[0x10; 1920], false);
+        assert_eq!(tap.snapshot().samples_total, 960);
+        capture.stop_capture();
+        tap.detach();
     }
 }

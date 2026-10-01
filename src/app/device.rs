@@ -41,7 +41,7 @@ fn should_store_resolved_resolution(video: &VideoSettings, target: &VideoTarget)
 /// 映像の試行のあとに届くので、それまでに利用者が選んでいたらそちらを残す。
 /// 「映像デバイスの音声」に決まったときは `input_source` だけを書き、
 /// 入力デバイス名は未設定のまま（WASAPI へ戻したときに選び直す）。
-fn apply_resolved_devices(
+pub(super) fn apply_resolved_devices(
     settings: &mut AppSettings,
     video: Option<String>,
     input: Option<String>,
