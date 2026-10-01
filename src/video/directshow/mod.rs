@@ -15,6 +15,7 @@
 //! | `audio_pin.rs` | 音声ピン（#388）。有無の記録、塊の長さの提案と接続、`Run` が通らないときに外してやり直す、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
 //! | `video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
 //! | `media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放（COM の初期化は `crate::com`） |
+//! | `timestamp_probe.rs` | テストを含むビルドだけ。サンプルの到着時刻とタイムスタンプの計測（#406） |
 //!
 //! **デバイス名には「(DirectShow)」を添える**（`display_name`）。設定に
 //! 保存されるのもこの名前で、Media Foundation の経路とどちらで開くかは
@@ -27,6 +28,8 @@ mod devices;
 mod filter;
 mod graph;
 mod media_type;
+#[cfg(test)]
+mod timestamp_probe;
 mod video_stream;
 
 use log::{debug, info, warn};
@@ -558,6 +561,58 @@ mod tests {
             results[1] <= results[0] + 1,
             "音声ピンを繋ぐと映像の途切れが増える: {results:?}"
         );
+    }
+
+    #[test]
+    #[ignore = "音声ピン付きの DirectShow のキャプチャーボード（AVerMedia GC551）に 1920x1080 60Hz の入力信号を入れておく"]
+    fn sample_timestamps_track_the_arrival_time() {
+        // 実行: cargo test sample_timestamps_track_the_arrival_time -- --ignored --nocapture
+        // #406。映像と音声ピンのサンプルに `IMediaSample::GetTime` のタイムスタンプが
+        // 付くか、付くなら到着時刻と比べてどれだけ揺れが小さいかを測る。基準時計を
+        // 外したグラフ（アプリと同じ）と付けたグラフで、それぞれ
+        // `CAPTURECARD_VIEWER_PIN_TEST_SECONDS` 秒（既定 10 秒）。数値を出すだけで、
+        // 結果は `docs/design/recording.md` の「DirectShow のサンプルのタイムスタンプ（#406）」
+        let seconds: u64 = std::env::var("CAPTURECARD_VIEWER_PIN_TEST_SECONDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let _ = timestamp_probe::BASE.set(Instant::now());
+        let mut capture = capture();
+        let name = capture
+            .list_friendly_names()
+            .into_iter()
+            .find(|name| name.contains("GC551"))
+            .expect("GC551 がある");
+        let display = display_name(&name);
+        for default_clock in [false, true] {
+            timestamp_probe::set_default_clock(default_clock);
+            capture
+                .start_capture(&display, Some((1920, 1080)), None, None, true)
+                .expect("開ける");
+            println!("基準時計を付ける {default_clock}: {:?}", capture.active());
+            // 開いた直後の詰まりを避ける
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            timestamp_probe::VIDEO.reset();
+            timestamp_probe::AUDIO.reset();
+            timestamp_probe::set_recording(true);
+            std::thread::sleep(std::time::Duration::from_secs(seconds));
+            // 記録を止め、グラフを止めてから読む。`record` は番号を取ってから値を
+            // 書くので、流れている間に読むと最後の行が書きかけになりうる。記録を
+            // 先に止めるのは、止める途中に届くサンプルを数えないため
+            timestamp_probe::set_recording(false);
+            capture.stop_capture();
+            let video = timestamp_probe::VIDEO.take();
+            let audio = timestamp_probe::AUDIO.take();
+            let video_lag = timestamp_probe::report("映像", &video);
+            let audio_lag = timestamp_probe::report("音声", &audio);
+            if let (Some(v), Some(a)) = (video_lag, audio_lag) {
+                println!(
+                    "到着 − タイムスタンプの平均: 映像 {v:.3}ms 音声 {a:.3}ms（差 {:.3}ms）",
+                    a - v
+                );
+            }
+        }
+        timestamp_probe::set_default_clock(false);
     }
 
     #[test]
