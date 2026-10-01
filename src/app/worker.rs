@@ -173,11 +173,19 @@ pub(super) enum DeviceEvent {
     /// 自分の状態も切り替える（`toggle_mute`）
     MuteToggled,
     /// 未設定だったデバイス名を、列挙結果の先頭で埋めた（起動直後の 1 回だけ）。
-    /// UI スレッドが設定へ書き戻す
+    /// UI スレッドが設定へ書き戻す。
+    ///
+    /// **映像の名前を埋めたときは、解像度も未指定にする**（#391）。設定の解像度は
+    /// そのデバイスを選んで決めた値ではない（既定の 1280x720）ので、開く経路に
+    /// 任せる（DirectShow ならデバイスのいまの解像度）。開いた解像度は
+    /// `VideoResolutionResolved` で返す
     DefaultDevicesResolved {
         video: Option<String>,
         input: Option<String>,
     },
+    /// 解像度が未指定の設定で映像を開き、実際に開いた解像度が分かった（#391）。
+    /// UI スレッドは設定の解像度がまだ未指定なら書き戻す
+    VideoResolutionResolved((u32, u32)),
 }
 
 /// 再試行の進み具合。「接続状態」タブに出す。

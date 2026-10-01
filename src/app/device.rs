@@ -86,6 +86,30 @@ impl CaptureCardViewer {
             DeviceEvent::DefaultDevicesResolved { video, input } => {
                 self.store_resolved_devices(video, input);
             }
+            DeviceEvent::VideoResolutionResolved(resolution) => {
+                self.store_resolved_resolution(resolution);
+            }
+        }
+    }
+
+    /// 解像度が未指定のまま開いた映像の、実際の解像度を設定へ書き戻す（#391）。
+    ///
+    /// **まだ未指定のときだけ書く。** 届くまでの間に利用者が設定ダイアログで
+    /// 選んだ値があれば、そちらを残す。
+    fn store_resolved_resolution(&mut self, resolution: (u32, u32)) {
+        let changed = match self.settings.lock() {
+            Ok(mut settings) if settings.video.resolution.is_none() => {
+                settings.video.resolution = Some(resolution);
+                true
+            }
+            Ok(_) => false,
+            Err(_) => {
+                warn!("開いた解像度の書き戻しで settings のロックを取得できない");
+                return;
+            }
+        };
+        if changed {
+            self.mark_settings_dirty();
         }
     }
 
@@ -100,6 +124,10 @@ impl CaptureCardViewer {
         if let Ok(mut settings) = self.settings.lock() {
             if let Some(name) = video {
                 settings.video.device_name = Some(name);
+                // ワーカーは解像度を未指定にして開く（#391）。こちらも揃えないと、
+                // 次に送る設定の解像度（既定の 1280x720）で開き直されてしまう。
+                // 開いた解像度は `VideoResolutionResolved` で届く
+                settings.video.resolution = None;
                 changed = true;
             }
             if let Some(name) = input {
