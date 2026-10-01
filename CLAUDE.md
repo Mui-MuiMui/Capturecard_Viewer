@@ -155,6 +155,7 @@ cargo build --release
 | `src/i18n/mod.rs` | 画面に出す文字列の入口。現在の言語（`Language` と `static LANGUAGE`）を持ち、`set_language` で切り替える。外から使う経路（`crate::i18n::...`）の `pub use` もここ |
 | `src/i18n/text.rs` | 引数を取らない文字列の表（`texts!` が `Text` のキーと言語ごとの `match` を作る） |
 | `src/i18n/msg.rs` | 引数を取る文字列。1 関数が 1 件で、言語ごとに文全体を組み立てる |
+| `src/i18n/device_msg.rs` | 引数を取る文字列のうち、デバイス（映像・音声）の接続と状態で使うもの（映像・音声のエラー、「Windows 側にも見えていない」、接続状態の観測値、「デバイス設定」タブ、「接続状態」タブ）。書き方は `msg.rs` と同じ |
 | `src/i18n/update_msg.rs` | 引数を取る文字列のうち、更新の確認と適用で使うもの。書き方は `msg.rs` と同じ |
 | `src/i18n/recording_msg.rs` | 引数を取る文字列のうち、録画で使うもの。書き方は `msg.rs` と同じ |
 
