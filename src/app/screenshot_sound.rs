@@ -13,9 +13,11 @@ use super::CaptureCardViewer;
 use crate::screenshot::ScreenshotError;
 use crate::screenshot_sound;
 use crate::status::ErrorSource;
+use chrono::Local;
 use log::{debug, warn};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// 効果音のスレッドから UI スレッドへ返すもの。
 pub(super) enum SoundMessage {
@@ -187,9 +189,25 @@ impl CaptureCardViewer {
                 }
                 let Some(e) = error else {
                     // 読み込めたので、前に読めなかった記録を取り下げる。ただし
-                    // 出力先を開けない失敗が続いている間は、その記録を消さない
-                    if self.sound_output_failure.is_none() {
-                        self.errors.clear(ErrorSource::ScreenshotSound);
+                    // 出力先を開けない失敗が続いている間は、記録をその理由へ戻す
+                    // （読めなかった記録が上書きしていることがあるため）。
+                    // 報告済みの理由なので、トーストは出さない
+                    match self.sound_output_failure.clone() {
+                        None => self.errors.clear(ErrorSource::ScreenshotSound),
+                        Some(reason) => {
+                            let latest = self
+                                .errors
+                                .latest(ErrorSource::ScreenshotSound)
+                                .map(|recorded| recorded.message.as_str());
+                            if latest != Some(reason.as_str()) {
+                                self.errors.record(
+                                    ErrorSource::ScreenshotSound,
+                                    reason,
+                                    Instant::now(),
+                                    Local::now(),
+                                );
+                            }
+                        }
                     }
                     return;
                 };

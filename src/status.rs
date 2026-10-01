@@ -627,7 +627,8 @@ mod tests {
             .single()
             .expect("有効な日時");
         let recorded = RecordedError {
-            message: "音声の出力先を開けない".repeat(10),
+            // トーストの上限（TOAST_MESSAGE_LIMIT = 60 文字）より長い理由
+            message: "音声の出力先を開けないため、効果音が鳴らない: The audio endpoint was not found on this system (0x88890004)".to_string(),
             at: Instant::now(),
             at_wall,
         };
@@ -637,7 +638,7 @@ mod tests {
         // 原因を調べる場所なので切り詰めない
         assert_eq!(
             message,
-            format!("効果音を再生できません: {}", recorded.message)
+            "効果音を再生できません: 音声の出力先を開けないため、効果音が鳴らない: The audio endpoint was not found on this system (0x88890004)"
         );
         assert_eq!(time, "10/01 09:05:07");
     }
