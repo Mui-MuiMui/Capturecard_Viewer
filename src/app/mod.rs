@@ -146,9 +146,7 @@ pub struct CaptureCardViewer {
 
     // 映像表示関連
     video_texture: Option<egui::TextureHandle>,
-    // テクスチャへ渡した画像。egui が描画を終えて手放していれば、次のフレームは
-    // この画素の Vec へ詰め直して渡す（1080p で約 8MB の毎フレームの確保を避ける、
-    // `view.rs` の `update_video_texture`）
+    // テクスチャへ渡した画像。egui が手放したら次のフレームはこの Vec へ詰め直す（`view.rs`）
     video_image: Option<Arc<egui::ColorImage>>,
     // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
     last_frame_generation: u64,

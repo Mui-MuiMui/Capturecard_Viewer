@@ -23,7 +23,9 @@ use std::time::Instant;
 
 use super::color::{adjusted_color_matrix, color_matrix_for, ColorMatrix, SharedColorConversion};
 use super::convert::{bgr24_stride, bgr24_to_rgb, mjpeg_to_rgb, yuy2_to_rgb_naive};
-use super::frame_buffer::{frame_len_status, FrameBuffer, FrameLenStatus, VideoFrame, VideoFrames};
+use super::frame_buffer::{
+    fill_recycled, frame_len_status, FrameBuffer, FrameLenStatus, VideoFrame, VideoFrames,
+};
 use super::tap::VideoTap;
 use super::yuv420::{yuv420_frame_len, yuv420_to_rgb, Yuv420Layout};
 use crate::repaint::RepaintWaker;
@@ -56,35 +58,6 @@ impl FirstTimeOnly {
         self.fired = true;
         first
     }
-}
-
-/// 置き換えたフレーム `previous` を使い回せれば、その中身へ `fill` で書いて返す。
-/// 他にも持ち主がいれば（UI スレッドがテクスチャ化のために、または録画のリングが
-/// 握っている）、そちらは書き換えずに新しく作る。
-///
-/// 返り値の 3 つ目は「回収しようとしたが他に持ち主がいた」か。`VideoTap` が録画中
-/// だけ数える。**使い回したときは確保が起きない**（`fill` の中で Vec が足りずに
-/// 広げる場合を除く）。他に持ち主がいたフレームは参照の数を減らして手放すだけで、
-/// 最後の持ち主になっていても解放は呼び出し元（ロックの外）で起きる。
-fn fill_recycled<R>(
-    previous: Option<Arc<VideoFrame>>,
-    fill: impl FnOnce(&mut VideoFrame) -> R,
-) -> (Arc<VideoFrame>, R, bool) {
-    let mut missed = false;
-    if let Some(mut frame) = previous {
-        if let Some(target) = Arc::get_mut(&mut frame) {
-            let result = fill(target);
-            return (frame, result, false);
-        }
-        missed = true;
-    }
-    let mut fresh = VideoFrame {
-        width: 0,
-        height: 0,
-        data: Vec::new(),
-    };
-    let result = fill(&mut fresh);
-    (Arc::new(fresh), result, missed)
 }
 
 /// 1 本のストリームぶんのフレームの受け口。
@@ -751,64 +724,16 @@ mod tests {
         assert_eq!(tap.recycle_misses(), 1);
     }
 
-    fn frame_of(data: Vec<u8>) -> Arc<VideoFrame> {
-        Arc::new(VideoFrame {
-            width: 1,
-            height: 1,
-            data,
-        })
-    }
-
-    #[test]
-    fn fill_recycled_reuses_unshared_frame_in_place() {
-        // 他に持ち主がいなければ `Arc` も Vec も使い回す（確保が起きない）
-        let previous = frame_of(vec![1, 2, 3]);
-        let arc_ptr = Arc::as_ptr(&previous);
-        let data_ptr = previous.data.as_ptr();
-
-        let (frame, (), missed) = fill_recycled(Some(previous), |target| {
-            target.data.copy_from_slice(&[4, 5, 6]);
-        });
-
-        assert!(!missed);
-        assert_eq!(Arc::as_ptr(&frame), arc_ptr);
-        assert_eq!(frame.data.as_ptr(), data_ptr);
-        assert_eq!(frame.data, vec![4, 5, 6]);
-    }
-
-    #[test]
-    fn fill_recycled_leaves_shared_frame_untouched() {
-        // UI スレッドや録画のリングが握っているフレームは書き換えず、新しく作る
-        let previous = frame_of(vec![1, 2, 3]);
-        let held = Arc::clone(&previous);
-
-        let (frame, (), missed) = fill_recycled(Some(previous), |target| {
-            target.data.extend_from_slice(&[4, 5, 6]);
-        });
-
-        assert!(missed);
-        assert!(!Arc::ptr_eq(&frame, &held));
-        assert_eq!(held.data, vec![1, 2, 3]);
-        assert_eq!(frame.data, vec![4, 5, 6]);
-    }
-
-    #[test]
-    fn fill_recycled_without_previous_is_not_a_miss() {
-        // 最初のフレームは回収するものが無いだけで、取りこぼしではない
-        let (frame, (), missed) = fill_recycled(None, |target| target.data.push(7));
-        assert!(!missed);
-        assert_eq!(frame.data, vec![7]);
+    fn sink_for(frames: &VideoFrames) -> FrameSink {
+        let color = Arc::new(SharedColorConversion::new());
+        FrameSink::new(frames, color, RepaintWaker::default())
     }
 
     #[test]
     fn frame_sink_reuses_the_frame_replaced_two_pushes_ago() {
         // 1 世代遅らせて回収するので、3 枚目は 1 枚目と同じ `Arc` に書かれる
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
         assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
         let first = Arc::as_ptr(&frames.latest().expect("1 枚目"));
         assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
@@ -821,14 +746,9 @@ mod tests {
 
     #[test]
     fn frame_sink_does_not_overwrite_a_frame_still_held_elsewhere() {
-        // UI スレッドがテクスチャ化のために握り続けているフレームは、回収の
-        // 順番が来ても書き換えない（画面に出ている絵が途中で変わらない）
+        // UI スレッドが握り続けているフレームは、回収の順番が来ても書き換えない
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
         assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
         let held = frames.latest().expect("1 枚目");
         assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
@@ -844,11 +764,7 @@ mod tests {
     fn frame_sink_push_mjpeg_keeps_the_buffer_when_decoding_fails() {
         // 展開に失敗しても変換先は捨てず、次のフレームで使い回す
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
         assert!(!sink.push_mjpeg(2, 1, &[0, 1, 2, 3], Instant::now()));
         assert!(frames.latest().is_none());
         assert!(sink.recyclable.is_some());
@@ -856,14 +772,9 @@ mod tests {
 
     #[test]
     fn frame_sink_push_decoded_takes_the_recyclable_before_the_lock() {
-        // デコーダの経路でも回収待ちを先に取り出すので、ロックの中の代入で
-        // 古いフレームが解放されることはない。回収した `Arc` を使い回す
+        // デコーダの経路でも回収待ちをロックの前に取り出し、`Arc` を使い回す
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
         assert!(sink.push_decoded(1, 1, vec![1, 2, 3], Instant::now(), "NV12"));
         let first = Arc::as_ptr(&frames.latest().expect("1 枚目"));
         assert!(sink.push_decoded(1, 1, vec![4, 5, 6], Instant::now(), "NV12"));
