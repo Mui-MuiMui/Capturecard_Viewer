@@ -91,7 +91,7 @@ flowchart LR
 
 - **ロックもアロケーションもしない。** `AudioPinFeed` の差し込み先は `try_lock` で取り、取れなければそのサンプルを捨てる（`process_input` がリングと `AudioTap` を `try_lock` で取るのと同じ扱い）
 - **失敗を返さない。** 受け取れない・差し込み先が無い・形式が読めないときも、サンプルを捨てて `Ok` を返す（フラッシュ中と停止中は映像と同じ）。`Receive` が失敗を返すと上流のフィルターはストリームを止め、グラフが `EC_ERRORABORT` などを積む。今の切断の判定（`is_device_lost_event`）はそれを**映像の切断**として扱うので、音声の不調で映像まで開き直しになる
-- 時刻は `Receive` の入口で 1 回だけ読む（映像の `received_at` と同じ）。DirectShow のタイムスタンプは使わない。基準時計を外してあるので（`SetSyncSource(NULL)`）、キャプチャーフィルターはタイムスタンプを付けないか、付けても基準が無い
+- 時刻は `Receive` の入口で 1 回だけ読む（映像の `received_at` と同じ）。DirectShow のタイムスタンプは使わない。基準時計を外してあるので（`SetSyncSource(NULL)`）、GC551 はタイムスタンプを付けない（`GetTime` が `VFW_E_SAMPLE_TIME_NOT_SET`。基準時計を付けても届いた時刻とほぼ同じ。#406、`docs/design/recording.md` の「DirectShow のサンプルのタイムスタンプ（#406）」）
 - `IMediaSample::IsDiscontinuity` が立っていたら、取りこぼしとして数える（cpal の `Xrun` と同じ数え手。「接続状態」タブの「入力の取りこぼし」に出る）
 
 `docs/design/threads.md` のスレッドの一覧には「DirectShow の音声ピンのストリーミングスレッド」を 1 行足す（実装の段で）。**デバイスに触る使い捨てのスレッドには当たらない。** 作るのはキャプチャーフィルターで、cpal / nokhwa のコールバックスレッドの代役にあたる。
