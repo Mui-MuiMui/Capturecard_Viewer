@@ -146,6 +146,10 @@ pub struct CaptureCardViewer {
 
     // 映像表示関連
     video_texture: Option<egui::TextureHandle>,
+    // テクスチャへ渡した画像。egui が描画を終えて手放していれば、次のフレームは
+    // この画素の Vec へ詰め直して渡す（1080p で約 8MB の毎フレームの確保を避ける、
+    // `view.rs` の `update_video_texture`）
+    video_image: Option<Arc<egui::ColorImage>>,
     // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
     last_frame_generation: u64,
     // 最後に新しいフレームをテクスチャへ取り込んだ時刻。
@@ -297,6 +301,7 @@ impl Default for CaptureCardViewer {
             autosave: AutoSavePolicy::from_load_outcome(load_outcome),
             settings_save_failures: SaveFailureStreak::default(),
             video_texture: None,
+            video_image: None,
             last_frame_generation: 0,
             last_new_frame_at: None,
             last_color_conversion: None,
