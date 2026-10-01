@@ -483,6 +483,60 @@ mod tests {
         capture.stop_capture();
     }
 
+    /// `seconds` 秒のあいだ 10ms ごとに最後のフレームからの経過を見て、映像が
+    /// 100ms 以上途切れたところを `(経過秒, 途切れた ms)` で返す。
+    fn video_stalls(capture: &DirectShowCapture, seconds: u64) -> Vec<(u64, u128)> {
+        let started = Instant::now();
+        let mut stalls: Vec<(u64, u128)> = Vec::new();
+        let mut longest_in_stall = 0;
+        while started.elapsed() < std::time::Duration::from_secs(seconds) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let since = capture
+                .frames
+                .since_last_frame()
+                .map_or(0, |d| d.as_millis());
+            if since >= 100 {
+                longest_in_stall = longest_in_stall.max(since);
+            } else if longest_in_stall > 0 {
+                stalls.push((started.elapsed().as_secs(), longest_in_stall));
+                longest_in_stall = 0;
+            }
+        }
+        stalls
+    }
+
+    #[test]
+    #[ignore = "音声ピン付きの DirectShow のキャプチャーボード（AVerMedia GC551）に 1920x1080 の入力信号を入れておく。2 分かかる"]
+    fn start_capture_with_audio_pin_does_not_add_video_stalls() {
+        // 実行: cargo test start_capture_with_audio_pin_does_not_add_video_stalls -- --ignored --nocapture
+        // #388。音声ピンを繋いでも映像の途切れが増えないこと。繋がずに 60 秒、繋いで 60 秒
+        // 開き、映像が 100ms 以上途切れたところを数える（音声のバックエンドは差し込まない）。
+        // GC551 は音声ピンを繋がなくても数分に 1 度ほど 200〜400ms 止まる（2026-10-01 の実測）
+        // ので、1 回の差は許す
+        let mut capture = capture();
+        let name = capture
+            .list_friendly_names()
+            .into_iter()
+            .find(|name| name.contains("GC551"))
+            .expect("GC551 がある");
+        let display = display_name(&name);
+        let mut results = Vec::new();
+        for connect in [false, true] {
+            capture
+                .start_capture(&display, Some((1920, 1080)), None, None, connect)
+                .expect("開ける");
+            println!("音声ピンを繋ぐ {connect}: {:?}", capture.active());
+            let stalls = video_stalls(&capture, 60);
+            println!("音声ピンを繋ぐ {connect}: 映像の途切れ {stalls:?}");
+            results.push(stalls.len());
+            capture.stop_capture();
+        }
+        assert!(
+            results[1] <= results[0] + 1,
+            "音声ピンを繋ぐと映像の途切れが増える: {results:?}"
+        );
+    }
+
     #[test]
     #[ignore = "OBS の仮想カメラが必要。開始したあと 30 秒以内に OBS 側で仮想カメラを止める（または OBS を終了する）"]
     fn link_state_reports_device_lost_when_the_source_goes_away() {

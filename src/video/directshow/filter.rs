@@ -721,13 +721,14 @@ impl Renderer {
         }
     }
 
-    /// 接続で決まったアロケーターの 1 バッファのバイト数（= 1 塊の上限）。
-    /// アロケーターが無い・読めないときは `None`
-    pub(super) fn allocator_buffer_bytes(&self) -> Option<u32> {
+    /// 接続で決まったアロケーターの `(1 バッファのバイト数, バッファの数)`。1 バッファが
+    /// 1 塊の上限になる。アロケーターが無い・読めないときは `None`
+    pub(super) fn allocator_buffers(&self) -> Option<(u32, i32)> {
         let allocator = self.pin.allocator.lock().ok()?.clone()?;
         let props = unsafe { allocator.GetProperties() }.ok()?;
-        u32::try_from(props.cbBuffer)
+        let bytes = u32::try_from(props.cbBuffer)
             .ok()
-            .filter(|bytes| *bytes > 0)
+            .filter(|bytes| *bytes > 0)?;
+        Some((bytes, props.cBuffers))
     }
 }

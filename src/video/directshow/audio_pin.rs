@@ -243,27 +243,29 @@ fn log_stream_caps(config: &IAMStreamConfig) {
         log::debug!("DirectShow の音声ピンの対応形式の数を読めない");
         return;
     }
-    // 書き込み先が足りないなら読まない（映像の `read_candidates` と同じ確かめ方）
-    if size as usize > size_of::<AUDIO_STREAM_CONFIG_CAPS>() {
+    // 書き込み先は返ってきた大きさで用意する。GC551 の音声ピンは映像の
+    // `VIDEO_STREAM_CONFIG_CAPS` と同じ 128 バイトを返す（実機で確かめた）。
+    // 読むのは先頭の `AUDIO_STREAM_CONFIG_CAPS` の分だけで、足りなければ読まない
+    let Ok(size) = usize::try_from(size) else {
+        return;
+    };
+    if size < size_of::<AUDIO_STREAM_CONFIG_CAPS>() || size > 4096 {
         log::debug!(
-            "DirectShow の音声ピンの対応形式の構造体が想定より大きい（{} バイト）ので読まない",
+            "DirectShow の音声ピンの対応形式の構造体の大きさ（{} バイト）が想定と違うので読まない",
             size
         );
         return;
     }
+    let mut buffer = vec![0u8; size];
     for index in 0..count {
         let mut pmt: *mut AM_MEDIA_TYPE = ptr::null_mut();
-        let mut caps = AUDIO_STREAM_CONFIG_CAPS::default();
-        let read = unsafe {
-            config.GetStreamCaps(
-                index,
-                &mut pmt,
-                &mut caps as *mut AUDIO_STREAM_CONFIG_CAPS as *mut u8,
-            )
-        };
+        let read = unsafe { config.GetStreamCaps(index, &mut pmt, buffer.as_mut_ptr()) };
         if read.is_err() || pmt.is_null() {
             continue;
         }
+        // 書き込み先の揃え（アラインメント）は保証しないので読み出しで写す
+        let caps =
+            unsafe { ptr::read_unaligned(buffer.as_ptr() as *const AUDIO_STREAM_CONFIG_CAPS) };
         let format = unsafe { pin_format_of(&*pmt) };
         unsafe { delete_media_type(pmt) };
         log::debug!(
@@ -367,20 +369,26 @@ pub(super) fn attach(
             .to_string(),
         )));
     };
-    let chunk_bytes = renderer.allocator_buffer_bytes().or_else(|| {
+    let buffers = renderer.allocator_buffers().or_else(|| {
         pin.cast::<IAMBufferNegotiation>()
             .ok()
             .and_then(|negotiation| unsafe { negotiation.GetAllocatorProperties() }.ok())
-            .and_then(|props| u32::try_from(props.cbBuffer).ok())
-            .filter(|bytes| *bytes > 0)
+            .and_then(|props| {
+                let bytes = u32::try_from(props.cbBuffer)
+                    .ok()
+                    .filter(|bytes| *bytes > 0)?;
+                Some((bytes, props.cBuffers))
+            })
     });
+    let chunk_bytes = buffers.map(|(bytes, _)| bytes);
     log::info!(
-        "音声ピンを繋いだ（形式: {}、塊: {}、提案: {} ms）",
+        "音声ピンを繋いだ（形式: {}、塊: {}、バッファの数: {:?}、提案: {} ms）",
         format.summary(),
         match chunk_bytes.and_then(|bytes| format.chunk_ms(bytes).map(|ms| (bytes, ms))) {
             Some((bytes, ms)) => format!("{bytes} バイト = {ms} ms"),
             None => "不明（最初のサンプルの長さで見る）".to_string(),
         },
+        buffers.map(|(_, count)| count),
         SUGGESTED_CHUNK_MS
     );
     AttachedAudio {

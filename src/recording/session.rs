@@ -582,7 +582,7 @@ pub(super) fn remove_partial_file(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recording::test_support::record_until_size_changes;
+    use crate::recording::test_support::{record_from_video_pin, record_until_size_changes};
 
     #[test]
     fn check_folder_accepts_an_absolute_path() {
@@ -705,5 +705,46 @@ mod tests {
                 "音声デバイス {audio_device}: 映像 {video_end}、音声 {audio_end}（{diff_ms}ms）"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "音声ピン付きの DirectShow のキャプチャーボード（AVerMedia GC551）に 1920x1080 の入力信号を入れておく。70 秒ほどかかる"]
+    fn session_records_audio_from_the_video_pin() {
+        // 実行: cargo test -- --ignored session_records_audio_from_the_video_pin --nocapture
+        // 書いた MP4 を残すなら CAPTURECARD_VIEWER_PIN_TEST_DIR に絶対パスのフォルダを指定する
+        //
+        // #388 の第 1 段の実機確認。音声ピンを繋いでも映像の fps が変わらないこと、
+        // 60 秒流してアンダーランと捨てたフレームが増え続けないこと、録画に音声トラックが
+        // 入り映像と長さが揃うことを数で見る
+        let temp = tempfile::tempdir().expect("一時ディレクトリを作れること");
+        let folder = std::env::var("CAPTURECARD_VIEWER_PIN_TEST_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| temp.path().to_path_buf());
+        let run = record_from_video_pin("GC551", (1920, 1080), 65, &folder);
+        let diff_ms = (run.audio_end - run.video_end) / 10_000;
+        println!(
+            "{}: 映像 {}、音声 {}（{diff_ms}ms）、fps {:?} → {:?}",
+            run.path.display(),
+            run.video_end,
+            run.audio_end,
+            run.fps_without_pin,
+            run.fps_with_pin
+        );
+        assert!(run.audio_end > 0, "音声トラックが空");
+        assert!((-50..=200).contains(&diff_ms), "映像と音声の長さが揃わない");
+        // 増え続けていないこと。GC551 はキャプチャーフィルターごと（映像も）数百 ms
+        // 止まることがあり（音声ピンを繋がなくても起きる。`docs/design/directshow-audio.md`
+        // の「第 1 段の実装で変えたところと実機の値」）、そのたびにアンダーランと捨てた
+        // フレームが一度に増える。なので「10 秒ごとの窓の半分以上で増えていない」を見る
+        let steady = run
+            .counters
+            .windows(2)
+            .filter(|pair| pair[0] == pair[1])
+            .count();
+        assert!(
+            steady * 2 >= run.counters.len().saturating_sub(1),
+            "数え手が増え続けている: {:?}",
+            run.counters
+        );
     }
 }
