@@ -17,7 +17,7 @@ WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の�
 
 ## 前提の裏取り
 
-2026-10-01 の `dev`（`71814c9`）の実コードで確かめたこと。設計はこの上に立つ。
+2026-10-01 の `dev`（`71814c9`。#387 の行だけ `3102480`）の実コードで確かめたこと。設計はこの上に立つ。
 
 | 対象 | 実コードでどうなっているか |
 |---|---|
@@ -28,6 +28,7 @@ WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の�
 | 入力のコールバック（`src/audio/stream.rs` の `process_input`） | **cpal 以外のスレッドからも呼ばれている**。フェイクの入力スレッド（`src/audio/fake_stream.rs`）が正弦波を同じ関数へ渡している。リングと `AudioTap` はどちらも `try_lock` で、待たない |
 | 出力側（`stream_output.rs` の `process_output`、`convert.rs` の `PassthroughConverter`、`resample.rs`） | 入力の出どころを知らない。見るのはリングの中身と水位だけ |
 | バックエンドの組み立て（`src/app/backend/system.rs` の `SystemBackends::create`） | 映像（`SystemVideo` = `VideoCapture` + `DirectShowCapture`）と音声（`AudioCapture`）を**別々の `Box` で返す**。いまは両者をつなぐものが無い。`BackendShared` は UI スレッドから来る共有だけを運ぶ |
+| 自動の倒し込み（#387、`src/app/backend/system.rs` の `attempt_with_fallback`） | 開き方が「自動」で Media Foundation が「見つかったが開けない」なら、**同じ `start_capture` の呼び出しの中で** DirectShow でも試す。GC551 は両方の一覧に同じ名前で出て Media Foundation では開けないので、既定の設定のまま DirectShow で開く。倒したことは覚えず、開くたびに Media Foundation から試す |
 | 接続の順番（`src/app/worker_timers.rs` の `poll_connection`） | 同じ `tick` で両方の期限が来ていれば、**映像を先に、音声を後に**試す |
 | 終了（`WorkerState::shutdown`、`app::recording`） | `on_exit` は録画を止めてからワーカーを止める。ワーカーは映像 → 音声の順に閉じる |
 | 接続対象（`src/app/worker.rs`） | `VideoTarget` は `(デバイス名, 解像度, フォーマット, fps, 開き方)`、`AudioTarget` は `(入力, 出力, レート, チャンネル数, バッファ長)` のタプル。差分が立つと開き直す |
@@ -42,7 +43,7 @@ WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の�
 - `docs/design/audio.md` の「ミュートは音量と別に持つ」は「`AudioCapture` の `muted`（`Arc<AtomicBool>`）」と書いているが、実際は `AudioControls::muted`（`AtomicBool`。`Arc<AudioControls>` ごと共有）
 - `docs/design/device-worker.md` の「開いたストリームは実装自身が持つ」の表は、`AudioCapture` が開くたびに作り直すものに `dropped_frames`（#350）と `xruns`（#377）を挙げていない
 - `src/app/backend/mod.rs` の冒頭のコメントは、trait を呼ぶのを「`worker_connect` と `worker_timers`」、本番の実装を「`VideoCapture` / `AudioCapture`」と書いている。いまは `worker_audio_connect` / `worker_audio_timers` も呼び、映像の本番は `SystemVideo`
-- `docs/design/threads.md` の「DirectShow のストリーミングスレッド」の行は本数を「「(DirectShow)」のデバイスをキャプチャ中」としているが、映像の開き方を DirectShow にすれば（#237）印の無いデバイスもこの経路で開く
+- `docs/design/threads.md` の「DirectShow のストリーミングスレッド」の行は本数を「「(DirectShow)」のデバイスをキャプチャ中」としているが、映像の開き方を DirectShow にしたとき（#237）と、自動で Media Foundation から倒したとき（#387）は、印の無いデバイスもこの経路で開く
 
 ## 全体の形
 
@@ -232,7 +233,7 @@ sequenceDiagram
 ### trait との整合
 
 - `AudioBackend::start_passthrough` の形は変えない（`PassthroughRequest` の中身だけ変わる）
-- `VideoBackend::start_capture` に「音声ピンを繋ぐか」を渡す。引数が 6 つ（`self` を入れて 7 つ）になるので、`PassthroughRequest` と同じく構造体（`CaptureRequest`）へまとめる。Media Foundation とモックは見ない。フェイクは見る
+- `VideoBackend::start_capture` に「音声ピンを繋ぐか」を渡す。引数が 6 つ（`self` を入れて 7 つ）になるので、`PassthroughRequest` と同じく構造体（`CaptureRequest`）へまとめる。Media Foundation とモックは見ない。フェイクは見る。**#387 の `attempt_with_fallback` が DirectShow へ倒すときも同じ指定を渡す**（GC551 はこの経路で開くので、渡し忘れると既定の設定では音声ピンが繋がらない）
 - `DeviceBackends::create` は `AudioPinFeed` を 1 つ作って両方へ渡す。モックの組み立て（`testing`）も同じ
 - モックは `MockVideoState` に音声ピンの状態、`MockAudioState` に最後に渡された入力の種類を足す。ワーカーの分岐（待つ / 開く / 映像の開き直しで開き直す）はモックで CI に載せる
 
@@ -305,7 +306,7 @@ input_device_name = "Line (AVerMedia Live Gamer)"   # "video_pin" の間は使�
 - **すでに選ばれている設定は、選べない状態でも選ばれたまま表示する。** 選び直しを強いない（映像デバイスを抜いているだけ、のことがあるため）。その代わりコンボボックスの下に `notice_label` で理由を出す
 - 名前は `crate::i18n` の `Text` に置く（「映像デバイスの音声 (DirectShow)」/ "Video device audio (DirectShow)"）。デバイス名に添える「(DirectShow)」と違い、**こちらは設定に残らない表示だけの文言なので翻訳してよい**（設定に残るのは `video_pin`）
 - 描画は `DeviceSnapshot` から写した値（`ActiveVideo::audio_pin`）を `SettingsDialogView` の読み取り専用の借用で受け取る。描画の中でデバイスへ問い合わせない（GUARDRAIL）
-- 映像の開き方を「自動」のまま「映像デバイスの音声」を選んだら DirectShow を優先する案もあるが、採らない。`route_for` は #387 が触っている最中で、入力の種類が映像の経路まで変えると、設定の項目同士の関係が見えにくくなる。理由の文言で「映像の開き方を DirectShow に」と案内する
+- 映像の開き方を「自動」のまま「映像デバイスの音声」を選んだら DirectShow を優先する案もあるが、採らない。GC551 は #387 の倒し込みで自動のまま DirectShow で開くので、この案が効くのは「Media Foundation でも開けるが音声は DirectShow の音声ピンにしか無い」機種だけで、まだ見つかっていない。入力の種類が映像の経路まで変えると、設定の項目同士の関係が見えにくくなる。理由の文言で「映像の開き方を DirectShow に」と案内する
 
 ### 「接続状態」タブ
 
@@ -392,7 +393,7 @@ input_device_name = "Line (AVerMedia Live Gamer)"   # "video_pin" の間は使�
 - `docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」に音声ピンの段落、「開いたストリームは実装自身が持つ」の表に `AudioPinFeed`、ワーカーの中で閉じる共有として `AudioPinFeed` を足す
 - `docs/design/threads.md` のスレッドの一覧に「DirectShow の音声ピンのストリーミングスレッド」、ロックの表に `AudioPinFeed` の差し込み先（`Receive` は `try_lock` だけ）を足す
 - `docs/design/presets.md` に `input_source` を足す
-- `docs/design/reconnect.md` に「映像の開き直しに合わせて音声も開き直す（音声ピン）」を足す。**#387 が触っている間は避け、マージ後に行う**
+- `docs/design/reconnect.md` に「映像の開き直しに合わせて音声も開き直す（音声ピン）」を足す（#387 の「両方に出るが Media Foundation では開けないデバイス」の近く）
 - `CLAUDE.md` のモジュール構成の表に `src/audio/pin_feed.rs` と `src/video/directshow/audio_pin.rs`（と切り出したファイル）を足す
 - `docs/MANUAL-TEST.md` に上の節を足す
 - `CHANGELOG.md` に「DirectShow で開いた映像デバイスの音声（WASAPI に出ない機種の音）を鳴らせる」を足す（第 1 段では設定ファイルを書き換えたときだけなので、第 2 段で書く）
