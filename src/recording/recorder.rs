@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use log::{debug, warn};
 
-use super::audio::AudioStats;
+use super::audio::{AudioDriftCorrection, AudioStats};
 use super::pts::{AUDIO_SAMPLE_RATE, UNITS_PER_SECOND};
 use super::replay_config::ReplayConfig;
 use super::{EncoderInfo, RecordingError};
@@ -87,6 +87,8 @@ pub struct RecordingSummary {
     pub recycle_misses: u64,
     /// リプレイバッファからさかのぼった長さ。リプレイバッファを通していなければ `None`
     pub replay_lead: Option<Duration>,
+    /// 音声に掛けたドリフトの補正（#288）。音声を録らない設定なら `None`
+    pub audio_drift: Option<AudioDriftCorrection>,
 }
 
 /// 録画スレッド → UI スレッド。

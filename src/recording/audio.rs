@@ -14,19 +14,25 @@
 //!   変換し終えてから、形を読み直して同じように揃え直す
 //! - 音声が来ていない間（音声デバイスが無い、開けていない、止まっている）は、
 //!   映像に合わせて無音を書き続ける。音声トラックの長さを映像と揃えるため
+//! - 途切れずに続く間は、入力デバイスの時計と PC の時計の差（ドリフト）を、変換器の
+//!   レート比をわずかに動かして直す（#288、`super::pts` の「ドリフトの補正」）。
+//!   時計の差では説明できないほどずれが飛んだら（サンプルが落ちた）、揃え直す
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use log::info;
+use log::{debug, info};
 use ringbuf::traits::{Consumer, Observer};
 
 use super::pts::{
-    align, audio_units, frames_in, silence_until, units_from, units_since, Alignment, DriftSpan,
-    TapTiming, AUDIO_CHANNELS, AUDIO_SAMPLE_RATE, UNITS_PER_SECOND,
+    align, audio_units, frames_in, silence_until, units_from, units_since, Alignment,
+    DriftCorrector, DriftDecision, DriftSpan, TapTiming, AUDIO_CHANNELS, AUDIO_SAMPLE_RATE,
+    UNITS_PER_SECOND,
 };
 use crate::audio::{
     f32_to_i16, AudioTap, AudioTapConsumer, AudioTapSnapshot, PassthroughConverter,
+    ResampleTelemetry,
 };
 
 /// 1 回に足す無音の上限（出力フレーム数、10 秒）。
@@ -66,12 +72,32 @@ pub(super) struct AudioStats {
     pub(super) overflows: u64,
     /// 最後に途切れずに続いた区間の `(PC の時計での経過, サンプル数 ÷ レート)`（100ns）
     pub(super) drift: Option<(i64, i64)>,
+    /// ドリフトの補正で足した長さの累計（100ns、負なら削った）
+    pub(super) correction_units: i64,
+    /// 入力から作った出力フレームの累計（無音を除く）。補正の平均の割合を出す分母
+    pub(super) converted_frames: u64,
+    /// 補正しても残ったずれ。最後に揃え直してからの基準に対する、直近 5 秒の平均の動き（100ns）
+    pub(super) residual: Option<i64>,
+    /// ずれが飛んで（入力デバイスがサンプルを落として）揃え直した回数
+    pub(super) realigns: u64,
+}
+
+/// 録画の音声に掛けたドリフトの補正（#288）。`RecordingSummary` に入れて UI スレッドへ返す。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AudioDriftCorrection {
+    /// 補正で音声の長さを変えた割合の平均（ppm）。正なら伸ばした（入力デバイスの時計が
+    /// PC の時計より遅い）
+    pub ppm: i32,
+    /// 補正で足した長さの累計（µs、負なら削った）
+    pub total_us: i64,
+    /// 補正しても残ったずれ（µs、負なら音声が映像より先行する向き）。測れていなければ `None`
+    pub residual_us: Option<i64>,
 }
 
 impl AudioStats {
     /// `base` からの差。リプレイバッファ（③）は音声トラックを録画をまたいで使い続けるので、
-    /// 1 回の録画の値は録画を始めたときの値からの差で出す。ドリフトの区間はそのまま使う
-    /// （揃え直すたびに始め直す区間で、録画の始まりとは関係しない）。
+    /// 1 回の録画の値は録画を始めたときの値からの差で出す。ドリフトの区間と補正しても
+    /// 残ったずれはそのまま使う（揃え直すたびに始め直す値で、録画の始まりとは関係しない）。
     pub(super) fn since(&self, base: &AudioStats) -> AudioStats {
         AudioStats {
             frames: self.frames.saturating_sub(base.frames),
@@ -80,21 +106,44 @@ impl AudioStats {
             trimmed_units: self.trimmed_units.saturating_sub(base.trimmed_units),
             overflows: self.overflows.saturating_sub(base.overflows),
             drift: self.drift,
+            correction_units: self.correction_units.saturating_sub(base.correction_units),
+            converted_frames: self.converted_frames.saturating_sub(base.converted_frames),
+            residual: self.residual,
+            realigns: self.realigns.saturating_sub(base.realigns),
+        }
+    }
+
+    /// 掛けた補正。割合は「足した長さ ÷ 入力から作った長さ」の平均。
+    pub(super) fn drift_correction(&self) -> AudioDriftCorrection {
+        let converted = audio_units(self.converted_frames);
+        let ppm = if converted > 0 {
+            (self.correction_units as f64 / converted as f64 * 1_000_000.0).round() as i32
+        } else {
+            0
+        };
+        AudioDriftCorrection {
+            ppm,
+            total_us: self.correction_units / 10,
+            residual_us: self.residual.map(|units| units / 10),
         }
     }
 
     /// ログへ 1 行で残す。録画スレッドが閉じたときに呼ぶ（失敗ではないので `info`）。
     ///
-    /// **途切れずに続いた区間での「映像の時計（PC）での経過」と「音声のサンプル数 ÷ レート」の差**
-    /// が、録画の中で音が映像からずれていく量（ドリフト）。②では直さず、この値を実機で
-    /// 測ってから、録画の音声を PC の時計へ合わせる補正を入れるか決める
-    /// （`docs/design/recording.md` の「ドリフト」）。
+    /// - **入力デバイスの時計のずれ**: 途切れずに続いた区間での「映像の時計（PC）での経過」と
+    ///   「音声のサンプル数 ÷ レート」の差。補正しなければ、録画の中で音が映像からずれていく量
+    ///   （ドリフト）。2 点の時刻から出すので 10ms ほどの粒度があり、入力デバイスが落とした
+    ///   サンプルも差に入る（GC551 では時計のずれより落としたサンプルのほうが大きかった）
+    /// - **ドリフトの補正**（#288）: 掛けた補正の平均（ppm）と足した長さ、補正しても残ったずれ
+    ///   （直近 5 秒の平均）。残ったずれが、録画の中で音が映像からずれた量になる
+    ///
+    /// `docs/design/recording.md` の「ドリフト」。
     pub(super) fn log(&self, video: Duration) {
         let secs = |units: i64| units as f64 / UNITS_PER_SECOND as f64;
         let millis = |units: i64| units as f64 * 1000.0 / UNITS_PER_SECOND as f64;
         let drift = match self.drift {
             Some((by_clock, by_samples)) if by_clock > 0 => format!(
-                "途切れずに続いた最後の区間で、映像の時計（PC）の {:.3} 秒に対して音声のサンプル数 ÷ レートは {:.3} 秒（差 {:+.1}ms、{:+.0}ppm。負なら録画の音声が映像より先行していく）",
+                "入力デバイスの時計: 途切れずに続いた最後の区間で、映像の時計（PC）の {:.3} 秒に対して音声のサンプル数 ÷ レートは {:.3} 秒（差 {:+.1}ms、{:+.0}ppm。入力デバイスが落としたサンプルも差に入る。負なら補正しないと録画の音声が映像より先行していく）",
                 secs(by_clock),
                 secs(by_samples),
                 millis(by_samples - by_clock),
@@ -102,11 +151,22 @@ impl AudioStats {
             ),
             _ => "音声が途切れずに続いた区間が無い（音声が届かなかった）".to_string(),
         };
+        let residual = match self.residual {
+            Some(units) => format!(
+                "補正しても残ったずれ {:+.1}ms（揃え直してからの基準に対する直近 5 秒の平均。負なら音声が先行する向き）",
+                millis(units)
+            ),
+            None => "補正しても残ったずれは未測定（揃え直してから 10 秒経っていない）".to_string(),
+        };
         info!(
-            "録画の音声: 長さ {:.3} 秒（映像 {:.3} 秒）。{}。揃えるために足した無音 {:.1}ms、削った入力 {} サンプル、リングの溢れ {} 回",
+            "録画の音声: 長さ {:.3} 秒（映像 {:.3} 秒）。{}。ドリフトの補正: 平均 {:+}ppm（足した長さ {:+.1}ms）、{}、ずれが飛んで揃え直した回数 {}。揃えるために足した無音 {:.1}ms、削った入力 {} サンプル、リングの溢れ {} 回",
             secs(audio_units(self.frames)),
             secs(units_from(video)),
             drift,
+            self.drift_correction().ppm,
+            millis(self.correction_units),
+            residual,
+            self.realigns,
             millis(audio_units(self.silence_frames)),
             self.trimmed_samples,
             self.overflows
@@ -143,6 +203,21 @@ pub(super) struct AudioTrack {
     popped: Vec<f32>,
     converted: Vec<f32>,
     drift: Option<DriftSpan>,
+    /// ドリフトの補正（#288）。変換器へ補正係数を渡す器。**録画スレッドの中だけで使い、
+    /// 出力コールバックの補正とは共有しない。** 変換器を作り直しても同じものを紐づけ、
+    /// 揃え直しをまたいで係数を持ち越す（入力デバイスの時計は揃え直しでは変わらない）。
+    /// ずれが飛んで揃え直すときだけ 1.0 に戻す（`correct_drift`）
+    correction: Arc<ResampleTelemetry>,
+    /// いま掛けている補正係数。`correction` に書いた値の控え
+    current_correction: f64,
+    /// ずれの窓と基準。揃え直すたびに作り直す
+    corrector: DriftCorrector,
+    /// 補正で増やした出力フレーム数の累計（負なら減らした）
+    corrected_frames: f64,
+    /// 入力から作った出力フレームの累計（無音を除く）。補正の平均の割合を出す分母
+    converted_frames: u64,
+    /// ずれが飛んで揃え直した回数
+    realigns: u64,
     silence_frames: u64,
     trimmed_samples: u64,
     trimmed_units: u64,
@@ -153,13 +228,14 @@ impl AudioTrack {
     pub(super) fn attach(tap: AudioTap, t0: Instant) -> Self {
         let attachment = tap.attach(tap.one_second_capacity());
         let format = tap.format();
+        let correction = Arc::new(ResampleTelemetry::for_recording());
         Self {
             consumer: attachment.consumer,
             t0,
             next_index: attachment.start_index,
             seen_breaks: attachment.breaks,
             format,
-            converter: format.map(converter_for),
+            converter: format.map(|format| converter_for(format, &correction)),
             input: VecDeque::new(),
             needs_anchor: true,
             trim_remaining: 0,
@@ -169,6 +245,12 @@ impl AudioTrack {
             popped: Vec::new(),
             converted: Vec::new(),
             drift: None,
+            correction,
+            current_correction: 1.0,
+            corrector: DriftCorrector::default(),
+            corrected_frames: 0.0,
+            converted_frames: 0,
+            realigns: 0,
             silence_frames: 0,
             trimmed_samples: 0,
             trimmed_units: 0,
@@ -217,6 +299,58 @@ impl AudioTrack {
         if let (Some(span), Some(timing)) = (self.drift.as_mut(), timing) {
             span.update(timing);
         }
+        if let Some(timing) = timing {
+            self.correct_drift(now_units, timing);
+        }
+    }
+
+    /// ずれ（次に書く位置 − そのサンプルを受け取った時刻）を測って補正の窓へ足し、窓を
+    /// 閉じたら補正係数を変換器へ渡す（#288、`super::pts` の「ドリフトの補正」）。
+    /// 揃え直しを待っている間と、揃えるための削りが残っている間は測らない（位置がまだ飛ぶ）。
+    fn correct_drift(&mut self, now: i64, timing: TapTiming) {
+        if self.needs_anchor || self.trim_remaining > 0 || self.converter.is_none() {
+            return;
+        }
+        // 変換待ちの入力の手前までが、書いた出力フレームになっている（補間が持つ 1〜2
+        // フレームの分は数十 µs なので無視する）
+        let consumed = self.next_index.saturating_sub(self.input.len() as u64);
+        let offset = audio_units(self.produced_frames).saturating_sub(timing.time_of(consumed));
+        let decision = self.corrector.observe(now, offset);
+        if let (Some(decision), Some(error)) = (decision, self.corrector.last_error()) {
+            // 窓（5 秒）ごとに 1 行。実機で補正の動きを追うため（`docs/design/recording.md` の「ドリフト」）
+            let span_ppm = self
+                .drift
+                .map(|span| span.measure())
+                .and_then(|(clock, samples)| {
+                    (clock > 0).then(|| (samples - clock) as f64 / clock as f64 * 1_000_000.0)
+                });
+            debug!(
+                "録画の音声のずれ: {:.1} 秒、基準からの動き {:+.2}ms、入力デバイスの時計（揃え直してから） {:+.0}ppm → {:?}",
+                now as f64 / UNITS_PER_SECOND as f64,
+                error as f64 / 10_000.0,
+                span_ppm.unwrap_or(0.0),
+                decision
+            );
+        }
+        match decision {
+            Some(DriftDecision::Correct(correction)) => self.set_correction(correction),
+            Some(DriftDecision::Realign) => {
+                // サンプルが落ちた。補正の窓に混ざった飛びで決めた係数は捨て、次に届いた
+                // サンプルで揃え直す（無音で埋めたあとと同じ扱い）
+                self.set_correction(1.0);
+                self.input.clear();
+                self.needs_anchor = true;
+                self.realigns += 1;
+            }
+            None => {}
+        }
+    }
+
+    fn set_correction(&mut self, correction: f64) {
+        // 変換器は f32 で読むので、控えも f32 に丸めた値にする（補正量の累計を合わせる）
+        let correction = correction as f32;
+        self.correction.set_correction(correction);
+        self.current_correction = f64::from(correction);
     }
 
     /// 録画の終わり。音声が映像より短ければ、`video_end`（100ns）まで無音で埋める。
@@ -262,6 +396,12 @@ impl AudioTrack {
             trimmed_units: self.trimmed_units,
             overflows: self.tap.overflows(),
             drift: self.drift.map(|span| span.measure()),
+            correction_units: (self.corrected_frames * UNITS_PER_SECOND as f64
+                / f64::from(AUDIO_SAMPLE_RATE))
+            .round() as i64,
+            converted_frames: self.converted_frames,
+            residual: self.corrector.last_error(),
+            realigns: self.realigns,
         }
     }
 
@@ -300,8 +440,12 @@ impl AudioTrack {
             // 時刻がまだ無い（開いた直後で 1 度も積んでいない）。積まれてから揃える
             return;
         };
-        // 途切れの前後で補間を繋げない
-        self.converter = self.format.map(converter_for);
+        // 途切れの前後で補間を繋げない。補正係数は持ち越す
+        self.converter = self
+            .format
+            .map(|format| converter_for(format, &self.correction));
+        // 揃え直しで位置が飛ぶので、ずれの基準は測り直す
+        self.corrector = DriftCorrector::default();
         let actual = timing.time_of(self.next_index);
         let expected = audio_units(self.produced_frames);
         match align(expected, actual, timing.sample_rate) {
@@ -336,7 +480,11 @@ impl AudioTrack {
         converter.convert_buffered(&mut self.input, &mut self.converted);
         self.pcm
             .extend(self.converted.iter().map(|&sample| f32_to_i16(sample)));
-        self.produced_frames += (self.converted.len() / usize::from(AUDIO_CHANNELS)) as u64;
+        let frames = (self.converted.len() / usize::from(AUDIO_CHANNELS)) as u64;
+        self.produced_frames += frames;
+        self.converted_frames += frames;
+        // 係数 c で作った n フレームは、補正しなければ n × c フレームだった
+        self.corrected_frames += frames as f64 * (1.0 - self.current_correction);
     }
 
     fn insert_silence(&mut self, frames: u64) {
@@ -357,9 +505,14 @@ fn samples_to_units(samples: u64, sample_rate: u32, channels: u16) -> u64 {
     frames.saturating_mul(UNITS_PER_SECOND as u64) / u64::from(sample_rate)
 }
 
-/// 入力の形から録画の形（48kHz 2ch）への変換器。クロックドリフト補正は付けない（②）。
-fn converter_for((sample_rate, channels): (u32, u16)) -> PassthroughConverter {
+/// 入力の形から録画の形（48kHz 2ch）への変換器。ドリフトの補正係数（#288）を紐づけるので、
+/// 入力が 48kHz 2ch でも補間の経路を通る（係数が 1.0 の間は入力の値がそのまま出る）。
+fn converter_for(
+    (sample_rate, channels): (u32, u16),
+    correction: &Arc<ResampleTelemetry>,
+) -> PassthroughConverter {
     PassthroughConverter::new(sample_rate, channels, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)
+        .with_telemetry(Some(Arc::clone(correction)))
 }
 
 #[cfg(test)]
@@ -489,6 +642,10 @@ mod tests {
             trimmed_units: 1_000,
             overflows: 1,
             drift: None,
+            correction_units: 2_000,
+            converted_frames: 40_000,
+            residual: None,
+            realigns: 1,
         };
         let now = AudioStats {
             frames: 96_000,
@@ -497,6 +654,10 @@ mod tests {
             trimmed_units: 3_000,
             overflows: 4,
             drift: Some((10_000_000, 9_999_000)),
+            correction_units: -3_000,
+            converted_frames: 80_000,
+            residual: Some(-4_000),
+            realigns: 3,
         };
         assert_eq!(
             now.since(&base),
@@ -507,10 +668,68 @@ mod tests {
                 trimmed_units: 2_000,
                 overflows: 3,
                 drift: Some((10_000_000, 9_999_000)),
+                // 補正量は符号付きの差（途中で向きが変わっても引き算のまま）
+                correction_units: -5_000,
+                converted_frames: 40_000,
+                residual: Some(-4_000),
+                realigns: 2,
             }
         );
         // 差し込み直しで溢れた回数が 0 に戻っていても、負にはしない
         assert_eq!(base.since(&now).overflows, 0);
+    }
+
+    #[test]
+    fn audio_stats_drift_correction_reports_the_average_ppm_and_totals() {
+        // 10 分（2880 万フレーム）で +30.6ms 足した。平均 +51ppm
+        let stats = AudioStats {
+            correction_units: 306_000,
+            converted_frames: 28_800_000,
+            residual: Some(-8_000),
+            ..AudioStats::default()
+        };
+        assert_eq!(
+            stats.drift_correction(),
+            AudioDriftCorrection {
+                ppm: 51,
+                total_us: 30_600,
+                residual_us: Some(-800),
+            }
+        );
+        // 削った向き
+        let stats = AudioStats {
+            correction_units: -12_000,
+            converted_frames: 4_800_000,
+            ..AudioStats::default()
+        };
+        assert_eq!(stats.drift_correction().ppm, -12);
+        assert_eq!(stats.drift_correction().residual_us, None);
+        // 入力から何も作っていない（音声が届かなかった）なら 0 で、割り算で落とさない
+        assert_eq!(
+            AudioStats::default().drift_correction(),
+            AudioDriftCorrection::default()
+        );
+    }
+
+    #[test]
+    fn audio_track_converter_follows_the_drift_correction_even_for_48k_stereo() {
+        // 入力が録画と同じ 48kHz 2ch でも補間の経路を通り、補正係数で出力の数が変わる
+        let correction = Arc::new(ResampleTelemetry::for_recording());
+        let mut converter = converter_for((48_000, 2), &correction);
+        let mut input: VecDeque<f32> = std::iter::repeat_n(0.25, 96_000).collect();
+        let mut output = Vec::new();
+        converter.convert_buffered(&mut input, &mut output);
+        // 係数 1.0 の間は値を変えない（補間の右端を待つ 1 フレームが残る）
+        assert_eq!(output.len(), 95_998);
+        assert!(output.iter().all(|&sample| sample == 0.25));
+
+        // 0.1% 遅く進める（入力デバイスの時計が遅い向き）と、1 秒の入力から 48 フレーム多く出る
+        correction.set_correction(0.999);
+        let mut input: VecDeque<f32> = std::iter::repeat_n(0.25, 96_000).collect();
+        output.clear();
+        converter.convert_buffered(&mut input, &mut output);
+        // 1 秒の入力から 48048 フレーム。前の呼び出しで残した 1 フレームを足して 48049
+        assert_eq!(output.len() / 2, 48_049);
     }
 
     #[test]
