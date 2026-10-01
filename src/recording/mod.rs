@@ -8,17 +8,21 @@
 //! | `recorder_loop.rs` | 録画スレッドの本体。コマンドの受け口と、リプレイバッファを通すかの経路の切り替え |
 //! | `session.rs` | リプレイバッファを通さない録画（①②）。Sink Writer がエンコードも行う。失敗の扱いの共通部分 |
 //! | `replay.rs` | リプレイバッファ（③）。エンコーダ MFT を回してエンコード済みのリングに持つ |
+//! | `replay_config.rs` | リプレイバッファの設定（UI スレッドが組み立てて渡す）と、エンコーダの作り直しが要るかの判定 |
 //! | `replay_recording.rs` | リプレイバッファを通す録画。リングからエンコードなしの Sink Writer へ書く |
 //! | `replay_ring.rs` | エンコード済みのリングと、書き出す位置・捨てる境界・PTS の付け替え（純粋関数） |
 //! | `encoder.rs` | エンコーダ MFT（H.264 / AAC、同期型と非同期型） |
+//! | `encoder_setup.rs` | エンコーダ MFT を作るときだけ使う補助（列挙、候補を先頭から開く、入出力の形の組み立て） |
 //! | `passthrough.rs` | エンコードなしの Sink Writer |
 //! | `bitstream.rs` | H.264 の IDR と SPS / PPS の読み取り、AAC の `MF_MT_USER_DATA`（純粋関数） |
 //! | `writer.rs` | Sink Writer の組み立てと書き込み、使っているエンコーダの名前 |
+//! | `sample_pool.rs` | Sink Writer とエンコーダ MFT へ渡す NV12 のサンプルの使い回し |
 //! | `convert.rs` | RGB → NV12 の画素変換（純粋関数） |
 //! | `audio.rs` | 音声トラック。`AudioTap` のリングから取り出し、48kHz 2ch の 16bit PCM へ寄せて PTS を付ける |
 //! | `pts.rs` | 映像と音声の PTS（純粋関数） |
 //! | `file_name.rs` | ファイル名の書式の検めと連番（純粋関数） |
 //! | `storage.rs` | 保存先の空き容量 |
+//! | `test_support.rs` | 録画のテストの補助（`#[cfg(test)]`。フェイクを流して録画し、書いた MP4 を読み戻す） |
 //!
 //! 依存の向きは `app → recording → video / audio`。`video` と `audio` は録画を知らず、
 //! フレームコールバックは `video::VideoTap`、入力コールバックは `audio::AudioTap` のリングへ

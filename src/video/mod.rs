@@ -14,6 +14,7 @@
 //! | `capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の問い合わせ |
 //! | `color.rs` | 係数表とその選択、映像調整の畳み込み、設定の共有 |
 //! | `convert.rs` | YUY2 → RGB24 の画素変換と、DirectShow の RGB24 / MJPEG の展開 |
+//! | `yuv420.rs` | 4:2:0 の YUV（NV12 / I420 / YV12）→ RGB24 の画素変換 |
 //! | `frame_buffer.rs` | `FrameBuffer` と世代番号、観測値（`FrameStats`） |
 //! | `tap.rs` | 録画へ映像を回す差し込み口（`VideoTap`）。録画中だけ、画面へ置いたのと同じ `Arc` をリングへ積む |
 //!

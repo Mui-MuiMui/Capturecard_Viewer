@@ -21,6 +21,7 @@
 //! | `recording_tab.rs` | 「録画」タブ |
 //! | `hotkeys_tab.rs` | 「ホットキー」タブ |
 //! | `hotkey_capture.rs` | ホットキー入力ダイアログ |
+//! | `hotkey_keys.rs` | 入力ダイアログが使うキーの対応表、割り当てさせない組み合わせ、ホットキー文字列の組み立て |
 //! | `other_tab.rs` | 「その他」タブ |
 //! | `status_tab.rs` | 「接続状態」タブ |
 //! | `update_dialog.rs` | 新しい版を知らせ、更新の進み具合を出すダイアログ |
