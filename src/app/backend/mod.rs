@@ -2,10 +2,12 @@
 //!
 //! **trait の境界は「ワーカーがデバイスへ触る場所」に置いてある。**
 //! 具体的には開く・閉じる・列挙する・能力を問い合わせる・観測値を読む、の
-//! 5 つだけで、`super::worker_connect` と `super::worker_timers` が呼ぶ操作が
-//! そのまま並ぶ。本番の実装は `crate::video::VideoCapture` /
-//! `crate::audio::AudioCapture` で、どちらも中身には手を入れず、`system` で
-//! trait に包んでいる。
+//! 5 つだけで、`super::worker_loop` / `super::worker_connect` /
+//! `super::worker_audio_connect` / `super::worker_timers` /
+//! `super::worker_audio_timers` が呼ぶ操作がそのまま並ぶ。本番の実装は
+//! `system` にあり、映像は `SystemVideo`（`crate::video::VideoCapture` と
+//! `crate::video::DirectShowCapture` を束ねる）、音声は
+//! `crate::audio::AudioCapture` をそのまま trait に包んでいる。
 //!
 //! **フレームコールバックと cpal のコールバックの経路には挟まない。**
 //! 映像フレームは `VideoFrames`、音量とミュートは `AudioControls` の共有
