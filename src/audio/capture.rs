@@ -127,6 +127,8 @@ pub struct AudioCapture {
     /// 入力コールバックがリングバッファの満杯で捨てたフレーム数（Issue #350）。
     /// `underruns` と同じく、開き直すたびに新しい `Arc` へ差し替えて 0 から数え直す
     dropped_frames: Arc<AtomicU32>,
+    /// cpal が知らせた入力の取りこぼし（`Xrun`）の回数（Issue #377）。開き直すたびに新しい `Arc` へ差し替える
+    xruns: Arc<AtomicU32>,
 }
 
 impl AudioCapture {
@@ -150,6 +152,7 @@ impl AudioCapture {
             stream_error: Arc::new(AtomicBool::new(false)),
             underruns: Arc::new(AtomicU32::new(0)),
             dropped_frames: Arc::new(AtomicU32::new(0)),
+            xruns: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -317,6 +320,8 @@ impl AudioCapture {
         let underruns = Arc::new(AtomicU32::new(0));
         // 満杯で捨てたフレームの数え手も同じく作り直す
         let dropped_frames = Arc::new(AtomicU32::new(0));
+        // 取りこぼしの回数の数え手も同じく作り直す
+        let xruns = Arc::new(AtomicU32::new(0));
 
         // 録画へ入力の形と開き直しを知らせる。**入力のコールバックが動き出す前に書く。**
         // 録画スレッドはここを境に、前のストリームのサンプルと分けて扱う
@@ -333,6 +338,7 @@ impl AudioCapture {
                 self.tap.clone(),
                 stream_error.clone(),
                 dropped_frames.clone(),
+                xruns.clone(),
                 |sample| sample,
             ),
             SampleFormat::I16 => build_input_stream_with::<i16>(
@@ -342,6 +348,7 @@ impl AudioCapture {
                 self.tap.clone(),
                 stream_error.clone(),
                 dropped_frames.clone(),
+                xruns.clone(),
                 i16_to_f32,
             ),
             SampleFormat::U16 => build_input_stream_with::<u16>(
@@ -351,6 +358,7 @@ impl AudioCapture {
                 self.tap.clone(),
                 stream_error.clone(),
                 dropped_frames.clone(),
+                xruns.clone(),
                 u16_to_f32,
             ),
             SampleFormat::I32 => build_input_stream_with::<i32>(
@@ -360,6 +368,7 @@ impl AudioCapture {
                 self.tap.clone(),
                 stream_error.clone(),
                 dropped_frames.clone(),
+                xruns.clone(),
                 i32_to_f32,
             ),
             other => {
@@ -484,6 +493,7 @@ impl AudioCapture {
         // 数え手も、いま開いたストリームのものへ差し替える
         self.underruns = underruns;
         self.dropped_frames = dropped_frames;
+        self.xruns = xruns;
         // 接続状態の表示用に、実際に開いた内容を控える
         self.active = Some(ActiveAudio {
             input_device: input_device_name,
@@ -541,6 +551,14 @@ impl AudioCapture {
             .map(|_| self.dropped_frames.load(Ordering::Relaxed))
     }
 
+    /// 「接続状態」タブへ出す、cpal が知らせた入力の取りこぼし（`Xrun`）の累計。
+    /// `underrun_count` と同じく、開いていなければ `None`
+    pub fn xrun_count(&self) -> Option<u32> {
+        self.active
+            .as_ref()
+            .map(|_| self.xruns.load(Ordering::Relaxed))
+    }
+
     pub fn stop_capture(&mut self) {
         self.active = None;
         self.resample_telemetry = None;
@@ -556,6 +574,7 @@ impl AudioCapture {
         // 同じ理由で、数え手も新しいものへ差し替える
         self.underruns = Arc::new(AtomicU32::new(0));
         self.dropped_frames = Arc::new(AtomicU32::new(0));
+        self.xruns = Arc::new(AtomicU32::new(0));
     }
 
     /// 稼働中のストリームでエラーが起きていたかを返し、旗を下ろす。

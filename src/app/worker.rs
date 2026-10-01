@@ -211,6 +211,8 @@ pub(super) struct DeviceSnapshot {
     /// 音声を開いていなければ `None`。開き直すと 0 から数え直す。
     /// 「接続状態」タブだけが読む（統計 OSD には出さない）
     pub(super) audio_dropped_frames: Option<u32>,
+    /// cpal が知らせた入力の取りこぼし（`Xrun`）の累計（Issue #377）。開いていなければ `None`
+    pub(super) audio_xruns: Option<u32>,
 }
 
 /// ワーカースレッドと、UI スレッドが共有する読み取り専用のスナップショット。
