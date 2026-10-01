@@ -11,12 +11,14 @@
 //! | `capture.rs` | `AudioCapture`。パススルーの開始と停止、観測値の取り出し |
 //! | `stream.rs` | cpal の入力ストリームの組み立てと入力のコールバック、リングバッファの型、ストリームのエラーの扱い |
 //! | `stream_output.rs` | cpal の出力ストリームの組み立てと出力のコールバック、アンダーランの数え方 |
+//! | `passthrough_output.rs` | パススルーの出力側の組み立て（出力デバイス、リングバッファ、変換器と補正を付けた出力ストリーム）。入力の種類によらず共有する |
 //! | `convert.rs` | 入出力の形が違う場合の変換（線形補間とミックス） |
 //! | `sample.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32） |
 //! | `resample.rs` | クロックドリフト補正の共有状態と、補正係数の決め方 |
 //! | `controls.rs` | 音量・パススルー・ミュートの共有状態 |
 //! | `fake.rs` | 実機なしで動くフェイクの音声デバイス（正弦波の入力と、書き込みを捨てる出力）。環境変数で有効にしたときだけ使う |
 //! | `fake_stream.rs` | フェイクの入出力のスレッドの本体（正弦波を吐く入力と、書き込みを捨てる出力） |
+//! | `pin_feed.rs` | DirectShow の映像デバイスの音声ピンと `AudioCapture` をつなぐ差し込み口（`AudioPinFeed`）。音声ピンの `Receive` が受け取った PCM を `process_input_iter` へ渡す。音声ピンの状態（`AudioPinState`）と形式もここ |
 //! | `tap.rs` | 録画へ音声を回す差し込み口（`AudioTap`）。録画中だけ、入力コールバックが f32 へ直した値を入力の形のまま録画のリングへも積む。PTS を決めるための累計・時刻・入力の形・開き直しの番号も持つ |
 
 mod capabilities;
@@ -25,6 +27,8 @@ mod controls;
 mod convert;
 mod fake;
 mod fake_stream;
+mod passthrough_output;
+mod pin_feed;
 mod resample;
 mod sample;
 mod stream;
@@ -40,9 +44,12 @@ pub use capabilities::{
     nearest_channels, nearest_sample_rate, query_capabilities, selectable_channels,
     selectable_sample_rates, AudioCapabilities, ChoiceSource,
 };
-pub use capture::{AudioCapture, PassthroughRequest};
+pub use capture::{AudioCapture, PassthroughInput, PassthroughRequest};
 pub use controls::AudioControls;
 pub use fake::{FakeAudioCapture, FakeAudioOptions};
+pub use pin_feed::{
+    AudioPinFeed, AudioPinState, PinConnection, PinFailure, PinFormat, PinSampleType,
+};
 pub(crate) use resample::decide_resample_correction;
 pub use resample::{ResampleStatus, ResampleTelemetry};
 // 録画スレッド（`crate::recording`）が録画用に 1 つ持つ変換器と、16bit PCM への変換
@@ -73,6 +80,33 @@ pub struct ActiveAudio {
     /// 出力のサンプリングレート（Hz）とチャンネル数
     pub output_sample_rate: u32,
     pub output_channels: u16,
+    /// 入力の経路。WASAPI のデバイスか、映像デバイスの音声ピンか
+    pub input_route: AudioInputRoute,
+    /// 音声ピンの塊の長さに合わせてリングバッファを広げたときの内訳。
+    /// 設定のまま開いたときは `None`
+    pub widened_buffer: Option<WidenedBuffer>,
+}
+
+/// 音声の入力の経路。「接続状態」タブの入力の欄と、ワーカーの開き直しの判定に使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudioInputRoute {
+    /// WASAPI の入力デバイス（cpal の入力ストリーム）
+    #[default]
+    Device,
+    /// 映像デバイスの音声ピン。`graph` は差し込んだグラフの番号
+    /// （`AudioPinFeed::begin_graph`）で、映像を開き直すと映像側の番号と食い違う
+    VideoPin { graph: u64 },
+}
+
+/// 音声ピンの塊が長くてリングバッファを広げたときの内訳（すべて ms）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WidenedBuffer {
+    /// 設定のバッファ長
+    pub configured_ms: u32,
+    /// 実際に開いた長さ
+    pub actual_ms: u32,
+    /// 音声ピンの 1 塊の長さ
+    pub chunk_ms: u32,
 }
 
 impl ActiveAudio {
@@ -157,6 +191,9 @@ pub enum AudioError {
         direction: AudioDirection,
         source: String,
     },
+    /// 入力が映像デバイスの音声ピンなのに、指定のグラフの音声ピンが繋がっていない。
+    /// ワーカーは繋がっているのを確かめてから開くので、ふつうは起きない
+    VideoPinUnavailable,
 }
 
 impl fmt::Display for AudioError {
@@ -186,6 +223,7 @@ impl fmt::Display for AudioError {
             AudioError::StreamPlayFailed { direction, source } => {
                 i18n::audio_stream_play_failed(direction.label(), source)
             }
+            AudioError::VideoPinUnavailable => Text::AudioPinUnavailable.get().to_string(),
         };
         f.write_str(&text)
     }
@@ -303,6 +341,7 @@ mod tests {
                 direction: AudioDirection::Output,
                 source: "busy".to_string(),
             },
+            AudioError::VideoPinUnavailable,
         ];
 
         for error in all {

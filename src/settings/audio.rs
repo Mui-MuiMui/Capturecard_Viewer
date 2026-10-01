@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioSettings {
+    // 入力の種類。WASAPI のデバイス（既定）か、DirectShow で開いた映像デバイスの
+    // 音声ピンか（#388）。"video_pin" の間は input_device_name を使わないが消さない
+    // （WASAPI のデバイスへ戻したときに前の選択を戻すため）。
+    // 知らない値が書かれていても設定全体を失わせない（deserialize_input_source）
+    #[serde(deserialize_with = "deserialize_input_source")]
+    pub input_source: AudioInputSource,
     pub input_device_name: Option<String>,
     pub output_device_name: Option<String>,
     // 以下 2 項目は「希望値」。実際に開く値はデバイスの能力に合わせて
@@ -73,9 +79,52 @@ where
     Ok(clamped as u32)
 }
 
+// 音声の入力の種類。設定ファイルには input_source = "device" / "video_pin" と
+// 書かれる。**一度出した名前は変えない**（設定に残る識別子。`HotkeyAction::as_str` と
+// 同じ理由）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum AudioInputSource {
+    // WASAPI の入力デバイス（input_device_name）。キーの無い既存の設定ファイルもこれ
+    #[default]
+    #[serde(rename = "device")]
+    Device,
+    // DirectShow で開いた映像デバイスの音声ピン。映像を DirectShow で開いたとき
+    // だけ鳴る（docs/design/directshow-audio.md）
+    #[serde(rename = "video_pin")]
+    VideoPin,
+}
+
+// 設定ファイルの input_source に知らない値が書かれていても、設定全体を
+// 失わせない。映像の開き方（deserialize_video_backend）と同じ考え方で、
+// 今までどおり WASAPI の入力として扱う
+fn deserialize_input_source<'de, D>(deserializer: D) -> Result<AudioInputSource, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(input_source_from_str(&raw).unwrap_or_else(|| {
+        warn!(
+            "設定の音声の入力の種類 \"{}\" を解釈できないので device として扱う",
+            raw
+        );
+        AudioInputSource::default()
+    }))
+}
+
+// 設定ファイルに書かれた文字列から入力の種類を決める。解釈できない場合は None。
+// 手書きされることを見込んで、大文字小文字と前後の空白は問わない
+fn input_source_from_str(raw: &str) -> Option<AudioInputSource> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "device" => Some(AudioInputSource::Device),
+        "video_pin" => Some(AudioInputSource::VideoPin),
+        _ => None,
+    }
+}
+
 impl Default for AudioSettings {
     fn default() -> Self {
         Self {
+            input_source: AudioInputSource::Device,
             input_device_name: None,
             output_device_name: None,
             sample_rate: Some(DEFAULT_SAMPLE_RATE),
@@ -137,6 +186,59 @@ mod tests {
 
         assert_eq!(settings.audio.buffer_ms, MIN_BUFFER_MS);
         assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_input_source_survives_a_save_and_load_roundtrip() {
+        // FULL_CONFIG は既定値（device）と違う video_pin を書いてある
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("テスト用の設定を読めること");
+        assert_eq!(settings.audio.input_source, AudioInputSource::VideoPin);
+        // video_pin の間も、WASAPI のデバイスの選択は残っている
+        assert_eq!(settings.audio.input_device_name.as_deref(), Some("Line In"));
+
+        let written = toml::to_string(&settings).expect("設定を書き出せること");
+        assert!(
+            written.contains("input_source = \"video_pin\""),
+            "設定ファイル上の名前で書かれていない: {written}"
+        );
+        let restored: AppSettings = toml::from_str(&written).expect("書き出した設定を読めること");
+        assert_eq!(restored.audio.input_source, AudioInputSource::VideoPin);
+    }
+
+    #[test]
+    fn app_settings_missing_input_source_is_device() {
+        // input_source を足す前の版が書いた設定ファイル。今までどおり WASAPI の入力で開く
+        let config = without_key(FULL_CONFIG, "input_source");
+        let settings: AppSettings = toml::from_str(&config).expect("欠けていても読める");
+        assert_eq!(settings.audio.input_source, AudioInputSource::Device);
+        assert_eq!(settings.audio.buffer_ms, 120);
+    }
+
+    #[test]
+    fn app_settings_unknown_input_source_is_device_without_losing_settings() {
+        let config = FULL_CONFIG.replace(
+            "input_source = \"video_pin\"",
+            "input_source = \"hdmi_magic\"",
+        );
+        let settings: AppSettings = toml::from_str(&config).expect("知らない値でも読める");
+        assert_eq!(settings.audio.input_source, AudioInputSource::Device);
+        assert_eq!(settings.audio.channels, Some(1));
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn input_source_from_str_accepts_the_written_names_loosely() {
+        assert_eq!(
+            input_source_from_str("device"),
+            Some(AudioInputSource::Device)
+        );
+        assert_eq!(
+            input_source_from_str(" Video_Pin "),
+            Some(AudioInputSource::VideoPin)
+        );
+        assert_eq!(input_source_from_str(""), None);
+        assert_eq!(input_source_from_str("wasapi"), None);
     }
 
     #[test]

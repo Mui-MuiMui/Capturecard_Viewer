@@ -12,10 +12,12 @@ use super::monitor::{
     decide_audio_reconnect, default_audio_device_changed, should_poll_default_audio_device,
     AudioErrorAction,
 };
+use super::monitor_audio_pin::{decide_pin_readiness, should_resync_pin_audio};
 use super::worker::DeviceEvent;
 use super::worker_loop::WorkerState;
 use crate::audio::{self, AudioDirection};
 use crate::i18n;
+use crate::settings::AudioInputSource;
 use log::{debug, info, warn};
 use std::time::{Duration, Instant};
 
@@ -37,6 +39,11 @@ const RESAMPLE_WARN_INTERVAL: Duration = Duration::from_secs(30);
 /// 吸収できる。それでもここまで外れるのは、デバイス側の極端なドリフトや
 /// バッファ長そのものが実情に合っていない可能性がある
 const RESAMPLE_WARN_RELATIVE_ERROR: f64 = 0.5;
+
+/// 音声の観測値をデバッグログへ出す間隔。「接続状態」タブを開かなくても、
+/// アンダーランや捨てたフレームが増え続けていないかをログで追えるようにする
+/// （#388 の実機確認。`device-debug` skill のログの読み方とも揃う）
+const AUDIO_COUNTERS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 impl WorkerState {
     /// 音声のクロックドリフト補正。水位を見て、レート比の補正係数を
@@ -107,6 +114,66 @@ impl WorkerState {
                 water_level, target_level
             );
         }
+    }
+
+    /// 開いている音声の観測値（アンダーラン・捨てたフレーム・入力の取りこぼし・
+    /// 水位）を `AUDIO_COUNTERS_LOG_INTERVAL` ごとにデバッグログへ出す。
+    /// 開いていなければ何もしない。数は開き直すと 0 から数え直す。
+    pub(super) fn log_audio_counters(&mut self, now: Instant) {
+        let Some(active) = self.audio.active() else {
+            return;
+        };
+        let due = self
+            .last_audio_counters_log
+            .is_none_or(|last| now.saturating_duration_since(last) >= AUDIO_COUNTERS_LOG_INTERVAL);
+        if !due {
+            return;
+        }
+        self.last_audio_counters_log = Some(now);
+        let resample = self.audio.resample_status();
+        debug!(
+            "音声の観測値（入力の経路: {:?}）: アンダーラン {:?} 回、捨てたフレーム {:?}、入力の取りこぼし {:?} 回、水位 {:?} / 目標 {:?}、補正 {:?}",
+            active.input_route,
+            self.audio.underrun_count(),
+            self.audio.dropped_frame_count(),
+            self.audio.xrun_count(),
+            resample.map(|status| status.water_level),
+            resample.map(|status| status.target_level),
+            resample.map(|status| status.ratio)
+        );
+    }
+
+    /// 入力が映像デバイスの音声ピンのとき、映像の音声ピンの番号と音声が差し込んで
+    /// いる番号を比べ、違えば音声を開き直す要求を立てる（#388）。
+    ///
+    /// **映像を開き直す経路（切断からの再接続、設定の変更、右クリックの再接続、
+    /// #387 の自動の倒し込み）をここ 1 か所で拾う。** `try_connect_video` の成功の
+    /// 枝に書き足さないのはこのため。音声のストリームのエラーとして知らせる経路も
+    /// 使わない（5 秒の下限に掛かり、映像を開き直すたびに音が 5 秒戻らなくなる）。
+    /// 判定は `monitor_audio_pin::should_resync_pin_audio`。
+    pub(super) fn monitor_audio_pin(&mut self) {
+        let Some(config) = self.config.clone() else {
+            return;
+        };
+        if config.audio.5 != AudioInputSource::VideoPin {
+            return;
+        }
+        let readiness = decide_pin_readiness(self.video.active().as_ref());
+        let audio_route = self.audio.active().map(|active| active.input_route);
+        if !should_resync_pin_audio(
+            &readiness,
+            audio_route,
+            self.audio_pin_wait.as_ref(),
+            self.audio_retry.is_active(),
+        ) {
+            return;
+        }
+        info!(
+            "映像デバイスの音声ピンの状態が変わったので、音声を開き直す（音声: {:?}、映像: {:?}）",
+            audio_route, readiness
+        );
+        self.last_audio_target = None;
+        self.audio_retry.request_now(config.audio);
     }
 
     /// 音声ストリームのエラーを拾って、必要なら開き直す。

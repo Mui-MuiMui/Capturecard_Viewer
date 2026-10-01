@@ -30,7 +30,7 @@ flowchart LR
 | 色空間・レンジ・明るさ・コントラスト・彩度 | `Arc<video::SharedColorConversion>`（Atomic） | UI スレッドが書き、フレームコールバックが読む |
 | 音量・ミュート・パススルー | `Arc<audio::AudioControls>`（Atomic） | UI スレッドが書き、出力コールバックが読む |
 
-**ワーカーの内側で閉じる共有は数に入れない。** 音声のリサンプル補正の水位・補正係数（`Arc<audio::ResampleTelemetry>`、Atomic）は、`AudioCapture` がストリームを開くたびに作り、出力コールバックが水位（直近の値と観測の窓）を書き、デバイスワーカーが `tick` の中で窓を読み出して補正係数を書く。UI へは `DeviceSnapshot` の `audio_resample` に写して渡す。**入出力の形が揃っているストリームでも作る**（#308。`AudioCapture::resample_telemetry()` が `None` を返すのは音声を開いていないときだけ。理由は `docs/design/audio.md` の「クロックドリフトは揃っている組み合わせでも補正する」）。フレームが届いたことを UI へ知らせる `RepaintWaker` も `BackendShared` に載るが、値を運ばず起こすだけの窓口なので数えない。
+**ワーカーの内側で閉じる共有は数に入れない。** 音声のリサンプル補正の水位・補正係数（`Arc<audio::ResampleTelemetry>`、Atomic）は、`AudioCapture` がストリームを開くたびに作り、出力コールバックが水位（直近の値と観測の窓）を書き、デバイスワーカーが `tick` の中で窓を読み出して補正係数を書く。UI へは `DeviceSnapshot` の `audio_resample` に写して渡す。**入出力の形が揃っているストリームでも作る**（#308。`AudioCapture::resample_telemetry()` が `None` を返すのは音声を開いていないときだけ。理由は `docs/design/audio.md` の「クロックドリフトは揃っている組み合わせでも補正する」）。フレームが届いたことを UI へ知らせる `RepaintWaker` も `BackendShared` に載るが、値を運ばず起こすだけの窓口なので数えない。DirectShow の映像デバイスの音声ピンと `AudioCapture` をつなぐ `audio::AudioPinFeed`（#388、下の「音声ピン」）も同じくワーカーの内側で閉じる共有で、`SystemBackends::create` が 1 つ作って映像と音声のバックエンドへ複製を渡す。UI スレッドは触らないので数えない。
 
 **映像フレームを `DeviceEvent` で送らないこと。** 接続やデバイス列挙の後ろで待たされ、遅延が増える。
 
@@ -87,8 +87,8 @@ flowchart LR
 | 実装 | 開くたびに作り直すもの | 開き直しても引き継ぐもの |
 |---|---|---|
 | `VideoCapture`（`src/video/capture.rs`） | `camera`（`CallbackCamera`）、`active` | `frames`、`color_conversion`、`repaint_waker` |
-| `DirectShowCapture`（`src/video/directshow/mod.rs`） | `graph`（`CaptureGraph`。フィルターグラフとレンダラー）、`active` | `frames`、`color_conversion`、`repaint_waker`、COM の初期化 |
-| `AudioCapture`（`src/audio/capture.rs`） | `input_stream` / `output_stream`、`active`、`resample_telemetry`、`stream_error`、`underruns` | `host`、`controls` |
+| `DirectShowCapture`（`src/video/directshow/mod.rs`） | `graph`（`CaptureGraph`。フィルターグラフと映像・音声のレンダラー）、`active`、`AudioPinFeed` に配るグラフの番号 | `frames`、`color_conversion`、`repaint_waker`、`pin_feed`、COM の初期化 |
+| `AudioCapture`（`src/audio/capture.rs`） | `input_stream`（入力が音声ピンなら無し）/ `output_stream`、`active`、`resample_telemetry`、`counters`（`StreamCounters`。エラーの旗・アンダーラン・捨てたフレーム・取りこぼしの数え手）、音声ピンの差し込み先（開くたびに `AudioPinFeed` へ差し込み、閉じるたびに抜く） | `host`、`controls`、`tap`、`pin_feed` |
 
 ハンドル型にするとは、左の列を別の型へ出して `start_*` の戻り値にし、閉じるのをその値の drop に任せる形のこと。#102 でこの形を採らなかった理由は「`src/video.rs`（当時 2,451 行）の中身を動かさないと切り出せない」だった。#197 で `src/video/` / `src/audio/` に分けたあとは、左の列はどちらも `capture.rs` 1 ファイルに収まっている。切り出しは `capture.rs` と `backend/` とワーカーの中で済むので、この理由はもう当たらない。
 
@@ -108,7 +108,9 @@ flowchart LR
 | `src/video/directshow/mod.rs` | `DirectShowCapture`。`VideoCapture` と同じ窓口（列挙・能力・開く・閉じる・観測）と、表示名の「(DirectShow)」の付け外し |
 | `src/video/directshow/devices.rs` | 列挙（`ICreateDevEnum` の `CLSID_VideoInputDeviceCategory`、表示名は `IPropertyBag` の `FriendlyName`）、対応形式（`IAMStreamConfig::GetStreamCaps`）、開く形式の選び方（`choose_candidate`、純粋関数） |
 | `src/video/directshow/graph.rs` | `CaptureGraph`。`IGraphBuilder` / `ICaptureGraphBuilder2` の組み立て、`SetFormat`、`RenderStream`、`Run`、`Stop` と破棄。グラフのイベント（`IMediaEventEx`）を待たずに読み、デバイスの喪失を拾う（`poll_device_lost`） |
-| `src/video/directshow/filter.rs` | サンプルを受ける自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`、`windows` クレートの `#[implement]`） |
+| `src/video/directshow/filter.rs` | サンプルを受ける自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`、`windows` クレートの `#[implement]`）。媒体を問わず、受け取る形式の判定と渡し先だけを映像（`video_stream.rs`）と音声（`audio_pin.rs`）で分ける |
+| `src/video/directshow/video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
+| `src/video/directshow/audio_pin.rs` | 音声ピン（#388）。有無の記録、10ms の塊の提案と接続、`Run` が通らないときに外してやり直す、受け取った PCM を `AudioPinFeed` へ渡す |
 | `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
 | `src/app/backend/system.rs` | `SystemVideo`。Media Foundation と DirectShow を 1 つの `VideoBackend` に束ねる |
 
@@ -164,6 +166,17 @@ flowchart LR
 **MJPEG の展開に nokhwa のデコーダ（mozjpeg）は使わない。** mozjpeg は壊れたデータを panic で知らせて内部で `catch_unwind` するが、release は `panic = "abort"` なので（`docs/design/logging.md`）そのままプロセスが落ちる。キャプチャーの MJPEG は途中で欠けたフレームが混ざりうるので、エラーを値で返す `image` クレートの JPEG デコーダを使い、壊れたフレームは捨てて初回だけ記録する。
 
 開く形式の選び方（`choose_candidate`）は、指定された形式がデバイスにあればその形式の中から、解像度が一致するもの → 画素数が近いもの → 形式が未指定なら YUY2・NV12・I420・YV12・MJPEG・RGB24 の順 → fps が近いもの。解像度が未指定なら Media Foundation の経路と同じく 1280x720 60fps を求め、fps は 15〜120 へ丸める。**Media Foundation の経路と違い、MJPEG / RGB24 を選べばその形式で開く**（`docs/design/video-pipeline.md` の「UI にあるが動作していない設定がある」）。
+
+#### 音声ピン（#388）
+
+WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の音は、映像フィルターが映像ピンと並べて持つ**音声ピン**から取る。設計の全体は `docs/design/directshow-audio.md`。ここにはワーカーとバックエンドの側の要点だけを置く。
+
+- **繋ぐのは `[audio] input_source = "video_pin"` のときだけ。** `VideoTarget` の 6 つ目（音声ピンを繋ぐか）として `CaptureRequest::connect_audio_pin` で渡す。繋がないときも音声ピンの有無は `FindPin` で調べ、`ActiveVideo::audio_pin`（`AudioPinState`）に残す。入力の種類を切り替えると映像も 1 度開き直す
+- グラフには**レンダラーを 2 つ入れる**（映像用と音声用。同じ型の別のインスタンス）。音声ピンの `Receive` は `AudioPinFeed::push` で `process_input_iter` を呼び、リングより後ろは WASAPI の入力と同じ経路を通る
+- **どこで失敗しても映像は止めない。** 繋げなければ音声のレンダラーを外して `AudioPinState::Failed` を残す。繋いだせいで `Run` が通らなければ、音声のレンダラーを外して 1 度だけやり直す
+- `AudioPinFeed` はグラフごとに番号を配る（`begin_graph`）。`Receive` は自分のグラフの番号と差し込み先の番号が合うときだけ積むので、映像を開き直したあとに古いグラフが積むことはない
+- ワーカーは**音声ピンが使えないとき開かずに待つ**（`hold_audio_for_pin`。#304 の `hold_audio_without_input` と同じ形）。**映像を開き直したら音声も開き直す。** 要求を立てるのは `tick` の監視（`worker_audio_timers::monitor_audio_pin`。判定は `monitor_audio_pin.rs` の純粋関数）で、映像の音声ピンの番号と音声が差し込んでいる番号を比べる。理由は `docs/design/reconnect.md` の「映像の開き直しに合わせて音声も開き直す（音声ピン）」
+- trait に「音声ピンを問い合わせる」メソッドは足さない。観測値の 1 項目（`ActiveVideo::audio_pin` / `ActiveAudio::input_route`）にしてあり、モックはそれを返すだけで「待つ / 開く / 映像の開き直しで開き直す」を CI に載せている（`worker_audio_connect.rs` のテスト）。フェイクの音声ピンは第 2 段
 
 #### DirectShow では確かめていないもの
 

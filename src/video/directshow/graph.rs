@@ -12,8 +12,11 @@
 //! 3. キャプチャーピンの `IAMStreamConfig` に、選んだ形式を `SetFormat` する
 //! 4. 自前のレンダラーを入れ、`RenderStream` で繋ぐ（直接繋がらなければ
 //!    DirectShow が間に変換フィルターを挟む）
-//! 5. グラフの基準時計を外し（届いたサンプルを待たせずに渡させるため）、
-//!    `IMediaControl::Run` で動かす
+//! 5. グラフの基準時計を外す（届いたサンプルを待たせずに渡させるため）
+//! 6. 音声ピンの有無を記録し、繋ぐ指定があれば音声のレンダラーへ繋ぐ
+//!    （`audio_pin.rs`、#388。失敗しても映像は止めない）
+//! 7. `IMediaControl::Run` で動かす（音声を繋いだせいで通らなければ、音声を
+//!    外して 1 度だけやり直す）
 //!
 //! 動かしたあとは、グラフが積むイベント（`IMediaEventEx`）をワーカーの
 //! 監視の周期で読み（`CaptureGraph::poll_device_lost`）、デバイスが消えた
@@ -36,6 +39,7 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 
+use super::audio_pin::{self, AttachedAudio, AudioPinRequest, PinOutcome};
 use super::devices::{self, choose_candidate, target_resolution, DeviceEntry, StreamCandidate};
 use super::filter::Renderer;
 use super::media_type::{
@@ -105,6 +109,8 @@ pub(super) struct CaptureGraph {
     device_lost: Cell<bool>,
     source: IBaseFilter,
     renderer: Renderer,
+    /// 音声ピンの結果と、繋いでいれば音声のレンダラー（#388）
+    audio: AttachedAudio,
     /// 上流と接続できた形式
     pub(super) format: SampleFormat,
     /// 要求した fps（`SetFormat` に使った値。使えなかったら接続した形式の値）
@@ -228,6 +234,7 @@ impl CaptureGraph {
         entry: &DeviceEntry,
         request: FormatRequest<'_>,
         sink: FrameSink,
+        audio: AudioPinRequest<'_>,
     ) -> Result<Self, GraphError> {
         let bind_start = Instant::now();
         let source = devices::bind_filter(entry).map_err(GraphError::Open)?;
@@ -245,13 +252,13 @@ impl CaptureGraph {
         }
 
         let connect_start = Instant::now();
-        let renderer = Renderer::new(sink);
+        let renderer = Renderer::video(sink);
         let built = Self::connect(&graph, &builder, &source, &renderer);
         if let Err(e) = built {
             Self::tear_down(&graph, &source, &renderer.filter);
             return Err(GraphError::Stream(e));
         }
-        let Some(format) = renderer.connected_format() else {
+        let Some(format) = renderer.connected_video_format() else {
             Self::tear_down(&graph, &source, &renderer.filter);
             return Err(GraphError::Stream(windows::core::Error::from_hresult(
                 windows::Win32::Media::DirectShow::VFW_E_NOT_CONNECTED,
@@ -267,9 +274,11 @@ impl CaptureGraph {
                 return Err(GraphError::Stream(e));
             }
         };
-        // Run は状態の遷移が済む前に S_FALSE で戻ることがある。失敗だけを見る
-        if let Err(e) = unsafe { control.Run() } {
+        // 音声ピンは映像を繋いだあと・Run の前に扱う。失敗しても映像は止めない
+        let mut audio = audio_pin::attach(&graph, &builder, &source, audio);
+        if let Err(e) = audio_pin::run_with_fallback(&graph, &control, &mut audio) {
             let _ = unsafe { control.Stop() };
+            Self::remove_audio(&graph, &mut audio);
             Self::tear_down(&graph, &source, &renderer.filter);
             return Err(GraphError::Stream(e));
         }
@@ -300,6 +309,7 @@ impl CaptureGraph {
             device_lost: Cell::new(false),
             source,
             renderer,
+            audio,
             format,
             requested_fps,
         })
@@ -358,6 +368,16 @@ impl CaptureGraph {
     fn tear_down(graph: &IGraphBuilder, source: &IBaseFilter, renderer: &IBaseFilter) {
         let _ = unsafe { graph.RemoveFilter(renderer) };
         let _ = unsafe { graph.RemoveFilter(source) };
+    }
+
+    /// 音声のレンダラーを入れていれば、音声ピンからの鎖ごと外す。`tear_down` の前に呼ぶ。
+    fn remove_audio(graph: &IGraphBuilder, audio: &mut AttachedAudio) {
+        audio_pin::detach(graph, audio);
+    }
+
+    /// グラフを組んだときの音声ピンの結果（`ActiveVideo::audio_pin` の材料）。
+    pub(super) fn audio_pin(&self) -> &PinOutcome {
+        &self.audio.outcome
     }
 
     /// 開いている形式の名前（`ActiveVideo::format` に入れる）。
@@ -421,6 +441,7 @@ impl Drop for CaptureGraph {
                 e
             ),
         }
+        Self::remove_audio(&self.graph, &mut self.audio);
         Self::tear_down(&self.graph, &self.source, &self.renderer.filter);
     }
 }

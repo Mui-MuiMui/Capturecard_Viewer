@@ -25,9 +25,12 @@ impl WorkerState {
         // 失敗が節目に届いた回もその場で判定できる
         self.log_device_enumeration();
         self.monitor_video_link();
+        // 映像の途絶を見たあとに置く。映像を閉じた回に、音声ピンの音声も同じ回で閉じる
+        self.monitor_audio_pin();
         self.monitor_audio_stream(now);
         self.poll_default_audio_device(now);
         self.adjust_resample_correction(now);
+        self.log_audio_counters(now);
     }
 
     /// 期限が来ているデバイスの接続を 1 回だけ試す。

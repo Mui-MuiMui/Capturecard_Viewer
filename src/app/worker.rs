@@ -25,7 +25,7 @@ use crate::audio::{
     ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, AudioTap, ResampleStatus,
 };
 use crate::repaint::RepaintWaker;
-use crate::settings::{AppSettings, VideoBackendSetting};
+use crate::settings::{AppSettings, AudioInputSource, VideoBackendSetting};
 use crate::video::{ActiveVideo, DeviceCapabilities, SharedColorConversion, VideoFrames};
 use log::{debug, warn};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -33,29 +33,35 @@ use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 
 /// 映像の接続対象。これが変わったらバックオフを捨てて即座に開き直す。
-/// `(デバイス名, 解像度, フォーマット, fps, 開き方)`
+/// `(デバイス名, 解像度, フォーマット, fps, 開き方, 音声ピンを繋ぐか)`
 ///
 /// 開き方（`video.backend`）を含めてあるのは、同じデバイスでも経路が
-/// 変われば開き直しが要るため（#237）
+/// 変われば開き直しが要るため（#237）。音声ピンを繋ぐか（`[audio] input_source`
+/// が `video_pin` か、#388）も同じで、繋ぐかどうかはグラフを組むときにしか
+/// 決まらない。入力の種類を切り替えると映像も 1 度開き直す
+/// （`docs/design/directshow-audio.md` の「音声ピンをいつ繋ぐか」）
 pub(super) type VideoTarget = (
     Option<String>,
     Option<(u32, u32)>,
     Option<String>,
     Option<u32>,
     VideoBackendSetting,
+    bool,
 );
 
 /// 音声の接続対象。
-/// `(入力デバイス名, 出力デバイス名, サンプリングレート, チャンネル数, バッファ長 ms)`
+/// `(入力デバイス名, 出力デバイス名, サンプリングレート, チャンネル数, バッファ長 ms, 入力の種類)`
 ///
 /// バッファ長を含めてあるのは、リングバッファの長さがストリームを開くときに
-/// しか決まらないため。設定ダイアログで変えたら音声だけを開き直す
+/// しか決まらないため。設定ダイアログで変えたら音声だけを開き直す。
+/// 入力の種類（#388）が `VideoPin` の間は、入力デバイス名とレート・チャンネル数を使わない
 pub(super) type AudioTarget = (
     Option<String>,
     Option<String>,
     Option<u32>,
     Option<u16>,
     u32,
+    AudioInputSource,
 );
 
 /// ワーカーがデバイスを開くために要る設定。
@@ -81,6 +87,7 @@ impl DeviceConfig {
                 settings.video.format.clone(),
                 settings.video.fps,
                 settings.video.backend,
+                settings.audio.input_source == AudioInputSource::VideoPin,
             ),
             audio: (
                 settings.audio.input_device_name.clone(),
@@ -88,6 +95,7 @@ impl DeviceConfig {
                 settings.audio.sample_rate,
                 settings.audio.channels,
                 settings.audio.buffer_ms,
+                settings.audio.input_source,
             ),
             auto_reconnect: settings.video.auto_reconnect,
         }

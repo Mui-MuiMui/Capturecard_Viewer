@@ -23,7 +23,7 @@ const RESAMPLE_MAX_CORRECTION: f32 = 0.001;
 ///
 /// 別々の Atomic にすると、デバイスワーカーが読み出す間に出力コールバックが
 /// 片方だけ足し、平均がずれる。1 語にまとめれば読み出し（`swap`）も
-/// 足し込み（`fetch_update` / `fetch_or`）も 1 回の不可分操作で済む。
+/// 足し込み（比較と交換の繰り返し / `fetch_or`）も 1 回の不可分操作で済む。
 ///
 /// 40 ビットは 1 兆サンプル強。192kHz 8ch の 200ms（容量 400ms、61 万サンプル）を
 /// 3 秒間（約 300 回）足しても 2 億に届かない。23 ビットの回数は 10ms ごとの
@@ -186,16 +186,25 @@ impl ResampleTelemetry {
 
     /// 出力コールバックが呼ぶ。観測の窓へ水位を 1 回足す。
     ///
-    /// `fetch_update` は比較と交換の繰り返しで、ロックもアロケーションもしない
-    /// （アンダーランの数え方と同じ）。上限に届いた窓には足さない。
+    /// 比較と交換（`compare_exchange_weak`）の繰り返しで、ロックもアロケーションも
+    /// しない（アンダーランの数え方 `stream::update_u32` と同じ。標準の `fetch_update` を
+    /// 使わない理由もそちら）。上限に届いた窓には足さない。
     pub(super) fn add_to_window(&self, level: usize) {
-        let _ = self
-            .window
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |packed| {
-                WaterLevelWindow::from_packed(packed)
-                    .with_observation(level)
-                    .map(WaterLevelWindow::to_packed)
-            });
+        let mut packed = self.window.load(Ordering::Relaxed);
+        while let Some(next) = WaterLevelWindow::from_packed(packed)
+            .with_observation(level)
+            .map(WaterLevelWindow::to_packed)
+        {
+            match self.window.compare_exchange_weak(
+                packed,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(actual) => packed = actual,
+            }
+        }
     }
 
     /// 出力コールバックが呼ぶ。この窓の間にアンダーランが起きたことを印す

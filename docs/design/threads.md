@@ -12,7 +12,8 @@
 | デバイスワーカー（`device-worker`） | 1 | デバイスを開く・閉じる・列挙する・能力を問い合わせる。接続の再試行と切断の監視のタイマーもここ |
 | nokhwa のフレームコールバック | 1（キャプチャ中） | nokhwa が作る。YUY2→RGB 変換と `FrameBuffer` への格納（本体は `video/frame_sink.rs` の `FrameSink`） |
 | DirectShow のストリーミングスレッド | 1（「(DirectShow)」のデバイスをキャプチャ中） | 上流のフィルターが作る。上の行の代わりに立ち、自前のレンダラーの `IMemInputPin::Receive` から同じ `FrameSink` へ渡す。ロックもアロケーションもしない（`docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」） |
-| cpal の入力コールバック／出力コールバック | 各 1（再生中） | cpal が作る。リングバッファの読み書き |
+| DirectShow の音声ピンのストリーミングスレッド | 1（入力が映像デバイスの音声ピンで、DirectShow で開いている間。映像ピンと同じスレッドのこともある） | キャプチャーフィルターが音声ピンのために作る（#388）。cpal の入力コールバックの代わりに立ち、音声のレンダラーの `Receive` から `AudioPinFeed::push` で `process_input_iter` を呼ぶ。ロックは `try_lock` だけで待たず、アロケーションもしない。受け取れないときも失敗を返さない。**デバイスに触る使い捨てのスレッドには当たらない**（作るのはフィルター。`docs/design/directshow-audio.md`） |
+| cpal の入力コールバック／出力コールバック | 各 1（再生中） | cpal が作る。リングバッファの読み書き。入力が音声ピンのときは出力だけ |
 | フェイクの映像生成（`fake-video`） / 音声入力・出力（`fake-audio-in` / `fake-audio-out`） | 映像 1、音声 各 1（開いている間） | 環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` で起動したときだけ、上の 2 行の代わりに立つ。ワーカーが開くときに起こし、閉じるときに join する（`docs/design/device-worker.md` の「フェイクデバイス（#142）」） |
 | ホットキーリスナー | 1 | `HotkeyManager::new` で起動し、`Drop` で join する。低レベルキーボードフックを持ち、そのメッセージループを回す |
 | 効果音再生 | 再生ごと | rodio による再生。出力先を開けたかを mpsc で UI スレッドへ返す（ログは出さない） |
@@ -65,6 +66,7 @@
 | `screenshot_manager` | `Arc<Mutex<ScreenshotManager>>` | 実質 UI スレッドだけ（撮影時は音の `Arc` を複製するだけで離し、再生スレッドはロックの外で起こす） |
 | `frames` | `video::VideoFrames`（内部が `Arc<Mutex<FrameBuffer>>`） | フレームコールバックスレッド ⇄ UI スレッド ⇄ ワーカー |
 | 録画の差し込み口 | `video::VideoTap`（`VideoFrames` の隣。内部が `Mutex<Option<Producer>>`） | フレームコールバックスレッド（`try_lock` だけで待たない）⇄ 録画スレッド（差し込み・抜き取りの瞬間だけ待つ）。他のロックと重ねて取らない |
+| 音声ピンの差し込み先 | `audio::AudioPinFeed`（内部が `Mutex<Option<PinSink>>`。繋いだ音声ピンの記録は別の `Mutex`） | 音声ピンのストリーミングスレッド（`try_lock` だけで待たない。中でパススルーのリングと `AudioTap` を `try_lock` するが、どれも待たないので順序の問題にならない）⇄ デバイスワーカー（差し込み・抜き取りの瞬間だけ待つ。繋いだ音声ピンの記録を読み書きするのもワーカーだけ）（#388） |
 | 録画の音声の差し込み口 | `audio::AudioTap`（内部が `Mutex<Option<Producer>>`） | 入力コールバックスレッド（`try_lock` だけで待たない。パススルーのリングバッファの `try_lock` と同じコールバックの中で取るが、どちらも待たないので順序の問題にならない）⇄ 録画スレッド（差し込み・抜き取りの瞬間だけ待つ）。他のロックと重ねて取らない |
 
 - `VideoCapture` / `AudioCapture` はワーカースレッドが所有していて `Mutex` が無い。**UI スレッドからは触れない**

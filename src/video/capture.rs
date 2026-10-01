@@ -17,6 +17,7 @@ use super::color::SharedColorConversion;
 use super::frame_buffer::VideoFrames;
 use super::frame_sink::{FirstTimeOnly, FrameSink};
 use super::{elapsed_ms, VideoError};
+use crate::audio::AudioPinState;
 use crate::i18n::{self, Text};
 use crate::repaint::RepaintWaker;
 
@@ -85,6 +86,9 @@ pub struct ActiveVideo {
     pub format: Option<String>,
     /// 要求したフレームレート
     pub requested_fps: u32,
+    /// 映像デバイスの音声ピンの状態（#388）。DirectShow で開いたときだけ意味を持ち、
+    /// それ以外は `NotApplicable`。ワーカーは音声を開くか待つかをこれで決める
+    pub audio_pin: AudioPinState,
 }
 
 /// 映像ストリームを開いた経路。
@@ -406,6 +410,8 @@ impl VideoCapture {
             resolution: actual_resolution,
             format: actual_format_name,
             requested_fps,
+            // Media Foundation で開いた映像には音声ピンが無い
+            audio_pin: AudioPinState::NotApplicable,
         });
 
         Ok(())

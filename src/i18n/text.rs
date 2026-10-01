@@ -77,6 +77,13 @@ texts! {
     VideoDeviceNotSelected { ja: "映像デバイスが選ばれていません。「デバイス設定」タブで選んでください", en: "No video device is selected. Choose one in the Devices tab" },
     // ワーカーが入力の未指定で音声を開かないときの理由（app/worker_connect.rs、#304）
     AudioInputNotSelected { ja: "オーディオ入力デバイスが選ばれていません。「デバイス設定」タブで選んでください", en: "No audio input device is selected. Choose one in the Devices tab" },
+    // 入力が映像デバイスの音声ピンなのに使えず、音声を開かずに待つ理由（app/monitor_audio_pin.rs、#388）
+    AudioPinVideoNotOpen { ja: "映像デバイスが開いていないので、映像デバイスの音声は使えません", en: "The video device is not open, so its audio cannot be used" },
+    AudioPinMediaFoundation { ja: "Media Foundation で開いた映像には音声ピンがありません。「デバイス設定」タブで映像の開き方を DirectShow にすると使えます", en: "Video opened with Media Foundation has no audio pin. Set the video backend to DirectShow in the Devices tab to use it" },
+    AudioPinMissing { ja: "この映像デバイスには音声ピンがありません", en: "This video device has no audio pin" },
+    AudioPinNotConnected { ja: "映像デバイスの音声ピンを繋ぐために、映像デバイスを開き直すのを待っています", en: "Waiting for the video device to reopen with its audio pin connected" },
+    // 音声ピンの入力で開こうとしたが、繋いだ音声ピンが無かった（audio::AudioError::VideoPinUnavailable）
+    AudioPinUnavailable { ja: "映像デバイスの音声ピンが繋がっていないので、音声を開けません", en: "The audio pin of the video device is not connected, so audio cannot be opened" },
     // 自動再接続が無効な間に音声ストリームがエラーで止まったときの理由（app/worker_timers.rs、#310）
     AudioStreamStoppedWithoutReconnect { ja: "音声ストリームがエラーで止まりました。自動再接続が無効なので、右クリックメニューの「デバイス再接続」で開き直してください", en: "The audio stream stopped with an error. Automatic reconnection is off, so use Reconnect devices in the right-click menu" },
     DeviceNotVisibleNoDevices { ja: "Windows 側にもデバイスが見えていない可能性があります（1 台も見えていません）。デバイスマネージャーで接続を確認してください", en: "Windows may not see the device either (no devices are visible). Check the connection in Device Manager" },

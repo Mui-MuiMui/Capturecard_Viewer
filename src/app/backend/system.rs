@@ -17,9 +17,11 @@
 //! あり、自動のままでは永遠に再試行を繰り返すため。対応形式の問い合わせも
 //! 同じ規則で倒す。開き方を Media Foundation に固定した設定では倒さない。
 
-use super::{AudioBackend, BackendShared, DeviceBackends, VideoBackend, VideoEnumeration};
+use super::{
+    AudioBackend, BackendShared, CaptureRequest, DeviceBackends, VideoBackend, VideoEnumeration,
+};
 use crate::audio::{
-    self, ActiveAudio, AudioCapabilities, AudioCapture, AudioDirection, AudioError,
+    self, ActiveAudio, AudioCapabilities, AudioCapture, AudioDirection, AudioError, AudioPinFeed,
     PassthroughRequest, ResampleStatus, ResampleTelemetry,
 };
 use crate::settings::VideoBackendSetting;
@@ -46,6 +48,9 @@ impl DeviceBackends for SystemBackends {
             audio_tap,
             repaint_waker,
         } = shared;
+        // 映像の音声ピンと音声のバックエンドをつなぐ差し込み口（#388）。ワーカーの
+        // 中で閉じた共有で、UI スレッドからは触らない（`ResampleTelemetry` と同じ扱い）
+        let pin_feed = AudioPinFeed::new();
         // どちらも同じフレームバッファへ積む。同時に開くのは片方だけ
         let video = SystemVideo {
             media_foundation: VideoCapture::new(
@@ -53,12 +58,17 @@ impl DeviceBackends for SystemBackends {
                 color_conversion.clone(),
                 repaint_waker.clone(),
             ),
-            direct_show: DirectShowCapture::new(frames, color_conversion, repaint_waker),
+            direct_show: DirectShowCapture::new(
+                frames,
+                color_conversion,
+                repaint_waker,
+                pin_feed.clone(),
+            ),
             open: None,
         };
         (
             Box::new(video),
-            Box::new(AudioCapture::new(audio_controls, audio_tap)),
+            Box::new(AudioCapture::new(audio_controls, audio_tap, pin_feed)),
         )
     }
 }
@@ -256,25 +266,27 @@ impl VideoBackend for SystemVideo {
         result
     }
 
-    fn start_capture(
-        &mut self,
-        device_name: Option<&str>,
-        resolution: Option<(u32, u32)>,
-        format: Option<&str>,
-        fps: Option<u32>,
-        backend: VideoBackendSetting,
-    ) -> Result<(), VideoError> {
+    fn start_capture(&mut self, request: &CaptureRequest<'_>) -> Result<(), VideoError> {
         self.stop_capture();
+        let CaptureRequest {
+            device_name,
+            resolution,
+            format,
+            fps,
+            backend,
+            connect_audio_pin,
+        } = *request;
         // 自動で Media Foundation が開けなければ DirectShow でも試す（#387）。
         // `open` には実際に開けた経路を入れるので、`link_state` / `stop_capture` /
-        // `active` もそちらを見る（「接続状態」タブの「開き方」も `active` から出る）
+        // `active` もそちらを見る（「接続状態」タブの「開き方」も `active` から出る）。
+        // 音声ピンを繋ぐ指定は、倒したときの DirectShow にも渡す（GC551 はこの経路で開く）
         let media_foundation = &mut self.media_foundation;
         let direct_show = &mut self.direct_show;
         let (result, route) =
             attempt_with_fallback(device_name, backend, "接続", |route, name| {
                 match (route, name) {
                     (VideoRoute::DirectShow, Some(name)) => {
-                        direct_show.start_capture(name, resolution, format, fps)
+                        direct_show.start_capture(name, resolution, format, fps, connect_audio_pin)
                     }
                     (_, name) => media_foundation.start_capture(name, resolution, format, fps),
                 }
@@ -589,10 +601,18 @@ mod tests {
         device_name: Option<&str>,
         backend: VideoBackendSetting,
     ) -> (Result<(), VideoError>, VideoRoute) {
-        attempt_with_fallback(device_name, backend, "接続", |route, name| match route {
-            VideoRoute::DirectShow => direct_show.start_capture(name, None, None, None, backend),
-            VideoRoute::MediaFoundation => {
-                media_foundation.start_capture(name, None, None, None, backend)
+        attempt_with_fallback(device_name, backend, "接続", |route, name| {
+            let request = CaptureRequest {
+                device_name: name,
+                resolution: None,
+                format: None,
+                fps: None,
+                backend,
+                connect_audio_pin: true,
+            };
+            match route {
+                VideoRoute::DirectShow => direct_show.start_capture(&request),
+                VideoRoute::MediaFoundation => media_foundation.start_capture(&request),
             }
         })
     }

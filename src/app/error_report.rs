@@ -5,6 +5,7 @@
 //! 「接続状態」タブへ渡す形に整える側をまとめてある。
 
 use super::CaptureCardViewer;
+use crate::audio::AudioInputRoute;
 use crate::i18n;
 use crate::overlay::OverlayContent;
 use crate::status::{self, ConnectionStatus, ErrorSource, LinkStatus};
@@ -90,6 +91,10 @@ impl CaptureCardViewer {
             video
                 .details
                 .push(i18n::link_requested_fps(active.requested_fps));
+            // 音声ピン（#388）。Media Foundation で開いているときは出さない
+            video
+                .details
+                .extend(i18n::link_audio_pin(&active.audio_pin));
         }
 
         let mut audio = LinkStatus {
@@ -100,10 +105,22 @@ impl CaptureCardViewer {
             error: self.status_error(ErrorSource::Audio),
         };
         if let Some(active) = active_audio {
-            audio.details.push(i18n::link_audio_input(
-                &active.input_device,
-                active.input_summary(),
-            ));
+            // 入力の経路を出す。音声ピンなら映像デバイスの名前で（#388）
+            audio.details.push(match active.input_route {
+                AudioInputRoute::Device => {
+                    i18n::link_audio_input(&active.input_device, active.input_summary())
+                }
+                AudioInputRoute::VideoPin { .. } => {
+                    i18n::link_audio_input_video_pin(&active.input_device, active.input_summary())
+                }
+            });
+            if let Some(widened) = active.widened_buffer {
+                audio.details.push(i18n::link_audio_buffer_widened(
+                    widened.configured_ms,
+                    widened.actual_ms,
+                    widened.chunk_ms,
+                ));
+            }
             audio.details.push(i18n::link_audio_output(
                 &active.output_device,
                 active.output_summary(),

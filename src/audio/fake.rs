@@ -29,14 +29,16 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::capabilities::AudioCapabilities;
-use super::capture::{ring_buffer_samples, target_water_level, PassthroughRequest};
+use super::capture::{
+    ring_buffer_samples, target_water_level, PassthroughInput, PassthroughRequest,
+};
 use super::controls::AudioControls;
 use super::convert::PassthroughConverter;
 use super::fake_stream::{spawn_named, DiscardOutput, SineInput};
 use super::resample::{ResampleStatus, ResampleTelemetry};
 use super::stream_config::{choose_passthrough_configs, resolve_ranges};
 use super::tap::AudioTap;
-use super::{ActiveAudio, AudioDirection, AudioError};
+use super::{ActiveAudio, AudioDirection, AudioError, AudioInputRoute};
 
 const INPUT_NAME_PREFIX: &str = "Fake Audio Input";
 const OUTPUT_NAME_PREFIX: &str = "Fake Audio Output";
@@ -199,7 +201,13 @@ impl FakeAudioCapture {
     ) -> Result<(), AudioError> {
         self.stop_capture();
 
-        let input = self.find(AudioDirection::Input, request.input_device_name)?;
+        // フェイクの映像は音声ピンを持たない（`AudioPinState::NotApplicable`）ので、
+        // ワーカーは音声ピンの入力で開きに来ない。来たら開けないと返す
+        let input_name = match request.input {
+            PassthroughInput::Device(name) => name,
+            PassthroughInput::VideoPin { .. } => return Err(AudioError::VideoPinUnavailable),
+        };
+        let input = self.find(AudioDirection::Input, input_name)?;
         let output = self.find(AudioDirection::Output, request.output_device_name)?;
 
         if self.remaining_failures > 0 {
@@ -326,6 +334,8 @@ impl FakeAudioCapture {
             input_channels,
             output_sample_rate: output_rate,
             output_channels,
+            input_route: AudioInputRoute::Device,
+            widened_buffer: None,
         });
         Ok(())
     }
@@ -479,7 +489,7 @@ mod tests {
 
     fn request<'a>(input: Option<&'a str>, output: Option<&'a str>) -> PassthroughRequest<'a> {
         PassthroughRequest {
-            input_device_name: input,
+            input: PassthroughInput::Device(input),
             output_device_name: output,
             sample_rate: None,
             channels: None,

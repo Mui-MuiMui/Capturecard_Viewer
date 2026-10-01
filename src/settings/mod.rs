@@ -31,7 +31,8 @@ mod video;
 mod write;
 
 pub use audio::{
-    AudioSettings, DEFAULT_CHANNELS, DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS, MIN_BUFFER_MS,
+    AudioInputSource, AudioSettings, DEFAULT_CHANNELS, DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS,
+    MIN_BUFFER_MS,
 };
 // 外からはテスト（`app::worker_loop` のテスト用の組み立て）からしか使わない。
 // テストを含まないビルドで再輸出すると誰も使わない `pub use` になり

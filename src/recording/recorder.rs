@@ -612,7 +612,7 @@ mod tests {
         );
         audio
             .start_passthrough(&PassthroughRequest {
-                input_device_name: Some("Fake Audio Input 1"),
+                input: crate::audio::PassthroughInput::Device(Some("Fake Audio Input 1")),
                 output_device_name: Some("Fake Audio Output 1"),
                 sample_rate: None,
                 channels: None,

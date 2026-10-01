@@ -42,13 +42,14 @@ cargo build --release
 | `src/app/worker_loop.rs` | デバイスワーカースレッドの本体。`WorkerState` の定義、待ち時間の決定、観測値の書き出し |
 | `src/app/worker_commands.rs` | デバイスワーカーのコマンドの受け口（`handle`）。設定の受け取りと開き直しの要求、最小化中のホットキーの代役（音量・ミュート）、即時の再接続 |
 | `src/app/worker_timers.rs` | ワーカーがタイマーで回す監視の入口（`tick`）。再試行の期限、フレームの途絶 |
-| `src/app/worker_audio_timers.rs` | ワーカーがタイマーで回す監視のうち音声まわり。音声ストリームのエラー、Windows の既定デバイスの切り替え、クロックドリフト補正 |
+| `src/app/worker_audio_timers.rs` | ワーカーがタイマーで回す監視のうち音声まわり。音声ストリームのエラー、Windows の既定デバイスの切り替え、クロックドリフト補正、映像の音声ピンの番号が変わったときの開き直し（`monitor_audio_pin`）、観測値のデバッグログ |
 | `src/app/worker_connect.rs` | ワーカーが行うデバイス操作のうち映像側と列挙。映像を開く・閉じる、列挙、映像の能力の問い合わせ、既定デバイス名の確定。列挙の結果のログと「Windows 側にも見えていない」の判定の適用 |
-| `src/app/worker_audio_connect.rs` | ワーカーが行うデバイス操作のうち音声側。音声を開く（`try_connect_audio`）、入力が未指定のときに開かずに待つ、映像の復帰に合わせた開き直し、対応設定の問い合わせ |
+| `src/app/worker_audio_connect.rs` | ワーカーが行うデバイス操作のうち音声側。音声を開く（`try_connect_audio`）、入力が未指定のときと音声ピンが使えないときに開かずに待つ、映像の復帰に合わせた開き直し、対応設定の問い合わせ |
 | `src/app/backend/mod.rs` | ワーカーがデバイスに触るときの入口の trait（`VideoBackend` / `AudioBackend` / `DeviceBackends`）と、本番かフェイクかを環境変数で選ぶ `backends_from_env`。テスト用のモックもここ（`#[cfg(test)]`） |
 | `src/app/backend/system.rs` | 本番のバックエンド `SystemBackends`。映像は `VideoCapture`（Media Foundation）と `DirectShowCapture` を `SystemVideo` で束ね、音声は `AudioCapture` を trait に載せる。一覧の突き合わせ（`merge_video_devices`）とどちらで開くかの判定（`route_for`） |
 | `src/app/backend/fake.rs` | フェイクのバックエンド `FakeBackends`。`FakeVideoCapture` / `FakeAudioCapture` を trait に載せる実装と、環境変数（`CAPTURECARD_VIEWER_FAKE_DEVICES` / `CAPTURECARD_VIEWER_FAKE_SCENARIO`）の解釈 |
 | `src/app/monitor.rs` | 切断や既定デバイスの切り替え、列挙をログへ出す回と「Windows 側にも見えていない」の**判定**（純粋関数）。ワーカーが使う |
+| `src/app/monitor_audio_pin.rs` | 音声の入力が映像デバイスの音声ピンのときの**判定**（純粋関数）。開くか待つか（`decide_pin_readiness`）、映像の開き直しに合わせて音声を開き直すか（`should_resync_pin_audio`）。`monitor.rs` が 800 行に近いので分けた |
 | `src/app/retry.rs` | `ConnectRetry` とバックオフ。「いつ試してよいか」だけを持つ。ワーカーが持つ |
 | `src/app/capabilities.rs` | デバイス一覧のキャッシュと、デバイス能力・対応設定の取得要求（ワーカーへ流すところまで） |
 | `src/app/screenshot.rs` | 撮影、保存スレッドの管理、結果の取り込み |
@@ -65,7 +66,9 @@ cargo build --release
 | `src/video/directshow/mod.rs` | DirectShow の映像デバイス `DirectShowCapture`（列挙・能力・開く・閉じる・観測）と、表示名の「(DirectShow)」の付け外し |
 | `src/video/directshow/devices.rs` | DirectShow の列挙（`ICreateDevEnum`）と対応形式（`IAMStreamConfig::GetStreamCaps`）、いまの解像度（`GetFormat`）、開く解像度と形式の選び方（`target_resolution` / `choose_candidate`） |
 | `src/video/directshow/graph.rs` | DirectShow のフィルターグラフの組み立て・開始・停止・破棄（`CaptureGraph`） |
-| `src/video/directshow/filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`）。`Receive` から `FrameSink` へ渡す |
+| `src/video/directshow/filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`）。媒体を問わず、受け取る形式の判定と渡し先だけを映像と音声で分ける |
+| `src/video/directshow/video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
+| `src/video/directshow/audio_pin.rs` | 映像デバイスの音声ピン（#388）。有無の記録、10ms の塊の提案と接続、`Run` が通らないときに外してやり直す（`run_with_fallback`）、`WAVEFORMATEX` の読み取り（`pin_format_from_wave`）、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
 | `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
 | `src/video/frame_sink.rs` | フレームコールバックの本体 `FrameSink`（YUY2→RGB、`FrameBuffer` へ積む、`RepaintWaker` で UI を起こす）。実機（Media Foundation / DirectShow）とフェイクで共有する。DirectShow の RGB24 / MJPEG / 4:2:0 の YUV（NV12 / I420 / YV12）の受け口もここ |
 | `src/video/fake.rs` | 実機なしで動くフェイクの映像デバイス `FakeVideoCapture`。テストパターンを指定 fps で吐く生成スレッド、切断・接続失敗のシナリオ |
@@ -82,6 +85,7 @@ cargo build --release
 | `src/audio/capture.rs` | `AudioCapture`。パススルーの開始と停止、観測値（実際に開いた内容・アンダーラン・リサンプル）の取り出し |
 | `src/audio/stream.rs` | cpal の入力ストリームの組み立てと入力のコールバック（本体は `process_input` で、フェイクと共有する）、リングバッファの型、ストリームのエラーの扱い（`handle_stream_error`）、満杯で捨てたフレームの数え方 |
 | `src/audio/stream_output.rs` | cpal の出力ストリームの組み立てと出力のコールバック（本体は `process_output` で、フェイクと共有する）、`OutputSignals`、アンダーランの数え方 |
+| `src/audio/passthrough_output.rs` | パススルーの出力側の組み立て（出力デバイス、リングバッファ、変換器とクロックドリフト補正を付けた出力ストリーム）。入力が WASAPI でも音声ピンでも共有する |
 | `src/audio/convert.rs` | レート・チャンネル数が違う場合の変換（`PassthroughConverter`） |
 | `src/audio/sample.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32）。純粋関数 |
 | `src/audio/resample.rs` | クロックドリフト補正の共有状態（`ResampleTelemetry`）と補正係数の決め方（`decide_resample_correction`） |
@@ -89,6 +93,7 @@ cargo build --release
 | `src/audio/fake.rs` | 実機なしで動くフェイクの音声デバイス `FakeAudioCapture`。デバイスの一覧と形、開く・閉じる、観測値、接続失敗・ストリームのエラーのシナリオ |
 | `src/audio/fake_stream.rs` | フェイクの音声デバイスが立てる入出力のスレッドの本体。正弦波の入力（`SineInput`）と書き込みを捨てる出力（`DiscardOutput`）、経過時間に合わせて回す `run_paced` |
 | `src/audio/tap.rs` | 録画へ音声を回す差し込み口 `AudioTap`。録画中だけ、入力コールバックが f32 へ直した値を入力の形のまま 1 秒ぶんのリングへ積む（待たない `try_lock`、空きが足りなければそのコールバックの分を捨てて数える）。累計のサンプル数・最後に積んだ時刻・入力の形・開き直しの番号・途切れた位置を Atomic で持つ |
+| `src/audio/pin_feed.rs` | DirectShow の映像デバイスの音声ピンと `AudioCapture` をつなぐ差し込み口 `AudioPinFeed`（#388）。音声ピンの `Receive` が受け取った PCM を、グラフの番号が合うときだけ待たない `try_lock` で `process_input_iter` へ渡す。音声ピンの状態（`AudioPinState`）・形式（`PinFormat`）、塊の長さに合わせたリングの広げ方（`widened_buffer_ms`）もここ |
 | `src/recording/mod.rs` | 録画の入口。`RecordingError`（文言は `Display` から `crate::i18n`）、`EncoderInfo`、経過時間の書式（`format_elapsed`）、外から使う経路（`crate::recording::...`）の `pub use` |
 | `src/recording/recorder.rs` | 録画スレッドの窓口 `Recorder`（UI スレッドが 1 つ持つ）。録画かリプレイバッファが ON のときにスレッドを起こし、どちらも無くなったら止めて join する（スレッドは自分から抜けない）。`RecordingCommand` / `RecordingEvent` / `RecordingSummary` / `RecordingTelemetry`（録画中の値は録画を始めたときからの差） |
 | `src/recording/recorder_loop.rs` | 録画スレッドの本体。コマンドの受け口と、リプレイバッファを通すかの経路の切り替え（`ReplayState`）。差し込み口を使っている録画の間に変えられたリプレイバッファの設定を、録画が終わってから反映する |
@@ -173,7 +178,7 @@ cargo build --release
 
 `src/ui/` の子モジュールは**どれも状態を持たず、書き換えるのもドラフトだけ。** 起きたことは `SettingsEvent` / `HotkeyDialogEvent` の列で返す。ダイアログの状態は `state.rs` の `SettingsDialogState` 1 つに集めてある。**外から使う経路（`crate::ui::...`）は `ui/mod.rs` の `pub use` に集める。** `ui` の中だけで使う項目は再輸出せず、子モジュールの経路で参照する（`mod ui;` 自体が私有なので、誰も使わない再輸出は `unused_imports` の警告になる）。
 
-`src/audio/` の子モジュールで**状態を持つのは `capture.rs` の `AudioCapture`、`fake.rs` の `FakeAudioCapture`（とその入出力のスレッドだけが持つ `fake_stream.rs` の `SineInput` / `DiscardOutput`）と、スレッドをまたいで共有する `AudioControls` / `ResampleTelemetry` / `AudioTap` だけ。** 残りは純粋関数か、cpal のストリームを組み立てて返すだけにする。**外から使う経路（`crate::audio::...`）は `audio/mod.rs` の `pub use` に集める**（`ui/mod.rs` と同じ理由で、誰も使わない再輸出は警告になる）。子モジュール同士で使うものには `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
+`src/audio/` の子モジュールで**状態を持つのは `capture.rs` の `AudioCapture`、`fake.rs` の `FakeAudioCapture`（とその入出力のスレッドだけが持つ `fake_stream.rs` の `SineInput` / `DiscardOutput`）と、スレッドをまたいで共有する `AudioControls` / `ResampleTelemetry` / `AudioTap` / `AudioPinFeed` だけ。** 残りは純粋関数か、cpal のストリームを組み立てて返すだけにする。**外から使う経路（`crate::audio::...`）は `audio/mod.rs` の `pub use` に集める**（`ui/mod.rs` と同じ理由で、誰も使わない再輸出は警告になる）。子モジュール同士で使うものには `pub(super)` を付け、そのファイルの中だけで使うものは私有のままにする。
 
 `src/recording/` の子モジュールで**状態を持つのは `recorder.rs` の `Recorder`（UI スレッドの窓口）と、録画スレッドの中だけにあるもの（`recorder_loop.rs` の `Worker`、1 回の録画 `Session` / `ReplayRecording`、リプレイバッファ `ReplayPipeline` とそのリング `EncodedRing`、音声トラック `AudioTrack`、`SinkWriter` / `PassthroughWriter` / `EncoderMft`）だけ。** 変換・PTS・ファイル名・空き容量の判定、リングのどこから書くか・どこで捨てるかは純粋関数にする。**録画スレッドから `error!` を出さず、失敗は `RecordingEvent` で UI スレッドへ返す**（`docs/design/threads.md`）。外から使う経路は `recording/mod.rs` の `pub use` に集める。
 
@@ -190,7 +195,7 @@ cargo build --release
 | `docs/design/reconnect.md` | 切断の検出、バックオフでの再試行、音声のフォールバックを外した経緯、Windows の既定デバイスの追従 |
 | `docs/design/video-pipeline.md` | `FrameBuffer` と世代番号、色変換への映像調整の畳み込み、再描画の間隔と `RepaintWaker`、UI にあるが効かない設定 |
 | `docs/design/audio.md` | 入出力の形が違う場合の変換、クロックドリフト補正、対応設定の取得、ミュート |
-| `docs/design/directshow-audio.md` | DirectShow の映像デバイスの音声ピンから音声を取り込む設計（#388）。**設計のみで未実装。** 受け口のフィルター、`AudioCapture` の入力の種類と `AudioPinFeed`、映像のグラフと音声の寿命、`[audio] input_source`、UI、対応設定、ドリフトと録画の PTS、段階分け |
+| `docs/design/directshow-audio.md` | DirectShow の映像デバイスの音声ピンから音声を取り込む設計（#388）。**第 1 段（設定ファイルの `input_source = "video_pin"` で鳴る・録画に入る、#393）を実装済み。UI は第 2 段。** 受け口のフィルター、`AudioCapture` の入力の種類と `AudioPinFeed`、映像のグラフと音声の寿命、`[audio] input_source`、UI、対応設定、ドリフトと録画の PTS、段階分け |
 | `docs/design/settings.md` | `#[serde(default)]`、デバウンス保存、壊れた設定ファイルと `AutoSavePolicy` |
 | `docs/design/settings-dialog.md` | ドラフトの編集、イベントで返す形、`commit_draft` の決まり、「その他」タブの書き出し / 読み込み / 初期化 |
 | `docs/design/hotkeys.md` | アクションごとの割り当て、旧形式からの移行、差分での登録 |

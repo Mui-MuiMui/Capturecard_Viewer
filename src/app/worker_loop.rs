@@ -24,6 +24,7 @@
 
 use super::backend::{AudioBackend, BackendShared, DeviceBackends, VideoBackend};
 use super::monitor::{DeviceNotVisible, VideoLinkAction};
+use super::monitor_audio_pin::PinWait;
 use super::retry::ConnectRetry;
 use super::worker::{
     AudioTarget, DeviceCommand, DeviceConfig, DeviceEvent, DeviceSnapshot, RetryStatus,
@@ -181,6 +182,8 @@ pub(super) struct WorkerState {
     /// 水位が目標から大きく外れている旨の `warn` を最後に出した時刻。
     /// 連打を防ぐための記録
     pub(super) last_resample_warn: Option<Instant>,
+    /// 音声の観測値（アンダーラン・捨てたフレーム・取りこぼし）を最後にログへ出した時刻
+    pub(super) last_audio_counters_log: Option<Instant>,
 
     /// 起動時の列挙をまだログへ出していないか。起動直後の `ApplyConfig` で立つ
     pub(super) startup_enumeration_pending: bool,
@@ -195,6 +198,10 @@ pub(super) struct WorkerState {
     /// 出し直すために持つ。接続できたら消す
     pub(super) last_video_failure: Option<String>,
     pub(super) last_audio_failure: Option<String>,
+    /// 入力が映像デバイスの音声ピンなのに使えず、音声を開かずに待っている理由（#388）。
+    /// 理由が変わったときだけ開き直しの要求を立てるために持つ
+    /// （`monitor_audio_pin::should_resync_pin_audio`）。音声を開けたら消す
+    pub(super) audio_pin_wait: Option<PinWait>,
 }
 
 impl WorkerState {
@@ -226,12 +233,14 @@ impl WorkerState {
             audio_capabilities: HashMap::new(),
             last_resample_correction: None,
             last_resample_warn: None,
+            last_audio_counters_log: None,
             startup_enumeration_pending: false,
             enumeration_logged_failures: (0, 0),
             video_not_visible: None,
             audio_not_visible: None,
             last_video_failure: None,
             last_audio_failure: None,
+            audio_pin_wait: None,
         }
     }
 
@@ -367,6 +376,7 @@ pub(super) mod testing {
                 None,
                 None,
                 crate::settings::VideoBackendSetting::Auto,
+                false,
             ),
             audio: (
                 input_device.map(str::to_string),
@@ -374,6 +384,7 @@ pub(super) mod testing {
                 None,
                 None,
                 DEFAULT_BUFFER_MS,
+                crate::settings::AudioInputSource::Device,
             ),
             auto_reconnect: false,
         }

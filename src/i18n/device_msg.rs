@@ -140,6 +140,38 @@ pub fn audio_stream_play_failed(direction: &str, source: impl Display) -> String
     }
 }
 
+// ---- 映像デバイスの音声ピン（audio::PinFailure、app::monitor_audio_pin、#388） ----
+
+/// 音声ピンに繋げなかった理由（`PinFailure`）だけを 1 行で表す。
+pub fn audio_pin_failure(failure: &crate::audio::PinFailure) -> String {
+    use crate::audio::PinFailure;
+    match (failure, language()) {
+        (PinFailure::Connect(source), Language::Japanese) => {
+            format!("音声ピンとつなげない: {source}")
+        }
+        (PinFailure::Connect(source), Language::English) => {
+            format!("cannot connect the audio pin: {source}")
+        }
+        (PinFailure::Run(source), Language::Japanese) => {
+            format!("音声ピンをつなぐと映像を動かせないので外した: {source}")
+        }
+        (PinFailure::Run(source), Language::English) => {
+            format!("removed the audio pin because the video could not run with it: {source}")
+        }
+    }
+}
+
+/// 入力が音声ピンなのに、音声ピンに繋げなかったので音声を開かずに待つ理由。
+pub fn audio_pin_connect_failed(failure: &crate::audio::PinFailure) -> String {
+    let reason = audio_pin_failure(failure);
+    match language() {
+        Language::Japanese => format!("映像デバイスの音声ピンに繋げませんでした（{reason}）"),
+        Language::English => {
+            format!("Could not connect the audio pin of the video device ({reason})")
+        }
+    }
+}
+
 // ---- Windows 側にも見えていない（app::monitor::DeviceNotVisible） ----
 
 pub fn device_not_visible_not_listed(name: impl Display) -> String {
@@ -339,6 +371,62 @@ pub fn link_audio_input(device: impl Display, summary: impl Display) -> String {
     }
 }
 
+/// 入力が映像デバイスの音声ピンのときの入力の行（#388）。`device` は映像デバイスの名前
+pub fn link_audio_input_video_pin(device: impl Display, summary: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("入力: 映像デバイスの音声（{device} の音声ピン、{summary}）"),
+        Language::English => {
+            format!("Input: video device audio (audio pin of {device}, {summary})")
+        }
+    }
+}
+
+/// 音声ピンの塊が長くてリングバッファを広げたときのバッファの行（#388）
+pub fn link_audio_buffer_widened(configured_ms: u32, actual_ms: u32, chunk_ms: u32) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "バッファ: 設定 {configured_ms} ms → 実際 {actual_ms} ms（音声ピンの塊が {chunk_ms} ms のため）"
+        ),
+        Language::English => format!(
+            "Buffer: {configured_ms} ms set → {actual_ms} ms used (the audio pin delivers {chunk_ms} ms chunks)"
+        ),
+    }
+}
+
+/// 映像の欄に出す音声ピンの行（#388）。対象外（Media Foundation など）なら `None`
+pub fn link_audio_pin(state: &crate::audio::AudioPinState) -> Option<String> {
+    use crate::audio::AudioPinState;
+    let japanese = language() == Language::Japanese;
+    let text = match state {
+        AudioPinState::NotApplicable => return None,
+        AudioPinState::Missing if japanese => "音声ピン: なし".to_string(),
+        AudioPinState::Missing => "Audio pin: none".to_string(),
+        AudioPinState::Available if japanese => "音声ピン: あり（繋いでいない）".to_string(),
+        AudioPinState::Available => "Audio pin: present (not connected)".to_string(),
+        AudioPinState::Connected(connection) => {
+            let summary = connection.format.summary();
+            let chunk = connection
+                .chunk_bytes
+                .and_then(|bytes| connection.format.chunk_ms(bytes));
+            match (chunk, japanese) {
+                (Some(ms), true) => format!("音声ピン: 繋いでいる {summary}、塊 {ms} ms"),
+                (Some(ms), false) => format!("Audio pin: connected {summary}, {ms} ms chunks"),
+                (None, true) => format!("音声ピン: 繋いでいる {summary}"),
+                (None, false) => format!("Audio pin: connected {summary}"),
+            }
+        }
+        AudioPinState::Failed(failure) => {
+            let reason = audio_pin_failure(failure);
+            if japanese {
+                format!("音声ピン: 繋げなかった（{reason}）")
+            } else {
+                format!("Audio pin: not connected ({reason})")
+            }
+        }
+    };
+    Some(text)
+}
+
 pub fn link_audio_output(device: impl Display, summary: impl Display) -> String {
     match language() {
         Language::Japanese => format!("出力: {device}（{summary}）"),
@@ -364,6 +452,56 @@ mod tests {
         assert_eq!(
             video_camera_open_failed("Cam", "busy"),
             "映像デバイス 'Cam' を開けない: busy"
+        );
+    }
+
+    #[test]
+    fn link_audio_pin_shows_each_state_and_hides_not_applicable() {
+        use crate::audio::{AudioPinState, PinConnection, PinFailure, PinFormat, PinSampleType};
+        let connection = PinConnection {
+            graph: 1,
+            device: "AVerMedia GC551 Video Capture (DirectShow)".to_string(),
+            format: PinFormat {
+                sample_rate: 48_000,
+                channels: 2,
+                sample_type: PinSampleType::I16,
+            },
+            chunk_bytes: Some(1920),
+        };
+        assert_eq!(link_audio_pin(&AudioPinState::NotApplicable), None);
+        assert_eq!(
+            link_audio_pin(&AudioPinState::Connected(connection.clone())).as_deref(),
+            Some("音声ピン: 繋いでいる 48000Hz 2ch 16bit、塊 10 ms")
+        );
+        assert_eq!(
+            link_audio_pin(&AudioPinState::Available).as_deref(),
+            Some("音声ピン: あり（繋いでいない）")
+        );
+        assert_eq!(
+            link_audio_pin(&AudioPinState::Missing).as_deref(),
+            Some("音声ピン: なし")
+        );
+        let failed = link_audio_pin(&AudioPinState::Failed(PinFailure::Run("E_FAIL".into())))
+            .expect("繋げなかった旨を出す");
+        assert!(failed.contains("E_FAIL"), "{failed}");
+        let without_chunk = PinConnection {
+            chunk_bytes: None,
+            ..connection
+        };
+        assert_eq!(
+            with_language(Language::English, || link_audio_pin(
+                &AudioPinState::Connected(without_chunk)
+            ))
+            .as_deref(),
+            Some("Audio pin: connected 48000Hz 2ch 16bit")
+        );
+    }
+
+    #[test]
+    fn link_audio_buffer_widened_shows_the_reason() {
+        assert_eq!(
+            link_audio_buffer_widened(50, 1000, 500),
+            "バッファ: 設定 50 ms → 実際 1000 ms（音声ピンの塊が 500 ms のため）"
         );
     }
 

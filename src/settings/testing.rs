@@ -22,6 +22,7 @@ contrast = -20
 saturation = 30
 
 [audio]
+input_source = "video_pin"
 input_device_name = "Line In"
 output_device_name = "Speakers"
 sample_rate = 44100
