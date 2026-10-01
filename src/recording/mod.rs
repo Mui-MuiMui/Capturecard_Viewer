@@ -16,6 +16,7 @@
 //! | `passthrough.rs` | エンコードなしの Sink Writer |
 //! | `bitstream.rs` | H.264 の IDR と SPS / PPS の読み取り、AAC の `MF_MT_USER_DATA`（純粋関数） |
 //! | `writer.rs` | Sink Writer の組み立てと書き込み、使っているエンコーダの名前 |
+//! | `sample_pool.rs` | Sink Writer とエンコーダ MFT へ渡す NV12 のサンプルの使い回し |
 //! | `convert.rs` | RGB → NV12 の画素変換（純粋関数） |
 //! | `audio.rs` | 音声トラック。`AudioTap` のリングから取り出し、48kHz 2ch の 16bit PCM へ寄せて PTS を付ける |
 //! | `pts.rs` | 映像と音声の PTS（純粋関数） |
