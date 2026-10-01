@@ -11,7 +11,7 @@
 use super::worker::{DeviceCommand, DeviceConfig, DeviceEvent, VideoTarget};
 use super::CaptureCardViewer;
 use crate::audio::AudioDirection;
-use crate::settings::VideoSettings;
+use crate::settings::{AppSettings, AudioInputSource, VideoSettings};
 use crate::status::ErrorSource;
 use crate::ui;
 use crate::video::VideoAdjustments;
@@ -29,6 +29,47 @@ fn should_store_resolved_resolution(video: &VideoSettings, target: &VideoTarget)
         && video.format == target.2
         && video.fps == target.3
         && video.backend == target.4
+}
+
+/// ワーカーが決めた既定のデバイス（`DefaultDevicesResolved`）を設定へ書く。書いたかを返す。
+///
+/// 映像の名前を埋めたら解像度は未指定にする。ワーカーは解像度を未指定にして開く
+/// （#391）ので、揃えないと次に送る設定の解像度（既定の 1280x720）で開き直される。
+/// 開いた解像度は `VideoResolutionResolved` で届く。
+///
+/// **入力は、設定の入力がまだ決まっていないときだけ書く**（#394）。入力は最初の
+/// 映像の試行のあとに届くので、それまでに利用者が選んでいたらそちらを残す。
+/// 「映像デバイスの音声」に決まったときは `input_source` だけを書き、
+/// 入力デバイス名は未設定のまま（WASAPI へ戻したときに選び直す）。
+fn apply_resolved_devices(
+    settings: &mut AppSettings,
+    video: Option<String>,
+    input: Option<String>,
+    input_source: Option<AudioInputSource>,
+) -> bool {
+    let mut changed = false;
+    if let Some(name) = video {
+        settings.video.device_name = Some(name);
+        settings.video.resolution = None;
+        changed = true;
+    }
+    let input_undecided = settings.audio.input_source == AudioInputSource::Device
+        && settings
+            .audio
+            .input_device_name
+            .as_deref()
+            .is_none_or(str::is_empty);
+    if input_undecided {
+        if let Some(name) = input {
+            settings.audio.input_device_name = Some(name);
+            changed = true;
+        }
+        if input_source == Some(AudioInputSource::VideoPin) {
+            settings.audio.input_source = AudioInputSource::VideoPin;
+            changed = true;
+        }
+    }
+    changed
 }
 
 impl CaptureCardViewer {
@@ -97,8 +138,12 @@ impl CaptureCardViewer {
                 self.adjust_volume(delta);
             }
             DeviceEvent::MuteToggled => self.toggle_mute(),
-            DeviceEvent::DefaultDevicesResolved { video, input } => {
-                self.store_resolved_devices(video, input);
+            DeviceEvent::DefaultDevicesResolved {
+                video,
+                input,
+                input_source,
+            } => {
+                self.store_resolved_devices(video, input, input_source);
             }
             DeviceEvent::VideoResolutionResolved { target, resolution } => {
                 self.store_resolved_resolution(&target, resolution);
@@ -131,27 +176,28 @@ impl CaptureCardViewer {
     /// 場合に書き戻しを止める判断は `mark_settings_dirty` が持っている
     /// （`AutoSavePolicy`）。以前は `CaptureCardViewer::default` が
     /// `may_write_defaults_on_startup()` で同じ判断をしていた。
-    fn store_resolved_devices(&mut self, video: Option<String>, input: Option<String>) {
-        let mut changed = false;
-        if let Ok(mut settings) = self.settings.lock() {
-            if let Some(name) = video {
-                settings.video.device_name = Some(name);
-                // ワーカーは解像度を未指定にして開く（#391）。こちらも揃えないと、
-                // 次に送る設定の解像度（既定の 1280x720）で開き直されてしまう。
-                // 開いた解像度は `VideoResolutionResolved` で届く
-                settings.video.resolution = None;
-                changed = true;
+    ///
+    /// 入力を「映像デバイスの音声」に決めたときは、その場で設定をワーカーへ送り直す
+    /// （#394）。ワーカーは書き戻した設定（音声ピンを繋ぐ映像の接続対象）が届いてから
+    /// 映像を開き直し、音声を開くので、2 秒ごとの再適用を待つとその分だけ音が遅れる。
+    fn store_resolved_devices(
+        &mut self,
+        video: Option<String>,
+        input: Option<String>,
+        input_source: Option<AudioInputSource>,
+    ) {
+        let changed = match self.settings.lock() {
+            Ok(mut settings) => apply_resolved_devices(&mut settings, video, input, input_source),
+            Err(_) => {
+                warn!("既定デバイスの書き戻しで settings のロックを取得できない");
+                return;
             }
-            if let Some(name) = input {
-                settings.audio.input_device_name = Some(name);
-                changed = true;
-            }
-        } else {
-            warn!("既定デバイスの書き戻しで settings のロックを取得できない");
-            return;
-        }
+        };
         if changed {
             self.mark_settings_dirty();
+            if input_source == Some(AudioInputSource::VideoPin) {
+                self.apply_settings(false);
+            }
         }
     }
 
@@ -428,5 +474,77 @@ mod tests {
             &PathBuf::from("sound/SS.mp3"),
             &Some(PathBuf::from("sound/SS.mp3"))
         ));
+    }
+
+    // 初回の既定の書き戻し（#394）
+
+    /// 設定ファイルが無い初回の設定。映像も入力も未設定
+    fn first_run_settings() -> AppSettings {
+        let mut settings = AppSettings::default();
+        settings.video.device_name = None;
+        settings.video.resolution = Some((1280, 720));
+        settings.audio.input_device_name = None;
+        settings
+    }
+
+    #[test]
+    fn apply_resolved_devices_writes_the_video_pin_without_an_input_name() {
+        let mut settings = first_run_settings();
+        assert!(apply_resolved_devices(
+            &mut settings,
+            None,
+            None,
+            Some(AudioInputSource::VideoPin)
+        ));
+        assert_eq!(settings.audio.input_source, AudioInputSource::VideoPin);
+        assert_eq!(settings.audio.input_device_name, None);
+        // 映像は届いていないので触らない
+        assert_eq!(settings.video.resolution, Some((1280, 720)));
+    }
+
+    #[test]
+    fn apply_resolved_devices_writes_the_video_name_and_the_wasapi_input() {
+        let mut settings = first_run_settings();
+        assert!(apply_resolved_devices(
+            &mut settings,
+            Some("キャプチャーボード".to_string()),
+            Some("ライン入力".to_string()),
+            Some(AudioInputSource::Device)
+        ));
+        assert_eq!(
+            settings.video.device_name.as_deref(),
+            Some("キャプチャーボード")
+        );
+        assert_eq!(settings.video.resolution, None);
+        assert_eq!(
+            settings.audio.input_device_name.as_deref(),
+            Some("ライン入力")
+        );
+        assert_eq!(settings.audio.input_source, AudioInputSource::Device);
+    }
+
+    #[test]
+    fn apply_resolved_devices_keeps_an_input_chosen_in_the_meantime() {
+        // 入力は最初の映像の試行のあとに届く。それまでに選ばれていたら残す
+        let mut settings = first_run_settings();
+        settings.audio.input_device_name = Some("選んだ入力".to_string());
+        assert!(!apply_resolved_devices(
+            &mut settings,
+            None,
+            None,
+            Some(AudioInputSource::VideoPin)
+        ));
+        assert_eq!(settings.audio.input_source, AudioInputSource::Device);
+
+        let mut settings = first_run_settings();
+        settings.audio.input_source = AudioInputSource::VideoPin;
+        assert!(!apply_resolved_devices(
+            &mut settings,
+            None,
+            Some("ライン入力".to_string()),
+            Some(AudioInputSource::Device)
+        ));
+        assert_eq!(settings.audio.input_device_name, None);
+        assert_eq!(settings.audio.input_source, AudioInputSource::VideoPin);
     }
 }

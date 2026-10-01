@@ -22,7 +22,8 @@
 
 use super::backend::{self, BackendShared};
 use crate::audio::{
-    ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, AudioTap, ResampleStatus,
+    ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, AudioInputRoute, AudioTap,
+    ResampleStatus,
 };
 use crate::repaint::RepaintWaker;
 use crate::settings::{AppSettings, AudioInputSource, VideoBackendSetting};
@@ -180,8 +181,13 @@ pub(super) enum DeviceEvent {
     /// 最小化中のホットキーでミュートを切り替えた。UI は復帰したときに
     /// 自分の状態も切り替える（`toggle_mute`）
     MuteToggled,
-    /// 未設定だったデバイス名を、列挙結果の先頭で埋めた（起動直後の 1 回だけ）。
-    /// UI スレッドが設定へ書き戻す。
+    /// 未設定だったデバイスを決めた（起動直後だけ）。UI スレッドが設定へ書き戻す。
+    ///
+    /// 映像の名前は起動直後の `ApplyConfig` で列挙結果の先頭に決め、入力は最初の
+    /// 映像の試行のあとに決める（#394）。どちらも決めた時点で 1 度ずつ返すので、
+    /// 2 回に分かれて届くことがある。入力は、映像に音声ピンがあれば
+    /// `input_source: Some(VideoPin)`（`input` は `None`）、無ければ WASAPI の
+    /// 列挙の先頭を `input` に入れる（`input_source: Some(Device)`）。
     ///
     /// **映像の名前を埋めたときは、解像度も未指定にする**（#391）。設定の解像度は
     /// そのデバイスを選んで決めた値ではない（既定の 1280x720）ので、開く経路に
@@ -190,6 +196,7 @@ pub(super) enum DeviceEvent {
     DefaultDevicesResolved {
         video: Option<String>,
         input: Option<String>,
+        input_source: Option<AudioInputSource>,
     },
     /// 解像度が未指定の設定で映像を開き、実際に開いた解像度が分かった（#391）。
     /// `target` は開いたときの接続対象（解像度は未指定のまま）。UI スレッドは、
@@ -238,6 +245,18 @@ pub(super) struct DeviceSnapshot {
     pub(super) audio_dropped_frames: Option<u32>,
     /// cpal が知らせた入力の取りこぼし（`Xrun`）の累計（Issue #377）。開いていなければ `None`
     pub(super) audio_xruns: Option<u32>,
+}
+
+impl DeviceSnapshot {
+    /// 統計 OSD の音声の行（アンダーランの回数）。入力が映像デバイスの音声ピンなら
+    /// 「（音声ピン）」を添える（#394、`status::format_osd_audio_line`）
+    pub(super) fn osd_audio_line(&self) -> String {
+        let via_pin = self
+            .active_audio
+            .as_ref()
+            .is_some_and(|active| matches!(active.input_route, AudioInputRoute::VideoPin { .. }));
+        crate::status::format_osd_audio_line(self.audio_underruns, via_pin)
+    }
 }
 
 /// ワーカースレッドと、UI スレッドが共有する読み取り専用のスナップショット。

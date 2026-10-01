@@ -7,6 +7,7 @@
 use crate::audio::AudioDirection;
 use crate::settings::{AppSettings, LanguageSetting, UpdateSettings};
 
+use super::audio_input::VideoPinChoice;
 use super::capability::{AudioCapabilityCache, VideoCapabilityCache};
 use super::draft::commit_draft;
 use super::hotkey_capture::HotkeyCaptureState;
@@ -51,6 +52,9 @@ pub struct SettingsDialogState {
     // **名前で引くので、入力と出力に同名のデバイスがあっても混ざらないよう分ける。**
     audio_input_capabilities: AudioCapabilityCache,
     audio_output_capabilities: AudioCapabilityCache,
+    // 「映像デバイスの音声 (DirectShow)」を選べるか（#394）。ワーカーの観測値から
+    // `app` が描画の前に差し替える。設定の中身ではないのでドラフトには入れない
+    video_pin: VideoPinChoice,
     // ホットキー入力ダイアログの入力状態
     hotkey_capture: HotkeyCaptureState,
     // 「その他」タブに出す直近の結果。ドラフトについての説明なので、
@@ -152,6 +156,14 @@ impl SettingsDialogState {
         &mut self.audio_input_capabilities
     }
 
+    /// 「映像デバイスの音声 (DirectShow)」を選べるかを差し替える（#394）。
+    ///
+    /// `CaptureCardViewer` がワーカーの観測値から作り、描画の前に毎回渡す。
+    /// 描画はこれを `SettingsDialogView` の借用で読むだけで、デバイスには問い合わせない。
+    pub fn set_video_pin(&mut self, choice: VideoPinChoice) {
+        self.video_pin = choice;
+    }
+
     /// オーディオ出力デバイスの対応設定。
     pub fn audio_output_capabilities_mut(&mut self) -> &mut AudioCapabilityCache {
         &mut self.audio_output_capabilities
@@ -241,6 +253,7 @@ impl SettingsDialogState {
             capabilities,
             audio_input_capabilities,
             audio_output_capabilities,
+            video_pin,
             management_message,
             reset_confirm,
             new_preset_name,
@@ -254,6 +267,7 @@ impl SettingsDialogState {
                 input: audio_input_capabilities,
                 output: audio_output_capabilities,
             },
+            video_pin,
             management_message: management_message.as_ref(),
             reset_confirm: *reset_confirm,
             new_preset_name,
@@ -323,6 +337,8 @@ pub struct SettingsDialogView<'a> {
     pub video_capabilities: &'a VideoCapabilityCache,
     /// オーディオデバイスの対応設定（入力・出力）
     pub audio_capabilities: AudioCapabilityCaches<'a>,
+    /// 「映像デバイスの音声 (DirectShow)」を選べるか（#394）
+    pub video_pin: &'a VideoPinChoice,
     /// 「その他」タブに出す直近の結果
     pub management_message: Option<&'a ManagementMessage>,
     /// 「設定を初期化」の確認待ちか

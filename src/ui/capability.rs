@@ -281,25 +281,26 @@ pub(super) fn show_choice_note(ui: &mut egui::Ui, source: ChoiceSource, label: &
 ///
 /// 取得中はスピナー、失敗したら理由と「再取得」ボタン。ビデオ側と同じ扱いで、
 /// 黙って既定の一覧を出すと選択肢が実態と違う理由が分からない。
+///
+/// `input_key` が `None` なら入力側は描かない。入力が映像デバイスの音声ピンの
+/// ときは、入力の対応設定をワーカーへ問い合わせないため（#394）。
 pub(super) fn show_audio_capability_progress(
     ui: &mut egui::Ui,
     caches: &AudioCapabilityCaches<'_>,
-    input_key: &str,
+    input_key: Option<&str>,
     output_key: &str,
     events: &mut Vec<SettingsEvent>,
 ) {
-    let retry_input = show_audio_capability_state(
-        ui,
-        caches.input.state(input_key),
-        AudioDirection::Input.label(),
-    );
+    let retry_input = input_key.filter(|key| {
+        show_audio_capability_state(ui, caches.input.state(*key), AudioDirection::Input.label())
+    });
     let retry_output = show_audio_capability_state(
         ui,
         caches.output.state(output_key),
         AudioDirection::Output.label(),
     );
 
-    if retry_input {
+    if let Some(input_key) = retry_input {
         events.push(SettingsEvent::Capability(CapabilityEvent::RetryAudio(
             AudioDirection::Input,
             input_key.to_string(),

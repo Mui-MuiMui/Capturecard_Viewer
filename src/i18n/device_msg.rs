@@ -220,6 +220,15 @@ pub fn underrun_count(count: u32) -> String {
     }
 }
 
+/// 統計 OSD の音声の行に、入力が映像デバイスの音声ピンであることを添える
+/// （`status::format_osd_audio_line`、#394）
+pub fn via_audio_pin(line: &str) -> String {
+    match language() {
+        Language::Japanese => format!("{line}（音声ピン）"),
+        Language::English => format!("{line} (audio pin)"),
+    }
+}
+
 pub fn dropped_frame_count(count: u32) -> String {
     match language() {
         Language::Japanese => format!("満杯で捨てた: {count} フレーム"),

@@ -187,6 +187,9 @@ texts! {
     SaturationHint { ja: "色の濃さを強く（＋）または弱く（－）します。-100 で白黒になります", en: "Makes colors more (+) or less (-) vivid. At -100 the picture becomes black and white" },
     AudioSettings { ja: "オーディオ設定", en: "Audio" },
     AudioInputDevice { ja: "オーディオ入力デバイス", en: "Audio input device" },
+    // 「オーディオ入力デバイス」の先頭の項目（ui/audio_input.rs、#394）。設定に残るのは
+    // `video_pin` で、これは表示だけの文言なので翻訳してよい（docs/design/directshow-audio.md の (5)）
+    AudioInputVideoPin { ja: "映像デバイスの音声 (DirectShow)", en: "Video device audio (DirectShow)" },
     AudioOutputDevice { ja: "オーディオ出力デバイス", en: "Audio output device" },
     DefaultDevice { ja: "デフォルト", en: "Default" },
     SampleRateLabel { ja: "サンプリングレート:", en: "Sample rate:" },

@@ -7,12 +7,13 @@
 use crate::audio::{self, AudioDirection, ChoiceSource};
 use crate::i18n::{self, Text};
 use crate::settings::{
-    AppSettings, ColorRange, ColorSpace, VideoBackendSetting, DEFAULT_CHANNELS,
+    AppSettings, AudioInputSource, ColorRange, ColorSpace, VideoBackendSetting, DEFAULT_CHANNELS,
     DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS, MAX_VIDEO_ADJUSTMENT, MIN_BUFFER_MS, MIN_VIDEO_ADJUSTMENT,
 };
 use eframe::egui;
 use log::debug;
 
+use super::audio_input::{show_audio_input_combo, VideoPinChoice};
 use super::capability::{
     channel_label, out_of_range_note, should_reselect_video_defaults,
     show_audio_capability_progress, show_choice_note, CapabilityState, VideoCapabilityCache,
@@ -39,6 +40,7 @@ pub(super) fn show_device_settings_tab(
     settings: &mut AppSettings,
     capabilities: &VideoCapabilityCache,
     audio_capabilities: &AudioCapabilityCaches<'_>,
+    video_pin: &VideoPinChoice,
     devices: &DeviceLists<'_>,
     events: &mut Vec<SettingsEvent>,
 ) {
@@ -455,31 +457,12 @@ pub(super) fn show_device_settings_tab(
         ui.strong(Text::AudioSettings.get());
         ui.add_space(5.0);
 
-        // オーディオ入力デバイス選択 - キャッシュリストを使用
-        let current_input_device = settings.audio.input_device_name.clone().unwrap_or_default();
-
-        let mut input_changed = false;
-        egui::ComboBox::new("audio_input_device_combo", Text::AudioInputDevice.get())
-            .selected_text(if current_input_device.is_empty() {
-                Text::SelectDevice.get()
-            } else {
-                &current_input_device
-            })
-            .show_ui(ui, |ui| {
-                for device_name in devices.input {
-                    if ui
-                        .selectable_value(
-                            &mut settings.audio.input_device_name,
-                            Some(device_name.clone()),
-                            device_name,
-                        )
-                        .clicked()
-                        && current_input_device != *device_name
-                    {
-                        input_changed = true;
-                    }
-                }
-            });
+        // オーディオ入力デバイス選択。先頭が「映像デバイスの音声」、その下に
+        // キャッシュした WASAPI のデバイス（#394）
+        let input_changed = show_audio_input_combo(ui, settings, devices.input, video_pin);
+        // 入力が音声ピンなら、入力の対応設定は音声ピンの形式 1 つだけ。ワーカーへは
+        // 問い合わせない（`docs/design/directshow-audio.md` の (6)）
+        let input_is_pin = settings.audio.input_source == AudioInputSource::VideoPin;
 
         // オーディオ出力デバイス選択 - キャッシュリストを使用
         let current_output_device = settings
@@ -528,7 +511,7 @@ pub(super) fn show_device_settings_tab(
         let input_key = audio::cache_key(settings.audio.input_device_name.as_deref());
         let output_key = audio::cache_key(settings.audio.output_device_name.as_deref());
 
-        if input_changed {
+        if input_changed && !input_is_pin {
             events.push(SettingsEvent::Capability(
                 CapabilityEvent::ExpectAudioDefaults(AudioDirection::Input, input_key.clone()),
             ));
@@ -540,39 +523,54 @@ pub(super) fn show_device_settings_tab(
         }
 
         // 対応設定の取得を要求する。列挙はワーカーなので UI は止まらない
-        events.push(SettingsEvent::Capability(CapabilityEvent::RequestAudio(
-            AudioDirection::Input,
-            input_key.clone(),
-        )));
+        if !input_is_pin {
+            events.push(SettingsEvent::Capability(CapabilityEvent::RequestAudio(
+                AudioDirection::Input,
+                input_key.clone(),
+            )));
+        }
         events.push(SettingsEvent::Capability(CapabilityEvent::RequestAudio(
             AudioDirection::Output,
             output_key.clone(),
         )));
 
-        show_audio_capability_progress(ui, audio_capabilities, &input_key, &output_key, events);
+        let progress_input_key = (!input_is_pin).then_some(input_key.as_str());
+        show_audio_capability_progress(
+            ui,
+            audio_capabilities,
+            progress_input_key,
+            &output_key,
+            events,
+        );
 
+        // 入力側の対応設定。音声ピンなら繋いだ形式 1 つ（映像が開いていない・
+        // 繋いでいない間は `None` で、入力側の制約にしない）
+        let input_capabilities = if input_is_pin {
+            video_pin.capabilities()
+        } else {
+            audio_capabilities.input.ready(&input_key)
+        };
         // 入出力の両方が対応する値だけを選択肢にする。取得できていない側は
         // 制約にしない（片側だけ、どちらも無ければ固定の既定一覧）
         let rates = audio::selectable_sample_rates(
-            audio_capabilities.input.ready(&input_key),
+            input_capabilities,
             audio_capabilities.output.ready(&output_key),
         );
         let channel_choices = audio::selectable_channels(
-            audio_capabilities.input.ready(&input_key),
+            input_capabilities,
             audio_capabilities.output.ready(&output_key),
         );
         // 設定に希望値が入っていないときの手掛かり。入力デバイスの既定を採る
         // （入力が音の出どころなので、そちらへ揃えるほうが変換が減る）
-        let input_defaults = audio_capabilities
-            .input
-            .ready(&input_key)
-            .map(|caps| (caps.default_sample_rate(), caps.default_channels()));
+        let input_defaults =
+            input_capabilities.map(|caps| (caps.default_sample_rate(), caps.default_channels()));
 
         // デバイスを切り替えたあとに能力が届いたら、対応する値へ寄せ直す。
         // **両方を必ず調べて、立っている目印は両方とも落とす要求を返す。**
         // 片方で早期に打ち切ると、残った目印のせいで次のフレームでも
-        // もう一度寄せ直してしまう
-        let input_awaits = audio_capabilities.input.awaits_defaults(&input_key);
+        // もう一度寄せ直してしまう。音声ピンへ切り替えたときは届くのを待たない
+        // （形式は手元にある）ので、切り替えたフレームで寄せ直す
+        let input_awaits = !input_is_pin && audio_capabilities.input.awaits_defaults(&input_key);
         let output_awaits = audio_capabilities.output.awaits_defaults(&output_key);
         if input_awaits {
             events.push(SettingsEvent::Capability(
@@ -584,7 +582,7 @@ pub(super) fn show_device_settings_tab(
                 CapabilityEvent::ClearAudioDefaults(AudioDirection::Output, output_key.clone()),
             ));
         }
-        let repick = input_awaits || output_awaits;
+        let repick = input_awaits || output_awaits || (input_changed && input_is_pin);
         if repick {
             let desired_rate = settings
                 .audio

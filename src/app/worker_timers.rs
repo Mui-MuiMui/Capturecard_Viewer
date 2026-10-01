@@ -48,6 +48,8 @@ impl WorkerState {
             self.try_connect_video(&config, now);
         }
         if audio_due {
+            // 映像の試行のあとで初回の入力の既定が決まると、この場の設定が変わる（#394）
+            let config = self.config.clone().unwrap_or(config);
             self.try_connect_audio(&config, now);
         }
     }

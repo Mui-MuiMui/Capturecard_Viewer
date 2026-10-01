@@ -68,6 +68,9 @@ impl WorkerState {
             // 列挙すると、その分だけ最初の接続が遅れる
             self.startup_enumeration_pending = true;
         }
+        // 入力の既定は最初の映像の試行のあとに決める。決めた名前を UI が書き戻す前の
+        // 設定が届いたら、その名前を引き継ぐ（#394）
+        self.track_default_input(&mut config, initial);
         // 初回に解像度を未指定で開いたあと、UI が書き戻す前の設定なら、開いた
         // 解像度を引き継ぐ（#391）。引き継がないと同じデバイスを開き直す
         carry_resolved_resolution(&mut config.video, self.last_video_target.as_ref());

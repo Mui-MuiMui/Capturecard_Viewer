@@ -34,10 +34,10 @@ pub(super) const VIDEO_AREA_SENSE: egui::Sense = egui::Sense {
 /// フレームが 1 枚も来ていない状態で平均を出そうとすると NaN や
 /// 無限大になり、それがそのまま画面に出てしまうため。
 ///
-/// `audio_underruns` は `DeviceSnapshot.audio_underruns`。音声のアンダーランは
-/// 映像の統計ではないが、**バッファ長を詰めたときに音が途切れていないかを、
-/// 設定画面を開かずに見られるようにする**ためにここへ並べてある。
-fn format_stats_lines(stats: &FrameStats, audio_underruns: Option<u32>) -> Vec<String> {
+/// `audio_line` は音声のアンダーランの行（`status::format_osd_audio_line`）。映像の統計では
+/// ないが、**バッファ長を詰めたときに音が途切れていないかを、設定画面を開かずに
+/// 見られるようにする**ためにここへ並べてある。
+fn format_stats_lines(stats: &FrameStats, audio_line: String) -> Vec<String> {
     let mut lines = Vec::new();
 
     match stats.intervals {
@@ -77,8 +77,8 @@ fn format_stats_lines(stats: &FrameStats, audio_underruns: Option<u32>) -> Vec<S
         lines.push(i18n::stats_since_last_frame(elapsed_ms));
     }
 
-    // 文言は「接続状態」タブと共通（`status::format_underrun_count`）
-    lines.push(status::format_underrun_count(audio_underruns));
+    // 文言は「接続状態」タブと共通（`status::format_underrun_count`）。経路の印だけ OSD で足す
+    lines.push(audio_line);
 
     lines
 }
@@ -389,8 +389,7 @@ impl CaptureCardViewer {
     pub(super) fn show_stats_overlay(&self, ctx: &egui::Context) -> f32 {
         let stats = self.frames.stats();
         // ワーカーが書き出した観測値の複製。ここでデバイスへは問い合わせない
-        let audio_underruns = self.device_snapshot.audio_underruns;
-        let mut lines = format_stats_lines(&stats, audio_underruns);
+        let mut lines = format_stats_lines(&stats, self.device_snapshot.osd_audio_line());
         // 録画中は録画の行を足す（経過時間、書いた枚数・捨てた枚数、エンコーダ）
         lines.extend(self.recording_stats_lines());
 
@@ -509,7 +508,7 @@ mod tests {
     fn format_stats_lines_without_frames_shows_no_numbers() {
         // デバイスに接続できていない状態。0 除算の結果や NaN を
         // そのまま画面へ出さないことを確かめる
-        let lines = format_stats_lines(&FrameStats::default(), None);
+        let lines = format_stats_lines(&FrameStats::default(), status::format_underrun_count(None));
         let joined = lines.join(
             "
 ",
@@ -562,7 +561,7 @@ mod tests {
             since_last_frame_ms: Some(12.4),
         };
 
-        let lines = format_stats_lines(&stats, Some(3));
+        let lines = format_stats_lines(&stats, status::format_underrun_count(Some(3)));
         let joined = lines.join(
             "
 ",
