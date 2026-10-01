@@ -190,6 +190,7 @@ cargo build --release
 | `docs/design/reconnect.md` | 切断の検出、バックオフでの再試行、音声のフォールバックを外した経緯、Windows の既定デバイスの追従 |
 | `docs/design/video-pipeline.md` | `FrameBuffer` と世代番号、色変換への映像調整の畳み込み、再描画の間隔と `RepaintWaker`、UI にあるが効かない設定 |
 | `docs/design/audio.md` | 入出力の形が違う場合の変換、クロックドリフト補正、対応設定の取得、ミュート |
+| `docs/design/directshow-audio.md` | DirectShow の映像デバイスの音声ピンから音声を取り込む設計（#388）。**設計のみで未実装。** 受け口のフィルター、`AudioCapture` の入力の種類と `AudioPinFeed`、映像のグラフと音声の寿命、`[audio] input_source`、UI、対応設定、ドリフトと録画の PTS、段階分け |
 | `docs/design/settings.md` | `#[serde(default)]`、デバウンス保存、壊れた設定ファイルと `AutoSavePolicy` |
 | `docs/design/settings-dialog.md` | ドラフトの編集、イベントで返す形、`commit_draft` の決まり、「その他」タブの書き出し / 読み込み / 初期化 |
 | `docs/design/hotkeys.md` | アクションごとの割り当て、旧形式からの移行、差分での登録 |
