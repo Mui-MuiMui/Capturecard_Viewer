@@ -3,7 +3,7 @@
 WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の音を、DirectShow のキャプチャーフィルターが映像ピンと並べて持つ**音声ピン**から取り込むための設計。
 受け口のフィルターをどこに置くか、受けた PCM を既存のパススルーと録画の経路へどう流すか、映像のグラフと音声の寿命、設定・UI・対応設定、ドリフトと録画の PTS、段階分けを扱う。
 
-**第 1 段（設定ファイルの `[audio] input_source = "video_pin"` で鳴る・録画に入る、#393）を実装済み。** 第 2 段（UI・初回の既定・フェイクの音声ピン）は未実装。実装で文書と変えたところと、実機（GC551）で確かめた値は「第 1 段の実装で変えたところと実機の値」の節にまとめた。
+**第 1 段（設定ファイルの `[audio] input_source = "video_pin"` で鳴る・録画に入る、#393）と第 2 段（設定ダイアログの項目・初回の既定・フェイクの音声ピン、#394）を実装済み。** 第 3 段（塊の長い機種、レート・チャンネル数の選択）は実機で問題が見つかったときだけ。実装で文書と変えたところと、実機（GC551）で確かめた値は「第 1 段の実装で変えたところと実機の値」と「第 2 段の実装で変えたところ」の節にまとめた。
 
 ## 決まっていること
 
@@ -418,14 +418,26 @@ input_device_name = "Line (AVerMedia Live Gamer)"   # "video_pin" の間は使�
 
 音声ピンの入力では、止まるたびにアンダーラン（約 30 回 = 300ms）と、まとめて届いた分のうちリング（容量 100ms）に入らない分の捨てたフレーム（約 6000 フレーム = 125ms）が一度に増える。止まっていない間は増えない。WASAPI の入力ではドライバーの側で同じことが起きていても見えていなかった可能性がある。**第 1 段では手当てしない。** 手当てするなら、まとめて届いたときに古い分を捨てて水位を目標へ戻す、などの案があり、第 3 段の候補にする（起票は指示役の判断）。
 
+## 第 2 段の実装で変えたところ
+
+第 2 段（#394）は上の (4) の「初回の既定」、(5)、(6) と (8) の第 2 段のとおりに実装した。決定した 8 点には触れない。文書と変えたところ・書いていなかったところは次のとおり。
+
+| 文書 | 実装 | 理由 |
+|---|---|---|
+| `resolve_default_devices` を「入力の決定は映像の最初の試行のあとまで持ち越す」に変える | `resolve_default_devices` は映像の名前だけを埋める。入力は `src/app/worker_default_input.rs` の `settle_default_input` が、`try_connect_video` の直後に決める。状態は `WorkerState::default_input`（`DefaultInput`: 決める必要が無い / 映像の試行を待つ / 書き戻しを待つ） | `worker_audio_connect.rs` が 800 行を超えるため。`DefaultDevicesResolved` は映像（`ApplyConfig` の中）と入力（最初の映像の試行のあと）で 2 回に分かれて届く |
+| `DefaultDevicesResolved` で入力の種類も運ぶ | `input_source: Option<AudioInputSource>` を足した。`video_pin` に決めたときは `input` が `None`。UI は設定の入力がまだ決まっていないときだけ書き（`device::apply_resolved_devices`）、`video_pin` を書いたらその場で設定をワーカーへ送り直す | 2 秒ごとの再適用を待つと、その分だけ初回の音が遅れる |
+| 待っている間は理由を出さない | 書き戻しが届くまでも理由を出さない。WASAPI の先頭に決めたときは往復を待たずにこの場の設定へ写して開き、書き戻す前の設定（入力なし）が届いたら決めた名前を引き継ぐ。`video_pin` に決めたときは、ワーカーは映像の接続対象を書き換えず、書き戻しが届いてから映像を開き直して音声を開く | 引き継がないと、書き戻す前の設定の差分で音声を閉じて「入力が選ばれていない」を出してしまう |
+| （書いていない） | 「音声ピンを繋ぐために映像を開き直すのを待っている」（`PinWait::NotConnected`）は、映像の開き直しがまだ済んでいない（設定の映像の接続対象と開いている相手が違う）間は理由を出さない（`monitor_audio_pin::waits_silently`） | 入力を切り替えた直後と初回の既定の直後は、映像の開き直しに「成功から 1 秒」の下限が掛かり、その間に音声の試行が先に来る。第 1 段では切り替えるたびに一瞬トーストが出ていた |
+| 選べるのは `audio_pin` が「無い」「対象外」以外 | そのとおり（「繋げなかった」も選べる）。判定は `monitor_audio_pin::pin_choice`、ダイアログへは `ui::VideoPinChoice` を `SettingsDialogState` に置いて `SettingsDialogView` の借用で渡す。`app` が観測値から毎フレーム作り直す（ダイアログを開いている間だけ） | 描画の中でデバイスへ問い合わせない（GUARDRAIL） |
+| 「デバイス設定」タブに項目を足す | コンボボックスは `src/ui/audio_input.rs` に出した | `device_tab.rs` が 800 行に近い |
+| 統計 OSD に「（音声ピン）」 | `i18n::via_audio_pin`（引数を取る文字列）で添える | `Text` の表は前後の空白を許さないので、英語の " (audio pin)" を置けない |
+| フェイクの音声ピン | シナリオ `audio-pin`（引数なし）。`FakeVideoCapture::with_audio_pin` と `FakeAudioCapture::with_pin_feed` に同じ `AudioPinFeed` を渡し、映像のフェイクは繋ぐ指定で開くと `FakePinSource`（660Hz の正弦波を 48kHz 2ch 16bit、10ms ごと）を立てる | 実機と同じ形にして、`AudioCapture` と同じ差し込み方（番号の照合、出力を落とす前に抜く）をフェイクの音声でも通す |
+
 ## 実装したら書き足す場所
 
 第 1 段で書き足したもの: `docs/design/audio.md`（要点と実機の値）、`docs/design/device-worker.md`（「音声ピン（#388）」、「開いたストリームは実装自身が持つ」の表、ワーカーの中で閉じる共有）、`docs/design/threads.md`（スレッドの一覧とロックの表）、`docs/design/presets.md`（`input_source`）、`docs/design/reconnect.md`（「映像の開き直しに合わせて音声も開き直す（音声ピン、#388）」）、`CLAUDE.md` のモジュール構成の表、`GUARDRAIL.md` の 3 行。
 
-第 2 段で書き足すもの。
-
-- `docs/MANUAL-TEST.md` に上の節を足す
-- `CHANGELOG.md` に「DirectShow で開いた映像デバイスの音声（WASAPI に出ない機種の音）を鳴らせる」を足す（第 1 段では設定ファイルを書き換えたときだけなので、第 2 段で書く）
+第 2 段で書き足したもの: `docs/MANUAL-TEST.md` の「DirectShow の音声ピン（#388）」の節、`CHANGELOG.md` の「追加」、`README.md` の音声の段落、`docs/design/audio.md` の要点、`docs/design/settings-dialog.md` の選択肢の扱い、`docs/BUILD.md` の環境変数の表（`audio-pin`）、`CLAUDE.md` のモジュール構成の表（`worker_default_input.rs` / `ui/audio_input.rs`）。
 
 ## GUARDRAIL.md に足した行
 

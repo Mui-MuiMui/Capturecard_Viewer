@@ -2,7 +2,7 @@
 
 入力と出力でレートやチャンネル数が違う場合の変換、長時間再生でのクロックドリフト補正、
 デバイスの対応設定をどこで取るか、ミュートを音量と別に持つ理由。
-DirectShow の映像デバイスの音声ピンから取り込む経路（#388、設計のみ）は `docs/design/directshow-audio.md` にある。
+DirectShow の映像デバイスの音声ピンから取り込む経路（#388）は末尾の節に要点、詳細は `docs/design/directshow-audio.md` にある。
 目指す構造は `docs/ARCHITECTURE.md` の「音声パイプライン」にある。
 
 ## 入出力の形が違う場合は出力側で変換する
@@ -136,13 +136,16 @@ cpal を 0.15 から 0.18 へ上げたとき（#299）に、WASAPI での振る�
 
 効果音（rodio 0.22）は cpal 0.17 を使う。rodio の最新（0.22.2）がまだ 0.18 に上がっていないため、ビルドには cpal が 2 つ入る（`docs/DEPENDENCIES.md`）。効果音の再生はパススルーと別のストリームなので、版が違っても干渉しない。
 
-## DirectShow の音声ピン（#388、第 1 段を実装済み）
+## DirectShow の音声ピン（#388、第 1 段・第 2 段を実装済み）
 
-WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の音は、DirectShow のキャプチャーフィルターが映像ピンと並べて持つ音声ピンから取る（`[audio] input_source = "video_pin"`。UI で選べるのは第 2 段）。**音声ピンは cpal の入力ストリームの代わりとして扱い、リングより後ろ（出力コールバック、変換、クロックドリフト補正、音量・ミュート、アンダーランの数え方）と録画への分岐（`AudioTap`）は今の経路をそのまま通す。** 音声ピンのレンダラーの `Receive` が `AudioPinFeed::push` 経由で `process_input_iter`（`process_input` の本体）を呼ぶ形で、フェイクの入力スレッドが cpal の代わりに `process_input` を呼んでいるのと同じ。
+WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の音は、DirectShow のキャプチャーフィルターが映像ピンと並べて持つ音声ピンから取る（`[audio] input_source = "video_pin"`。設定ダイアログの「オーディオ入力デバイス」の先頭の「映像デバイスの音声 (DirectShow)」で選ぶ）。**音声ピンは cpal の入力ストリームの代わりとして扱い、リングより後ろ（出力コールバック、変換、クロックドリフト補正、音量・ミュート、アンダーランの数え方）と録画への分岐（`AudioTap`）は今の経路をそのまま通す。** 音声ピンのレンダラーの `Receive` が `AudioPinFeed::push` 経由で `process_input_iter`（`process_input` の本体）を呼ぶ形で、フェイクの入力スレッドが cpal の代わりに `process_input` を呼んでいるのと同じ。
 
 - `AudioCapture::start_passthrough` は入力の種類（`PassthroughInput::Device` / `VideoPin { graph }`）で入力側だけを分け、出力側（`passthrough_output.rs`）は共有する。音声ピンの入力は音声ピンの形式 1 つで開き、出力をそれに揃える（設定のレート・チャンネル数は使わない）
 - **塊の長さは 10ms を提案する**（`IAMBufferNegotiation::SuggestAllocatorProperties`）。GC551 では提案が通り、1 塊 1920 バイト（48kHz 2ch 16bit の 10ms）で届く（2026-10-01 の実測）。提案を無視して長い塊を返す機種では、そのストリームに限ってリングを塊 2 つぶんまで広げ、「接続状態」タブに出す
 - 不連続の印（`IMediaSample::IsDiscontinuity`）は「入力の取りこぼし」として数える（最初のサンプルを除く）
 - GC551 はキャプチャーフィルターごと数百 ms 止まり、そのあと音声ピンが溜まった分をまとめて渡すことがある。そのたびにアンダーランと捨てたフレームが一度に増える（音声ピンの実装が起こしているものではない。`docs/design/directshow-audio.md` の「実機で確かめた値」）
+- **対応設定は音声ピンの形式 1 つ**（`PinFormat::capabilities`）。設定ダイアログのサンプリングレートとチャンネル数の選択肢は、入力側にこれを使って作り、ワーカーへ入力の対応設定を問い合わせない。映像が開いていない・繋いでいない間は入力側の制約にしない（出力だけで作る）
+- **入力が未設定のまま起動したら、最初の映像の試行のあとに入力を決める**（`app::worker_default_input`）。映像に音声ピンがあれば `video_pin`、無ければ今までどおり WASAPI の列挙の先頭。決めるまでと、UI が書き戻した設定が届くまでの間は、音声を理由なしで待たせる（「入力が選ばれていない」を出さない）
+- フェイク（`CAPTURECARD_VIEWER_FAKE_SCENARIO=audio-pin`）は、映像のフェイクが正弦波を `AudioPinFeed` へ流し、音声のフェイクが本物と同じく番号の合う音声ピンへリングを差し込む。設定からワーカー、音声ピンで開くまでを CI で通している
 
 受け口のフィルターの置き場所、映像のグラフと音声の寿命、`[audio] input_source`、UI、対応設定、ドリフトと録画の PTS、段階分けと、文書から変えたところは `docs/design/directshow-audio.md` にまとめてある。
