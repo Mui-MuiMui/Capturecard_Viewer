@@ -100,7 +100,20 @@ pub(super) enum EncoderError {
     Encode(windows::core::Error),
 }
 
+impl EncoderError {
+    /// ログに出す理由。ログは表示の言語にかかわらず日本語で固定する（`docs/design/i18n.md`）
+    /// ので、画面向けの `Display` とは分けてある。
+    pub(super) fn log_reason(&self) -> String {
+        match self {
+            EncoderError::NotFound => "エンコーダが登録されていない".to_string(),
+            EncoderError::Configure(error) => format!("エンコーダを設定できない: {error}"),
+            EncoderError::Encode(error) => format!("エンコードに失敗した: {error}"),
+        }
+    }
+}
+
 /// 文言は `RecordingError::EncoderUnavailable` の理由として画面に出るので `crate::i18n` から引く。
+/// ログには `log_reason` を使う。
 impl std::fmt::Display for EncoderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let text = match self {
@@ -633,6 +646,9 @@ mod tests {
             let fixed = english.replace(&os_message, "");
             assert!(fixed.is_ascii(), "{english}");
         }
+        // ログは表示の言語にかかわらず日本語のまま
+        let log = with_language(Language::English, || EncoderError::NotFound.log_reason());
+        assert_eq!(log, "エンコーダが登録されていない");
     }
 
     #[test]
