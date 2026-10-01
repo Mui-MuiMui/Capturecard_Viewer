@@ -184,8 +184,12 @@ pub(super) enum DeviceEvent {
         input: Option<String>,
     },
     /// 解像度が未指定の設定で映像を開き、実際に開いた解像度が分かった（#391）。
-    /// UI スレッドは設定の解像度がまだ未指定なら書き戻す
-    VideoResolutionResolved((u32, u32)),
+    /// `target` は開いたときの接続対象（解像度は未指定のまま）。UI スレッドは、
+    /// 設定の解像度がまだ未指定で、解像度以外が `target` と同じときだけ書き戻す
+    VideoResolutionResolved {
+        target: VideoTarget,
+        resolution: (u32, u32),
+    },
 }
 
 /// 再試行の進み具合。「接続状態」タブに出す。

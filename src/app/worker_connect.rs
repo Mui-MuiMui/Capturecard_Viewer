@@ -197,7 +197,10 @@ impl WorkerState {
             config.video = resolved.clone();
         }
         self.last_video_target = Some(resolved);
-        self.emit(DeviceEvent::VideoResolutionResolved(resolution));
+        self.emit(DeviceEvent::VideoResolutionResolved {
+            target: target.clone(),
+            resolution,
+        });
     }
 
     /// 映像デバイスが選ばれていないので、開いているストリームを閉じて待つ（#334）。
@@ -685,11 +688,13 @@ mod tests {
         config
     }
 
-    fn resolved_resolutions(events: &[DeviceEvent]) -> Vec<(u32, u32)> {
+    fn resolved_resolutions(events: &[DeviceEvent]) -> Vec<(VideoTarget, (u32, u32))> {
         events
             .iter()
             .filter_map(|event| match event {
-                DeviceEvent::VideoResolutionResolved(resolution) => Some(*resolution),
+                DeviceEvent::VideoResolutionResolved { target, resolution } => {
+                    Some((target.clone(), *resolution))
+                }
                 _ => None,
             })
             .collect()
@@ -723,9 +728,12 @@ mod tests {
         assert_eq!(config.video.2.as_deref(), Some("YUY2"));
         assert_eq!(config.video.3, Some(60));
 
+        // 返すイベントは開いたときの接続対象（解像度なし）を運ぶ。UI はこれと
+        // 設定を突き合わせてから書き戻す
+        let opened = config.video.clone();
         state.tick(Instant::now());
         let events = drain(&events);
-        assert_eq!(resolved_resolutions(&events), vec![(1920, 1080)]);
+        assert_eq!(resolved_resolutions(&events), vec![(opened, (1920, 1080))]);
         let config = state.config.as_ref().expect("設定を覚えていること");
         assert_eq!(config.video.1, Some((1920, 1080)));
         assert_eq!(state.last_video_target.as_ref(), Some(&config.video));
