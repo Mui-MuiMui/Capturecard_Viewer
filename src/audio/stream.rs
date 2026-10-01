@@ -36,9 +36,23 @@ fn count_dropped_frames(counter: &AtomicU32, frames: usize) {
         return;
     }
     let add = u32::try_from(frames).unwrap_or(u32::MAX);
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_add(add))
-    });
+    update_u32(counter, |current| Some(current.saturating_add(add)));
+}
+
+/// `counter` を `f` で書き換える。`f` が `None` を返したら書き換えずに終わる。
+///
+/// 比較と交換（`compare_exchange_weak`）の繰り返しで、ロックもアロケーションもしない。
+/// コールバックの数え手が使う。標準の `fetch_update` は新しいツールチェインで
+/// `try_update` へ改名されて非推奨になり（CI は `-D warnings`）、新しい名前は
+/// それより前の版に無いので、どちらの版でも通るように自分で回す。
+pub(super) fn update_u32(counter: &AtomicU32, f: impl Fn(u32) -> Option<u32>) {
+    let mut current = counter.load(Ordering::Relaxed);
+    while let Some(next) = f(current) {
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
+    }
 }
 
 /// 渡されたサンプル数 `offered` のうち `pushed` だけ積めたとき、捨てたフレーム数。
@@ -52,9 +66,7 @@ fn dropped_frames(offered: usize, pushed: usize, channels: usize) -> usize {
 /// **エラーのコールバックから呼ぶので、ロックもアロケーションもしない。**
 /// `count_dropped_frames` と同じく `u32::MAX` で頭打ちにする。
 pub(super) fn count_xrun(counter: &AtomicU32) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_add(1))
-    });
+    update_u32(counter, |current| Some(current.saturating_add(1)));
 }
 
 /// ストリームのエラーのうち、ストリームが動き続けていて開き直さなくてよいものか。

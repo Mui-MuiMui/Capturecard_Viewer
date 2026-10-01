@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use super::controls::{load_volume, AudioControls};
 use super::convert::PassthroughConverter;
-use super::stream::{handle_stream_error, AudioConsumer};
+use super::stream::{handle_stream_error, update_u32, AudioConsumer};
 
 /// 出力ストリームがデバイスワーカーへ知らせる値。
 ///
@@ -40,9 +40,7 @@ pub(super) struct OutputSignals {
 /// 戻ると「直った」と読めてしまうため。数え始めからの累計で、減ることはない。
 fn count_underrun(counter: &AtomicU32) {
     // `checked_add` が `None` を返す（頭打ち）と更新せずに終わる
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        current.checked_add(1)
-    });
+    update_u32(counter, |current| current.checked_add(1));
 }
 
 /// 出力ストリームを組み立てる。
