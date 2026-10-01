@@ -36,7 +36,8 @@ grep -E '\] capturecard_viewer(::| )' "$APPDATA/capturecard_viewer/logs/<ファ�
 | ターゲット | 何を出すか |
 |---|---|
 | `app::worker` | ワーカースレッドの起動と終了（`debug`） |
-| `app::worker_loop` | ワーカーの開始・停止、「デバイス再接続」の要求、最小化中のホットキー（音量・ミュート） |
+| `app::worker_loop` | ワーカーの開始・停止 |
+| `app::worker_commands` | 設定の受け取り（`trace`）、「デバイス再接続」の要求、最小化中のホットキー（音量・ミュート） |
 | `app::worker_timers` | 映像の切断の検出、再接続の要求 |
 | `app::worker_audio_timers` | 音声ストリームのエラーによる再接続の要求、既定デバイスの切り替え、音声のリサンプル比の補正 |
 | `app::worker_connect` / `app::worker_audio_connect` | 接続の試行と成否、デバイス能力・対応設定の取得、既定デバイス名の確定（音声側は `worker_audio_connect`） |
