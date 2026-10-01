@@ -3,7 +3,7 @@
 WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の音を、DirectShow のキャプチャーフィルターが映像ピンと並べて持つ**音声ピン**から取り込むための設計。
 受け口のフィルターをどこに置くか、受けた PCM を既存のパススルーと録画の経路へどう流すか、映像のグラフと音声の寿命、設定・UI・対応設定、ドリフトと録画の PTS、段階分けを扱う。
 
-**この文書の段階では未実装。** 録画（`docs/design/recording.md`、#120）と同じ進め方で、指示役がレビューしてから実装の Issue を切る。実装したら「実装したら書き足す場所」の節を埋め、この行を書き換える。
+**第 1 段（設定ファイルの `[audio] input_source = "video_pin"` で鳴る・録画に入る、#393）を実装済み。** 第 2 段（UI・初回の既定・フェイクの音声ピン）は未実装。実装で文書と変えたところと、実機（GC551）で確かめた値は「第 1 段の実装で変えたところと実機の値」の節にまとめた。
 
 ## 決まっていること
 
@@ -387,20 +387,49 @@ input_device_name = "Line (AVerMedia Live Gamer)"   # "video_pin" の間は使�
 - [ ] 統計 OSD の音声の行に「（音声ピン）」が付く
 - [ ] 入力の種類だけが違うプリセットを読み込むと、入力の種類が切り替わる。「（変更あり）」の判定にも効く
 
+## 第 1 段の実装で変えたところと実機の値
+
+第 1 段（#393）は上の (1)〜(4)、(6)、(7) と (8) の第 1 段のとおりに実装した。文書と変えたところは次のとおり。どれも決定した 8 点（「決めてもらうこと」）には触れない。
+
+| 文書 | 実装 | 理由 |
+|---|---|---|
+| `PassthroughInput::VideoPin`（引数なし。`AudioCapture` が `AudioPinFeed` から読む） | `PassthroughInput::VideoPin { graph }`。ワーカーが `ActiveVideo::audio_pin` から番号を読んで渡し、`AudioCapture` は `AudioPinFeed` の繋いだ音声ピンと番号が合わなければ `AudioError::VideoPinUnavailable` で開かない | ワーカーが「どの映像のグラフに対して開いたか」を明示でき、モックが番号を記録するだけで「映像の開き直しで開き直す」を CI で確かめられる。`AudioPinFeed` を持たないモックでも同じ分岐を通る |
+| 判定は `app::monitor` の純粋関数 | `src/app/monitor_audio_pin.rs`（`decide_pin_readiness` / `should_resync_pin_audio`） | `monitor.rs` が 793 行で、足すと 800 行を超える |
+| `capture.rs` の出力側を関数へ切り出す（置き場所は実装の段で） | 出力デバイス・リング・出力ストリームの組み立ては `src/audio/passthrough_output.rs`、入力ストリームのサンプル型ごとの組み立ては `stream.rs` の `build_input_stream`、旗と数え手は `StreamCounters` にまとめた | 文書のとおり（置き場所を決めた）。`StreamCounters` は「開くたびに作り直す」決まりを 1 つの値の差し替えにした |
+| `filter.rs` の映像の受け取りを別ファイルへ | `src/video/directshow/video_stream.rs` | 文書のとおり |
+| `process_input` をイテレーターでも受けられる形に | 本体を `process_input_iter`（`ExactSizeIterator`）にし、`process_input` はスライスを渡す薄い入口として残した | cpal とフェイクの呼び出しとテストを書き換えずに済む |
+| `AudioTarget` を構造体へ置き換えるかは実装の段で | タプルのまま末尾に足した（`VideoTarget` の 6 つ目が「音声ピンを繋ぐか」、`AudioTarget` の 6 つ目が `AudioInputSource`） | 既存の `.0` `.1` `.4` の参照とテストを動かさずに済む |
+| （書いていない） | 最初のサンプルに付く不連続の印は取りこぼしに数えない | 流れ始めには必ず付くので、数えると「入力の取りこぼし: 1」が常に出る |
+| （書いていない） | 起動直後の既定の決定（`resolve_default_devices`）は、入力の種類が `video_pin` なら WASAPI の入力を埋めない | 「映像デバイスの音声」を選んでいる間は `input_device_name` を書き換えない（(4)） |
+| （書いていない） | 開いている音声の観測値（アンダーラン・捨てたフレーム・取りこぼし・水位）を 30 秒ごとにデバッグログへ出す | 実機で「増え続けない」を「接続状態」タブを開かずに数で確かめるため |
+
+### 実機で確かめた値（2026-10-01、AVerMedia GC551、HDMI に 1920x1080 60Hz のテスト動画）
+
+| 項目 | 値 |
+|---|---|
+| 音声ピンの形式 | 48000Hz 2ch 16bit（`WAVE_FORMAT_PCM`） |
+| 塊の長さ | **10ms の提案が通った。** アロケーターの 1 バッファ 1920 バイト、実際に届いた最も長い塊も 1920 バイト（= 10ms）。リングは広げずに開く |
+| `Run` | 音声ピンを繋いでも通った（やり直しは起きない） |
+| 映像の fps | 繋ぐ前 59.99、繋いだあと 60.0〜60.04（統計の実効 fps） |
+| 録画 | 65 秒の MP4 に AAC 48kHz 2ch のトラックが入り、映像と音声の終わりの差は -3ms |
+| `IAMStreamConfig::GetNumberOfCapabilities` の大きさ | 音声ピンでも 128 バイト（`VIDEO_STREAM_CONFIG_CAPS` の大きさ）を返す。返った大きさの領域を用意し、先頭の `AUDIO_STREAM_CONFIG_CAPS` だけを読む |
+
+**キャプチャーフィルターごと数百 ms 止まることがある。** 映像のフレームも音声ピンの塊も同じ時刻に 200〜400ms 届かなくなり、そのあと音声ピンは溜まっていた分をまとめて渡してくる。音声ピンを繋がず、音声のバックエンドも開かない状態でも起きた（300 秒で 1 回）ので、音声ピンの実装が起こしているものではない（ドライバー・USB・入力側のどれかで、切り分けていない）。録画中（ハードウェアの H.264 エンコーダが動いている間）は回数が増えた（65 秒で 2〜3 回）。
+
+音声ピンの入力では、止まるたびにアンダーラン（約 30 回 = 300ms）と、まとめて届いた分のうちリング（容量 100ms）に入らない分の捨てたフレーム（約 6000 フレーム = 125ms）が一度に増える。止まっていない間は増えない。WASAPI の入力ではドライバーの側で同じことが起きていても見えていなかった可能性がある。**第 1 段では手当てしない。** 手当てするなら、まとめて届いたときに古い分を捨てて水位を目標へ戻す、などの案があり、第 3 段の候補にする（起票は指示役の判断）。
+
 ## 実装したら書き足す場所
 
-- `docs/design/audio.md` の「DirectShow の音声ピン」の節を、要点と実機で確かめた塊の長さに書き換える
-- `docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」に音声ピンの段落、「開いたストリームは実装自身が持つ」の表に `AudioPinFeed`、ワーカーの中で閉じる共有として `AudioPinFeed` を足す
-- `docs/design/threads.md` のスレッドの一覧に「DirectShow の音声ピンのストリーミングスレッド」、ロックの表に `AudioPinFeed` の差し込み先（`Receive` は `try_lock` だけ）を足す
-- `docs/design/presets.md` に `input_source` を足す
-- `docs/design/reconnect.md` に「映像の開き直しに合わせて音声も開き直す（音声ピン）」を足す（#387 の「両方に出るが Media Foundation では開けないデバイス」の近く）
-- `CLAUDE.md` のモジュール構成の表に `src/audio/pin_feed.rs` と `src/video/directshow/audio_pin.rs`（と切り出したファイル）を足す
+第 1 段で書き足したもの: `docs/design/audio.md`（要点と実機の値）、`docs/design/device-worker.md`（「音声ピン（#388）」、「開いたストリームは実装自身が持つ」の表、ワーカーの中で閉じる共有）、`docs/design/threads.md`（スレッドの一覧とロックの表）、`docs/design/presets.md`（`input_source`）、`docs/design/reconnect.md`（「映像の開き直しに合わせて音声も開き直す（音声ピン、#388）」）、`CLAUDE.md` のモジュール構成の表、`GUARDRAIL.md` の 3 行。
+
+第 2 段で書き足すもの。
+
 - `docs/MANUAL-TEST.md` に上の節を足す
 - `CHANGELOG.md` に「DirectShow で開いた映像デバイスの音声（WASAPI に出ない機種の音）を鳴らせる」を足す（第 1 段では設定ファイルを書き換えたときだけなので、第 2 段で書く）
 
-## GUARDRAIL.md に足す行の案
+## GUARDRAIL.md に足した行
 
-GUARDRAIL.md はまだ変えない。実装の段で足す。
+第 1 段（#393）で `GUARDRAIL.md` の「スレッドとデバイス」に足した。
 
 - 音声ピンのレンダラーの `Receive` でロックもアロケーションもしない。受け取れないときも失敗を返さず、捨てて `Ok` を返す（理由: `docs/design/directshow-audio.md`）
 - 音声ピンを繋ぐのは `[audio] input_source = "video_pin"` のときだけにする（理由: 同上）

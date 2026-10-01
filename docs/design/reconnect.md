@@ -104,6 +104,17 @@ cpal は WASAPI の `IMMNotificationClient` を公開していないため、開
 - **対応形式の問い合わせ（`capabilities`）も同じ規則で倒す。** 能力キャッシュのキーはデバイス名と開き方の組（#249）なので、（GC551、自動）には DirectShow の対応形式が入る。自動で開くときもやはり DirectShow へ倒れるので、選択肢と実際に開く経路は食い違わない
 - **倒したことを覚えておかない。** 次に開くときもまず Media Foundation を試す。ドライバーの更新などで Media Foundation でも開けるようになれば、そのまま Media Foundation へ戻る。Media Foundation の失敗にかかる分だけ毎回の接続が遅れるが、開き直しは設定の変更か切断のときだけなので許容している
 - 判定は純粋関数 `directshow_fallback`（倒すか・どの名前で探すか）で、`attempt_with_fallback` は経路ごとの操作をクロージャで受け取る。テストは経路ごとに `MockVideoBackend` を 1 つずつ置いて回す
+- **音声ピンを繋ぐ指定（`CaptureRequest::connect_audio_pin`、#388）も DirectShow へ倒すときに渡す。** GC551 はこの経路で開くので、渡し忘れると既定の開き方のままでは音声ピンが繋がらない
+
+### 映像の開き直しに合わせて音声も開き直す（音声ピン、#388）
+
+入力が映像デバイスの音声ピン（`[audio] input_source = "video_pin"`）のとき、音声は映像のグラフの中の音声ピンから来る。**映像を開き直すとグラフが作り直され、音声ピンの番号（`AudioPinFeed::begin_graph`）が進む。** 古い番号の差し込み先には何も積まれないので、音声も開き直す。設計の全体は `docs/design/directshow-audio.md` の (3)。
+
+- **要求を立てるのはワーカーの `tick` の監視**（`worker_audio_timers::monitor_audio_pin`。判定は `app::monitor_audio_pin::should_resync_pin_audio`）。映像の音声ピンの番号（`ActiveVideo::audio_pin`）と、音声が差し込んでいる番号（`ActiveAudio::input_route`）を比べ、違えば `last_audio_target = None` にして `audio_retry.request_now` する。`try_connect_video` の成功の枝に書かないのは、映像を開き直す経路（切断からの再接続、設定の変更、右クリックの再接続、#387 の自動の倒し込み）を 1 か所でまとめて拾うため
+- **音声のストリームのエラーの経路では知らせない。** エラーからの開き直しには 5 秒の下限（`AUDIO_ERROR_RECONNECT_MIN_INTERVAL`）があり、映像を開き直すたびに音が 5 秒戻らなくなる。自動再接続を切っていると「エラーで止まった」と通知まで出る（#310）
+- 形式が同じでも毎回開き直す。映像の開き直しはそれ自体で 1 秒前後途切れるので、出力を開き直す数百 ms を惜しむ理由が薄い
+- **音声ピンが使えないときは開かずに待つ**（映像が開いていない、Media Foundation で開いた、音声ピンが無い、繋げなかった。`hold_audio_for_pin`）。扱いは上の「入力が未指定なら音声を開かない（#304）」と同じで、再試行はせず、理由を 1 度だけ返す。映像の状態が変わって理由が変わったら、同じ監視が要求を立て直す。映像が閉じたら音声も閉じる（出力だけを開いたまま無音を流し続けない）
+- 開き直しは `ConnectRetry` の「成功から次の開き直しまで 1 秒」（下の #232）の下限を受ける。起動直後は `poll_connection` が映像を先に試すので、ふつうは同じ `tick` で映像 → 音声の順に開く
 
 ### 成功から次の開き直しまでの下限（#232）
 
