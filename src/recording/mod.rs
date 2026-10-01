@@ -42,6 +42,7 @@ mod replay;
 mod replay_config;
 mod replay_recording;
 mod replay_ring;
+mod sample_pool;
 mod session;
 mod storage;
 #[cfg(test)]
