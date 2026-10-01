@@ -32,6 +32,7 @@ use super::replay_recording::{Baseline, Counters, ReplayRecording};
 use super::replay_ring::{
     keep_from, replay_cut, ring_byte_limit, should_force_keyframe, ByteTrim, EncodedRing, Track,
 };
+use super::sample_pool::{SamplePool, SAMPLE_POOL_CAPACITY};
 use super::session::{check_disk, fail, prepare_folder, MIN_AUDIO_CHUNK_FRAMES};
 use super::storage::{free_bytes, is_short, megabytes, replay_required_bytes};
 use super::writer::{memory_sample, WriterParams};
@@ -61,6 +62,8 @@ pub(super) struct ReplayPipeline {
     /// ハードウェアのエンコーダで最初の 1 枚から失敗したので、以降はソフトウェアを使う
     hardware_failed: bool,
     nv12: Vec<u8>,
+    /// エンコーダへ渡す NV12 のサンプル。手放されたものを使い回す（#382）
+    video_samples: SamplePool,
     ring: EncodedRing,
     /// エンコーダが最後に出したキーフレームの時刻と、最後にキーフレームを強制した時刻（#313）
     last_keyframe: Option<i64>,
@@ -113,6 +116,7 @@ impl ReplayPipeline {
             size: None,
             hardware_failed: false,
             nv12: Vec::new(),
+            video_samples: SamplePool::new(SAMPLE_POOL_CAPACITY),
             ring: EncodedRing::default(),
             last_keyframe: None,
             last_forced: None,
@@ -375,11 +379,12 @@ impl ReplayPipeline {
 
     fn encode_video(&mut self, pts: i64) -> Result<(), RecordingError> {
         let duration = self.clock.sample_duration();
-        let sample = memory_sample(&self.nv12, pts, duration).map_err(|error| {
-            RecordingError::EncoderUnavailable {
+        let sample = self
+            .video_samples
+            .sample(&self.nv12, pts, duration)
+            .map_err(|error| RecordingError::EncoderUnavailable {
                 reason: error.to_string(),
-            }
-        })?;
+            })?;
         let Some(encoder) = self.video_encoder.as_mut() else {
             return Ok(());
         };

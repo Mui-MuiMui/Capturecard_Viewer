@@ -42,6 +42,7 @@ use windows::Win32::System::Com::{CoTaskMemFree, IPersist};
 
 use super::convert::{nv12_len, Nv12Matrix};
 use super::pts::{AUDIO_CHANNELS, AUDIO_SAMPLE_RATE};
+use super::sample_pool::{SamplePool, SAMPLE_POOL_CAPACITY};
 use super::EncoderInfo;
 
 /// Sink Writer を組み立てるときに決める値。
@@ -113,6 +114,8 @@ pub(super) struct SinkWriter {
     audio_stream: Option<u32>,
     params: WriterParams,
     samples_written: u64,
+    /// 映像の入力のサンプル。Sink Writer が手放したものを使い回す（#382）
+    video_samples: SamplePool,
 }
 
 impl SinkWriter {
@@ -158,6 +161,7 @@ impl SinkWriter {
             audio_stream,
             params,
             samples_written: 0,
+            video_samples: SamplePool::new(SAMPLE_POOL_CAPACITY),
         })
     }
 
@@ -202,8 +206,10 @@ impl SinkWriter {
     ) -> Result<(), WriterError> {
         let expected = nv12_len(self.params.width as usize, self.params.height as usize);
         debug_assert_eq!(data.len(), expected);
-        let sample =
-            memory_sample(data, pts, duration).map_err(WriterError::at(WriterStage::Write))?;
+        let sample = self
+            .video_samples
+            .sample(data, pts, duration)
+            .map_err(WriterError::at(WriterStage::Write))?;
         unsafe { self.writer.WriteSample(self.stream, &sample) }
             .map_err(WriterError::at(WriterStage::Write))?;
         self.samples_written += 1;
