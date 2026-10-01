@@ -199,17 +199,56 @@ fn is_blank_config(contents: &[u8]) -> bool {
     contents.iter().all(|b| b.is_ascii_whitespace())
 }
 
-// 保存で使う一時ファイルのパス。同じフォルダの `<元のファイル名>.tmp`。
+// 保存で使う一時ファイルのパス。同じフォルダの `<元のファイル名>.<乱数>.tmp`。
 //
 // 同じフォルダに置くのは、rename が同じボリュームの中でだけ置き換えとして
 // 働くため。別のフォルダ（%TEMP% など）に置くとボリュームをまたぎうる。
-fn temp_path_for(path: &Path) -> PathBuf {
+// 名前に乱数を入れるのは、もともと同じ名前の `.tmp` があっても上書きしたり
+// 消したりしないため（Issue #369）。書き出しは任意のフォルダへ書く。
+fn temp_path_for(path: &Path, token: u64) -> PathBuf {
     let file_name = path
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    path.with_file_name(format!("{}.tmp", file_name))
+    path.with_file_name(format!("{}.{:016x}.tmp", file_name, token))
+}
+
+// 一時ファイルの名前に入れる乱数。クレートを増やさないため、`RandomState`
+// （種をプロセスごとに乱数で取る）のハッシュへ時刻・プロセス ID・試行の番号を混ぜる。
+fn temp_token(attempt: u32) -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    hasher.write_u128(nanos);
+    hasher.write_u32(std::process::id());
+    hasher.write_u32(attempt);
+    hasher.finish()
+}
+
+// 名前が衝突したときに別の名前で試す回数
+const TEMP_ATTEMPTS: u32 = 8;
+
+// 一時ファイルを排他的に（`create_new`）作り、そのパスを返す。既にある
+// ファイルは開かないので、ここから返るのは自分が作ったものだけ。
+fn create_temp_file(path: &Path) -> std::io::Result<PathBuf> {
+    let mut last_error = None;
+    for attempt in 0..TEMP_ATTEMPTS {
+        let temp_path = temp_path_for(path, temp_token(attempt));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(_) => return Ok(temp_path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::AlreadyExists)))
 }
 
 // 設定を一時ファイルへ書き、ディスクへ書き切ってから本来のファイルと置き換える。
@@ -233,7 +272,9 @@ fn write_atomically(path: &Path, settings: &AppSettings) -> Result<(), SettingsE
 // `write_atomically` と `export_to` の本体。失敗の理由だけを返し、どの
 // `SettingsError` にするかは呼び出し側が決める。
 fn replace_atomically(path: &Path, settings: &AppSettings) -> Result<(), String> {
-    let temp_path = temp_path_for(path);
+    // 名前を排他的に確保してから書く。confy は `truncate` で開き直して書くが、
+    // 開くのは自分で作ったファイルだけ
+    let temp_path = create_temp_file(path).map_err(|e| e.to_string())?;
 
     let written = confy::store_path(&temp_path, settings)
         .map_err(|e| e.to_string())
@@ -249,8 +290,9 @@ fn replace_atomically(path: &Path, settings: &AppSettings) -> Result<(), String>
         .and_then(|()| std::fs::rename(&temp_path, path).map_err(|e| e.to_string()));
 
     if let Err(source) = written {
-        // 置き換えられなかった一時ファイルは残さない。元のファイルは
-        // 手付かずのまま。消せなくても次の保存で上書きされるので、失敗は捨てる
+        // 置き換えられなかった一時ファイルは残さない。消すのは自分で作った
+        // `temp_path` だけ。元のファイルは手付かずのまま。消せなくても残るのは
+        // 自分の一時ファイル 1 つだけなので、失敗は捨てる
         let _ = std::fs::remove_file(&temp_path);
         return Err(source);
     }
@@ -351,6 +393,23 @@ mod tests {
     use chrono::NaiveDate;
     use std::fs;
     use tempfile::tempdir;
+
+    // `path` の隣に、この書式（`<名前>.<16 桁の 16 進数>.tmp`）の一時ファイルが残っているか
+    fn has_own_temp_file(path: &Path) -> bool {
+        let name = format!("{}.", path.file_name().unwrap().to_string_lossy());
+        fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                let entry = entry.file_name().to_string_lossy().into_owned();
+                entry
+                    .strip_prefix(&name)
+                    .and_then(|rest| rest.strip_suffix(".tmp"))
+                    .is_some_and(|token| {
+                        token.len() == 16 && token.chars().all(|c| c.is_ascii_hexdigit())
+                    })
+            })
+    }
 
     #[test]
     fn backup_broken_config_moves_file_and_returns_path() {
@@ -515,14 +574,54 @@ mod tests {
     }
 
     #[test]
-    fn temp_path_for_appends_tmp_in_the_same_folder() {
-        // rename を同じボリュームの中で済ませるため、同じフォルダに置く
+    fn temp_path_for_puts_token_before_tmp_in_the_same_folder() {
+        // rename を同じボリュームの中で済ませるため、同じフォルダに置く。
+        // 乱数は 16 桁の 16 進数で入る
         let path = Path::new(r"C:\config\default-config.toml");
 
         assert_eq!(
-            temp_path_for(path),
-            PathBuf::from(r"C:\config\default-config.toml.tmp")
+            temp_path_for(path, 0xab),
+            PathBuf::from(r"C:\config\default-config.toml.00000000000000ab.tmp")
         );
+    }
+
+    #[test]
+    fn temp_token_differs_between_attempts() {
+        // 衝突したときに試す名前が毎回変わること
+        assert_ne!(temp_token(0), temp_token(1));
+    }
+
+    #[test]
+    fn export_to_keeps_existing_tmp_file_on_success() {
+        // Issue #369。書き出し先の隣にもともとある同じ名前の `.tmp` を
+        // 上書きも削除もしない
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("exported.toml");
+        let stale = dir.path().join("exported.toml.tmp");
+        fs::write(&stale, "user data").expect("既存の .tmp を作れること");
+
+        export_to(&path, &AppSettings::default()).expect("書き出せること");
+
+        assert_eq!(fs::read_to_string(&stale).unwrap(), "user data");
+        assert!(path.is_file());
+        // 自分の一時ファイルは rename で消えている
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn export_to_keeps_existing_tmp_file_on_failure() {
+        // 置き換え先がフォルダで rename が失敗しても、既存の `.tmp` は残り、
+        // 自分の一時ファイルだけが消える
+        let dir = tempdir().expect("一時ディレクトリを作れること");
+        let path = dir.path().join("exported.toml");
+        fs::create_dir(&path).expect("置き換えられないフォルダを作れること");
+        let stale = dir.path().join("exported.toml.tmp");
+        fs::write(&stale, "user data").expect("既存の .tmp を作れること");
+
+        assert!(export_to(&path, &AppSettings::default()).is_err());
+
+        assert_eq!(fs::read_to_string(&stale).unwrap(), "user data");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[test]
@@ -580,7 +679,7 @@ mod tests {
 
         write_atomically(&path, &settings).expect("保存できること");
 
-        assert!(!temp_path_for(&path).exists(), "一時ファイルが残っている");
+        assert!(!has_own_temp_file(&path), "一時ファイルが残っている");
         let (reloaded, outcome) = AppSettings::load_from(&path);
         assert_eq!(outcome, LoadOutcome::Loaded);
         assert_eq!(reloaded.video.device_name, settings.video.device_name);
@@ -597,7 +696,7 @@ mod tests {
         write_atomically(&path, &AppSettings::default()).expect("保存できること");
 
         assert!(path.exists());
-        assert!(!temp_path_for(&path).exists());
+        assert!(!has_own_temp_file(&path));
     }
 
     #[test]
@@ -615,7 +714,7 @@ mod tests {
             "保存の失敗として返ること: {err:?}"
         );
         assert!(path.is_dir(), "元の場所が変わっている");
-        assert!(!temp_path_for(&path).exists(), "一時ファイルが残っている");
+        assert!(!has_own_temp_file(&path), "一時ファイルが残っている");
     }
 
     #[test]
@@ -639,7 +738,7 @@ mod tests {
             assert!(result.is_err(), "読み取り専用のファイルを置き換えた");
             assert_eq!(fs::read_to_string(&path).unwrap(), "[video]\nfps = 15\n");
         }
-        assert!(!temp_path_for(&path).exists(), "一時ファイルが残っている");
+        assert!(!has_own_temp_file(&path), "一時ファイルが残っている");
     }
 
     #[test]
@@ -651,7 +750,7 @@ mod tests {
 
         export_to(&path, &settings).expect("書き出せること");
 
-        assert!(!temp_path_for(&path).exists(), "一時ファイルが残っている");
+        assert!(!has_own_temp_file(&path), "一時ファイルが残っている");
         let imported = import_from(&path).expect("読み戻せること");
         assert_eq!(imported.video.fps, settings.video.fps);
     }
@@ -671,7 +770,7 @@ mod tests {
             "書き出しの失敗として返ること: {err:?}"
         );
         assert!(path.is_dir(), "元の場所が変わっている");
-        assert!(!temp_path_for(&path).exists(), "一時ファイルが残っている");
+        assert!(!has_own_temp_file(&path), "一時ファイルが残っている");
     }
 
     #[test]
