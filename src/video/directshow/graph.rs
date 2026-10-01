@@ -221,13 +221,13 @@ impl CaptureGraph {
         }
 
         let connect_start = Instant::now();
-        let renderer = Renderer::new(sink);
+        let renderer = Renderer::video(sink);
         let built = Self::connect(&graph, &builder, &source, &renderer);
         if let Err(e) = built {
             Self::tear_down(&graph, &source, &renderer.filter);
             return Err(GraphError::Stream(e));
         }
-        let Some(format) = renderer.connected_format() else {
+        let Some(format) = renderer.connected_video_format() else {
             Self::tear_down(&graph, &source, &renderer.filter);
             return Err(GraphError::Stream(windows::core::Error::from_hresult(
                 windows::Win32::Media::DirectShow::VFW_E_NOT_CONNECTED,

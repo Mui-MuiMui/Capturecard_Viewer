@@ -5,12 +5,17 @@
 //! `IMemInputPin` の実装として書いている。上流（キャプチャーのフィルター、
 //! 間に入る変換フィルター）が `IMemInputPin::Receive` でサンプルを渡してくる。
 //!
+//! **媒体を問わない作りにしてある。** ピンとフィルターの参照の数え方、
+//! アロケーター、列挙、状態の切り替えはここ 1 か所に置き、媒体に固有な
+//! 部分（受け取る形式の判定と、受け取ったサンプルの渡し先）だけを
+//! `StreamState` の種類で分ける。映像の渡し先は `video_stream.rs`
+//! （`FrameSink` へ渡す）。
+//!
 //! **`Receive` はグラフのストリーミングスレッドから呼ばれる。** ここでは
-//! ロックもアロケーションもしない。変換と `FrameBuffer` への積み込みは
-//! `FrameSink` がやる（ロックはフレームバッファの 1 回だけで、nokhwa の
-//! フレームコールバックと同じ扱い。`docs/design/video-pipeline.md`）。
-//! `FrameSink` を持つのはストリーミングスレッドだけなので、`Mutex` では包まず
-//! `StreamSlot`（待たない旗）で守っている。
+//! ロックもアロケーションもしない。渡し先（`StreamState`）を持つのは
+//! ストリーミングスレッドだけなので、`Mutex` では包まず `StreamSlot`
+//! （待たない旗）で守っている。**捨てるときも失敗を返さない**（フラッシュ中と
+//! 停止中を除く）。`Receive` が失敗を返すと上流はストリームを止めてしまう。
 //!
 //! 接続・状態の切り替え・問い合わせ（`ReceiveConnection` / `Run` / `Stop` /
 //! `QueryPinInfo` など）はデバイスワーカースレッドからグラフ経由で呼ばれる。
@@ -47,11 +52,9 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoTaskMemAlloc, IPersist_Impl, CLSCTX_INPROC_SERVER,
 };
 
-use super::media_type::{
-    delete_media_type, sample_format_of, OwnedMediaType, SampleFormat, SampleKind,
-};
+use super::media_type::{sample_format_of, OwnedMediaType, SampleFormat};
+use super::video_stream::VideoStream;
 use crate::video::frame_sink::FrameSink;
-use crate::video::yuv420::Yuv420Layout;
 
 /// このフィルターのクラス ID。登録はしないので、`GetClassID` に答えるためだけの値
 const RENDERER_CLSID: GUID = GUID::from_u128(0x6f3a8c21_4d2b_4e6a_9b1c_2f7d5e8a9c03);
@@ -91,63 +94,52 @@ impl Shared {
     }
 }
 
-/// ストリーミングスレッドだけが触る状態。
-struct StreamState {
-    sink: FrameSink,
-    /// いま流れてくるサンプルの形。接続時に決まり、流れの途中で変わることがある
-    format: Option<SampleFormat>,
+/// 入力ピンが受ける媒体。ピンを作るときに決まり、以後変わらない。
+///
+/// **`StreamState` とは別に持つ。** 受け取る形式の判定（`QueryAccept`）は
+/// ストリーミングスレッドと同時に呼ばれうるので、`StreamSlot` を経由せずに
+/// 読めるようにしておく。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaKind {
+    Video,
+}
+
+/// 上流と接続したときの形式。媒体ごとに中身が違う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectedFormat {
+    Video(SampleFormat),
+}
+
+/// メディアタイプを読んで、ピンの媒体で受け取れる形式ならその形を返す。
+///
+/// # Safety
+/// `sample_format_of` と同じ。
+unsafe fn accepted_format(kind: MediaKind, mt: &AM_MEDIA_TYPE) -> Option<ConnectedFormat> {
+    match kind {
+        MediaKind::Video => unsafe { sample_format_of(mt) }.map(ConnectedFormat::Video),
+    }
+}
+
+/// ストリーミングスレッドだけが触る状態。媒体ごとの渡し先。
+enum StreamState {
+    Video(VideoStream),
 }
 
 impl StreamState {
-    /// サンプル 1 つを `FrameSink` へ渡す。
+    /// 接続したときの形式を渡し先へ書く。媒体が食い違う組み合わせは来ない
+    /// （`accepted_format` がピンの媒体で判定している）
+    fn set_format(&mut self, format: ConnectedFormat) {
+        match (self, format) {
+            (StreamState::Video(stream), ConnectedFormat::Video(format)) => {
+                stream.format = Some(format);
+            }
+        }
+    }
+
+    /// サンプル 1 つを渡し先へ渡す。
     fn receive(&mut self, sample: &IMediaSample, received_at: Instant) {
-        // 流れの途中で形式が変わると、そのサンプルに新しいメディアタイプが
-        // 付いてくる。付いていなければ null（S_FALSE）で、確保は起きない
-        if let Ok(pmt) = unsafe { sample.GetMediaType() } {
-            if !pmt.is_null() {
-                let changed = unsafe { sample_format_of(&*pmt) };
-                unsafe { delete_media_type(pmt) };
-                if changed != self.format {
-                    log::info!("DirectShow のサンプルの形式が変わった: {:?}", changed);
-                }
-                self.format = changed;
-            }
-        }
-        let Some(format) = self.format else {
-            return;
-        };
-        let Ok(data) = (unsafe { sample.GetPointer() }) else {
-            return;
-        };
-        let len = unsafe { sample.GetActualDataLength() };
-        if data.is_null() || len <= 0 {
-            return;
-        }
-        let src = unsafe { std::slice::from_raw_parts(data, len as usize) };
-        let (width, height) = (format.width as usize, format.height as usize);
-        match format.kind {
-            SampleKind::Yuy2 => {
-                self.sink.push_yuy2(width, height, src, received_at);
-            }
-            SampleKind::Nv12 => {
-                self.sink
-                    .push_yuv420(Yuv420Layout::Nv12, width, height, src, received_at);
-            }
-            SampleKind::I420 => {
-                self.sink
-                    .push_yuv420(Yuv420Layout::I420, width, height, src, received_at);
-            }
-            SampleKind::Yv12 => {
-                self.sink
-                    .push_yuv420(Yuv420Layout::Yv12, width, height, src, received_at);
-            }
-            SampleKind::Rgb24 => {
-                self.sink
-                    .push_bgr24(width, height, format.bottom_up, src, received_at);
-            }
-            SampleKind::Mjpeg => {
-                self.sink.push_mjpeg(width, height, src, received_at);
-            }
+        match self {
+            StreamState::Video(stream) => stream.receive(sample, received_at),
         }
     }
 }
@@ -191,7 +183,7 @@ impl StreamSlot {
 struct Connection {
     peer: IPin,
     media_type: OwnedMediaType,
-    format: SampleFormat,
+    format: ConnectedFormat,
 }
 
 /// 入力ピン。`IMemInputPin` も同じオブジェクトが持つ（上流は `IPin` から
@@ -201,6 +193,8 @@ struct InputPin {
     /// 持ち主のフィルター（`IBaseFilter` の生ポインタ）。**参照は数えない。**
     /// フィルターが消えるときに null へ戻る
     filter: AtomicPtr<c_void>,
+    /// 受ける媒体。受け取る形式の判定に使う
+    kind: MediaKind,
     shared: Arc<Shared>,
     connection: Mutex<Option<Connection>>,
     allocator: Mutex<Option<IMemAllocator>>,
@@ -262,13 +256,13 @@ impl IPin_Impl for InputPin_Impl {
             return Err(error(VFW_E_NOT_STOPPED));
         }
         let mt = unsafe { &*pmt };
-        let Some(format) = (unsafe { sample_format_of(mt) }) else {
+        let Some(format) = (unsafe { accepted_format(self.kind, mt) }) else {
             return Err(error(VFW_E_TYPE_NOT_ACCEPTED));
         };
         // 止まっている間なので、ストリーミングスレッドとは競合しない
         if self
             .stream
-            .try_with(|state| state.format = Some(format))
+            .try_with(|state| state.set_format(format))
             .is_none()
         {
             return Err(error(E_UNEXPECTED));
@@ -356,7 +350,7 @@ impl IPin_Impl for InputPin_Impl {
         if pmt.is_null() {
             return E_POINTER;
         }
-        if unsafe { sample_format_of(&*pmt) }.is_some() {
+        if unsafe { accepted_format(self.kind, &*pmt) }.is_some() {
             S_OK
         } else {
             S_FALSE
@@ -656,15 +650,20 @@ pub(super) struct Renderer {
 }
 
 impl Renderer {
-    /// フレームの受け口を持たせて作る。`sink` はストリーミングスレッドへ渡る
-    pub(super) fn new(sink: FrameSink) -> Self {
+    /// 映像のレンダラー。`sink` はストリーミングスレッドへ渡る
+    pub(super) fn video(sink: FrameSink) -> Self {
+        Self::new(MediaKind::Video, StreamState::Video(VideoStream::new(sink)))
+    }
+
+    fn new(kind: MediaKind, stream: StreamState) -> Self {
         let shared = Arc::new(Shared::default());
         let pin = ComObject::new(InputPin {
             filter: AtomicPtr::new(ptr::null_mut()),
+            kind,
             shared: shared.clone(),
             connection: Mutex::new(None),
             allocator: Mutex::new(None),
-            stream: StreamSlot::new(StreamState { sink, format: None }),
+            stream: StreamSlot::new(stream),
         });
         let filter_object = ComObject::new(RendererFilter {
             shared,
@@ -679,8 +678,15 @@ impl Renderer {
     }
 
     /// 上流と接続できていれば、そのときの形式
-    pub(super) fn connected_format(&self) -> Option<SampleFormat> {
+    fn connected_format(&self) -> Option<ConnectedFormat> {
         self.pin
             .with_connection(|connection| connection.as_ref().map(|c| c.format))
+    }
+
+    /// 映像のレンダラーが上流と接続できていれば、そのときの形式
+    pub(super) fn connected_video_format(&self) -> Option<SampleFormat> {
+        match self.connected_format()? {
+            ConnectedFormat::Video(format) => Some(format),
+        }
     }
 }

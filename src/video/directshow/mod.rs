@@ -11,7 +11,8 @@
 //! |---|---|
 //! | `devices.rs` | 列挙（`ICreateDevEnum`）、対応形式（`IAMStreamConfig::GetStreamCaps`）、開く形式の選び方 |
 //! | `graph.rs` | フィルターグラフの組み立て・開始・停止・破棄 |
-//! | `filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`） |
+//! | `filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`）。媒体を問わない |
+//! | `video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
 //! | `media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放（COM の初期化は `crate::com`） |
 //!
 //! **デバイス名には「(DirectShow)」を添える**（`display_name`）。設定に
@@ -24,6 +25,7 @@ mod devices;
 mod filter;
 mod graph;
 mod media_type;
+mod video_stream;
 
 use log::{debug, info, warn};
 use std::sync::Arc;
