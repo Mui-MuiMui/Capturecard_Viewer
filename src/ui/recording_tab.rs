@@ -1,6 +1,6 @@
 //! 「録画」タブ（`docs/design/recording.md` の「設定 `[recording]`」）。
 //!
-//! 保存先・ファイル名の書式・映像のビットレート・ハードウェアエンコーダ・音声（録るか、ビットレート）・
+//! 保存先・ファイル名の書式・映像のビットレート・ハードウェアエンコーダ・音声（録るか、ビットレート、映像とのずれの補正）・
 //! リプレイバッファ（ON / OFF、さかのぼる長さ）。
 //! フォルダの選択はここでは開かず、`SettingsEvent::PickRecordingFolder` で上へ返す
 //! （`docs/design/settings-dialog.md`）。
@@ -12,8 +12,9 @@ use super::{notice_label, warning_label, NoticeKind, SettingsEvent};
 use crate::i18n::{self, Text};
 use crate::recording::{render_file_name, RECORDING_EXTENSION};
 use crate::settings::{
-    AppSettings, MAX_RECORDING_BITRATE_KBPS, MAX_REPLAY_SECONDS, MIN_RECORDING_BITRATE_KBPS,
-    MIN_REPLAY_SECONDS, RECORDING_AUDIO_BITRATES_KBPS,
+    AppSettings, MAX_RECORDING_AUDIO_OFFSET_MS, MAX_RECORDING_BITRATE_KBPS, MAX_REPLAY_SECONDS,
+    MIN_RECORDING_AUDIO_OFFSET_MS, MIN_RECORDING_BITRATE_KBPS, MIN_REPLAY_SECONDS,
+    RECORDING_AUDIO_BITRATES_KBPS,
 };
 
 /// 「録画」タブを描画する。書き換えるのはドラフトだけ。
@@ -116,6 +117,18 @@ pub(super) fn show_recording_settings_tab(
                         }
                     });
             });
+            // 映像と音声のずれの補正（#404）。正なら音声を遅らせ、負なら早める
+            ui.horizontal(|ui| {
+                ui.label(Text::RecordingAudioOffsetLabel.get());
+                ui.add(
+                    egui::Slider::new(
+                        &mut settings.recording.audio_offset_ms,
+                        MIN_RECORDING_AUDIO_OFFSET_MS..=MAX_RECORDING_AUDIO_OFFSET_MS,
+                    )
+                    .suffix(" ms"),
+                );
+            });
+            ui.small(Text::RecordingAudioOffsetHint.get());
         });
         ui.add_space(5.0);
         ui.small(Text::RecordingAudioHint.get());

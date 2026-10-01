@@ -182,6 +182,21 @@ pub(super) fn silence_until(now: i64, last_push: Option<i64>, format_known: bool
     stale.then(|| now.saturating_sub(AUDIO_STALE))
 }
 
+// ---- 映像と音声のずれの補正（#404） ----
+//
+// 設定 `[recording] audio_offset_ms` を、**音声のサンプルを受け取った時刻に足す。**
+// 揃え直し（`align`）・無音で埋める先（`silence_until`）・ドリフトの補正（`DriftCorrector`）は
+// すべて足したあとの時刻で見るので、音声の時刻の並び全体がそのぶん動く。正なら録画の先頭に
+// 無音が入り（音声が遅れる）、負なら録画の先頭の音声をそのぶん削る（音声が早まる）。
+// ドリフトの補正は揃え直した直後の窓を基準に「動き」だけを見るので、固定のずれは補正に入らない
+// （`docs/design/recording.md` の「映像と音声のずれの補正（#404）」）。
+
+/// 音声のサンプルを受け取った時刻（t0 からの 100ns）に、映像と音声のずれの補正
+/// `offset_ms`（ms、正なら音声を遅らせる）を足した、録画の音声の時刻。
+pub(super) fn offset_audio_time(received: i64, offset_ms: i32) -> i64 {
+    received.saturating_add(i64::from(offset_ms) * (UNITS_PER_SECOND / 1_000))
+}
+
 /// ドリフトの測定。途切れずに続いた区間の、PC の時計での経過と、入力のサンプル数 ÷ レート。
 ///
 /// 映像の PTS は PC の時計で測った到着時刻、音声の PTS はサンプル数から作るので、
@@ -466,6 +481,18 @@ mod tests {
                 input_frames: 8_820
             }
         );
+    }
+
+    #[test]
+    fn offset_audio_time_adds_milliseconds_in_100ns_units() {
+        // 正は音声を遅らせる（受け取った時刻より後ろに置く）
+        assert_eq!(offset_audio_time(5_000_000, 100), 6_000_000);
+        // 負は早める。t0 より前（負）になってもよい（揃え直しで削られる）
+        assert_eq!(offset_audio_time(1_000_000, -200), -1_000_000);
+        assert_eq!(offset_audio_time(1_000_000, 0), 1_000_000);
+        // 桁外れの時刻でも溢れて落ちない
+        assert_eq!(offset_audio_time(i64::MAX, 200), i64::MAX);
+        assert_eq!(offset_audio_time(i64::MIN, -200), i64::MIN);
     }
 
     #[test]

@@ -77,6 +77,7 @@ impl CaptureCardViewer {
             nominal_fps: self.nominal_fps(),
             // 音声を録らない設定なら None（映像だけの MP4）
             audio_bitrate_kbps: settings.audio_bitrate_for_recording(),
+            audio_offset_ms: settings.clamped_audio_offset_ms(),
         };
         if let Err(reason) = self.recorder.start(request) {
             error!("録画を始められない: {}", reason);
@@ -105,6 +106,7 @@ impl CaptureCardViewer {
                 video_bitrate_kbps: settings.clamped_bitrate_kbps(),
                 hardware_encoder: settings.hardware_encoder,
                 audio_bitrate_kbps: settings.audio_bitrate_for_recording(),
+                audio_offset_ms: settings.clamped_audio_offset_ms(),
                 nominal_fps: self.nominal_fps(),
             });
         if let Err(reason) = self.recorder.set_replay(config) {

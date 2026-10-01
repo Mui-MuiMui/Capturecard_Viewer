@@ -567,6 +567,7 @@ mod tests {
                 audio_bitrate_kbps: 96,
                 replay_enabled: true,
                 replay_seconds: 90,
+                audio_offset_ms: -40,
             },
             ui: UiSettings {
                 volume: 80.0,
