@@ -16,6 +16,7 @@
 //! | `resample.rs` | クロックドリフト補正の共有状態と、補正係数の決め方 |
 //! | `controls.rs` | 音量・パススルー・ミュートの共有状態 |
 //! | `fake.rs` | 実機なしで動くフェイクの音声デバイス（正弦波の入力と、書き込みを捨てる出力）。環境変数で有効にしたときだけ使う |
+//! | `fake_stream.rs` | フェイクの入出力のスレッドの本体（正弦波を吐く入力と、書き込みを捨てる出力） |
 //! | `tap.rs` | 録画へ音声を回す差し込み口（`AudioTap`）。録画中だけ、入力コールバックが f32 へ直した値を入力の形のまま録画のリングへも積む。PTS を決めるための累計・時刻・入力の形・開き直しの番号も持つ |
 
 mod capabilities;
@@ -23,6 +24,7 @@ mod capture;
 mod controls;
 mod convert;
 mod fake;
+mod fake_stream;
 mod resample;
 mod sample;
 mod stream;

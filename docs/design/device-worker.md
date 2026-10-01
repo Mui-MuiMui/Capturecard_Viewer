@@ -177,7 +177,7 @@ flowchart LR
 |---|---|
 | `src/video/fake.rs` | `FakeVideoCapture`。デバイスとしての振る舞い（名乗る名前、対応形式、シナリオ）と生成スレッド |
 | `src/video/test_pattern.rs` | テストパターンの描画（カラーバー、ベタ塗り、フレーム番号の焼き込み）。純粋関数 |
-| `src/audio/fake.rs` | `FakeAudioCapture`。正弦波を出す入力と、書き込みを捨てる出力のスレッド |
+| `src/audio/fake.rs` / `src/audio/fake_stream.rs` | `FakeAudioCapture`。正弦波を出す入力と、書き込みを捨てる出力のスレッド（スレッドの本体は `fake_stream.rs`） |
 | `src/app/backend/fake.rs` | `FakeBackends`（`DeviceBackends`）、上の 2 つを trait に包む impl、環境変数の解釈 |
 
 **フェイクを `src/video/` / `src/audio/` の中に置いたのは、共有の窓口がそこにしか無いため。** `app::backend` に直接書くと届かない。
