@@ -117,6 +117,9 @@ impl CaptureCardViewer {
             audio.details.push(status::format_dropped_frame_count(
                 self.device_snapshot.audio_dropped_frames,
             ));
+            audio
+                .details
+                .push(i18n::xrun_count(self.device_snapshot.audio_xruns));
         }
 
         ConnectionStatus {

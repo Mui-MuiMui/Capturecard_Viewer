@@ -45,6 +45,16 @@ fn dropped_frames(offered: usize, pushed: usize, channels: usize) -> usize {
     offered.saturating_sub(pushed) / channels.max(1)
 }
 
+/// cpal が知らせた入力の取りこぼし（`Xrun`）を 1 回数える（Issue #377）。
+///
+/// **エラーのコールバックから呼ぶので、ロックもアロケーションもしない。**
+/// `count_dropped_frames` と同じく `u32::MAX` で頭打ちにする。
+fn count_xrun(counter: &AtomicU32) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(1))
+    });
+}
+
 /// ストリームのエラーのうち、ストリームが動き続けていて開き直さなくてよいものか。
 ///
 /// cpal 0.18 からは、止まったわけではない出来事もエラーのコールバックへ届く
@@ -65,12 +75,22 @@ fn is_recoverable_stream_error(kind: cpal::ErrorKind) -> bool {
 
 /// ストリームのエラーのコールバックの本体。開き直すべきものなら旗を立てる。
 ///
-/// `direction` はログに出す「入力」「出力」。`Xrun` はログにも出さない。取りこぼしの
+/// `direction` はログに出す「入力」「出力」。`Xrun` はログにも出さず、`xruns` が
+/// あれば回数だけ数える（「接続状態」タブへ出す、Issue #377）。取りこぼしの
 /// たびに届きうるうえ、WASAPI ではデータのコールバックと同じ音声スレッドから呼ばれる
-/// ため、そこでロックやアロケーションをしたくない。
-pub(super) fn handle_stream_error(direction: &str, e: &cpal::Error, stream_error: &AtomicBool) {
+/// ため、そこでロックやアロケーションをしたくない。出力は数えない（`None`）。
+pub(super) fn handle_stream_error(
+    direction: &str,
+    e: &cpal::Error,
+    stream_error: &AtomicBool,
+    xruns: Option<&AtomicU32>,
+) {
     match e.kind() {
-        cpal::ErrorKind::Xrun => {}
+        cpal::ErrorKind::Xrun => {
+            if let Some(counter) = xruns {
+                count_xrun(counter);
+            }
+        }
         kind if is_recoverable_stream_error(kind) => {
             warn!("{}ストリームの通知（開き直さない）: {}", direction, e);
         }
@@ -86,6 +106,9 @@ pub(super) fn handle_stream_error(direction: &str, e: &cpal::Error, stream_error
 /// `to_f32` でデバイスのサンプル型をリングバッファの表現（f32）へ正規化する。
 /// `tap` は録画へ回す差し込み口（録画中だけ同じ値を積む）。
 /// `dropped_frames` はリングバッファの満杯で捨てたフレーム数の数え手。
+/// `xruns` は cpal が知らせた取りこぼし（`Xrun`）の回数の数え手。
+// 引数はどれもストリームのクロージャへ move する部品で、束ねる型を作っても呼び出し側が組み立て直すだけなので許容する
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_input_stream_with<T>(
     device: &Device,
     config: &cpal::StreamConfig,
@@ -93,6 +116,7 @@ pub(super) fn build_input_stream_with<T>(
     tap: AudioTap,
     stream_error: Arc<AtomicBool>,
     dropped_frames: Arc<AtomicU32>,
+    xruns: Arc<AtomicU32>,
     to_f32: impl Fn(T) -> f32 + Send + 'static,
 ) -> Result<cpal::Stream, cpal::Error>
 where
@@ -106,7 +130,7 @@ where
         },
         // 呼ばれるのは cpal のストリームスレッド。ここで開き直すと
         // ストリーム自身を drop することになるので、旗を立てるだけにする
-        move |e| handle_stream_error("入力", &e, &stream_error),
+        move |e| handle_stream_error("入力", &e, &stream_error, Some(&xruns)),
         None,
     )
 }
@@ -378,11 +402,41 @@ mod tests {
     #[test]
     fn handle_stream_error_raises_flag_only_for_fatal_errors() {
         let flag = AtomicBool::new(false);
-        handle_stream_error("入力", &cpal::ErrorKind::Xrun.into(), &flag);
-        handle_stream_error("出力", &cpal::ErrorKind::RealtimeDenied.into(), &flag);
+        handle_stream_error("入力", &cpal::ErrorKind::Xrun.into(), &flag, None);
+        handle_stream_error("出力", &cpal::ErrorKind::RealtimeDenied.into(), &flag, None);
         assert!(!flag.load(Ordering::Relaxed));
 
-        handle_stream_error("出力", &cpal::ErrorKind::StreamInvalidated.into(), &flag);
+        handle_stream_error(
+            "出力",
+            &cpal::ErrorKind::StreamInvalidated.into(),
+            &flag,
+            None,
+        );
         assert!(flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn handle_stream_error_counts_only_xruns() {
+        let flag = AtomicBool::new(false);
+        let xruns = AtomicU32::new(0);
+        handle_stream_error("入力", &cpal::ErrorKind::Xrun.into(), &flag, Some(&xruns));
+        handle_stream_error("入力", &cpal::ErrorKind::Xrun.into(), &flag, Some(&xruns));
+        handle_stream_error(
+            "入力",
+            &cpal::ErrorKind::RealtimeDenied.into(),
+            &flag,
+            Some(&xruns),
+        );
+        assert_eq!(xruns.load(Ordering::Relaxed), 2);
+        // 取りこぼしは開き直さない
+        assert!(!flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn count_xrun_saturates() {
+        let counter = AtomicU32::new(u32::MAX - 1);
+        count_xrun(&counter);
+        count_xrun(&counter);
+        assert_eq!(counter.load(Ordering::Relaxed), u32::MAX);
     }
 }

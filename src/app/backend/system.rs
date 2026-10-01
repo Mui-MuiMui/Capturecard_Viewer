@@ -290,6 +290,10 @@ impl AudioBackend for AudioCapture {
         AudioCapture::dropped_frame_count(self)
     }
 
+    fn xrun_count(&self) -> Option<u32> {
+        AudioCapture::xrun_count(self)
+    }
+
     fn take_stream_error(&self) -> bool {
         AudioCapture::take_stream_error(self)
     }
