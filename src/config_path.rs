@@ -1,6 +1,7 @@
 //! 設定ファイルとログの置き場所。
 //!
-//! 既定は confy が決める `%AppData%\capturecard_viewer\config\default-config.toml` と、
+//! 既定は `%AppData%\capturecard_viewer\config\default-config.toml`（1.2.x まで
+//! 使っていた confy 0.6 と同じ場所）と、
 //! その 2 つ上のデータディレクトリの下の `logs`。環境変数
 //! `CAPTURECARD_VIEWER_CONFIG_DIR` にフォルダを指定すると、設定ファイルとログを
 //! そのフォルダへ置く（Issue #290）。
@@ -21,7 +22,8 @@ use std::sync::OnceLock;
 /// 設定ファイルとログを置くフォルダを差し替える環境変数。絶対パスだけを受け付ける。
 pub const CONFIG_DIR_ENV: &str = "CAPTURECARD_VIEWER_CONFIG_DIR";
 
-/// 差し替えたフォルダに置く設定ファイルの名前。confy の既定と揃えてある
+/// 設定ファイルの名前。既定の置き場所でも、差し替えたフォルダでも同じ。
+/// 1.2.x まで使っていた confy の既定の名前と揃えてある
 const CONFIG_FILE_NAME: &str = "default-config.toml";
 
 /// 実際に使う置き場所。
@@ -67,10 +69,26 @@ pub fn config_file_path() -> Result<PathBuf, String> {
     location().map(|location| location.config_file.clone())
 }
 
-/// confy が決める既定の設定ファイルのパス。
+/// 既定の設定ファイルのパス。`%AppData%`（`FOLDERID_RoamingAppData`）の下。
 fn default_config_file() -> Result<PathBuf, String> {
-    confy::get_configuration_file_path(crate::settings::APP_NAME, None)
-        .map_err(|e| format!("設定ファイルのパスを取得できない: {}", e))
+    dirs::config_dir()
+        .map(|dir| default_config_file_in(&dir))
+        .ok_or_else(|| "設定ファイルのパスを取得できない: %AppData% の場所が分からない".to_string())
+}
+
+/// `%AppData%` にあたるフォルダから、既定の設定ファイルのパスを組み立てる。
+///
+/// **1.2.x まで使っていた confy 0.6 と同じ場所にすること。** confy 0.6 は
+/// directories の `ProjectDirs::from("rs", "", APP_NAME)` の `config_dir()` に
+/// `default-config.toml` を足していた。Windows ではこれが
+/// `<FOLDERID_RoamingAppData>\<APP_NAME>\config` になる（directories と dirs は
+/// 同じ dirs-sys で既知のフォルダを引く）。ずれると既存の設定ファイルを見失う
+/// （`docs/DEPENDENCIES.md` の第 3 段）。
+fn default_config_file_in(app_data: &Path) -> PathBuf {
+    app_data
+        .join(crate::settings::APP_NAME)
+        .join("config")
+        .join(CONFIG_FILE_NAME)
 }
 
 /// 環境変数の値と既定の設定ファイルのパスから、使う置き場所を決める。
@@ -238,6 +256,20 @@ mod tests {
         assert_eq!(location.config_file, default_file().unwrap());
         assert!(!location.overridden);
         assert!(location.notice.is_some());
+    }
+
+    #[test]
+    fn default_config_file_in_matches_the_confy_0_6_location() {
+        // 1.2.x（confy 0.6）が使っていた場所と同じであること。ずれると
+        // 既存の設定ファイルを見失って既定値で起動する
+        let app_data = PathBuf::from("C:\\Users\\user\\AppData\\Roaming");
+
+        assert_eq!(
+            default_config_file_in(&app_data),
+            PathBuf::from(
+                "C:\\Users\\user\\AppData\\Roaming\\capturecard_viewer\\config\\default-config.toml"
+            )
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@
 
 - キャプチャーデバイスは Windows Media Foundation 経由で Web カメラとして扱う（nokhwa）。Media Foundation に出ないデバイス（OBS の仮想カメラなど）は DirectShow で扱い、名前に「(DirectShow)」を添える
 - 音声は WASAPI 経由の入力 → リングバッファ → 出力のパススルー（cpal）
-- 設定は `%AppData%\capturecard_viewer\config\default-config.toml`（confy）
+- 設定は `%AppData%\capturecard_viewer\config\default-config.toml`（`toml` で読み書きする。`src/settings/store.rs`）
 
 ## ビルドと検証
 
@@ -122,7 +122,7 @@ cargo build --release
 | `src/settings/preset.rs` | `[[presets]]`。適用と一致の判定（`matches_preset` / `resolved_active_preset`）、名前の検証、読み込んだ一覧の整え方（`sanitize_presets`）、`AppSettings` のプリセット操作 |
 | `src/settings/store.rs` | 設定ファイルの読み書き（`AppSettings::load` / `save`。保存は一時ファイルへ書いて rename で置き換える `write_atomically`）、読めなかったファイル・空のファイルの退避、`LoadOutcome` / `AutoSavePolicy`、書き出し / 読み込み（`export_to` / `import_from`）。置き場所は `config_path` を呼ぶだけ |
 | `src/settings/testing.rs` | テストが複数のファイルから使う設定ファイルの例（`FULL_CONFIG` / `LEGACY_CONFIG`）と `without_key`、保存先の候補の例（`#[cfg(test)]`） |
-| `src/config_path.rs` | 設定ファイルとログの置き場所（`ConfigLocation`）。既定は confy の置き場所で、環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で差し替える。解釈（`parse_config_dir` / `resolve`）は純粋関数 |
+| `src/config_path.rs` | 設定ファイルとログの置き場所（`ConfigLocation`）。既定は `%AppData%` の下（1.2.x まで使っていた confy と同じ場所）で、環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で差し替える。解釈（`parse_config_dir` / `resolve`）は純粋関数 |
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |
 | `src/ui/mod.rs` | 設定ダイアログの入口 `show_settings_dialog` と、タブをまたいで使うイベント型・注意書きのヘルパー（`warning_label` / `notice_label` / `status_badge`）。外から使う経路（`crate::ui::...`）の `pub use` もここ |
 | `src/ui/state.rs` | `SettingsDialogState`。ドラフトの保持、操作の受け止め、`SettingsDialogView` の切り出し |

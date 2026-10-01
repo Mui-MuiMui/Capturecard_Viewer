@@ -2,7 +2,7 @@
 
 現在の依存と、更新に向けた調査結果をまとめる。
 
-**バージョン情報は 2026-09-14 時点で crates.io を参照したもの（第 1 段の 4 つと第 2 段の 3 つは 2026-10-01 に更新）。** 参照するときは日付を確認し、必要なら取り直すこと。
+**バージョン情報は 2026-09-14 時点で crates.io を参照したもの（第 1 段の 4 つと第 2 段の 3 つは 2026-10-01 に更新。第 3 段の `confy` は 2026-10-01 に外した）。** 参照するときは日付を確認し、必要なら取り直すこと。
 
 ## 方針
 
@@ -53,10 +53,10 @@
 | `egui` | 0.26 | 0.36.2 | マイナー 10 | UI |
 | `nokhwa` | 0.10 | 0.10.11 | パッチのみ | 映像キャプチャ |
 | `cpal` | 0.18 | 0.18.2 | 追随 | 音声入出力。`realtime` フィーチャで音声スレッドの優先度を上げる（`docs/design/audio.md` の「cpal 0.18 で変わったこと」） |
-| `confy` | 0.6 | 2.0.0 | メジャー | 設定の永続化 |
+| `toml` | 1.1 | 1.1.x | 追随 | 設定ファイルの読み書き。`confy` 0.6 の代わり（第 3 段、#302） |
 | `image` | 0.25 | 0.25.10 | 追随 | スクリーンショットの保存、埋め込みアイコンの読み込み、MJPEG の展開 |
 | `rodio` | 0.22 | 0.22.2 | 追随 | 効果音の再生。フィーチャは `playback` と使う形式（MP3 / WAV / Vorbis / FLAC）だけ |
-| `dirs` | 7.0 | 7.0.0 | 追随 | デスクトップ等のパス取得 |
+| `dirs` | 7.0 | 7.0.0 | 追随 | デスクトップ等のパス取得、設定ファイルの置き場所（`%AppData%`） |
 | `rfd` | 0.17 | 0.17.2 | 追随 | ファイル選択ダイアログ |
 | `ringbuf` | 0.5 | 0.5.2 | 追随 | 音声のリングバッファ、録画の差し込み口（`VideoTap` / `AudioTap`） |
 | `arboard` | 3.6 | 3.6.1 | 追随 | スクリーンショットのクリップボードへのコピー |
@@ -71,7 +71,6 @@
 | `semver` | 1.0 | 1.0.28 | 追随 | 同上。タグと実行中の版を比べる |
 | `sha2` | 0.11 | 0.11.0 | 追随 | 更新の適用で、ダウンロードした exe を `SHA256SUMS.txt` と照合する（`src/update/apply.rs`） |
 | `tempfile`（dev） | 3.27 | 3.27.x | 追随 | テストで一時ディレクトリに設定ファイルを書く |
-| `toml`（dev） | 1.1 | 1.1.x | 追随 | テストで設定の TOML を直接組み立てて読ませる |
 
 ### `arboard` は egui-winit が既に使っている
 
@@ -127,7 +126,7 @@
 flowchart TD
     A["第 1 段: 影響が局所的<br/>image / dirs / rfd / embed-resource"]
     B["第 2 段: 音声まわり<br/>ringbuf → cpal → rodio"]
-    C["第 3 段: 設定<br/>confy"]
+    C["第 3 段: 設定<br/>confy（外した）"]
     D["第 4 段: UI<br/>eframe / egui"]
     E["第 5 段: 映像<br/>nokhwa"]
     F["winapi → windows-sys<br/>（任意・別軸）"]
@@ -168,13 +167,20 @@ flowchart TD
 
 ### 第 3 段 — 設定
 
-`confy` 0.6 → 2.0 はメジャー更新。設定ファイルの配置場所や読み書きの API が変わる可能性がある。
+**判断済み（#302、2026-10-01）。`confy` は 2.0 へ上げず、依存から外した。** 設定ファイルは `toml` 1.x で直接読み書きし、置き場所は `dirs` で決める。
 
-**既存ユーザーの設定ファイルを読めなくすると実害が出る。** 更新する場合は、旧バージョンが書いたファイルを読めることを必ず確認する。`#[serde(default)]` の対応を先に済ませておくこと。
+| 案 | 判断 | 理由 |
+|---|---|---|
+| `confy` 0.6 のまま据え置く | 採らない | 頼っていたのは読み込み（`load_path`）・一時ファイルへの書き込み（`store_path`）・既定の置き場所（`get_configuration_file_path`）の 3 つだけ。保存の置き換え（#317 / #361）は既に自前。このために `directories` / `dirs-sys` 0.4 と、`toml` 0.8 系（`toml_edit` / `winnow` 0.7 / `indexmap` など）を `toml` 1.x と二重に持っていた |
+| `confy` 2.0 へ上げる | 採らない | Windows の置き場所は同じ `%AppData%\capturecard_viewer\config` のままだが、置き場所を `etcetera` で決めるようになり、`etcetera` / `lazy_static` / `thiserror` 2 / `toml` 0.9 系が増える。使う 3 つの関数は自前で書いても数行 |
+| `confy` を外して `toml` + `std::fs` で読む | **採った** | `toml` 1.x は `embed-resource`（ビルド時）が既に使っていて、`THIRD-PARTY-LICENSES.txt` にも載っている。`dirs` も既に直接の依存。増えるクレートは無く、12 個（`confy` / `directories` / `dirs-sys` 0.4 / `toml` 0.8 / `toml_edit` 0.22 / `toml_datetime` 0.6 / `serde_spanned` 0.6 / `toml_write` / `winnow` 0.7 / `indexmap` / `hashbrown` 0.17 / `equivalent`）が消えた |
 
-更新の必要性が薄いと判断するなら、据え置きも選択肢。
+外すときに確かめたこと。
 
-**`%AppData%` の設定ファイルの保存は、confy の `store_path` で本来のファイルへ直接書かなくなった**（#317）。一時ファイル（`default-config.toml.tmp`）へ書いて `rename` で置き換えるのは自前の処理。「設定を書き出す」（`export_to`）も同じ処理で、書き出し先と同じフォルダの一時ファイルを経由する（#361）。confy の `store_path` は一時ファイルへ書くのにだけ使う。読み込みは `load_path` のまま。更新するときは、この 2 つの API と書式が保たれるかを見ればよい。
+- **置き場所が変わらない。** confy 0.6 は `directories` の `ProjectDirs::from("rs", "", "capturecard_viewer").config_dir()` に `default-config.toml` を足していた。Windows ではこれが `<FOLDERID_RoamingAppData>\capturecard_viewer\config`。`dirs::config_dir()` も同じ `FOLDERID_RoamingAppData` を引くので、その下に `capturecard_viewer\config\default-config.toml` を組み立てる（`src/config_path.rs` の `default_config_file_in`）。`CAPTURECARD_VIEWER_CONFIG_DIR` の扱いは変えていない
+- **1.2.x が書いた設定ファイルをそのまま読める。** テスト用の設定（`FULL_CONFIG` / `LEGACY_CONFIG`）と、プリセット・引用符を含む名前・日本語のパスを足した設定について、confy 0.6（`toml` 0.8）が書いたものを `toml` 1.x で読み、`toml` 1.x が書いたものを confy 0.6 で読んで、どちらも同じ値に戻ることを確かめた。**書き出す内容もバイト単位で同じだった**ので、新しい版が書いたファイルを古い版へ戻しても読める。BOM 付きの UTF-8 もどちらも読める
+- confy 0.6 の `load_path` はファイルが無いと既定値で作っていた。いまは既定値を返すだけで、起動時の保存（`AppSettings::save`、フォルダも作る）が作る。起動の直後にファイルができるのは同じ
+- 読めなかったときの理由は、confy では「Bad TOML data」だけだった。いまは `toml` の位置（行と列）と理由を 1 行にして返す（ログと、読み込みの失敗のトースト）
 
 ### 第 4 段 — UI
 
