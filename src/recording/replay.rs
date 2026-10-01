@@ -363,7 +363,7 @@ impl ReplayPipeline {
         // ①と同じく、ハードウェアで最初の 1 枚から失敗したらソフトウェアで作り直す
         warn!(
             "ハードウェアのエンコーダで最初のフレームをエンコードできないので、ソフトウェアで作り直す: {}",
-            error
+            error.log_reason()
         );
         self.hardware_failed = true;
         self.video_encoder = None;

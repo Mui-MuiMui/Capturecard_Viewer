@@ -96,6 +96,7 @@ texts! {
     UpdateChecksumMissing { ja: "SHA256SUMS.txt に exe の行が無い", en: "SHA256SUMS.txt has no line for the exe" },
     UpdateChecksumMismatch { ja: "ダウンロードした exe の SHA-256 が SHA256SUMS.txt と合わない", en: "The SHA-256 of the downloaded exe does not match SHA256SUMS.txt" },
     UpdateCancelled { ja: "キャンセルした", en: "Cancelled" },
+    UpdateThreadEnded { ja: "更新のスレッドが結果を返さずに終わった", en: "The update thread ended without a result" },
 
     // ---- ホットキーのアクション名（HotkeyAction::label） ----
     ActionScreenshot { ja: "スクリーンショット", en: "Screenshot" },
@@ -348,6 +349,8 @@ texts! {
 
     // ---- 録画（recording/ / app/recording.rs） ----
     RecordingNoVideo { ja: "映像が届かなかったので、ファイルを作りませんでした", en: "No video arrived, so no file was created" },
+    RecordingEncoderNotFound { ja: "エンコーダが登録されていない", en: "No encoder is registered" },
+    RecordingThreadStopped { ja: "録画スレッドが止まっている", en: "The recording thread has stopped" },
     RecordingFileNameEmpty { ja: "ファイル名の書式が空です", en: "The file name format is empty" },
     RecordingFileNameInvalidSpecifier { ja: "ファイル名の書式に使えない指定子（% で始まるもの）が含まれています", en: "The file name format contains an unknown % specifier" },
     RecordingFileNameTrailingDot { ja: "ファイル名の末尾を空白や「.」にはできません", en: "A file name cannot end with a space or a period" },

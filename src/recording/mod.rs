@@ -91,6 +91,8 @@ pub enum RecordingError {
     NoVideo,
     /// 録画スレッドを起こせない、COM や Media Foundation を初期化できない
     Platform { reason: String },
+    /// 録画スレッドへコマンドを送れない（スレッドが既に終わっている）
+    ThreadStopped,
 }
 
 impl fmt::Display for RecordingError {
@@ -116,6 +118,9 @@ impl fmt::Display for RecordingError {
             }
             RecordingError::NoVideo => Text::RecordingNoVideo.get().to_string(),
             RecordingError::Platform { reason } => i18n::recording_platform_failed(reason),
+            RecordingError::ThreadStopped => {
+                i18n::recording_platform_failed(Text::RecordingThreadStopped.get())
+            }
         };
         f.write_str(&text)
     }
@@ -166,5 +171,21 @@ mod tests {
             RecordingError::NoVideo.to_string()
         });
         assert!(english.is_ascii(), "{english}");
+    }
+
+    // #315: 録画スレッドが止まっているときの文言が英語の画面で日本語にならない
+    #[test]
+    fn thread_stopped_display_follows_the_language() {
+        let english = i18n::with_language(i18n::Language::English, || {
+            RecordingError::ThreadStopped.to_string()
+        });
+        assert_eq!(
+            english,
+            "Cannot prepare for recording: The recording thread has stopped"
+        );
+        let japanese = i18n::with_language(i18n::Language::Japanese, || {
+            RecordingError::ThreadStopped.to_string()
+        });
+        assert_eq!(japanese, "録画の準備ができない: 録画スレッドが止まっている");
     }
 }

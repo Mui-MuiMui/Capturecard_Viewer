@@ -146,7 +146,7 @@ pub(super) fn open_first(
                     "エンコーダ {}（ハードウェア: {}）を組み立てられないので次を試す: {}",
                     name.as_deref().unwrap_or("（名前不明）"),
                     if hardware { "はい" } else { "いいえ" },
-                    error
+                    error.log_reason()
                 );
                 last_error = error;
             }
