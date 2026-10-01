@@ -63,7 +63,7 @@ cargo build --release
 | `src/video/mod.rs` | `VideoError` とログ用の `elapsed_ms`。外から使う経路（`crate::video::...`）の `pub use` もここ |
 | `src/video/capture.rs` | nokhwa `CallbackCamera` によるキャプチャ。開く・閉じる・列挙する、フレームコールバック（nokhwa の `Buffer` から取り出して `FrameSink` へ渡す）、途絶の観測（`VideoLinkState`） |
 | `src/video/directshow/mod.rs` | DirectShow の映像デバイス `DirectShowCapture`（列挙・能力・開く・閉じる・観測）と、表示名の「(DirectShow)」の付け外し |
-| `src/video/directshow/devices.rs` | DirectShow の列挙（`ICreateDevEnum`）と対応形式（`IAMStreamConfig::GetStreamCaps`）、開く形式の選び方（`choose_candidate`） |
+| `src/video/directshow/devices.rs` | DirectShow の列挙（`ICreateDevEnum`）と対応形式（`IAMStreamConfig::GetStreamCaps`）、いまの解像度（`GetFormat`）、開く解像度と形式の選び方（`target_resolution` / `choose_candidate`） |
 | `src/video/directshow/graph.rs` | DirectShow のフィルターグラフの組み立て・開始・停止・破棄（`CaptureGraph`） |
 | `src/video/directshow/filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`）。`Receive` から `FrameSink` へ渡す |
 | `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
