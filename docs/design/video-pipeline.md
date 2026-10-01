@@ -66,6 +66,15 @@
 - 設定ダイアログでデバイスを切り替えたときの既定（`ui::video_mode::select_default_video_mode`）も、能力に添えたいまの解像度（`FormatCapability::current_resolution`、DirectShow だけが埋める）を前の解像度より優先する。前のデバイスの 1280x720 を引き継ぐと映らないため
 - 録画の「大きさの変化で停止」（`docs/design/recording.md`）とは関係しない。入力が変わってボードが警告画面に切り替わっても、フレームの大きさは開いた解像度のまま
 
+## DirectShow で開く fps（#389）
+
+`IAMStreamConfig::GetStreamCaps` の fps は点ではなく範囲（`MinFrameInterval` 〜 `MaxFrameInterval`）で返る。GC551 は 15 〜 60.0002fps。
+
+- **範囲の中なら要求した fps をそのまま `AvgTimePerFrame` に入れて開く**（`devices::fps_range` / `choose_candidate`）。範囲を持たない（両端が同じ fps に丸まる）デバイスは、これまでどおり一覧の中で最も近い fps
+- 設定画面の選択肢は、メディアタイプの既定値と両端に、範囲の中の代表値（15 / 24 / 25 / 30 / 50 / 60 / 120）を足して並べる（`devices::fps_list`）
+- **開いた fps と届く fps は一致するとは限らない。** GC551（入力 1920x1080 60Hz）で 30fps を要求すると、`SetFormat` は通り「開いた fps」は 30 になるが、届くフレームの間隔は平均 16.67ms（59.996fps）のままだった（2026-10-01 の実測、`directshow::tests::start_capture_requested_fps_inside_the_range_reports_the_delivered_rate`）。ボードが入力信号の fps で出しているためで、アプリの不具合ではない。間引いて 30fps にする処理は入れていない
+- 解像度が未指定のときは fps の指定を見ず 60fps を要求する（`graph::apply_format`）。これは変えていない
+
 ## 再描画をいつ要求するか
 
 eframe は **`update()` の中で要求された再描画しか予約しない。** 何も要求しなければ次の `update()` は来ないので、時間で動くもの（フレームの途絶の判定、接続の再試行、OSD の消滅、設定の遅延書き出し）は自分の都合で予約する必要がある。判断は `src/repaint.rs` に集めてある。
