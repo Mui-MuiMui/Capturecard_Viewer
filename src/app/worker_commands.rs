@@ -9,9 +9,30 @@
 
 use super::audio_control::volume_change_result;
 use super::monitor::VideoLinkAction;
-use super::worker::{DeviceCommand, DeviceConfig, DeviceEvent};
+use super::worker::{DeviceCommand, DeviceConfig, DeviceEvent, VideoTarget};
 use super::worker_loop::WorkerState;
 use log::{info, trace};
+
+/// 解像度が未指定の要求で開いたあと（`report_resolved_resolution`）に、UI が
+/// 開いた解像度を書き戻す前の設定が届いたら、開いた解像度を引き継ぐ（#391）。
+///
+/// UI は 2 秒ごとに設定を送るので、接続している間に解像度なしの設定が積まれて
+/// いることがある。そのまま比べると差分ありになり、同じデバイスを開き直して
+/// 映像が一瞬途切れる。**引き継ぐのは解像度以外がすべて同じときだけ。**
+/// 未指定の解像度が設定から届くのは、初回に `resolve_default_devices` が
+/// 未指定にしてから書き戻されるまでの間だけ。
+fn carry_resolved_resolution(incoming: &mut VideoTarget, opened: Option<&VideoTarget>) {
+    let Some(opened) = opened else {
+        return;
+    };
+    let (name, resolution, format, fps, backend) = incoming;
+    if resolution.is_none()
+        && opened.1.is_some()
+        && (&*name, &*format, &*fps, &*backend) == (&opened.0, &opened.2, &opened.3, &opened.4)
+    {
+        *resolution = opened.1;
+    }
+}
 
 impl WorkerState {
     pub(super) fn handle(&mut self, command: DeviceCommand) {
@@ -46,6 +67,9 @@ impl WorkerState {
             // 列挙すると、その分だけ最初の接続が遅れる
             self.startup_enumeration_pending = true;
         }
+        // 初回に解像度を未指定で開いたあと、UI が書き戻す前の設定なら、開いた
+        // 解像度を引き継ぐ（#391）。引き継がないと同じデバイスを開き直す
+        carry_resolved_resolution(&mut config.video, self.last_video_target.as_ref());
 
         // 繋ぐ相手が変わったら「見えていない」の判定は前の相手のもの。
         // **直前に受け取った設定と比べる。** 繋がっていない間は
@@ -116,5 +140,45 @@ impl WorkerState {
         };
         self.video_retry.request_now(config.video);
         self.audio_retry.request_now(config.audio);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::VideoBackendSetting;
+
+    #[test]
+    fn carry_resolved_resolution_only_when_everything_else_matches() {
+        let opened: VideoTarget = (
+            Some("ボード".to_string()),
+            Some((1920, 1080)),
+            Some("YUY2".to_string()),
+            Some(60),
+            VideoBackendSetting::Auto,
+        );
+        let mut stale = opened.clone();
+        stale.1 = None;
+        carry_resolved_resolution(&mut stale, Some(&opened));
+        assert_eq!(stale, opened);
+
+        // 別のデバイスなら引き継がない
+        let mut other = opened.clone();
+        other.0 = Some("別のボード".to_string());
+        other.1 = None;
+        carry_resolved_resolution(&mut other, Some(&opened));
+        assert_eq!(other.1, None);
+
+        // 解像度を指定した設定はそのまま
+        let mut explicit = opened.clone();
+        explicit.1 = Some((1280, 720));
+        carry_resolved_resolution(&mut explicit, Some(&opened));
+        assert_eq!(explicit.1, Some((1280, 720)));
+
+        // 開いている相手が無ければ何もしない
+        let mut alone = opened.clone();
+        alone.1 = None;
+        carry_resolved_resolution(&mut alone, None);
+        assert_eq!(alone.1, None);
     }
 }

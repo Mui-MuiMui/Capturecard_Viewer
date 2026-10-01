@@ -192,6 +192,59 @@ pub(super) fn read_candidates(config: &IAMStreamConfig) -> Vec<StreamCandidate> 
     candidates
 }
 
+/// `IAMStreamConfig::GetFormat` が返す、ピンのいまの解像度。読めなければ `None`。
+///
+/// **`SetFormat` する前に呼ぶ。** 入力信号の解像度をここへ映すドライバーがある
+/// （AVerMedia GC551 は入力が 1920x1080 なら、前に 1280x720 で開いたあとでも
+/// 1920x1080 を返す。#391）。受け取れない形式（UYVY など）のときは `None`。
+pub(super) fn current_resolution(config: &IAMStreamConfig) -> Option<(u32, u32)> {
+    let pmt = unsafe { config.GetFormat() }.ok()?;
+    if pmt.is_null() {
+        return None;
+    }
+    let format = unsafe { sample_format_of(&*pmt) };
+    unsafe { delete_media_type(pmt) };
+    format.map(|format| (format.width, format.height))
+}
+
+/// 開く解像度を決める（#391）。`choose_candidate` へ渡す解像度を返す。
+///
+/// 入力信号と違う解像度で開くと、映像の代わりにボード自前の警告画面
+/// （「Signal Out of Range」）を出すボードがある（AVerMedia GC551）。警告画面も
+/// 正常なフレームとして届くのでアプリからは見分けられない。そこで、要求が
+/// このデバイスで開けないときは、ドライバーが返すいまの解像度（`current`、
+/// 入力信号を映していることが多い）を使う。
+///
+/// - 要求した解像度の候補がある（形式を指定していてその形式があれば、その形式の
+///   中で）なら、要求のまま。**利用者が選んだ解像度は上書きしない**
+/// - 要求が無い、または候補に無いなら、`current` が候補にあればそれ
+/// - どちらでもなければ要求のまま（`choose_candidate` が近いものを選ぶ）
+pub(super) fn target_resolution(
+    candidates: &[StreamCandidate],
+    requested: Option<(u32, u32)>,
+    format: Option<&str>,
+    current: Option<(u32, u32)>,
+) -> Option<(u32, u32)> {
+    let requested_kind = format.and_then(SampleKind::from_name);
+    let has_requested_kind = requested_kind.is_some_and(|kind| {
+        candidates
+            .iter()
+            .any(|candidate| candidate.format.kind == kind)
+    });
+    let listed = |resolution: (u32, u32)| {
+        candidates.iter().any(|candidate| {
+            (!has_requested_kind || Some(candidate.format.kind) == requested_kind)
+                && (candidate.format.width, candidate.format.height) == resolution
+        })
+    };
+    match requested {
+        Some(resolution) if listed(resolution) => Some(resolution),
+        _ => current
+            .filter(|&resolution| listed(resolution))
+            .or(requested),
+    }
+}
+
 /// 1 件の対応形式で開ける fps を並べる。
 ///
 /// メディアタイプの既定値と、`VIDEO_STREAM_CONFIG_CAPS` の最短・最長の間隔を
@@ -211,7 +264,14 @@ pub(super) fn fps_list(avg: i64, min_interval: i64, max_interval: i64) -> Vec<u3
 /// 形式ごとにまとめ、解像度の大きい順、同じ解像度なら fps の大きい順にする
 /// （Media Foundation の経路の `get_device_capabilities` と同じ並び）。
 /// 形式の並びは `SampleKind::ALL` の順（YUY2・NV12・I420・YV12・MJPEG・RGB24）。
-pub(super) fn capabilities_from_candidates(candidates: &[StreamCandidate]) -> DeviceCapabilities {
+///
+/// `current` はドライバーが返すいまの解像度（`current_resolution`）。その解像度を
+/// 開ける形式にだけ `FormatCapability::current_resolution` として添える（#391）。
+/// デバイスを切り替えたときの既定（`ui::video_mode`）が前の解像度より優先する。
+pub(super) fn capabilities_from_candidates(
+    candidates: &[StreamCandidate],
+    current: Option<(u32, u32)>,
+) -> DeviceCapabilities {
     let mut result = Vec::new();
     for kind in SampleKind::ALL {
         let mut modes: Vec<VideoMode> = candidates
@@ -231,7 +291,7 @@ pub(super) fn capabilities_from_candidates(candidates: &[StreamCandidate]) -> De
         });
         modes.dedup();
         if !modes.is_empty() {
-            result.push(FormatCapability::new(kind.name(), modes));
+            result.push(FormatCapability::new(kind.name(), modes).with_current_resolution(current));
         }
     }
     result
@@ -398,7 +458,7 @@ mod tests {
             candidate(2, SampleKind::Nv12, 640, 480, &[30]),
             candidate(3, SampleKind::Yuy2, 640, 480, &[30]),
         ];
-        let names: Vec<String> = capabilities_from_candidates(&candidates)
+        let names: Vec<String> = capabilities_from_candidates(&candidates, None)
             .into_iter()
             .map(|capability| capability.name)
             .collect();
@@ -462,7 +522,7 @@ mod tests {
 
     #[test]
     fn capabilities_from_candidates_groups_by_format_in_fixed_order() {
-        let caps = capabilities_from_candidates(&sample_candidates());
+        let caps = capabilities_from_candidates(&sample_candidates(), None);
         let names: Vec<&str> = caps.iter().map(|cap| cap.name.as_str()).collect();
         assert_eq!(names, vec!["YUY2", "MJPEG", "RGB24"]);
         assert_eq!(
@@ -481,13 +541,131 @@ mod tests {
             candidate(0, SampleKind::Yuy2, 640, 480, &[30]),
             candidate(1, SampleKind::Yuy2, 640, 480, &[30]),
         ];
-        let caps = capabilities_from_candidates(&candidates);
+        let caps = capabilities_from_candidates(&candidates, None);
         assert_eq!(caps.len(), 1);
         assert_eq!(caps[0].modes, vec![VideoMode::new(640, 480, 30)]);
     }
 
+    /// 実機の AVerMedia GC551 が返す対応形式（#391 で実測）
+    fn gc551_candidates() -> Vec<StreamCandidate> {
+        vec![
+            candidate(0, SampleKind::Yuy2, 1920, 1080, &[60, 15]),
+            candidate(1, SampleKind::Yuy2, 1280, 720, &[60, 15]),
+            candidate(2, SampleKind::Yuy2, 720, 576, &[50, 25]),
+            candidate(3, SampleKind::Yuy2, 720, 480, &[60, 30]),
+            candidate(4, SampleKind::Yuy2, 640, 480, &[85, 15]),
+        ]
+    }
+
+    #[test]
+    fn target_resolution_keeps_a_listed_request() {
+        // 利用者が選んだ解像度は、いまの解像度と違っても上書きしない
+        assert_eq!(
+            target_resolution(
+                &gc551_candidates(),
+                Some((1280, 720)),
+                Some("YUY2"),
+                Some((1920, 1080))
+            ),
+            Some((1280, 720))
+        );
+    }
+
+    #[test]
+    fn target_resolution_unlisted_request_uses_current() {
+        // 2560x1440 はこのボードに無い。近いものへ寄せず、入力の 1920x1080 にする
+        assert_eq!(
+            target_resolution(
+                &gc551_candidates(),
+                Some((2560, 1440)),
+                Some("YUY2"),
+                Some((1920, 1080))
+            ),
+            Some((1920, 1080))
+        );
+    }
+
+    #[test]
+    fn target_resolution_without_request_uses_current() {
+        assert_eq!(
+            target_resolution(&gc551_candidates(), None, None, Some((1920, 1080))),
+            Some((1920, 1080))
+        );
+    }
+
+    #[test]
+    fn target_resolution_without_current_keeps_request() {
+        // いまの解像度を読めなければ、これまでどおり（近いもの / 1280x720）
+        assert_eq!(
+            target_resolution(&gc551_candidates(), Some((2560, 1440)), None, None),
+            Some((2560, 1440))
+        );
+        assert_eq!(
+            target_resolution(&gc551_candidates(), None, None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn target_resolution_ignores_unlisted_current() {
+        // いまの解像度が一覧に無いなら使わない
+        assert_eq!(
+            target_resolution(&gc551_candidates(), None, None, Some((1024, 768))),
+            None
+        );
+    }
+
+    #[test]
+    fn target_resolution_checks_within_the_requested_format() {
+        // 1280x720 は MJPEG にしか無い。YUY2 を指定したら「一覧に無い」扱いで、
+        // いまの解像度にする（`choose_candidate` も YUY2 の中から選ぶため）
+        let candidates = vec![
+            candidate(0, SampleKind::Yuy2, 1920, 1080, &[30]),
+            candidate(1, SampleKind::Mjpeg, 1280, 720, &[30]),
+        ];
+        assert_eq!(
+            target_resolution(
+                &candidates,
+                Some((1280, 720)),
+                Some("YUY2"),
+                Some((1920, 1080))
+            ),
+            Some((1920, 1080))
+        );
+        // 形式が未指定なら、どの形式にあってもよい
+        assert_eq!(
+            target_resolution(&candidates, Some((1280, 720)), None, Some((1920, 1080))),
+            Some((1280, 720))
+        );
+    }
+
+    #[test]
+    fn target_resolution_then_choose_candidate_opens_the_input_resolution() {
+        // 解像度が未指定のとき、これまでは 1280x720 で開いて警告画面になっていた
+        let candidates = gc551_candidates();
+        let resolution = target_resolution(&candidates, None, None, Some((1920, 1080)));
+        assert_eq!(
+            choose_candidate(&candidates, resolution, None, None),
+            Some((0, 60))
+        );
+    }
+
+    #[test]
+    fn capabilities_from_candidates_marks_the_current_resolution() {
+        let candidates = vec![
+            candidate(0, SampleKind::Yuy2, 1920, 1080, &[60]),
+            candidate(1, SampleKind::Mjpeg, 1280, 720, &[60]),
+        ];
+        let caps = capabilities_from_candidates(&candidates, Some((1920, 1080)));
+        assert_eq!(caps[0].name, "YUY2");
+        assert_eq!(caps[0].current_resolution, Some((1920, 1080)));
+        // MJPEG は 1920x1080 を開けないので添えない
+        assert_eq!(caps[1].name, "MJPEG");
+        assert_eq!(caps[1].current_resolution, None);
+    }
+
     #[test]
     fn capabilities_from_candidates_empty_input_is_empty() {
-        assert!(capabilities_from_candidates(&[]).is_empty());
+        assert!(capabilities_from_candidates(&[], None).is_empty());
     }
 }
