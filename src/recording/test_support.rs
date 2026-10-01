@@ -112,6 +112,7 @@ pub(super) fn record_until_size_changes(audio_device: bool) -> (i64, i64) {
         hardware_encoder: false,
         nominal_fps: Some(60),
         audio_bitrate_kbps: Some(160),
+        audio_offset_ms: 0,
     };
     let telemetry = Arc::new(RecordingTelemetry::default());
     let mut session = Session::begin(request, frames.tap(), audio_tap, telemetry, events)
@@ -171,6 +172,7 @@ pub(super) fn record_from_video_pin(
     resolution: (u32, u32),
     seconds: u64,
     folder: &Path,
+    audio_offset_ms: i32,
 ) -> VideoPinRun {
     use crate::audio::{
         AudioCapture, AudioControls, AudioPinFeed, AudioPinState, PassthroughInput,
@@ -319,6 +321,7 @@ pub(super) fn record_from_video_pin(
         hardware_encoder: true,
         nominal_fps: Some(nominal_fps),
         audio_bitrate_kbps: Some(160),
+        audio_offset_ms,
     };
     let telemetry = Arc::new(RecordingTelemetry::default());
     let mut session = Session::begin(request, frames.tap(), audio_tap, telemetry, events)

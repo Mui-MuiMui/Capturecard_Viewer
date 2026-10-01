@@ -17,6 +17,8 @@
 //! - 途切れずに続く間は、入力デバイスの時計と PC の時計の差（ドリフト）を、変換器の
 //!   レート比をわずかに動かして直す（#288、`super::pts` の「ドリフトの補正」）。
 //!   時計の差では説明できないほどずれが飛んだら（サンプルが落ちた）、揃え直す
+//! - 映像と音声のずれの補正（#404）は、受け取った時刻に足してから上のすべてを行う
+//!   （`super::pts::offset_audio_time`）。正なら先頭に無音が入り、負なら先頭を削る
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -26,9 +28,9 @@ use log::{debug, info};
 use ringbuf::traits::{Consumer, Observer};
 
 use super::pts::{
-    align, audio_units, frames_in, silence_until, units_from, units_since, Alignment,
-    DriftCorrector, DriftDecision, DriftSpan, TapTiming, AUDIO_CHANNELS, AUDIO_SAMPLE_RATE,
-    UNITS_PER_SECOND,
+    align, audio_units, frames_in, offset_audio_time, silence_until, units_from, units_since,
+    Alignment, DriftCorrector, DriftDecision, DriftSpan, TapTiming, AUDIO_CHANNELS,
+    AUDIO_SAMPLE_RATE, UNITS_PER_SECOND,
 };
 use crate::audio::{
     f32_to_i16, AudioTap, AudioTapConsumer, AudioTapSnapshot, PassthroughConverter,
@@ -221,11 +223,14 @@ pub(super) struct AudioTrack {
     silence_frames: u64,
     trimmed_samples: u64,
     trimmed_units: u64,
+    /// 映像と音声のずれの補正（ms、正なら音声を遅らせる、#404）。作ったあとは変えない
+    offset_ms: i32,
 }
 
 impl AudioTrack {
     /// リングを差し込んで音声トラックを始める。`t0` は映像と同じ録画の基準。
-    pub(super) fn attach(tap: AudioTap, t0: Instant) -> Self {
+    /// `offset_ms` は映像と音声のずれの補正（`[recording] audio_offset_ms`、丸め済み）。
+    pub(super) fn attach(tap: AudioTap, t0: Instant, offset_ms: i32) -> Self {
         let attachment = tap.attach(tap.one_second_capacity());
         let format = tap.format();
         let correction = Arc::new(ResampleTelemetry::for_recording());
@@ -254,6 +259,7 @@ impl AudioTrack {
             silence_frames: 0,
             trimmed_samples: 0,
             trimmed_units: 0,
+            offset_ms,
             tap,
         }
     }
@@ -279,12 +285,19 @@ impl AudioTrack {
         self.take_until(snapshot.samples_total, &snapshot);
         self.convert();
 
-        // 音声が来ていなければ、映像に合わせて無音を書く
+        // 音声が来ていなければ無音を書く。両方にずれの補正（#404）を足すので埋める先だけが動く
         let now_units = units_since(self.t0, now);
-        let last_push = snapshot
-            .last_push
-            .map(|elapsed| units_since(self.t0, self.tap.base() + elapsed));
-        if let Some(until) = silence_until(now_units, last_push, self.format.is_some()) {
+        let last_push = snapshot.last_push.map(|elapsed| {
+            offset_audio_time(
+                units_since(self.t0, self.tap.base() + elapsed),
+                self.offset_ms,
+            )
+        });
+        if let Some(until) = silence_until(
+            offset_audio_time(now_units, self.offset_ms),
+            last_push,
+            self.format.is_some(),
+        ) {
             let expected = audio_units(self.produced_frames);
             if until > expected {
                 self.insert_silence(frames_in(until - expected, AUDIO_SAMPLE_RATE));
@@ -459,12 +472,16 @@ impl AudioTrack {
         self.needs_anchor = false;
     }
 
-    /// 逆算に使う値。入力の形か時刻がまだ無ければ `None`。
+    /// 逆算に使う値。入力の形か時刻がまだ無ければ `None`。最後に積んだ時刻には映像と音声のずれの
+    /// 補正（#404）を足しておく（揃え直しもドリフトの補正もここから逆算する）。
     fn timing(&self, snapshot: &AudioTapSnapshot) -> Option<TapTiming> {
         let (sample_rate, channels) = self.format?;
         let last_push = snapshot.last_push?;
         Some(TapTiming {
-            last_push: units_since(self.t0, self.tap.base() + last_push),
+            last_push: offset_audio_time(
+                units_since(self.t0, self.tap.base() + last_push),
+                self.offset_ms,
+            ),
             samples_total: snapshot.samples_total,
             sample_rate,
             channels,
@@ -523,7 +540,7 @@ mod tests {
     fn audio_track_without_any_stream_writes_silence_up_to_now_minus_the_stale_margin() {
         let tap = AudioTap::new();
         let t0 = Instant::now();
-        let mut track = AudioTrack::attach(tap, t0);
+        let mut track = AudioTrack::attach(tap, t0, 0);
 
         track.pump(t0 + Duration::from_secs(1));
 
@@ -539,7 +556,7 @@ mod tests {
     fn audio_track_chunks_are_contiguous() {
         let tap = AudioTap::new();
         let t0 = Instant::now();
-        let mut track = AudioTrack::attach(tap, t0);
+        let mut track = AudioTrack::attach(tap, t0, 0);
 
         track.pump(t0 + Duration::from_millis(500));
         let first = track.take_chunk(0).expect("1 つ目");
@@ -555,7 +572,7 @@ mod tests {
     fn audio_track_take_chunk_waits_for_the_minimum_length() {
         let tap = AudioTap::new();
         let t0 = Instant::now();
-        let mut track = AudioTrack::attach(tap, t0);
+        let mut track = AudioTrack::attach(tap, t0, 0);
 
         track.pump(t0 + Duration::from_millis(210));
         // 10ms（480 フレーム）しか溜まっていない
@@ -567,7 +584,7 @@ mod tests {
     fn audio_track_finish_pads_to_the_video_end() {
         let tap = AudioTap::new();
         let t0 = Instant::now();
-        let mut track = AudioTrack::attach(tap, t0);
+        let mut track = AudioTrack::attach(tap, t0, 0);
 
         track.finish(20_000_000);
 
@@ -579,7 +596,7 @@ mod tests {
     fn audio_track_finish_pads_beyond_the_per_insert_limit() {
         let tap = AudioTap::new();
         let t0 = Instant::now();
-        let mut track = AudioTrack::attach(tap, t0);
+        let mut track = AudioTrack::attach(tap, t0, 0);
 
         // 1 回に足せる無音（10 秒）を超える差（25 秒）でも、映像の終わりまで揃える
         track.finish(250_000_000);
@@ -597,7 +614,7 @@ mod tests {
         tap.begin_stream(48_000, 1);
         // 録画を 1 秒前に始めたことにする（届いたサンプルが t0 より前として削られないように）
         let t0 = Instant::now() - Duration::from_secs(1);
-        let mut track = AudioTrack::attach(tap.clone(), t0);
+        let mut track = AudioTrack::attach(tap.clone(), t0, 0);
 
         // 入力（モノラル）に 0.5 を 4800 サンプル（100ms）積む
         tap.push_for_test(&vec![0.5; 4_800]);
@@ -619,7 +636,7 @@ mod tests {
         let tap = AudioTap::new();
         tap.begin_stream(48_000, 2);
         let t0 = Instant::now() - Duration::from_secs(1);
-        let mut track = AudioTrack::attach(tap.clone(), t0);
+        let mut track = AudioTrack::attach(tap.clone(), t0, 0);
         tap.push_for_test(&[0.25; 960]);
         track.pump(Instant::now());
 
@@ -631,6 +648,43 @@ mod tests {
         assert_eq!(track.format, Some((44_100, 1)));
         assert_eq!(track.next_index, 960 + 441);
         assert!(track.stats().drift.is_some());
+    }
+
+    /// `ago` 前に始めた録画へ、いま 48kHz モノラルの `samples` を積んで 1 回 `pump` した音声トラック。
+    fn track_with_offset(offset_ms: i32, ago: Duration, samples: usize) -> AudioTrack {
+        let tap = AudioTap::new();
+        tap.begin_stream(48_000, 1);
+        let t0 = Instant::now() - ago;
+        let mut track = AudioTrack::attach(tap.clone(), t0, offset_ms);
+        tap.push_for_test(&vec![0.5; samples]);
+        track.pump(Instant::now());
+        track
+    }
+
+    #[test]
+    fn audio_track_offset_adds_leading_silence_or_trims_the_head() {
+        // +100ms: 1 秒前に始めた録画へいま 100ms ぶん届いた。先頭の無音が 100ms（4800 フレーム）
+        // 増える。2 つの音声トラックを作る間の時間の差（数 ms）を許す
+        let plain = track_with_offset(0, Duration::from_secs(1), 4_800).stats();
+        let delayed = track_with_offset(100, Duration::from_secs(1), 4_800).stats();
+        let added = delayed.silence_frames as i64 - plain.silence_frames as i64;
+        assert!((4_320..=5_280).contains(&added), "{added}");
+        assert_eq!(delayed.trimmed_samples, 0);
+
+        // -200ms: 500ms 前に始めた録画へいま 500ms ぶん届いた（最初のサンプルはほぼ t0）。
+        // 補正なしなら揃えず、-200ms なら先頭の 200ms（モノラル 9600 サンプル）を削る
+        let plain = track_with_offset(0, Duration::from_millis(500), 24_000).stats();
+        let early = track_with_offset(-200, Duration::from_millis(500), 24_000).stats();
+        assert!(plain.trimmed_samples < 720, "{}", plain.trimmed_samples);
+        let trimmed = early.trimmed_samples;
+        assert!((9_120..=10_080).contains(&trimmed), "{trimmed}");
+        assert_eq!(early.silence_frames, 0);
+
+        // 音声が来ていない間に埋める先（いま − 200ms）も補正のぶん動く。1 秒 − 200ms + 100ms
+        let t0 = Instant::now();
+        let mut track = AudioTrack::attach(AudioTap::new(), t0, 100);
+        track.pump(t0 + Duration::from_secs(1));
+        assert_eq!(track.stats().silence_frames, 43_200);
     }
 
     #[test]

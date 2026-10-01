@@ -44,9 +44,9 @@ use hotkeys::{default_hotkeys, migrate_hotkeys};
 use preset::sanitize_presets;
 pub use preset::{resolved_active_preset, validate_preset_name, Preset};
 pub use recording::{
-    RecordingSettings, DEFAULT_RECORDING_FILE_NAME_FORMAT, MAX_RECORDING_BITRATE_KBPS,
-    MAX_REPLAY_SECONDS, MIN_RECORDING_BITRATE_KBPS, MIN_REPLAY_SECONDS,
-    RECORDING_AUDIO_BITRATES_KBPS,
+    RecordingSettings, DEFAULT_RECORDING_FILE_NAME_FORMAT, MAX_RECORDING_AUDIO_OFFSET_MS,
+    MAX_RECORDING_BITRATE_KBPS, MAX_REPLAY_SECONDS, MIN_RECORDING_AUDIO_OFFSET_MS,
+    MIN_RECORDING_BITRATE_KBPS, MIN_REPLAY_SECONDS, RECORDING_AUDIO_BITRATES_KBPS,
 };
 pub use screenshot::{
     ScreenshotDestination, ScreenshotEncoding, ScreenshotFormat, ScreenshotSettings,

@@ -125,9 +125,9 @@ impl Session {
         // 届いたサンプルはリングに入らない（コールバック 1 回ぶんの端数は削る）
         let audio = request
             .audio_bitrate_kbps
-            .map(|_| AudioTrack::attach(audio_tap, t0));
+            .map(|_| AudioTrack::attach(audio_tap, t0, request.audio_offset_ms));
         info!(
-            "録画を始めた（保存先: {}、ファイル名: {}.mp4、{}kbps、ハードウェアエンコーダ: {}、音声: {}）",
+            "録画を始めた（保存先: {}、ファイル名: {}.mp4、{}kbps、ハードウェアエンコーダ: {}、音声: {}、音声のずれの補正: {:+}ms）",
             request.folder.display(),
             request.file_stem,
             request.video_bitrate_kbps,
@@ -139,7 +139,8 @@ impl Session {
             match request.audio_bitrate_kbps {
                 Some(kbps) => format!("AAC {kbps}kbps"),
                 None => "録らない".to_string(),
-            }
+            },
+            request.audio_offset_ms
         );
         let _ = events.send(RecordingEvent::Started);
         Some(Self {
@@ -738,7 +739,12 @@ mod tests {
         let folder = std::env::var("CAPTURECARD_VIEWER_PIN_TEST_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| temp.path().to_path_buf());
-        let run = record_from_video_pin("GC551", (1920, 1080), seconds, &folder);
+        // 映像と音声のずれの補正（#404）を試すときは CAPTURECARD_VIEWER_PIN_TEST_AUDIO_OFFSET_MS（ms、既定 0）
+        let audio_offset_ms = std::env::var("CAPTURECARD_VIEWER_PIN_TEST_AUDIO_OFFSET_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let run = record_from_video_pin("GC551", (1920, 1080), seconds, &folder, audio_offset_ms);
         let diff_ms = (run.audio_end - run.video_end) / 10_000;
         println!(
             "{}: 映像 {}、音声 {}（{diff_ms}ms）、fps {:?} → {:?}",

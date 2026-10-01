@@ -17,6 +17,9 @@ pub struct ReplayConfig {
     /// 公称 fps。映像が無ければ `None`（始めるときは 60 として扱い、動いている間に届いたら
     /// 「変化なし」として扱う。`same_encoders`）
     pub nominal_fps: Option<u32>,
+    /// 映像と音声のずれの補正（ms、正なら音声を遅らせる、#404）。±200 に丸めてある。
+    /// 音声トラックは作るときに決めるので、変わったら作り直す（`same_encoders`）
+    pub audio_offset_ms: i32,
 }
 
 impl ReplayConfig {
@@ -24,7 +27,9 @@ impl ReplayConfig {
         self.nominal_fps.unwrap_or(FALLBACK_FPS).max(1)
     }
 
-    /// エンコーダの作り直しが要らない違いか（さかのぼる長さだけが違う）。
+    /// エンコーダ（と音声トラック）の作り直しが要らない違いか（さかのぼる長さだけが違う）。
+    /// 映像と音声のずれの補正（#404）が変わったときも作り直す。リングに溜めた分は前の補正で
+    /// 書いてあり、そのあとに新しい補正の音声を繋ぐと、録画の中で音声の位置が飛ぶため。
     /// `self` がいま動いているもの、`other` が新しく届いたもの。
     ///
     /// **新しい方の公称 fps が `None`（映像が途絶えて閉じた）なら fps は変わっていないとみなす**
@@ -34,6 +39,7 @@ impl ReplayConfig {
         self.video_bitrate_kbps == other.video_bitrate_kbps
             && self.hardware_encoder == other.hardware_encoder
             && self.audio_bitrate_kbps == other.audio_bitrate_kbps
+            && self.audio_offset_ms == other.audio_offset_ms
             && (other.nominal_fps.is_none() || self.fps() == other.fps())
     }
 }
@@ -49,6 +55,7 @@ mod tests {
             hardware_encoder: true,
             audio_bitrate_kbps: Some(160),
             nominal_fps: Some(60),
+            audio_offset_ms: 0,
         }
     }
 
@@ -79,6 +86,10 @@ mod tests {
             },
             ReplayConfig {
                 nominal_fps: Some(30),
+                ..config()
+            },
+            ReplayConfig {
+                audio_offset_ms: 100,
                 ..config()
             },
         ] {

@@ -41,6 +41,11 @@ pub struct RecordingSettings {
     // さかのぼる長さ（秒）。MIN_REPLAY_SECONDS〜MAX_REPLAY_SECONDS（上限 5 分は #182 の決定）
     #[serde(deserialize_with = "deserialize_replay_seconds")]
     pub replay_seconds: u32,
+    // 映像と音声のずれの補正（ms、#404）。録画の音声のサンプルを受け取った時刻に足す。
+    // 正なら音声を遅らせ（先頭に無音が入る）、負なら早める（先頭の音声をそのぶん削る）。
+    // MIN_RECORDING_AUDIO_OFFSET_MS〜MAX_RECORDING_AUDIO_OFFSET_MS。リプレイバッファにも効く
+    #[serde(deserialize_with = "deserialize_audio_offset_ms")]
+    pub audio_offset_ms: i32,
 }
 
 // 録画のファイル名の既定の書式
@@ -68,6 +73,12 @@ pub const MAX_REPLAY_SECONDS: u32 = 300;
 
 pub const DEFAULT_REPLAY_SECONDS: u32 = 30;
 
+// 録画の映像と音声のずれの補正（ms）の範囲（#404）。#398 の実測（音声が 50〜60ms 遅れる）に
+// 対して両方向に余裕を持たせた
+pub const MIN_RECORDING_AUDIO_OFFSET_MS: i32 = -200;
+
+pub const MAX_RECORDING_AUDIO_OFFSET_MS: i32 = 200;
+
 impl Default for RecordingSettings {
     fn default() -> Self {
         Self {
@@ -79,6 +90,7 @@ impl Default for RecordingSettings {
             audio_bitrate_kbps: DEFAULT_RECORDING_AUDIO_BITRATE_KBPS,
             replay_enabled: false,
             replay_seconds: DEFAULT_REPLAY_SECONDS,
+            audio_offset_ms: 0,
         }
     }
 }
@@ -106,6 +118,13 @@ impl RecordingSettings {
                 .clamp(MIN_REPLAY_SECONDS, MAX_REPLAY_SECONDS)
         })
     }
+
+    // 録画スレッドへ渡す映像と音声のずれの補正（ms）。範囲に丸めてから渡す
+    // （理由は clamped_bitrate_kbps と同じ）
+    pub fn clamped_audio_offset_ms(&self) -> i32 {
+        self.audio_offset_ms
+            .clamp(MIN_RECORDING_AUDIO_OFFSET_MS, MAX_RECORDING_AUDIO_OFFSET_MS)
+    }
 }
 
 // 範囲外のさかのぼる長さが書かれていても、設定全体を失わせない。
@@ -124,6 +143,27 @@ where
     }
     // clamp 済みなので u32 に収まる
     Ok(clamped as u32)
+}
+
+// 範囲外の映像と音声のずれの補正が書かれていても、設定全体を失わせない。
+// 考え方は deserialize_recording_bitrate と同じ。
+fn deserialize_audio_offset_ms<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = i64::deserialize(deserializer)?;
+    let clamped = raw.clamp(
+        i64::from(MIN_RECORDING_AUDIO_OFFSET_MS),
+        i64::from(MAX_RECORDING_AUDIO_OFFSET_MS),
+    );
+    if clamped != raw {
+        warn!(
+            "設定の録画の映像と音声のずれの補正 {} ms は範囲外なので {} ms として扱う",
+            raw, clamped
+        );
+    }
+    // clamp 済みなので i32 に収まる
+    Ok(clamped as i32)
 }
 
 // RECORDING_AUDIO_BITRATES_KBPS のうち `kbps` に最も近いもの。
@@ -327,6 +367,7 @@ mod tests {
                 audio_bitrate_kbps: 128,
                 replay_enabled: true,
                 replay_seconds: 120,
+                audio_offset_ms: -80,
             },
             ..AppSettings::default()
         };
@@ -429,6 +470,56 @@ mod tests {
             assert_eq!(settings.recording.replay_seconds, expected, "{written}");
             assert_eq!(settings.ui.volume, 80.0);
         }
+    }
+
+    #[test]
+    fn app_settings_audio_offset_round_trips_with_the_full_config() {
+        // 補正が入る前の版の設定ファイルには項目が無い。0（補正しない）で読む
+        let settings: AppSettings = toml::from_str(FULL_CONFIG).expect("読めなければならない");
+        assert_eq!(settings.recording.audio_offset_ms, 0);
+
+        // 負の値（音声を早める）も書き出して読み戻せる
+        let config = format!("{FULL_CONFIG}\n[recording]\naudio_offset_ms = -80\n");
+        let settings: AppSettings = toml::from_str(&config).expect("読めなければならない");
+        assert_eq!(settings.recording.audio_offset_ms, -80);
+        let text = toml::to_string(&settings).expect("書き出せる");
+        let restored: AppSettings = toml::from_str(&text).expect("読み戻せる");
+        assert_eq!(restored.recording, settings.recording);
+    }
+
+    #[test]
+    fn app_settings_out_of_range_audio_offset_is_clamped_without_losing_settings() {
+        for (written, expected) in [
+            (-201, -200),
+            (-200, -200),
+            (0, 0),
+            (200, 200),
+            (201, 200),
+            (i64::MAX, 200),
+            (i64::MIN, -200),
+        ] {
+            let config = format!("{FULL_CONFIG}\n[recording]\naudio_offset_ms = {written}\n");
+
+            let settings: AppSettings =
+                toml::from_str(&config).expect("範囲外の補正でも読めなければならない");
+
+            assert_eq!(settings.recording.audio_offset_ms, expected, "{written}");
+            assert_eq!(settings.ui.volume, 80.0);
+        }
+    }
+
+    #[test]
+    fn recording_settings_clamped_audio_offset_stays_in_range() {
+        // 読み込み後に差し替えられた範囲外の値も、渡す前に丸める
+        let mut recording = RecordingSettings {
+            audio_offset_ms: 1_000,
+            ..RecordingSettings::default()
+        };
+        assert_eq!(recording.clamped_audio_offset_ms(), 200);
+        recording.audio_offset_ms = -1_000;
+        assert_eq!(recording.clamped_audio_offset_ms(), -200);
+        recording.audio_offset_ms = 55;
+        assert_eq!(recording.clamped_audio_offset_ms(), 55);
     }
 
     #[test]

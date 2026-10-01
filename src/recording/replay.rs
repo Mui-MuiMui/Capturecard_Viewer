@@ -87,9 +87,9 @@ impl ReplayPipeline {
         let t0 = Instant::now();
         let audio = config
             .audio_bitrate_kbps
-            .map(|_| AudioTrack::attach(audio_tap, t0));
+            .map(|_| AudioTrack::attach(audio_tap, t0, config.audio_offset_ms));
         info!(
-            "リプレイバッファを始めた（{} 秒、{}kbps、ハードウェアエンコーダ: {}、音声: {}、公称 {}fps）",
+            "リプレイバッファを始めた（{} 秒、{}kbps、ハードウェアエンコーダ: {}、音声: {}、音声のずれの補正: {:+}ms、公称 {}fps）",
             config.seconds,
             config.video_bitrate_kbps,
             if config.hardware_encoder {
@@ -101,6 +101,7 @@ impl ReplayPipeline {
                 Some(kbps) => format!("AAC {kbps}kbps"),
                 None => "持たない".to_string(),
             },
+            config.audio_offset_ms,
             config.fps()
         );
         Self {

@@ -62,6 +62,9 @@ pub struct RecordingRequest {
     /// 音声（AAC）の平均ビットレート（kbps）。96 / 128 / 160 / 192 のどれかに寄せてある。
     /// `None` なら音声を録らない（映像だけの MP4）
     pub audio_bitrate_kbps: Option<u32>,
+    /// 映像と音声のずれの補正（ms、正なら音声を遅らせる、#404）。±200 に丸めてある。
+    /// リプレイバッファを通す録画では使わず、`ReplayConfig` の値が効く
+    pub audio_offset_ms: i32,
 }
 
 /// UI スレッド → 録画スレッド。
@@ -663,6 +666,7 @@ mod tests {
                 hardware_encoder: false,
                 audio_bitrate_kbps: Some(160),
                 nominal_fps: Some(60),
+                audio_offset_ms: 0,
             }))
             .expect("リプレイバッファを始められる");
         // OFF のままならスレッドは起きない（OFF のときの負荷は①②と同じ）
@@ -683,6 +687,7 @@ mod tests {
                 hardware_encoder: false,
                 nominal_fps: Some(60),
                 audio_bitrate_kbps: Some(160),
+                audio_offset_ms: 0,
             })
             .expect("録画を始められる");
         poll_for(&mut recorder, record);
