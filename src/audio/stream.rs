@@ -351,7 +351,7 @@ fn render_output_samples<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::convert::{f32_to_i16, f32_to_i32, f32_to_u16, i16_to_f32};
+    use crate::audio::sample::{f32_to_i16, f32_to_i32, f32_to_u16, i16_to_f32};
     use ringbuf::traits::Split;
     use ringbuf::HeapRb;
 

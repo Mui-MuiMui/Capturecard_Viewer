@@ -14,10 +14,9 @@ use std::sync::{Arc, Mutex};
 
 use super::capabilities::{device_name, AudioCapabilities};
 use super::controls::AudioControls;
-use super::convert::{
-    f32_to_i16, f32_to_i32, f32_to_u16, i16_to_f32, i32_to_f32, u16_to_f32, PassthroughConverter,
-};
+use super::convert::PassthroughConverter;
 use super::resample::{ResampleStatus, ResampleTelemetry};
+use super::sample::{f32_to_i16, f32_to_i32, f32_to_u16, i16_to_f32, i32_to_f32, u16_to_f32};
 use super::stream::{build_input_stream_with, build_output_stream_with, OutputSignals};
 use super::stream_config::{choose_passthrough_configs, resolve_ranges};
 use super::tap::AudioTap;

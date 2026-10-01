@@ -10,7 +10,8 @@
 //! | `stream_config.rs` | 対応設定の中から、実際に開く設定を選ぶ |
 //! | `capture.rs` | `AudioCapture`。パススルーの開始と停止、観測値の取り出し |
 //! | `stream.rs` | cpal のストリームの組み立てと、入出力のコールバック |
-//! | `convert.rs` | 入出力の形が違う場合の変換（線形補間とミックス）とサンプル型の変換 |
+//! | `convert.rs` | 入出力の形が違う場合の変換（線形補間とミックス） |
+//! | `sample.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32） |
 //! | `resample.rs` | クロックドリフト補正の共有状態と、補正係数の決め方 |
 //! | `controls.rs` | 音量・パススルー・ミュートの共有状態 |
 //! | `fake.rs` | 実機なしで動くフェイクの音声デバイス（正弦波の入力と、書き込みを捨てる出力）。環境変数で有効にしたときだけ使う |
@@ -22,6 +23,7 @@ mod controls;
 mod convert;
 mod fake;
 mod resample;
+mod sample;
 mod stream;
 mod stream_config;
 mod tap;
@@ -40,7 +42,8 @@ pub use fake::{FakeAudioCapture, FakeAudioOptions};
 pub(crate) use resample::decide_resample_correction;
 pub use resample::{ResampleStatus, ResampleTelemetry};
 // 録画スレッド（`crate::recording`）が録画用に 1 つ持つ変換器と、16bit PCM への変換
-pub(crate) use convert::{f32_to_i16, PassthroughConverter};
+pub(crate) use convert::PassthroughConverter;
+pub(crate) use sample::f32_to_i16;
 pub use tap::{AudioTap, AudioTapConsumer, AudioTapSnapshot};
 
 use cpal::SampleFormat;
