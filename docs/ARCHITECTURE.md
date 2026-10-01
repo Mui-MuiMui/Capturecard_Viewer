@@ -388,6 +388,7 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 | 音声設定を効かせる | サンプルレート・チャンネル数は反映され、UI の選択肢も入出力の対応設定から生成している。列挙は別スレッドで行い UI を止めない | 完了 |
 | 入出力差の吸収 | 揃えられる場合は揃え、揃えられない場合は線形補間でリサンプルし、チャンネル数はアップ／ダウンミックスする。クロックドリフトはリングバッファの水位の数秒間の平均から補正する（`ResampleTelemetry`）。**入出力の形が揃っていても補正する**（#308、`docs/design/audio.md`）。リサンプル比・バッファ水位は「接続状態」タブに出る | 完了 |
 | バッファ長の調整 | 設定ダイアログのデバイス設定タブでスライダーから調整できる（20〜200ms、既定 50ms）。出力は最初にリングがその長さまで溜まってから鳴らすので、選んだ長さがそのまま遅延になる（#308） | 完了 |
+| 音声入力の経路 | 音声入力は WASAPI だけ。WASAPI に音声が出ず、DirectShow のキャプチャーフィルターの音声ピンにだけ音声を持つ機種（AVerMedia GC551）の音は取れない。音声ピンを cpal の入力の代わりにする設計は `docs/design/directshow-audio.md`（未実装） | #388 |
 | エラー型 | 下位モジュールの公開 API は自分のエラー enum（`VideoError` / `AudioError` / `RecordingError` / `ScreenshotError` / `HotkeyError` / `SettingsError` / `UpdateError`）を返す。文言はその型の `Display` が `crate::i18n` から引いて出す。`logging` だけはロガー初期化前の失敗で読み手がいないため `Result<_, String>` のまま | 完了 |
 | ユーザー通知 | 接続失敗・ホットキー登録失敗・スクリーンショット保存失敗はトースト（`TransientOverlay`）で数秒表示し、同じ発生源の同じ文言は間引く。映像・音声の接続先は設定ダイアログの「接続状態」タブに、ホットキーの登録失敗は理由も添えてホットキー一覧に出す | 完了 |
 | trait による抽象化 | デバイスワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。本番の実装は映像が `VideoCapture` と `DirectShowCapture` を束ねた `SystemVideo`、音声が `AudioCapture`、テストはモック、環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` で起動したときはフェイク（`FakeVideoCapture` / `FakeAudioCapture`）。**コールバックの経路には挟んでいない**（映像フレームと音量は共有ハンドルを直に流れる） | 完了 |
