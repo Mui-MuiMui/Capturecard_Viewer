@@ -65,6 +65,7 @@ texts! {
     HeadlineVideo { ja: "映像デバイスに接続できません", en: "Cannot connect to the video device" },
     HeadlineAudio { ja: "音声デバイスに接続できません", en: "Cannot connect to the audio device" },
     HeadlineScreenshot { ja: "スクリーンショットを出力できません", en: "Cannot output the screenshot" },
+    HeadlineScreenshotSound { ja: "効果音を再生できません", en: "Cannot play the screenshot sound" },
     HeadlineHotkey { ja: "ホットキーを登録できません", en: "Cannot register the hotkey" },
     HeadlineSettings { ja: "設定ファイルを読み書きできません", en: "Cannot read or write the settings file" },
     HeadlineUpdate { ja: "更新できません", en: "Cannot update" },
@@ -272,6 +273,8 @@ texts! {
     // ---- 「接続状態」タブ（ui/status_tab.rs） ----
     LinkVideo { ja: "映像", en: "Video" },
     LinkAudio { ja: "音声", en: "Audio" },
+    // 直近の失敗があるときだけ出す枠の見出し（Issue #356）
+    LinkScreenshotSound { ja: "スクリーンショットの効果音", en: "Screenshot sound" },
     StatusReadOnlyHint { ja: "この内容は表示だけで、「適用」や「OK」では変わりません。", en: "This tab is for information only. Apply and OK do not change it." },
     StatusLogHint { ja: "詳しい経過はログファイルに残っています（%AppData%\\capturecard_viewer\\logs）。", en: "Details are recorded in the log files (%AppData%\\capturecard_viewer\\logs)." },
     FakeDevicesNotice { ja: "テスト用のフェイクデバイスで動いています（環境変数 CAPTURECARD_VIEWER_FAKE_DEVICES）", en: "Running with fake test devices (environment variable CAPTURECARD_VIEWER_FAKE_DEVICES)" },

@@ -43,6 +43,17 @@ pub(super) fn show_status_tab(ui: &mut egui::Ui, connection: &ConnectionStatus) 
     ui.add_space(15.0);
     show_link_status(ui, Text::LinkAudio.get(), &connection.audio);
 
+    // 効果音は繋ぎっぱなしのデバイスではないので、失敗が残っているときだけ枠を出す（#356）
+    if let Some((message, time)) = &connection.screenshot_sound_error {
+        ui.add_space(15.0);
+        ui.group(|ui| {
+            ui.strong(Text::LinkScreenshotSound.get());
+            ui.add_space(5.0);
+            warning_label(ui, message);
+            ui.label(i18n::error_time(time));
+        });
+    }
+
     ui.add_space(15.0);
     ui.label(Text::StatusReadOnlyHint.get());
     ui.label(Text::StatusLogHint.get());

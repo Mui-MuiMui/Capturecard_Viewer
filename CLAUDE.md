@@ -124,8 +124,10 @@ cargo build --release
 | `src/settings/ui.rs` | `[ui]`（音量・言語・ウィンドウ）と `[update]`。音量の範囲と言語の選択肢（`LanguageSetting`） |
 | `src/settings/hotkeys.rs` | `[hotkeys]` / `[hotkey_settings]`。既定の割り当て、旧版の `screenshot.hotkey` からの移行（`migrate_hotkeys`）、`AppSettings::hotkey` / `set_hotkey` |
 | `src/settings/preset.rs` | `[[presets]]`。適用と一致の判定（`matches_preset` / `resolved_active_preset`）、名前の検証、読み込んだ一覧の整え方（`sanitize_presets`）、`AppSettings` のプリセット操作 |
-| `src/settings/store.rs` | 設定ファイルの読み書き（`AppSettings::load` / `save`。保存は一時ファイルへ書いて rename で置き換える `write_atomically`）、読めなかったファイル・空のファイルの退避、`LoadOutcome` / `AutoSavePolicy`、書き出し / 読み込み（`export_to` / `import_from`）。置き場所は `config_path` を呼ぶだけ |
-| `src/settings/testing.rs` | テストが複数のファイルから使う設定ファイルの例（`FULL_CONFIG` / `LEGACY_CONFIG`）と `without_key`、保存先の候補の例（`#[cfg(test)]`） |
+| `src/settings/store.rs` | 設定ファイルの読み込みと保存（`AppSettings::load` / `save`）、TOML の読み方と書き方（`parse_settings` / `serialize_settings`）、読めなかったファイル・空のファイルの退避、`LoadOutcome` / `AutoSavePolicy`。置き場所は `config_path` を呼ぶだけ |
+| `src/settings/write.rs` | 設定ファイルの書き込み。同じフォルダの一時ファイル（`<名前>.<乱数>.tmp`）へ書いて rename で置き換える（`write_atomically` / `replace_atomically`）。保存と書き出しで共通 |
+| `src/settings/transfer.rs` | 設定の書き出し / 読み込み（`export_to` / `import_from`）と、書き出すファイルの既定の名前（`export_file_name`） |
+| `src/settings/testing.rs` | テストが複数のファイルから使う設定ファイルの例（`FULL_CONFIG` / `LEGACY_CONFIG`）と `without_key`、一時ファイルが残っているかの確かめ（`has_own_temp_file`）、保存先の候補の例（`#[cfg(test)]`） |
 | `src/config_path.rs` | 設定ファイルとログの置き場所（`ConfigLocation`）。既定は `%AppData%` の下（1.2.x まで使っていた confy と同じ場所）で、環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で差し替える。解釈（`parse_config_dir` / `resolve`）は純粋関数 |
 | `src/logging.rs` | `log` クレートのロガー実装。ログファイルの置き場所・命名・世代管理、レベルの決定 |
 | `src/ui/mod.rs` | 設定ダイアログの入口 `show_settings_dialog` と、タブをまたいで使うイベント型・注意書きのヘルパー（`warning_label` / `notice_label` / `status_badge`）。外から使う経路（`crate::ui::...`）の `pub use` もここ |
