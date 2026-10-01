@@ -1,11 +1,12 @@
 //! 設定ファイルの読み書き。起動時の読み込み（`AppSettings::load`）と保存、
 //! 読めなかったファイルの退避、自動保存を許すかの判断（`AutoSavePolicy`）、
-//! 設定の書き出しと読み込み（`docs/design/settings.md`）。
+//! 設定ファイルの TOML の読み方と書き方（`docs/design/settings.md`）。
+//! 一時ファイルを使う書き込みは `write`、書き出し / 読み込みは `transfer` が持つ。
 //!
 //! 置き場所の決定は `crate::config_path` が持ち、ここは呼ぶだけ。
 
-use super::{AppSettings, SettingsError, APP_NAME};
-use chrono::Datelike;
+use super::write::write_atomically;
+use super::{AppSettings, SettingsError};
 use log::{error, warn};
 use std::path::{Path, PathBuf};
 
@@ -120,75 +121,6 @@ fn next_backup_path(path: &Path) -> PathBuf {
     candidate
 }
 
-// 書き出す設定ファイルの既定のファイル名。
-//
-// 日付を入れるのは、同じフォルダへ何度も書き出したときに前回のものを
-// 黙って上書きしないため。同じ日に 2 度書き出した場合は、保存ダイアログが
-// 上書きの確認を出す。
-//
-// 時刻を入れないのは、不具合報告に添える用途で名前が長くなりすぎるため。
-// 日が変わらないうちの 2 度目は、ユーザーが名前を変えればよい。
-pub fn export_file_name(date: &impl Datelike) -> String {
-    format!(
-        "{}-settings-{:04}{:02}{:02}.toml",
-        APP_NAME,
-        date.year(),
-        date.month(),
-        date.day()
-    )
-}
-
-// 設定を、指定した場所へ TOML として書き出す。
-//
-// **書式は `%AppData%` の設定ファイルと同じ（`serialize_settings`）。** 別の
-// 書き方にすると、書き出したファイルを読み戻せない組み合わせが生まれる。
-//
-// 書き方は `save()` と同じく、書き出し先と同じフォルダの一時ファイルへ書いて
-// rename で置き換える（Issue #361）。選んだファイルへ直接書くと、書き込み中に
-// 止まったとき壊れたファイルが残る。
-pub fn export_to(path: &Path, settings: &AppSettings) -> Result<(), SettingsError> {
-    replace_atomically(path, settings).map_err(|source| SettingsError::ExportFailed {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-// 書き出した設定ファイルを読む。
-//
-// 読めた場合は `AppSettings` へのパースを通っているので、知らない値は
-// 既定へ倒れ、旧版のホットキーも移行済みになっている（`RawAppSettings`）。
-//
-// 先にメタデータで「無い」「ファイルではない」を分けておく。読んだときの
-// 失敗と区別が付かないと、ユーザーは置き場所を疑って直しようがなくなる。
-//
-// 確かめ方に `Path::is_file()` を使わないのは、**実在するのにメタデータを
-// 取れない場合も `false` を返す**ため。権限の無いファイルを選んだときに
-// 「見つからない」と出すと、置き場所を疑って直しようがなくなる。
-pub fn import_from(path: &Path) -> Result<AppSettings, SettingsError> {
-    match std::fs::metadata(path) {
-        Ok(metadata) if metadata.is_file() => {}
-        // ディレクトリやデバイスファイル。読もうとしても読めない
-        Ok(_) => return Err(SettingsError::NotAFile(path.to_path_buf())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(SettingsError::FileNotFound(path.to_path_buf()))
-        }
-        Err(e) => {
-            return Err(SettingsError::ImportFailed {
-                path: path.to_path_buf(),
-                source: e.to_string(),
-            })
-        }
-    }
-
-    std::fs::read_to_string(path)
-        .map_err(|e| e.to_string())
-        .and_then(|contents| parse_settings(&contents))
-        .map_err(|source| SettingsError::ImportFailed {
-            path: path.to_path_buf(),
-            source,
-        })
-}
-
 // 設定ファイルの中身（TOML）を `AppSettings` へ読む。
 //
 // 1.2.x までは confy 0.6（内部は toml 0.8）で読み書きしていた。toml 1.x へ
@@ -197,7 +129,7 @@ pub fn import_from(path: &Path) -> Result<AppSettings, SettingsError> {
 //
 // 失敗の理由は 1 行にまとめる。toml のエラーの `Display` は該当行の抜き出しを
 // 含む複数行で、設定の読み込みの失敗はトーストにも出るため。
-fn parse_settings(contents: &str) -> Result<AppSettings, String> {
+pub(super) fn parse_settings(contents: &str) -> Result<AppSettings, String> {
     toml::from_str(contents).map_err(|e| {
         let full = e.to_string();
         // 1 行目は「TOML parse error at line L, column C」
@@ -207,7 +139,7 @@ fn parse_settings(contents: &str) -> Result<AppSettings, String> {
 }
 
 // 設定を、設定ファイルに書く TOML にする。保存と書き出しで共通。
-fn serialize_settings(settings: &AppSettings) -> Result<String, String> {
+pub(super) fn serialize_settings(settings: &AppSettings) -> Result<String, String> {
     toml::to_string_pretty(settings).map_err(|e| e.to_string())
 }
 
@@ -220,105 +152,6 @@ fn serialize_settings(settings: &AppSettings) -> Result<String, String> {
 // ユーザーが意図して空のファイルを置く理由は無い。
 fn is_blank_config(contents: &[u8]) -> bool {
     contents.iter().all(|b| b.is_ascii_whitespace())
-}
-
-// 保存で使う一時ファイルのパス。同じフォルダの `<元のファイル名>.<乱数>.tmp`。
-//
-// 同じフォルダに置くのは、rename が同じボリュームの中でだけ置き換えとして
-// 働くため。別のフォルダ（%TEMP% など）に置くとボリュームをまたぎうる。
-// 名前に乱数を入れるのは、もともと同じ名前の `.tmp` があっても上書きしたり
-// 消したりしないため（Issue #369）。書き出しは任意のフォルダへ書く。
-fn temp_path_for(path: &Path, token: u64) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned();
-    path.with_file_name(format!("{}.{:016x}.tmp", file_name, token))
-}
-
-// 一時ファイルの名前に入れる乱数。クレートを増やさないため、`RandomState`
-// （種をプロセスごとに乱数で取る）のハッシュへ時刻・プロセス ID・試行の番号を混ぜる。
-fn temp_token(attempt: u32) -> u64 {
-    use std::hash::{BuildHasher, Hasher};
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    hasher.write_u128(nanos);
-    hasher.write_u32(std::process::id());
-    hasher.write_u32(attempt);
-    hasher.finish()
-}
-
-// 名前が衝突したときに別の名前で試す回数
-const TEMP_ATTEMPTS: u32 = 8;
-
-// 一時ファイルを排他的に（`create_new`）作り、そのパスと開いたファイルを返す。
-// 既にあるファイルは開かないので、ここから返るのは自分が作ったものだけ。
-fn create_temp_file(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
-    let mut last_error = None;
-    for attempt in 0..TEMP_ATTEMPTS {
-        let temp_path = temp_path_for(path, temp_token(attempt));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-        {
-            Ok(file) => return Ok((temp_path, file)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(e),
-            Err(e) => return Err(e),
-        }
-    }
-    Err(last_error.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::AlreadyExists)))
-}
-
-// 設定を一時ファイルへ書き、ディスクへ書き切ってから本来のファイルと置き換える。
-//
-// 本来のファイルを `truncate` で開いて直接書くと、途中で止まったとき 0 バイトか
-// 書きかけのファイルが残る（Issue #317。confy 0.6 の `store_path` がそうだった）。
-// 置き換えを rename にすれば、ディスクに残るのは古い内容か新しい内容の
-// どちらかになる。Windows の `std::fs::rename` は置き換え先があっても
-// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` で差し替える。
-fn write_atomically(path: &Path, settings: &AppSettings) -> Result<(), SettingsError> {
-    replace_atomically(path, settings).map_err(|source| SettingsError::SaveFailed {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-// `write_atomically` と `export_to` の本体。失敗の理由だけを返し、どの
-// `SettingsError` にするかは呼び出し側が決める。
-fn replace_atomically(path: &Path, settings: &AppSettings) -> Result<(), String> {
-    use std::io::Write;
-
-    // 書けない設定なら一時ファイルを作る前に止める
-    let contents = serialize_settings(settings)?;
-
-    // 名前を排他的に確保し、そのとき開いたファイルへ書く。開くのは自分で
-    // 作ったファイルだけ
-    let (temp_path, mut file) = create_temp_file(path).map_err(|e| e.to_string())?;
-
-    let synced = file
-        .write_all(contents.as_bytes())
-        // rename の前にディスクへ書き切る。書き切る前に置き換えると、
-        // 電源断のあとに中身の無いファイルへ置き換わっていることがある
-        .and_then(|()| file.sync_all());
-    // 置き換えや削除の前に閉じておく
-    drop(file);
-    let written = synced
-        .map_err(|e| e.to_string())
-        .and_then(|()| std::fs::rename(&temp_path, path).map_err(|e| e.to_string()));
-
-    if let Err(source) = written {
-        // 置き換えられなかった一時ファイルは残さない。消すのは自分で作った
-        // `temp_path` だけ。元のファイルは手付かずのまま。消せなくても残るのは
-        // 自分の一時ファイル 1 つだけなので、失敗は捨てる
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(source);
-    }
-    Ok(())
 }
 
 impl AppSettings {
@@ -349,7 +182,7 @@ impl AppSettings {
     // 指定したパスの設定ファイルを読む。`load` の本体。
     //
     // パスを引数にしているのは、一時フォルダのファイルでテストするため。
-    fn load_from(path: &Path) -> (Self, LoadOutcome) {
+    pub(super) fn load_from(path: &Path) -> (Self, LoadOutcome) {
         match read_config_file(path) {
             Ok(Some(settings)) => (settings, LoadOutcome::Loaded),
             // 初回起動などでまだ無い。既定値で起動し、起動時の保存が作る
@@ -434,28 +267,10 @@ fn read_config_file(path: &Path) -> Result<Option<AppSettings>, String> {
 mod tests {
     use super::*;
     use crate::hotkey::HotkeyAction;
+    use crate::settings::testing::has_own_temp_file;
     use crate::settings::testing::{FULL_CONFIG, LEGACY_CONFIG};
-    use crate::settings::{ColorSpace, ScreenshotFormat, MAX_JPEG_QUALITY};
-    use chrono::NaiveDate;
     use std::fs;
     use tempfile::tempdir;
-
-    // `path` の隣に、この書式（`<名前>.<16 桁の 16 進数>.tmp`）の一時ファイルが残っているか
-    fn has_own_temp_file(path: &Path) -> bool {
-        let name = format!("{}.", path.file_name().unwrap().to_string_lossy());
-        fs::read_dir(path.parent().unwrap())
-            .unwrap()
-            .filter_map(Result::ok)
-            .any(|entry| {
-                let entry = entry.file_name().to_string_lossy().into_owned();
-                entry
-                    .strip_prefix(&name)
-                    .and_then(|rest| rest.strip_suffix(".tmp"))
-                    .is_some_and(|token| {
-                        token.len() == 16 && token.chars().all(|c| c.is_ascii_hexdigit())
-                    })
-            })
-    }
 
     #[test]
     fn backup_broken_config_moves_file_and_returns_path() {
@@ -620,58 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn temp_path_for_puts_token_before_tmp_in_the_same_folder() {
-        // rename を同じボリュームの中で済ませるため、同じフォルダに置く。
-        // 乱数は 16 桁の 16 進数で入る
-        let path = Path::new(r"C:\config\default-config.toml");
-
-        assert_eq!(
-            temp_path_for(path, 0xab),
-            PathBuf::from(r"C:\config\default-config.toml.00000000000000ab.tmp")
-        );
-    }
-
-    #[test]
-    fn temp_token_differs_between_attempts() {
-        // 衝突したときに試す名前が毎回変わること
-        assert_ne!(temp_token(0), temp_token(1));
-    }
-
-    #[test]
-    fn export_to_keeps_existing_tmp_file_on_success() {
-        // Issue #369。書き出し先の隣にもともとある同じ名前の `.tmp` を
-        // 上書きも削除もしない
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("exported.toml");
-        let stale = dir.path().join("exported.toml.tmp");
-        fs::write(&stale, "user data").expect("既存の .tmp を作れること");
-
-        export_to(&path, &AppSettings::default()).expect("書き出せること");
-
-        assert_eq!(fs::read_to_string(&stale).unwrap(), "user data");
-        assert!(path.is_file());
-        // 自分の一時ファイルは rename で消えている
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
-    }
-
-    #[test]
-    fn export_to_keeps_existing_tmp_file_on_failure() {
-        // 置き換え先がフォルダで rename が失敗しても、既存の `.tmp` は残り、
-        // 自分の一時ファイルだけが消える
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("exported.toml");
-        fs::create_dir(&path).expect("置き換えられないフォルダを作れること");
-        let stale = dir.path().join("exported.toml.tmp");
-        fs::write(&stale, "user data").expect("既存の .tmp を作れること");
-
-        assert!(export_to(&path, &AppSettings::default()).is_err());
-
-        assert_eq!(fs::read_to_string(&stale).unwrap(), "user data");
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
-    }
-
-    #[test]
-    fn load_from_empty_file_backs_it_up_and_falls_back_to_defaults() {
+    pub(super) fn load_from_empty_file_backs_it_up_and_falls_back_to_defaults() {
         // Issue #317。保存の途中で止まって 0 バイトになったファイルは、
         // `#[serde(default)]` のせいで「読めた」ことになり、退避されずに
         // 全設定が既定値へ戻っていた。壊れたファイルとして退避すること
@@ -691,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_whitespace_only_file_is_treated_as_broken() {
+    pub(super) fn load_from_whitespace_only_file_is_treated_as_broken() {
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("default-config.toml");
         fs::write(&path, "\r\n  \r\n").expect("書けること");
@@ -703,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_valid_file_is_loaded_without_backup() {
+    pub(super) fn load_from_valid_file_is_loaded_without_backup() {
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("default-config.toml");
         fs::write(&path, FULL_CONFIG).expect("書けること");
@@ -717,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_legacy_file_migrates_the_hotkey() {
+    pub(super) fn load_from_legacy_file_migrates_the_hotkey() {
         // 旧版が書いた設定ファイルを、起動時の読み込みでもそのまま読めること
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("default-config.toml");
@@ -730,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_missing_file_returns_defaults_without_creating_it() {
+    pub(super) fn load_from_missing_file_returns_defaults_without_creating_it() {
         // 初回起動。既定値で読めたことにし、ファイルは起動時の保存が作る
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("config").join("default-config.toml");
@@ -744,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_broken_toml_backs_it_up() {
+    pub(super) fn load_from_broken_toml_backs_it_up() {
         let dir = tempdir().expect("一時ディレクトリを作れること");
         let path = dir.path().join("default-config.toml");
         fs::write(&path, "これは TOML ではない [[[").expect("書けること");
@@ -790,234 +554,5 @@ mod tests {
 
         assert!(path.is_file());
         assert!(!has_own_temp_file(&path));
-    }
-
-    #[test]
-    fn write_atomically_replaces_the_file_and_leaves_no_temp_file() {
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("default-config.toml");
-        fs::write(&path, "[video]\nfps = 15\n").expect("古い内容を書けること");
-        let settings: AppSettings = toml::from_str(FULL_CONFIG).expect("読めること");
-
-        write_atomically(&path, &settings).expect("保存できること");
-
-        assert!(!has_own_temp_file(&path), "一時ファイルが残っている");
-        let (reloaded, outcome) = AppSettings::load_from(&path);
-        assert_eq!(outcome, LoadOutcome::Loaded);
-        assert_eq!(reloaded.video.device_name, settings.video.device_name);
-        assert_eq!(reloaded.video.fps, settings.video.fps);
-        assert_eq!(reloaded.hotkeys, settings.hotkeys);
-    }
-
-    #[test]
-    fn write_atomically_creates_a_missing_file() {
-        // 初回起動のようにファイルがまだ無い場合も書けること
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("default-config.toml");
-
-        write_atomically(&path, &AppSettings::default()).expect("保存できること");
-
-        assert!(path.exists());
-        assert!(!has_own_temp_file(&path));
-    }
-
-    #[test]
-    fn write_atomically_failure_keeps_the_original_and_removes_the_temp_file() {
-        // 置き換え先がディレクトリで rename できない場合。元の場所は手付かずで、
-        // 一時ファイルも残らないこと
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("default-config.toml");
-        fs::create_dir(&path).expect("ディレクトリを作れること");
-
-        let err = write_atomically(&path, &AppSettings::default()).expect_err("失敗すること");
-
-        assert!(
-            matches!(&err, SettingsError::SaveFailed { path: p, .. } if p == &path),
-            "保存の失敗として返ること: {err:?}"
-        );
-        assert!(path.is_dir(), "元の場所が変わっている");
-        assert!(!has_own_temp_file(&path), "一時ファイルが残っている");
-    }
-
-    #[test]
-    fn write_atomically_read_only_target_keeps_the_original() {
-        // 置き換え先が読み取り専用の場合。Windows の rename は読み取り専用の
-        // ファイルを置き換えられないので失敗し、元の内容が残ること
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("default-config.toml");
-        fs::write(&path, "[video]\nfps = 15\n").expect("古い内容を書けること");
-        let mut permissions = fs::metadata(&path).unwrap().permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(&path, permissions.clone()).unwrap();
-
-        let result = write_atomically(&path, &AppSettings::default());
-
-        // 後片付けのために読み取り専用を外しておく
-        #[allow(clippy::permissions_set_readonly_false)]
-        permissions.set_readonly(false);
-        fs::set_permissions(&path, permissions).unwrap();
-        if cfg!(windows) {
-            assert!(result.is_err(), "読み取り専用のファイルを置き換えた");
-            assert_eq!(fs::read_to_string(&path).unwrap(), "[video]\nfps = 15\n");
-        }
-        assert!(!has_own_temp_file(&path), "一時ファイルが残っている");
-    }
-
-    #[test]
-    fn export_to_replaces_an_existing_file_and_leaves_no_temp_file() {
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("exported.toml");
-        fs::write(&path, "[video]\nfps = 15\n").expect("古い内容を書けること");
-        let settings: AppSettings = toml::from_str(FULL_CONFIG).expect("読めること");
-
-        export_to(&path, &settings).expect("書き出せること");
-
-        assert!(!has_own_temp_file(&path), "一時ファイルが残っている");
-        let imported = import_from(&path).expect("読み戻せること");
-        assert_eq!(imported.video.fps, settings.video.fps);
-    }
-
-    #[test]
-    fn export_to_failure_returns_export_error_and_removes_the_temp_file() {
-        // 書き出し先がディレクトリで置き換えられない場合。保存ではなく
-        // 書き出しの失敗として返り、一時ファイルも残らないこと
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("exported.toml");
-        fs::create_dir(&path).expect("ディレクトリを作れること");
-
-        let err = export_to(&path, &AppSettings::default()).expect_err("失敗すること");
-
-        assert!(
-            matches!(&err, SettingsError::ExportFailed { path: p, .. } if p == &path),
-            "書き出しの失敗として返ること: {err:?}"
-        );
-        assert!(path.is_dir(), "元の場所が変わっている");
-        assert!(!has_own_temp_file(&path), "一時ファイルが残っている");
-    }
-
-    #[test]
-    fn export_file_name_uses_the_given_date() {
-        let date = NaiveDate::from_ymd_opt(2026, 9, 21).expect("日付として正しいこと");
-
-        assert_eq!(
-            export_file_name(&date),
-            "capturecard_viewer-settings-20260921.toml"
-        );
-    }
-
-    #[test]
-    fn export_file_name_pads_single_digit_month_and_day() {
-        // 境界。0 埋めを忘れると 2026-1-5 が 202615 になり、並べ替えが崩れる
-        let date = NaiveDate::from_ymd_opt(2026, 1, 5).expect("日付として正しいこと");
-
-        assert_eq!(
-            export_file_name(&date),
-            "capturecard_viewer-settings-20260105.toml"
-        );
-    }
-
-    #[test]
-    fn export_to_then_import_from_restores_the_values() {
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("exported.toml");
-        let mut settings: AppSettings = toml::from_str(FULL_CONFIG).expect("読めること");
-        settings.set_hotkey(HotkeyAction::VolumeUp, Some("Ctrl+Up".to_string()));
-
-        export_to(&path, &settings).expect("書き出せること");
-        let imported = import_from(&path).expect("読み戻せること");
-
-        assert_eq!(imported.video.device_name, settings.video.device_name);
-        assert_eq!(imported.video.resolution, settings.video.resolution);
-        assert_eq!(imported.audio.sample_rate, settings.audio.sample_rate);
-        assert_eq!(imported.screenshot.format, settings.screenshot.format);
-        assert_eq!(
-            imported.screenshot.jpeg_quality,
-            settings.screenshot.jpeg_quality
-        );
-        assert_eq!(imported.ui.volume, settings.ui.volume);
-        assert_eq!(imported.hotkeys, settings.hotkeys);
-    }
-
-    #[test]
-    fn import_from_missing_file_returns_error_without_creating_it() {
-        // 1.2.x まで使っていた confy の load_path はファイルが無いと既定値で
-        // 作っていた。読み込みのつもりで選んだ場所にファイルが増えないこと
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("missing.toml");
-
-        let err = import_from(&path).expect_err("エラーになること");
-
-        assert_eq!(err, SettingsError::FileNotFound(path.clone()));
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn import_from_broken_toml_returns_error() {
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("broken.toml");
-        fs::write(&path, "これは TOML ではない [[[").expect("書けること");
-
-        let err = import_from(&path).expect_err("エラーになること");
-
-        // ファイルはあるので「見つからない」ではなく解釈の失敗として返ること。
-        // 区別が付かないと、ユーザーは置き場所を疑って直しようがなくなる
-        assert!(
-            matches!(err, SettingsError::ImportFailed { .. }),
-            "解釈の失敗として返ること: {err:?}"
-        );
-    }
-
-    #[test]
-    fn import_from_a_directory_is_not_reported_as_missing() {
-        // 実在するのに「見つからない」と出すと、置き場所を疑って直しようがない。
-        // is_file() だけで判定していたころはここが FileNotFound になっていた
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("not-a-file");
-        fs::create_dir(&path).expect("ディレクトリを作れること");
-
-        let err = import_from(&path).expect_err("エラーになること");
-
-        assert_eq!(err, SettingsError::NotAFile(path));
-    }
-
-    #[test]
-    fn import_from_unknown_values_falls_back_to_defaults() {
-        // 手で書き換えたファイルを読み込んだ場合。解釈できない値だけが
-        // 既定へ倒れ、他の項目は読めていること
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("odd.toml");
-        fs::write(
-            &path,
-            r#"
-[video]
-fps = 30
-color_space = "bt2020"
-
-[screenshot]
-format = "webp"
-jpeg_quality = 500
-"#,
-        )
-        .expect("書けること");
-
-        let imported = import_from(&path).expect("読めること");
-
-        assert_eq!(imported.video.fps, Some(30));
-        assert_eq!(imported.video.color_space, ColorSpace::Auto);
-        assert_eq!(imported.screenshot.format, ScreenshotFormat::Jpeg);
-        assert_eq!(imported.screenshot.jpeg_quality, MAX_JPEG_QUALITY);
-    }
-
-    #[test]
-    fn import_from_legacy_file_migrates_the_hotkey() {
-        // 旧版が書き出したファイルを読み込んだ場合も、通常の起動と同じく
-        // screenshot.hotkey が hotkeys へ移ること
-        let dir = tempdir().expect("一時ディレクトリを作れること");
-        let path = dir.path().join("legacy.toml");
-        fs::write(&path, LEGACY_CONFIG).expect("書けること");
-
-        let imported = import_from(&path).expect("読めること");
-
-        assert_eq!(imported.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
     }
 }

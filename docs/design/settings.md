@@ -34,9 +34,9 @@
 
 ## 保存は一時ファイルを経由して置き換える
 
-`AppSettings::save()` は、同じフォルダの一時ファイル（`default-config.toml.<乱数>.tmp`）へ書いて `sync_all` でディスクへ書き切り、`rename` で本来のファイルと置き換える（`src/settings/store.rs` の `write_atomically`、Issue #317）。confy 0.6 の `store_path` で本来のファイルへ直接書いていたころは、`truncate` で開いてから書くため、書き込み中の強制終了や電源断で 0 バイトか書きかけのファイルが残った。rename なら、ディスクに残るのは古い内容か新しい内容のどちらかになる。
+`AppSettings::save()` は、同じフォルダの一時ファイル（`default-config.toml.<乱数>.tmp`）へ書いて `sync_all` でディスクへ書き切り、`rename` で本来のファイルと置き換える（`src/settings/write.rs` の `write_atomically`、Issue #317）。confy 0.6 の `store_path` で本来のファイルへ直接書いていたころは、`truncate` で開いてから書くため、書き込み中の強制終了や電源断で 0 バイトか書きかけのファイルが残った。rename なら、ディスクに残るのは古い内容か新しい内容のどちらかになる。
 
-- 「その他」タブの「設定を書き出す」（`export_to`）も同じ処理を通す。一時ファイルはユーザーが選んだ書き出し先と同じフォルダに置く（Issue #361）
+- 「その他」タブの「設定を書き出す」（`src/settings/transfer.rs` の `export_to`）も同じ処理を通す。一時ファイルはユーザーが選んだ書き出し先と同じフォルダに置く（Issue #361）
 - 一時ファイルを同じフォルダに置くのは、rename が同じボリュームの中でだけ置き換えとして働くため
 - 書く内容は `toml` 1.x の `to_string_pretty`（`serialize_settings`）。読み込みも同じ `toml` 1.x（`parse_settings`）。1.2.x まで使っていた confy 0.6（内部は `toml` 0.8）と書き出す内容はバイト単位で同じで、互いに読める（`docs/DEPENDENCIES.md` の第 3 段、Issue #302）
 - 開いた一時ファイルのハンドルへそのまま書き、`sync_all` してから閉じて rename する。書き込みのためにパスから開き直さない

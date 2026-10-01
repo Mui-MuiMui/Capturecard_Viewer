@@ -89,3 +89,20 @@ pub(super) const DESKTOP: &str = r"C:\Users\tester\Desktop";
 pub(super) const HOME: &str = r"C:\Users\tester";
 pub(super) const EXE_DIR: &str = r"C:\Program Files\capturecard_viewer";
 pub(super) const TEMP: &str = r"C:\Users\tester\AppData\Local\Temp";
+
+// `path` の隣に、この書式（`<名前>.<16 桁の 16 進数>.tmp`）の一時ファイルが残っているか
+pub(super) fn has_own_temp_file(path: &std::path::Path) -> bool {
+    let name = format!("{}.", path.file_name().unwrap().to_string_lossy());
+    std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            let entry = entry.file_name().to_string_lossy().into_owned();
+            entry
+                .strip_prefix(&name)
+                .and_then(|rest| rest.strip_suffix(".tmp"))
+                .is_some_and(|token| {
+                    token.len() == 16 && token.chars().all(|c| c.is_ascii_hexdigit())
+                })
+        })
+}
