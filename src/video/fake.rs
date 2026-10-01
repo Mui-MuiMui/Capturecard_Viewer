@@ -387,6 +387,7 @@ impl Generator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ringbuf::traits::Consumer;
 
     #[test]
     fn choose_mode_keeps_a_listed_resolution_and_clamps_fps() {
@@ -560,7 +561,7 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let tapped = loop {
-            if let Some(entry) = consumer.pop() {
+            if let Some(entry) = consumer.try_pop() {
                 break Some(entry);
             }
             if Instant::now() >= deadline {

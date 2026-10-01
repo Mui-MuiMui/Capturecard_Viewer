@@ -10,8 +10,9 @@
 
 use cpal::traits::DeviceTrait;
 use cpal::Device;
-use log::error;
-use ringbuf::HeapRb;
+use log::{error, warn};
+use ringbuf::traits::{Consumer, Observer, Producer};
+use ringbuf::{HeapCons, HeapProd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -21,8 +22,8 @@ use super::tap::AudioTap;
 
 /// リングバッファの内部表現は f32 に統一する。デバイス側のサンプル型は
 /// 入力で f32 へ正規化し、出力で書き戻す。
-pub(super) type AudioProducer = ringbuf::Producer<f32, Arc<HeapRb<f32>>>;
-pub(super) type AudioConsumer = ringbuf::Consumer<f32, Arc<HeapRb<f32>>>;
+pub(super) type AudioProducer = HeapProd<f32>;
+pub(super) type AudioConsumer = HeapCons<f32>;
 
 /// 出力ストリームがデバイスワーカーへ知らせる値。
 ///
@@ -72,6 +73,42 @@ fn dropped_frames(offered: usize, pushed: usize, channels: usize) -> usize {
     offered.saturating_sub(pushed) / channels.max(1)
 }
 
+/// ストリームのエラーのうち、ストリームが動き続けていて開き直さなくてよいものか。
+///
+/// cpal 0.18 からは、止まったわけではない出来事もエラーのコールバックへ届く
+/// （`docs/design/audio.md` の「cpal 0.18 で変わったこと」）。これを切断として
+/// 開き直すと、そのたびに数百 ms 途切れる。
+///
+/// - `Xrun`: WASAPI の入力で取りこぼしの印（`AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY`）が
+///   付いたとき（0.18.2 から）
+/// - `RealtimeDenied`: 音声スレッドの優先度を上げられなかった。音は出る
+/// - `DeviceChanged`: 既定のデバイスへ自動で経路を切り替えた。ストリームは動き続ける。
+///   WASAPI では出ない（既定のデバイスが替わると `StreamInvalidated` が届く）
+fn is_recoverable_stream_error(kind: cpal::ErrorKind) -> bool {
+    matches!(
+        kind,
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceChanged
+    )
+}
+
+/// ストリームのエラーのコールバックの本体。開き直すべきものなら旗を立てる。
+///
+/// `direction` はログに出す「入力」「出力」。`Xrun` はログにも出さない。取りこぼしの
+/// たびに届きうるうえ、WASAPI ではデータのコールバックと同じ音声スレッドから呼ばれる
+/// ため、そこでロックやアロケーションをしたくない。
+fn handle_stream_error(direction: &str, e: &cpal::Error, stream_error: &AtomicBool) {
+    match e.kind() {
+        cpal::ErrorKind::Xrun => {}
+        kind if is_recoverable_stream_error(kind) => {
+            warn!("{}ストリームの通知（開き直さない）: {}", direction, e);
+        }
+        _ => {
+            error!("{}ストリームのエラー: {}", direction, e);
+            stream_error.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 /// 入力ストリームを組み立てる。
 ///
 /// `to_f32` でデバイスのサンプル型をリングバッファの表現（f32）へ正規化する。
@@ -85,22 +122,19 @@ pub(super) fn build_input_stream_with<T>(
     stream_error: Arc<AtomicBool>,
     dropped_frames: Arc<AtomicU32>,
     to_f32: impl Fn(T) -> f32 + Send + 'static,
-) -> Result<cpal::Stream, cpal::BuildStreamError>
+) -> Result<cpal::Stream, cpal::Error>
 where
     T: cpal::SizedSample,
 {
     let channels = usize::from(config.channels);
     device.build_input_stream(
-        config,
+        *config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
             process_input(data, channels, &producer, &tap, &dropped_frames, &to_f32);
         },
-        move |e| {
-            error!("入力ストリームのエラー: {}", e);
-            // 呼ばれるのは cpal のストリームスレッド。ここで開き直すと
-            // ストリーム自身を drop することになるので、旗を立てるだけにする
-            stream_error.store(true, Ordering::Relaxed);
-        },
+        // 呼ばれるのは cpal のストリームスレッド。ここで開き直すと
+        // ストリーム自身を drop することになるので、旗を立てるだけにする
+        move |e| handle_stream_error("入力", &e, &stream_error),
         None,
     )
 }
@@ -118,7 +152,7 @@ pub(super) fn build_output_stream_with<T>(
     signals: OutputSignals,
     mut converter: PassthroughConverter,
     to_sample: impl Fn(f32) -> T + Send + 'static,
-) -> Result<cpal::Stream, cpal::BuildStreamError>
+) -> Result<cpal::Stream, cpal::Error>
 where
     T: cpal::SizedSample,
 {
@@ -129,7 +163,7 @@ where
         underruns,
     } = signals;
     device.build_output_stream(
-        config,
+        *config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
             process_output(
                 data,
@@ -140,11 +174,8 @@ where
                 &to_sample,
             );
         },
-        move |e| {
-            error!("出力ストリームのエラー: {}", e);
-            // 入力側と同じ理由で、旗を立てるだけにする
-            stream_error.store(true, Ordering::Relaxed);
-        },
+        // 入力側と同じ理由で、旗を立てるだけにする
+        move |e| handle_stream_error("出力", &e, &stream_error),
         None,
     )
 }
@@ -182,7 +213,7 @@ pub(super) fn process_input<T: Copy>(
     // フレームは積まない。空きは出力側が読むと増えるだけで減らないので、
     // ここで数えた分は必ず入る
     let mut room = passthrough.as_ref().map_or(0, |prod| {
-        whole_frame_samples(prod.free_len().min(data.len()), channels)
+        whole_frame_samples(prod.vacant_len().min(data.len()), channels)
     });
     if passthrough.is_some() {
         count_dropped_frames(dropped, dropped_frames(data.len(), room, channels));
@@ -191,7 +222,7 @@ pub(super) fn process_input<T: Copy>(
         let value = to_f32(sample);
         if room > 0 {
             if let Some(prod) = passthrough.as_mut() {
-                let _ = prod.push(value);
+                let _ = prod.try_push(value);
                 room -= 1;
             }
         }
@@ -223,7 +254,7 @@ pub(super) fn process_output<T: Clone>(
     if let Ok(mut cons) = consumer.try_lock() {
         // この呼び出し分を消費する前の水位を渡す（クロックドリフト補正の観測と、
         // 最初の水位に達したかの判定）
-        if !converter.observe_water_level(cons.len()) {
+        if !converter.observe_water_level(cons.occupied_len()) {
             // 最初の水位に達するまでは取り出さずに無音を書く。わざと待っているので
             // アンダーランには数えない
             data.fill(to_sample(0.0));
@@ -268,7 +299,7 @@ fn whole_frame_samples(samples: usize, channels: usize) -> usize {
 /// 出力側からはフレームの途中までが見えることがある。途中まで読むと以降が
 /// 1 つずれるので、残りが届くまで読まずに残す。
 fn pop_whole_frame(consumer: &mut AudioConsumer, dst: &mut [f32]) -> bool {
-    if consumer.len() < dst.len() {
+    if consumer.occupied_len() < dst.len() {
         return false;
     }
     // 揃っていることは確かめたので、ここで取り出せる数は `dst.len()` になる
@@ -321,6 +352,8 @@ fn render_output_samples<T>(
 mod tests {
     use super::*;
     use crate::audio::convert::{f32_to_i16, f32_to_i32, f32_to_u16, i16_to_f32};
+    use ringbuf::traits::Split;
+    use ringbuf::HeapRb;
 
     /// テスト用のサンプル供給源。取り出した回数も数える。
     struct SampleSource {
@@ -628,7 +661,7 @@ mod tests {
 
         assert_eq!(data, [0.0, 0.0]);
         // ミュート中も同じだけ取り出す（残りは 1 フレーム）
-        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        assert_eq!(consumer.lock().expect("ロックできる").occupied_len(), 2);
     }
 
     #[test]
@@ -652,7 +685,7 @@ mod tests {
             &dropped,
             |s| s,
         );
-        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        assert_eq!(consumer.lock().expect("ロックできる").occupied_len(), 2);
         // 捨てた 2 フレーム目を数える（Issue #350）
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
         process_output(
@@ -723,7 +756,7 @@ mod tests {
         let mut data = [9.0f32; 2];
 
         // 左だけが公開された瞬間を作る
-        let _ = producer.lock().expect("ロックできる").push(1.0);
+        let _ = producer.lock().expect("ロックできる").try_push(1.0);
         process_output(
             &mut data,
             &consumer,
@@ -735,11 +768,11 @@ mod tests {
         assert_eq!(data, [0.0, 0.0]);
         assert_eq!(underruns.load(Ordering::Relaxed), 1);
         // 左は読まずに残っている
-        assert_eq!(consumer.lock().expect("ロックできる").len(), 1);
+        assert_eq!(consumer.lock().expect("ロックできる").occupied_len(), 1);
 
         let mut prod = producer.lock().expect("ロックできる");
         for value in [-1.0, 0.5, -0.5] {
-            let _ = prod.push(value);
+            let _ = prod.try_push(value);
         }
         drop(prod);
         let mut data = [9.0f32; 4];
@@ -837,7 +870,7 @@ mod tests {
             |s| s,
         );
         assert_eq!(data, [0.0, 0.0]);
-        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        assert_eq!(consumer.lock().expect("ロックできる").occupied_len(), 2);
         assert_eq!(underruns.load(Ordering::Relaxed), 0);
 
         // 目標に達したら、溜まった先頭から出す
@@ -858,7 +891,7 @@ mod tests {
             |s| s,
         );
         assert_eq!(data, [1.0, -1.0]);
-        assert_eq!(consumer.lock().expect("ロックできる").len(), 2);
+        assert_eq!(consumer.lock().expect("ロックできる").occupied_len(), 2);
         assert_eq!(underruns.load(Ordering::Relaxed), 0);
     }
 
@@ -906,5 +939,33 @@ mod tests {
 
         assert_eq!(underruns.load(Ordering::Relaxed), 1);
         assert!(telemetry.take_window().underran());
+    }
+
+    #[test]
+    fn is_recoverable_stream_error_keeps_running_streams() {
+        // ストリームが動き続けている通知は開き直さない
+        assert!(is_recoverable_stream_error(cpal::ErrorKind::Xrun));
+        assert!(is_recoverable_stream_error(cpal::ErrorKind::RealtimeDenied));
+        assert!(is_recoverable_stream_error(cpal::ErrorKind::DeviceChanged));
+        // 止まった・使えなくなったものは開き直す
+        assert!(!is_recoverable_stream_error(
+            cpal::ErrorKind::StreamInvalidated
+        ));
+        assert!(!is_recoverable_stream_error(
+            cpal::ErrorKind::DeviceNotAvailable
+        ));
+        assert!(!is_recoverable_stream_error(cpal::ErrorKind::BackendError));
+        assert!(!is_recoverable_stream_error(cpal::ErrorKind::Other));
+    }
+
+    #[test]
+    fn handle_stream_error_raises_flag_only_for_fatal_errors() {
+        let flag = AtomicBool::new(false);
+        handle_stream_error("入力", &cpal::ErrorKind::Xrun.into(), &flag);
+        handle_stream_error("出力", &cpal::ErrorKind::RealtimeDenied.into(), &flag);
+        assert!(!flag.load(Ordering::Relaxed));
+
+        handle_stream_error("出力", &cpal::ErrorKind::StreamInvalidated.into(), &flag);
+        assert!(flag.load(Ordering::Relaxed));
     }
 }

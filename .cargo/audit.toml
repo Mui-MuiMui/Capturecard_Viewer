@@ -11,8 +11,6 @@
 # ttf-parser（epaint 経由）は egui 系の経由で手元では外せない。
 [advisories]
 ignore = [
-    # ringbuf 0.3.3。Windows のビルドに入る。#299 で ringbuf を上げて解消する
-    "RUSTSEC-2026-0293",
     # webbrowser 0.8.15（egui-winit 0.26 経由）。Unix の BROWSER 環境変数の扱いの
     # 問題で、Windows では通らない経路。#300 で解消する
     "RUSTSEC-2026-0257",

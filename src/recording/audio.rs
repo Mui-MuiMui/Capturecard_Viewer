@@ -19,6 +19,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use log::info;
+use ringbuf::traits::{Consumer, Observer};
 
 use super::pts::{
     align, audio_units, frames_in, silence_until, units_from, units_since, Alignment, DriftSpan,
@@ -274,7 +275,8 @@ impl AudioTrack {
             self.anchor(snapshot);
         }
         let wanted = usize::try_from(wanted).unwrap_or(usize::MAX);
-        self.popped.resize(wanted.min(self.consumer.len()), 0.0);
+        self.popped
+            .resize(wanted.min(self.consumer.occupied_len()), 0.0);
         let count = self.consumer.pop_slice(&mut self.popped);
         self.next_index += count as u64;
 

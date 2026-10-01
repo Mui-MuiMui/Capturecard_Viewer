@@ -7,11 +7,12 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat};
 use log::{debug, info};
+use ringbuf::traits::Split;
 use ringbuf::HeapRb;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::capabilities::AudioCapabilities;
+use super::capabilities::{device_name, AudioCapabilities};
 use super::controls::AudioControls;
 use super::convert::{
     f32_to_i16, f32_to_i32, f32_to_u16, i16_to_f32, i32_to_f32, u16_to_f32, PassthroughConverter,
@@ -172,7 +173,7 @@ impl AudioCapture {
             AudioDirection::Output => self.host.output_devices(),
         };
         match devices {
-            Ok(devices) => Ok(devices.filter_map(|d| d.name().ok()).collect()),
+            Ok(devices) => Ok(devices.filter_map(|d| device_name(&d)).collect()),
             Err(e) => Err(AudioError::DeviceEnumerationFailed {
                 direction,
                 source: e.to_string(),
@@ -186,7 +187,7 @@ impl AudioCapture {
     /// 確認するために呼ぶ（3〜5 秒おき）。ストリームは開かないので
     /// `list_output_devices` より軽いが、COM を伴うため毎フレームは避ける。
     pub fn default_output_device_name(&self) -> Option<String> {
-        self.host.default_output_device()?.name().ok()
+        device_name(&self.host.default_output_device()?)
     }
 
     pub fn start_passthrough(
@@ -228,12 +229,10 @@ impl AudioCapture {
         };
 
         // デバイス名をログ出力
-        let input_device_name = input_device
-            .name()
-            .unwrap_or_else(|_| "Unknown Input".to_string());
-        let output_device_name = output_device
-            .name()
-            .unwrap_or_else(|_| "Unknown Output".to_string());
+        let input_device_name =
+            device_name(&input_device).unwrap_or_else(|| "Unknown Input".to_string());
+        let output_device_name =
+            device_name(&output_device).unwrap_or_else(|| "Unknown Output".to_string());
         info!(
             "使用するデバイス - 入力: {}、出力: {}",
             input_device_name, output_device_name
@@ -282,10 +281,10 @@ impl AudioCapture {
 
         info!(
             "音声の設定 - 入力: {}Hz {}ch ({:?})、出力: {}Hz {}ch ({:?})",
-            input_config.sample_rate().0,
+            input_config.sample_rate(),
             input_config.channels(),
             input_config.sample_format(),
-            output_config.sample_rate().0,
+            output_config.sample_rate(),
             output_config.channels(),
             output_config.sample_format()
         );
@@ -294,7 +293,7 @@ impl AudioCapture {
         // 小さいほど遅延が減るが、出力コールバックが間に合わずアンダーランが
         // 出やすくなる。容量は目標水位の 2 倍にして、入力が先行しても後れても
         // 同じだけ余裕を持たせる
-        let sample_rate = input_config.sample_rate().0;
+        let sample_rate = input_config.sample_rate();
         let channels = input_config.channels() as usize;
         let buffer_size = ring_buffer_samples(sample_rate, channels, buffer_ms);
         let capacity = buffer_size * 2;
@@ -322,7 +321,7 @@ impl AudioCapture {
         // 録画へ入力の形と開き直しを知らせる。**入力のコールバックが動き出す前に書く。**
         // 録画スレッドはここを境に、前のストリームのサンプルと分けて扱う
         self.tap
-            .begin_stream(input_config.sample_rate().0, input_config.channels());
+            .begin_stream(input_config.sample_rate(), input_config.channels());
 
         // 入力ストリーム。デバイスのサンプル型ごとに正規化の仕方が違うので明示的に分ける
         let input_stream_config = input_config.config();
@@ -389,9 +388,9 @@ impl AudioCapture {
         // から取り出し始める（入力と出力を同時に始めてよいのはこのため）
         let make_converter = || {
             PassthroughConverter::new(
-                input_config.sample_rate().0,
+                input_config.sample_rate(),
                 input_config.channels(),
-                output_config.sample_rate().0,
+                output_config.sample_rate(),
                 output_config.channels(),
             )
             .with_prebuffer(target_level)
@@ -404,7 +403,7 @@ impl AudioCapture {
         } else {
             info!(
                 "入出力の形が違うので変換する - レート比: {:.4}、チャンネル: {} -> {}",
-                f64::from(input_config.sample_rate().0) / f64::from(output_config.sample_rate().0),
+                f64::from(input_config.sample_rate()) / f64::from(output_config.sample_rate()),
                 input_config.channels(),
                 output_config.channels()
             );
@@ -489,9 +488,9 @@ impl AudioCapture {
         self.active = Some(ActiveAudio {
             input_device: input_device_name,
             output_device: output_device_name,
-            input_sample_rate: input_config.sample_rate().0,
+            input_sample_rate: input_config.sample_rate(),
             input_channels: input_config.channels(),
-            output_sample_rate: output_config.sample_rate().0,
+            output_sample_rate: output_config.sample_rate(),
             output_channels: output_config.channels(),
         });
 
@@ -585,7 +584,7 @@ impl AudioCapture {
             source: e.to_string(),
         })?;
         for d in iter {
-            if let Ok(n) = d.name() {
+            if let Some(n) = device_name(&d) {
                 if n == name {
                     return Ok(d);
                 }
