@@ -268,8 +268,8 @@ PR 本文の雛形は `.github/pull_request_template.md`。**GitHub が自動で
 
 1. PR を作るとき本文の「対応する Issue」に `Refs #<番号>` を書く
 2. Issue 側にも PR の URL と「人間が確認すること」をコメントする
-3. マージされたら Status を「人間確認待ち」にする
-4. **Issue を閉じるのは人が実機で確認したとき。** Claude は閉じない
+3. マージされたら、CI・エージェントの実機ログ・ソースや文書の確認で確かめられたものは **Claude が Issue を閉じる**
+4. 人の感覚か Claude の環境に無い機器・状況が要るものだけ Status を「人間確認待ち」にする。基準は `.claude/skills/naming-conventions/SKILL.md` の「Issue を閉じる基準」
 
 部分実装の PR なら、Issue にその旨と残りのスコープを書いて Status は「作業中」のままにする。
 
