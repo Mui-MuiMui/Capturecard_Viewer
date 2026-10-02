@@ -55,7 +55,7 @@ CI（`.github/workflows/ci.yml`）は上の表の下 4 行（fmt → clippy → 
 - 対応する Issue があれば本文に `Refs: #<番号>` を入れます。**`Closes` / `Fixes` などのクローズ用キーワードは使いません**
 - 各コミットはビルドとテストが通る状態にします。レビュー指摘への対応は元のコミットを直さず追加のコミットで積み、push 済みの履歴を force push で作り直しません
 
-クローズ用キーワードを禁じているのは、GitHub の自動クローズが**既定ブランチ（`main`）に入った瞬間**に働くためです。コミットメッセージに紛れていると、リリースで `dev` → `main` を入れたときに、作者がまだ実機で確認していない Issue までまとめて閉じてしまいます。**Issue 番号の前に置いてよいのは `Refs` だけ**と覚えてください。
+クローズ用キーワードを禁じているのは、GitHub の自動クローズが**既定ブランチ（`main`）に入った瞬間**に働くためです。コミットメッセージに紛れていると、リリースで `dev` → `main` を入れたときに、人の確認を待っている Issue までまとめて閉じてしまいます。**Issue 番号の前に置いてよいのは `Refs` だけ**と覚えてください。
 
 **種別（type）の一覧、マージ戦略、1 つの PR に入れる範囲は [.claude/skills/naming-conventions/SKILL.md](.claude/skills/naming-conventions/SKILL.md) にあります。**
 
@@ -80,7 +80,7 @@ CI（`.github/workflows/ci.yml`）は上の表の下 4 行（fmt → clippy → 
 - Issue は `.github/ISSUE_TEMPLATE/` のテンプレートから起票します。キャプチャーボードの製品名・Windows の版数・アプリの版数が無いと再現できないことがほとんどなので、埋められる欄は埋めてください。設定ファイルのパスにはユーザー名が含まれるので、伏せて構いません
 - PR の本文は [.github/pull_request_template.md](.github/pull_request_template.md) の見出しに沿って書きます。**マージ先は `dev`** です。既定の候補が `main` になっていることがあるので毎回確認してください
 - 改善のバックログは GitHub Issues で管理し、進行状況は GitHub Project の Status（未着手 / 作業中 / レビュー待ち / 人間確認待ち / 完了）で見ます。分野は `area:` ラベル、優先度は `P1`〜`P3` ラベルです（`CLAUDE.md` の「タスク管理」）
-- **Issue を閉じるのは、作者が実機で確認したときです。** PR がマージされた時点では閉じません
+- マージ後、CI や実機のログ、ソースの確認で確かめられた Issue は閉じます。人の感覚や手元に無い環境が要るものだけ「人間確認待ち」にします（`.claude/skills/naming-conventions/SKILL.md` の「Issue を閉じる基準」）
 
 優先度の目安。
 
