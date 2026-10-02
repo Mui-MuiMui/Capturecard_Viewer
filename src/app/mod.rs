@@ -38,7 +38,7 @@ use self::screenshot::ScreenshotResult;
 use self::screenshot_sound::SoundMessage;
 use self::settings_store::{SaveFailureStreak, SaveTrigger};
 use self::update::UpdateState;
-use self::window::needs_drag_move_guard;
+use self::window::{needs_drag_move_guard, WindowRecordState};
 use self::worker::{DeviceSnapshot, DeviceWorker};
 use crate::audio::{AudioControls, AudioTap};
 use crate::hotkey::{HotkeyAction, HotkeyManager};
@@ -195,6 +195,8 @@ pub struct CaptureCardViewer {
     // フルスクリーン中は OS 側が元から装飾を外しているので、この値は
     // 「フルスクリーンから戻ったときにどちらへ戻すか」を保持しているだけになる
     borderless: bool,
+    // ウィンドウの位置と大きさの記録で、フレームをまたいで覚えておくもの（window.rs）
+    window_record: WindowRecordState,
 
     // 進行中のスクリーンショット保存スレッド。クリップボードへの転送も
     // このスレッドが行う。
@@ -320,6 +322,7 @@ impl Default for CaptureCardViewer {
             // ウィンドウ管理
             always_on_top: false,
             borderless: false,
+            window_record: WindowRecordState::default(),
 
             screenshot_save_threads: Vec::new(),
             sound_load_threads: Vec::new(),
@@ -473,13 +476,8 @@ impl CaptureCardViewer {
             info!("起動直後の設定適用とデバイスの接続を始める");
             self.apply_settings(true);
 
-            // ウィンドウレベルは always_on_top を設定から取り込んだあとに適用する。
-            // 順序を入れ替えると、既定値の false で 1 度適用されてしまう
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
-                egui::WindowLevel::AlwaysOnTop
-            } else {
-                egui::WindowLevel::Normal
-            }));
+            // 最前面表示。設定を取り込んだあとに適用する
+            self.apply_startup_window_level(ctx);
 
             // 前回の更新で残った `.old` / `.new` を消す（別スレッド）
             self.clean_up_update_leftovers();
