@@ -584,6 +584,35 @@ mod tests {
     }
 
     #[test]
+    fn audio_pin_presence_follows_the_audio_pin_scenario() {
+        // 列挙の時点の有無（#409）。audio-pin なら全台「ある」、無ければ全台「無い」
+        use crate::audio::{AudioControls, AudioTap};
+        use crate::repaint::RepaintWaker;
+        use crate::video::{SharedColorConversion, VideoFrames};
+
+        let presence = |scenario: Option<&str>| {
+            let backends = FakeBackends::from_env_values(Some("2"), scenario).expect("有効");
+            let (mut video, _audio) = Box::new(backends).create(BackendShared {
+                frames: VideoFrames::new(),
+                color_conversion: Arc::new(SharedColorConversion::new()),
+                audio_controls: Arc::new(AudioControls::default()),
+                audio_tap: AudioTap::new(),
+                repaint_waker: RepaintWaker::new(),
+            });
+            video.audio_pin_presence()
+        };
+        let names = ["Fake Camera 1", "Fake Camera 2"];
+        assert_eq!(
+            presence(Some("audio-pin")),
+            names.map(|name| (name.to_string(), AudioPinPresence::Present))
+        );
+        assert_eq!(
+            presence(None),
+            names.map(|name| (name.to_string(), AudioPinPresence::Absent))
+        );
+    }
+
+    #[test]
     fn first_run_with_an_audio_pin_opens_audio_from_the_video_pin() {
         // 設定 → ワーカー → 音声ピンで開く、の通し（#394）。設定ファイルが無い初回の
         // 設定（映像も入力も未設定）から始め、ワーカーが返した既定を UI と同じ関数
@@ -702,6 +731,21 @@ mod tests {
                 Some(crate::audio::AudioPinState::Connected(_))
             ),
             "映像の音声ピンが繋がっていない"
+        );
+
+        // デバイス一覧を取り直すと、列挙の時点の音声ピンの有無が観測値に載る（#409）
+        command_tx
+            .send(DeviceCommand::RefreshDeviceLists)
+            .expect("送れる");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut pins = Vec::new();
+        while pins.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+            pins = snapshot.read().expect("読める").video_audio_pins.clone();
+        }
+        assert_eq!(
+            pins,
+            vec![("Fake Camera 1".to_string(), AudioPinPresence::Present)]
         );
 
         audio_tap.detach();
