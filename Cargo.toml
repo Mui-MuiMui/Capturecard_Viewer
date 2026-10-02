@@ -92,6 +92,10 @@ windows = { version = "0.62", features = [
     "Win32_System_Ole",
     "Win32_System_Variant",
 ] }
+# winit のメッセージループにフックを差し込む（`EventLoopBuilderExtWindows::with_msg_hook`、
+# src/platform.rs の redirect_misdirected_close、#420）。eframe が同じ版を既に使っているので、
+# クレートは増えない。フィーチャは eframe が有効にするものに任せる
+winit = { version = "0.30", default-features = false }
 # 自前のレンダラーフィルターを `#[implement]` で書く。マクロが生成するコードは
 # `windows_core` を直接参照するので、`windows` とは別に依存へ入れる
 windows-core = "0.62"
