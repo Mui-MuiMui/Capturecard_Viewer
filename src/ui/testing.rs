@@ -35,6 +35,10 @@ pub(super) struct DialogFixture {
     /// 描画が返した `SettingsEvent`。**フレームをまたいで溜める。** クリックが
     /// 効くのは押したフレームなので、最後の 1 フレームだけを見ると取りこぼす
     pub(super) events: Vec<SettingsEvent>,
+    /// 描画の前に、ドラフトから映像デバイスの音声を選べるかを作り直す。
+    /// `app` の `refresh_device_snapshot` が毎フレーム行うことの代わり（#425）。
+    /// `None` なら `new` で渡した値のまま
+    pin_for_draft: Option<fn(&AppSettings) -> VideoPinChoice>,
 }
 
 impl DialogFixture {
@@ -60,7 +64,23 @@ impl DialogFixture {
             version: current_version(),
             update_status: UpdateStatus::default(),
             events: Vec::new(),
+            pin_for_draft: None,
         }
+    }
+
+    /// 映像デバイスの一覧（説明は空）を差し替える
+    pub(super) fn with_video_devices(mut self, names: &[&str]) -> Self {
+        self.video_devices = names
+            .iter()
+            .map(|name| (name.to_string(), String::new()))
+            .collect();
+        self
+    }
+
+    /// 描画の前に毎回、ドラフトから映像デバイスの音声を選べるかを作り直す（#425）
+    pub(super) fn with_pin_for_draft(mut self, pin: fn(&AppSettings) -> VideoPinChoice) -> Self {
+        self.pin_for_draft = Some(pin);
+        self
     }
 
     /// 編集中のドラフト。描画が書き換えた結果を見るのに使う
@@ -70,6 +90,12 @@ impl DialogFixture {
 
     /// 1 フレーム分の描画。`app::settings_dialog` が毎フレーム行うのと同じ呼び方
     fn draw(&mut self, ui: &mut egui::Ui) {
+        if let Some(pin_for_draft) = self.pin_for_draft {
+            let pin = self.state.draft().map(pin_for_draft);
+            if let Some(pin) = pin {
+                self.state.set_video_pin(pin);
+            }
+        }
         let Self {
             state,
             video_devices,
@@ -80,6 +106,7 @@ impl DialogFixture {
             version,
             update_status,
             events,
+            pin_for_draft: _,
         } = self;
         let Some((draft, view)) = state.split_for_draw() else {
             return;
