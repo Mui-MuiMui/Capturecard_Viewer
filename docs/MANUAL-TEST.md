@@ -2,6 +2,8 @@
 
 キャプチャーデバイスを接続した実機でのみ確認できる項目をまとめる。リリース前に一通り実施する。
 
+このチェックリストは、人の感覚（見た目・聞こえ方・操作感）や Claude の環境に無い機器・状況が要る項目の置き場所であって、全 Issue の確認表ではない。CI や実機のログで確かめられるものはここへ足さず、マージ後に Issue を閉じる（`.claude/skills/naming-conventions/SKILL.md` の「Issue を閉じる基準」）。
+
 自動テストの方針は `.claude/skills/testing-conventions/SKILL.md` を参照。
 
 ## 実施環境の記録
