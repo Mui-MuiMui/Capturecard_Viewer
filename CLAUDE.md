@@ -203,7 +203,7 @@ cargo build --release
 | `docs/design/settings-dialog.md` | ドラフトの編集、イベントで返す形、`commit_draft` の決まり、「その他」タブの書き出し / 読み込み / 初期化 |
 | `docs/design/hotkeys.md` | アクションごとの割り当て、旧形式からの移行、差分での登録 |
 | `docs/design/presets.md` | プリセットに入れる項目、「（変更あり）」の判定、名前の検証 |
-| `docs/design/window.md` | 装飾なし（ボーダーレス）と、動かす / 大きさを変える / 閉じる手段の代替 |
+| `docs/design/window.md` | 装飾なし（ボーダーレス）と、動かす / 大きさを変える / 閉じる手段の代替。位置と大きさの記録と最大化 |
 | `docs/design/error-reporting.md` | 失敗の通知と間引き、「接続状態」タブ |
 | `docs/design/logging.md` | ログの出力先とレベル、`catch_unwind` が効かないこと |
 | `docs/design/assets.md` | アイコンと効果音の埋め込み、パスの解決 |
