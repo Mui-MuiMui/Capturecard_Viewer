@@ -26,6 +26,7 @@
 //! | `other_tab.rs` | 「その他」タブ |
 //! | `status_tab.rs` | 「接続状態」タブ |
 //! | `update_dialog.rs` | 新しい版を知らせ、更新の進み具合を出すダイアログ |
+//! | `testing.rs` | ウィジェットのテスト（egui_kittest）の組み立て。テストを含むビルドだけ |
 
 mod audio_input;
 mod capability;
@@ -41,6 +42,9 @@ mod recording_tab;
 mod screenshot_tab;
 mod state;
 mod status_tab;
+// ウィジェットのテスト（egui_kittest、#419）の組み立て。テストを含むビルドだけ
+#[cfg(test)]
+mod testing;
 mod update_dialog;
 mod video_mode;
 

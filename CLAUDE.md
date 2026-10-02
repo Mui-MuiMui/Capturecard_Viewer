@@ -158,6 +158,7 @@ cargo build --release
 | `src/ui/other_tab.rs` | 「その他」タブの描画（プリセット、言語、書き出し / 読み込み / 初期化） |
 | `src/ui/status_tab.rs` | 「接続状態」タブの描画 |
 | `src/ui/update_dialog.rs` | 新しい版を知らせ、更新の進み具合と結果を出すダイアログの描画（`UpdateDialogView`）。押されたものを `UpdateDialogEvent` で返す |
+| `src/ui/testing.rs` | ウィジェットのテスト（egui_kittest、#419）で設定ダイアログを描く組み立て（`DialogFixture` / `dialog_harness`、`#[cfg(test)]`）。書き方は `.claude/skills/testing-conventions/SKILL.md` |
 | `src/status.rs` | 失敗の記録（`ErrorCenter`）とトーストの間引き判定、設定ダイアログへ渡す接続状態（`ConnectionStatus`）、発生源ごとの定型文 |
 | `src/update/mod.rs` | 更新の確認。GitHub の Release API への問い合わせ（`check_latest_release`）と、版の比較・通知するかの判定（純粋関数）、`UpdateError` |
 | `src/update/apply.rs` | 更新の適用の本体（`run_apply`）。exe を `.new` へ書きながらの SHA-256 の計算と照合、進み具合（`ApplyProgress`）、キャンセルと差し替えの取り合い（`ApplyControl`）、`ApplyError` |

@@ -478,6 +478,9 @@ pub(super) fn menu_items_collapsed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::accesskit::Toggled;
+    use egui_kittest::kittest::{NodeT, Queryable};
+    use egui_kittest::Harness;
 
     #[test]
     fn menu_action_one_shot_items_close_the_menu() {
@@ -510,5 +513,146 @@ mod tests {
         ] {
             assert!(!action.closes_menu(), "閉じてはいけない操作: {:?}", action);
         }
+    }
+
+    // ---- ウィジェットのテスト（egui_kittest、#419） ----
+    //
+    // ここの描画関数は状態を持たず、起きたことを `MenuAction` で返すだけなので、
+    // `MenuView` を組み立てて直接描ける。`CaptureCardViewer` は要らない
+
+    /// 描画に渡すものと、描画が返した `MenuAction`（フレームをまたいで溜める）
+    struct MenuFixture {
+        view: MenuView,
+        actions: Vec<MenuAction>,
+    }
+
+    /// 既定の設定と同じ見た目のスナップショット。プリセットは 2 つ
+    fn sample_view() -> MenuView {
+        MenuView {
+            recording: RecordingMenuState::Idle,
+            volume: 100.0,
+            muted: false,
+            maintain_aspect_ratio: true,
+            always_on_top: false,
+            is_fullscreen: false,
+            borderless: false,
+            enable_drag_move: true,
+            show_stats_overlay: false,
+            auto_reconnect: true,
+            preset_names: vec!["配信用".to_string(), "録画用".to_string()],
+            active_preset: Some("配信用".to_string()),
+        }
+    }
+
+    /// サブメニューへ折りたたんだ右クリックメニューを描く `Harness`
+    fn collapsed_menu_harness(view: MenuView) -> Harness<'static, MenuFixture> {
+        let fixture = MenuFixture {
+            view,
+            actions: Vec::new(),
+        };
+        Harness::builder()
+            .with_size(egui::vec2(600.0, 600.0))
+            .build_ui_state(
+                |ui, fixture: &mut MenuFixture| {
+                    // 外側クリックの判定に使う矩形。描画が積むだけで、ここでは見ない
+                    let mut menu_rects = Vec::new();
+                    ui.set_max_width(240.0);
+                    menu_items_collapsed(
+                        ui,
+                        &fixture.view,
+                        240.0,
+                        &mut menu_rects,
+                        &mut fixture.actions,
+                    );
+                },
+                fixture,
+            )
+    }
+
+    #[test]
+    fn view_submenu_toggle_returns_an_action_and_keeps_the_submenu_open() {
+        let mut harness = collapsed_menu_harness(sample_view());
+        // 閉じている間は中の項目が木に無い
+        assert!(harness
+            .query_by_label(Text::MaintainAspectRatio.get())
+            .is_none());
+
+        harness.get_by_label(Text::MenuViewSubmenu.get()).click();
+        harness.run();
+        harness
+            .get_by_label(Text::MaintainAspectRatio.get())
+            .click();
+        harness.run();
+
+        assert_eq!(
+            harness.state().actions,
+            [MenuAction::SetMaintainAspectRatio(false)]
+        );
+        // 切り替え系はサブメニューを閉じない。続けて隣の項目を押せる
+        harness.get_by_label(Text::MenuAlwaysOnTop.get()).click();
+        harness.run();
+        assert_eq!(
+            harness.state().actions,
+            [
+                MenuAction::SetMaintainAspectRatio(false),
+                MenuAction::SetAlwaysOnTop(true)
+            ]
+        );
+    }
+
+    #[test]
+    fn preset_submenu_returns_the_chosen_preset_and_closes() {
+        let mut harness = collapsed_menu_harness(sample_view());
+
+        harness.get_by_label(Text::MenuPresetSubmenu.get()).click();
+        harness.run();
+        // 選択中のプリセットに印が付く
+        assert_eq!(
+            harness.get_by_label("配信用").accesskit_node().toggled(),
+            Some(Toggled::True)
+        );
+        harness.get_by_label("録画用").click();
+        harness.run();
+
+        assert_eq!(
+            harness.state().actions,
+            [MenuAction::ApplyPreset("録画用".to_string())]
+        );
+        // 選んだらサブメニューを閉じる
+        assert!(harness.query_by_label("録画用").is_none());
+    }
+
+    #[test]
+    fn preset_submenu_is_hidden_without_presets() {
+        let view = MenuView {
+            preset_names: Vec::new(),
+            active_preset: None,
+            ..sample_view()
+        };
+        let harness = collapsed_menu_harness(view);
+        assert!(harness
+            .query_by_label(Text::MenuPresetSubmenu.get())
+            .is_none());
+        // 他のサブメニューは出ている
+        assert!(harness
+            .query_by_label(Text::MenuWindowSubmenu.get())
+            .is_some());
+    }
+
+    #[test]
+    fn window_submenu_reset_is_disabled_in_fullscreen() {
+        let view = MenuView {
+            is_fullscreen: true,
+            ..sample_view()
+        };
+        let mut harness = collapsed_menu_harness(view);
+
+        harness.get_by_label(Text::MenuWindowSubmenu.get()).click();
+        harness.run();
+        let reset = harness.get_by_label(Text::MenuResetWindowSize.get());
+        assert!(reset.accesskit_node().is_disabled());
+        reset.click();
+        harness.run();
+        assert_eq!(harness.state().actions, Vec::<MenuAction>::new());
     }
 }
