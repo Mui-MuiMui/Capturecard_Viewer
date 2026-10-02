@@ -130,8 +130,10 @@ fn create_graph() -> windows::core::Result<(IGraphBuilder, ICaptureGraphBuilder2
 /// 能力の問い合わせで読めたもの。
 pub(super) struct QueriedCandidates {
     pub(super) candidates: Vec<StreamCandidate>,
-    /// ドライバーが返すいまの解像度（`devices::current_resolution`）
+    /// ドライバーが返すいまの解像度（`devices::current_format`）
     pub(super) current: Option<(u32, u32)>,
+    /// ドライバーが返すいまの fps（`devices::current_format`、#410）
+    pub(super) current_fps: Option<u32>,
 }
 
 /// デバイスの対応形式といまの解像度を読む。能力の問い合わせ
@@ -146,9 +148,13 @@ pub(super) fn query_candidates(
     let (graph, builder) = create_graph().map_err(GraphError::Open)?;
     unsafe { graph.AddFilter(&source, windows::core::w!("Capture Source")) }
         .map_err(GraphError::Open)?;
-    let candidates = devices::stream_config(&builder, &source).map(|config| QueriedCandidates {
-        current: devices::current_resolution(&config),
-        candidates: devices::read_candidates(&config),
+    let candidates = devices::stream_config(&builder, &source).map(|config| {
+        let current = devices::current_format(&config);
+        QueriedCandidates {
+            current: current.map(|format| format.resolution),
+            current_fps: current.and_then(|format| format.fps),
+            candidates: devices::read_candidates(&config),
+        }
     });
     // グラフから外してから手放す。外すとピンの接続も切れる
     let _ = unsafe { graph.RemoveFilter(&source) };
@@ -161,7 +167,7 @@ pub(super) fn query_candidates(
 /// ここでは記録するだけで止めない。
 fn apply_format(config: &IAMStreamConfig, request: FormatRequest<'_>) -> Option<u32> {
     // いまの解像度は SetFormat より前に読む。設定したあとは設定した値が返る
-    let current = devices::current_resolution(config);
+    let current = devices::current_format(config).map(|format| format.resolution);
     let candidates = devices::read_candidates(config);
     let resolution = target_resolution(&candidates, request.resolution, request.format, current);
     if resolution != request.resolution {

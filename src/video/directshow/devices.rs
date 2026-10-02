@@ -201,19 +201,30 @@ pub(super) fn read_candidates(config: &IAMStreamConfig) -> Vec<StreamCandidate> 
     candidates
 }
 
-/// `IAMStreamConfig::GetFormat` が返す、ピンのいまの解像度。読めなければ `None`。
+/// `IAMStreamConfig::GetFormat` が返す、ピンのいまの形式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CurrentFormat {
+    pub(super) resolution: (u32, u32),
+    /// `AvgTimePerFrame` を fps に直したもの。読めなければ `None`（#410）
+    pub(super) fps: Option<u32>,
+}
+
+/// `IAMStreamConfig::GetFormat` が返す、ピンのいまの形式。読めなければ `None`。
 ///
-/// **`SetFormat` する前に呼ぶ。** 入力信号の解像度をここへ映すドライバーがある
+/// **`SetFormat` する前に呼ぶ。** 入力信号の解像度と fps をここへ映すドライバーがある
 /// （AVerMedia GC551 は入力が 1920x1080 なら、前に 1280x720 で開いたあとでも
 /// 1920x1080 を返す。#391）。受け取れない形式（UYVY など）のときは `None`。
-pub(super) fn current_resolution(config: &IAMStreamConfig) -> Option<(u32, u32)> {
+pub(super) fn current_format(config: &IAMStreamConfig) -> Option<CurrentFormat> {
     let pmt = unsafe { config.GetFormat() }.ok()?;
     if pmt.is_null() {
         return None;
     }
     let format = unsafe { sample_format_of(&*pmt) };
     unsafe { delete_media_type(pmt) };
-    format.map(|format| (format.width, format.height))
+    format.map(|format| CurrentFormat {
+        resolution: (format.width, format.height),
+        fps: fps_from_interval(format.avg_time_per_frame),
+    })
 }
 
 /// 開く解像度を決める（#391）。`choose_candidate` へ渡す解像度を返す。
@@ -289,6 +300,19 @@ pub(super) fn fps_list(avg: i64, min_interval: i64, max_interval: i64) -> Vec<u3
     fps
 }
 
+/// 設定画面に並べる 1 件の対応形式の fps（#410）。
+///
+/// 範囲を持つ候補では、どれを選んでも届くのは入力信号の fps なので、
+/// `GetFormat` が返すいまの fps（`current_fps`）だけを出す。いまの fps が
+/// 読めないか範囲の外なら、範囲の代表値（`StreamCandidate::fps`）へ戻す。
+/// 範囲を持たない候補はそのまま。
+pub(super) fn fps_choices(candidate: &StreamCandidate, current_fps: Option<u32>) -> Vec<u32> {
+    match (candidate.fps_range, current_fps) {
+        (Some((min, max)), Some(fps)) if (min..=max).contains(&fps) => vec![fps],
+        _ => candidate.fps.clone(),
+    }
+}
+
 /// 対応形式を、設定画面の「対応形式」に出す形へ並べ替える。
 ///
 /// 形式ごとにまとめ、解像度の大きい順、同じ解像度なら fps の大きい順にする
@@ -298,9 +322,11 @@ pub(super) fn fps_list(avg: i64, min_interval: i64, max_interval: i64) -> Vec<u3
 /// `current` はドライバーが返すいまの解像度（`current_resolution`）。その解像度を
 /// 開ける形式にだけ `FormatCapability::current_resolution` として添える（#391）。
 /// デバイスを切り替えたときの既定（`ui::video_mode`）が前の解像度より優先する。
+/// fps の並べ方は `fps_choices`（`current_fps` はいまの fps）。
 pub(super) fn capabilities_from_candidates(
     candidates: &[StreamCandidate],
     current: Option<(u32, u32)>,
+    current_fps: Option<u32>,
 ) -> DeviceCapabilities {
     let mut result = Vec::new();
     for kind in SampleKind::ALL {
@@ -308,9 +334,9 @@ pub(super) fn capabilities_from_candidates(
             .iter()
             .filter(|candidate| candidate.format.kind == kind)
             .flat_map(|candidate| {
-                candidate.fps.iter().map(|fps| {
-                    VideoMode::new(candidate.format.width, candidate.format.height, *fps)
-                })
+                fps_choices(candidate, current_fps)
+                    .into_iter()
+                    .map(|fps| VideoMode::new(candidate.format.width, candidate.format.height, fps))
             })
             .collect();
         modes.sort_by(|a, b| {
@@ -496,9 +522,37 @@ mod tests {
 
     #[test]
     fn capabilities_from_candidates_lists_range_representatives() {
-        let caps = capabilities_from_candidates(&[ranged(0, 1920, 1080, 166_666, 666_666)], None);
+        let caps =
+            capabilities_from_candidates(&[ranged(0, 1920, 1080, 166_666, 666_666)], None, None);
         let fps: Vec<u32> = caps[0].modes.iter().map(|mode| mode.fps).collect();
         assert_eq!(fps, vec![60, 50, 30, 25, 24, 15]);
+    }
+
+    #[test]
+    fn capabilities_from_candidates_lists_only_the_current_fps_inside_the_range() {
+        // #410: GC551 は入力が 60Hz なら、どれを選んでも 60fps で届く
+        let candidates = vec![
+            ranged(0, 1920, 1080, 166_666, 666_666),
+            candidate(1, SampleKind::Yuy2, 1280, 720, &[60, 30]),
+        ];
+        let caps = capabilities_from_candidates(&candidates, Some((1920, 1080)), Some(60));
+        let modes: Vec<(u32, u32)> = caps[0].modes.iter().map(|m| (m.width, m.fps)).collect();
+        // 範囲を持たない 1280x720 は今までどおり
+        assert_eq!(modes, vec![(1920, 60), (1280, 60), (1280, 30)]);
+    }
+
+    #[test]
+    fn fps_choices_falls_back_to_representatives() {
+        let ranged = ranged(0, 1920, 1080, 166_666, 666_666);
+        assert_eq!(fps_choices(&ranged, Some(30)), vec![30]);
+        // 読めない・範囲の外は代表値
+        let all = vec![60, 50, 30, 25, 24, 15];
+        assert_eq!(fps_choices(&ranged, None), all);
+        assert_eq!(fps_choices(&ranged, Some(120)), all);
+        assert_eq!(fps_choices(&ranged, Some(10)), all);
+        // 範囲を持たない候補は、いまの fps があっても一覧のまま
+        let fixed = candidate(1, SampleKind::Yuy2, 1280, 720, &[60, 30]);
+        assert_eq!(fps_choices(&fixed, Some(60)), vec![60, 30]);
     }
 
     fn sample_candidates() -> Vec<StreamCandidate> {
@@ -575,7 +629,7 @@ mod tests {
             candidate(2, SampleKind::Nv12, 640, 480, &[30]),
             candidate(3, SampleKind::Yuy2, 640, 480, &[30]),
         ];
-        let names: Vec<String> = capabilities_from_candidates(&candidates, None)
+        let names: Vec<String> = capabilities_from_candidates(&candidates, None, None)
             .into_iter()
             .map(|capability| capability.name)
             .collect();
@@ -642,7 +696,7 @@ mod tests {
 
     #[test]
     fn capabilities_from_candidates_groups_by_format_in_fixed_order() {
-        let caps = capabilities_from_candidates(&sample_candidates(), None);
+        let caps = capabilities_from_candidates(&sample_candidates(), None, None);
         let names: Vec<&str> = caps.iter().map(|cap| cap.name.as_str()).collect();
         assert_eq!(names, vec!["YUY2", "MJPEG", "RGB24"]);
         assert_eq!(
@@ -661,7 +715,7 @@ mod tests {
             candidate(0, SampleKind::Yuy2, 640, 480, &[30]),
             candidate(1, SampleKind::Yuy2, 640, 480, &[30]),
         ];
-        let caps = capabilities_from_candidates(&candidates, None);
+        let caps = capabilities_from_candidates(&candidates, None, None);
         assert_eq!(caps.len(), 1);
         assert_eq!(caps[0].modes, vec![VideoMode::new(640, 480, 30)]);
     }
@@ -776,7 +830,7 @@ mod tests {
             candidate(0, SampleKind::Yuy2, 1920, 1080, &[60]),
             candidate(1, SampleKind::Mjpeg, 1280, 720, &[60]),
         ];
-        let caps = capabilities_from_candidates(&candidates, Some((1920, 1080)));
+        let caps = capabilities_from_candidates(&candidates, Some((1920, 1080)), None);
         assert_eq!(caps[0].name, "YUY2");
         assert_eq!(caps[0].current_resolution, Some((1920, 1080)));
         // MJPEG は 1920x1080 を開けないので添えない
@@ -786,6 +840,6 @@ mod tests {
 
     #[test]
     fn capabilities_from_candidates_empty_input_is_empty() {
-        assert!(capabilities_from_candidates(&[], None).is_empty());
+        assert!(capabilities_from_candidates(&[], None, None).is_empty());
     }
 }
