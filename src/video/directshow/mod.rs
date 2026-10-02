@@ -513,8 +513,8 @@ mod tests {
         let name = capture
             .list_friendly_names()
             .into_iter()
-            .next()
-            .expect("DirectShow のデバイスがある");
+            .find(|name| name.contains("GC551"))
+            .expect("AVerMedia GC551 がある");
         let display = display_name(&name);
         let entry = DirectShowCapture::find(&display).expect("見つかる");
         let queried = graph::query_candidates(&entry)
@@ -524,8 +524,20 @@ mod tests {
             "いまの解像度: {:?}、いまの fps: {:?}",
             queried.current, queried.current_fps
         );
+        // GC551 の 1920x1080 は範囲を持つ形式であること（前提の確認）
+        let ranged: Vec<_> = queried
+            .candidates
+            .iter()
+            .filter(|c| (c.format.width, c.format.height) == (1920, 1080))
+            .filter(|c| c.fps_range.is_some())
+            .map(|c| c.format.kind.name())
+            .collect();
+        assert!(!ranged.is_empty(), "1920x1080 に範囲を持つ形式がある");
         let capabilities = capture.capabilities(&display).expect("能力を読める");
-        for capability in &capabilities {
+        for capability in capabilities
+            .iter()
+            .filter(|c| ranged.contains(&c.name.as_str()))
+        {
             let fps: Vec<u32> = capability
                 .modes
                 .iter()
@@ -533,9 +545,7 @@ mod tests {
                 .map(|mode| mode.fps)
                 .collect();
             println!("{}: 1920x1080 の fps の候補 {:?}", capability.name, fps);
-            if !fps.is_empty() {
-                assert_eq!(fps, vec![60]);
-            }
+            assert_eq!(fps, vec![60]);
         }
     }
 
