@@ -66,6 +66,10 @@ sha2 = "0.11"
 
 # テスト専用。一時フォルダで設定ファイルなどの読み書きを検証するため
 [dev-dependencies]
+# 設定ダイアログと右クリックメニューのウィジェットのテスト（#419）。egui と同じ版に揃える。
+# 画像の比較（snapshot / wgpu）は使わず、AccessKit の木から項目を探して押すだけなので
+# 既定のフィーチャは切る。GPU の無い CI でも動く
+egui_kittest = { version = "0.36", default-features = false }
 tempfile = "3.27"
 
 [build-dependencies]

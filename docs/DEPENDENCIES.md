@@ -204,7 +204,7 @@ flowchart TD
 
 #### 更新して使えるようになったもの
 
-`egui_kittest`（egui とバージョンが連動）が使えるようになった（まだ入れていない）。AccessKit を利用した egui 向けのテストハーネスで、**ウィジェット単位のテストを自動化できる**。
+`egui_kittest`（egui とバージョンが連動）が使えるようになった（#419 で `[dev-dependencies]` に入れた。書き方は `.claude/skills/testing-conventions/SKILL.md` の「ウィジェットのテスト」）。AccessKit を利用した egui 向けのテストハーネスで、**ウィジェット単位のテストを自動化できる**。
 
 `.claude/skills/testing-conventions/SKILL.md` で「要調査」としていた項目はこれに該当する。ただし本アプリの映像表示部分は `ui.painter().image()` による直接描画でアクセシビリティツリーに現れないため、**テストできるのは設定ダイアログやメニューなどのウィジェット部分に限られる**。映像・音声の検証には使えない。
 

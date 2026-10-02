@@ -178,7 +178,11 @@ pub(super) fn show_audio_input_combo(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::{PinFormat, PinSampleType};
+    use crate::audio::{AudioDirection, PinFormat, PinSampleType};
+    use crate::ui::testing::{dialog_harness, DialogFixture};
+    use crate::ui::{CapabilityEvent, SettingsEvent, SettingsTab};
+    use eframe::egui::accesskit::Role;
+    use egui_kittest::kittest::{NodeT, Queryable};
 
     #[test]
     fn selected_text_follows_the_input_source() {
@@ -244,5 +248,174 @@ mod tests {
             Some(Text::AudioPinVideoNotOpen.get())
         );
         assert_eq!(unavailable.capabilities(), None);
+    }
+
+    // ---- ウィジェットのテスト（egui_kittest、#419） ----
+    //
+    // 設定ダイアログを「デバイス設定」タブで描き、コンボボックスを開いて項目を押す。
+    // 組み立ては `ui::testing`。描画はデバイスに問い合わせないので実機は要らない
+
+    /// 「デバイス設定」タブを開いた設定ダイアログ。入力デバイスは 2 つ
+    fn device_tab_harness(
+        draft: &AppSettings,
+        pin: VideoPinChoice,
+    ) -> egui_kittest::Harness<'static, DialogFixture> {
+        dialog_harness(DialogFixture::new(
+            draft,
+            SettingsTab::Device,
+            pin,
+            &["ライン入力", "マイク"],
+        ))
+    }
+
+    /// 「オーディオ入力デバイス」のコンボボックスを開き、一覧の項目名を上から返す
+    fn open_input_combo(harness: &mut egui_kittest::Harness<'_, DialogFixture>) -> Vec<String> {
+        harness.get_by_label(Text::AudioInputDevice.get()).click();
+        harness.run();
+        // 一覧の項目は同じ親の下に並ぶ。先頭の項目の親から兄弟を順に読む
+        let first = harness.get_by_label("ライン入力");
+        let list = first.accesskit_node().parent().expect("一覧の親があるはず");
+        list.children().filter_map(|node| node.label()).collect()
+    }
+
+    #[test]
+    fn audio_input_combo_lists_the_video_device_first_and_selects_it() {
+        // WASAPI の「ライン入力」を選んでいる状態から、映像デバイスの音声へ切り替える
+        let mut draft = AppSettings::default();
+        draft.audio.input_device_name = Some("ライン入力".to_string());
+        let pin = VideoPinChoice::selectable(None, Some("GC551 (DirectShow)".to_string()));
+        let mut harness = device_tab_harness(&draft, pin);
+
+        // 先頭は映像デバイスの名前（「(DirectShow)」の印は外す）、その下に WASAPI
+        assert_eq!(
+            open_input_combo(&mut harness),
+            ["GC551", "ライン入力", "マイク"]
+        );
+
+        harness.state_mut().events.clear();
+        harness.get_by_label("GC551").click();
+        harness.run();
+
+        let fixture = harness.state();
+        assert_eq!(
+            fixture.draft().audio.input_source,
+            AudioInputSource::VideoPin
+        );
+        // WASAPI へ戻したときのために入力デバイス名は残す
+        assert_eq!(
+            fixture.draft().audio.input_device_name.as_deref(),
+            Some("ライン入力")
+        );
+        // 既定値の選び直しは手元の形式で済ませるので、届くのを待つ目印を立てない
+        assert!(
+            !fixture.events.iter().any(|event| matches!(
+                event,
+                SettingsEvent::Capability(CapabilityEvent::ExpectAudioDefaults(
+                    AudioDirection::Input,
+                    _
+                ))
+            )),
+            "{:?}",
+            fixture.events
+        );
+
+        // 切り替えたあとのフレームでは、入力側の対応設定をワーカーへ問い合わせない
+        // （クリックは押下と離しで別のフレームになるので、押下のフレームの分は見ない）
+        harness.state_mut().events.clear();
+        harness.step();
+        let events = &harness.state().events;
+        assert!(!events.is_empty(), "描画が 1 フレーム走っているはず");
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                SettingsEvent::Capability(CapabilityEvent::RequestAudio(AudioDirection::Input, _))
+            )),
+            "{:?}",
+            events
+        );
+    }
+
+    #[test]
+    fn audio_input_combo_selecting_a_wasapi_device_requests_its_defaults() {
+        // 映像デバイスの音声から WASAPI の「マイク」へ切り替える
+        let mut draft = AppSettings::default();
+        draft.audio.input_source = AudioInputSource::VideoPin;
+        let pin = VideoPinChoice::selectable(None, Some("GC551".to_string()));
+        let mut harness = device_tab_harness(&draft, pin);
+
+        open_input_combo(&mut harness);
+        harness.state_mut().events.clear();
+        harness.get_by_label("マイク").click();
+        harness.run();
+
+        let fixture = harness.state();
+        assert_eq!(fixture.draft().audio.input_source, AudioInputSource::Device);
+        assert_eq!(
+            fixture.draft().audio.input_device_name.as_deref(),
+            Some("マイク")
+        );
+        // 切り替えたフレームで既定値の選び直しを頼み、対応設定を問い合わせる
+        let expect = SettingsEvent::Capability(CapabilityEvent::ExpectAudioDefaults(
+            AudioDirection::Input,
+            "マイク".to_string(),
+        ));
+        let request = SettingsEvent::Capability(CapabilityEvent::RequestAudio(
+            AudioDirection::Input,
+            "マイク".to_string(),
+        ));
+        assert!(fixture.events.contains(&expect), "{:?}", fixture.events);
+        assert!(fixture.events.contains(&request), "{:?}", fixture.events);
+    }
+
+    #[test]
+    fn audio_input_combo_unavailable_pin_is_disabled_and_explains_why() {
+        // 映像デバイスの音声が「無い」と分かっている。項目名は設定の映像デバイス名
+        let mut draft = AppSettings::default();
+        draft.video.device_name = Some("USB Video (DirectShow)".to_string());
+        draft.audio.input_device_name = Some("ライン入力".to_string());
+        let reason = "この映像デバイスには音声がありません";
+        let pin = VideoPinChoice::unavailable(reason.to_string(), None);
+        let mut harness = device_tab_harness(&draft, pin.clone());
+
+        assert_eq!(
+            open_input_combo(&mut harness),
+            ["USB Video", "ライン入力", "マイク"]
+        );
+        assert!(harness
+            .get_by_label("USB Video")
+            .accesskit_node()
+            .is_disabled());
+
+        // 押しても選ばれない
+        harness.get_by_label("USB Video").click();
+        harness.run();
+        assert_eq!(
+            harness.state().draft().audio.input_source,
+            AudioInputSource::Device
+        );
+        // 選ばれていないので、コンボボックスの下に理由は出ない
+        let shows_reason = |harness: &egui_kittest::Harness<'_, DialogFixture>| -> bool {
+            harness
+                .query_by(|node| {
+                    node.role() == Role::Label
+                        && node.value().is_some_and(|value| value.contains(reason))
+                })
+                .is_some()
+        };
+        assert!(!shows_reason(&harness));
+
+        // 選ばれたまま「無い」になった（映像デバイスを差し替えたなど）ときは、
+        // 選ばれたまま表示し、下に理由を出す
+        draft.audio.input_source = AudioInputSource::VideoPin;
+        let harness = device_tab_harness(&draft, pin);
+        assert_eq!(
+            harness
+                .get_by_label(Text::AudioInputDevice.get())
+                .accesskit_node()
+                .value()
+                .as_deref(),
+            Some("USB Video")
+        );
+        assert!(shows_reason(&harness));
     }
 }

@@ -220,6 +220,10 @@ pub(super) fn normalize_hotkey(hotkey: &str) -> String {
 mod tests {
     use super::*;
     use crate::hotkey::HotkeyAction;
+    use crate::ui::testing::{dialog_harness, DialogFixture};
+    use crate::ui::{SettingsTab, VideoPinChoice};
+    use eframe::egui::accesskit::Role;
+    use egui_kittest::kittest::Queryable;
 
     use std::collections::BTreeMap;
 
@@ -323,5 +327,78 @@ mod tests {
         ]);
         assert!(!has_bare_navigation_key(&assigned));
         assert!(!has_bare_navigation_key(&BTreeMap::new()));
+    }
+
+    // ---- ウィジェットのテスト（egui_kittest、#419） ----
+
+    /// 一覧の `action` の行にある、`label` のボタン。行は `HotkeyAction::ALL` の順に並ぶ
+    fn row_button<'h>(
+        harness: &'h egui_kittest::Harness<'_, DialogFixture>,
+        label: &'h str,
+        action: HotkeyAction,
+    ) -> egui_kittest::Node<'h> {
+        let row = HotkeyAction::ALL
+            .iter()
+            .position(|candidate| *candidate == action)
+            .expect("ALL に含まれるはず");
+        harness
+            .get_all_by_label(label)
+            .nth(row)
+            .expect("どの行にもボタンがあるはず")
+    }
+
+    #[test]
+    fn hotkeys_tab_warns_about_duplicates_until_one_is_cleared() {
+        let draft = AppSettings {
+            hotkeys: hotkeys(&[
+                (HotkeyAction::Screenshot, "F5"),
+                (HotkeyAction::VolumeUp, "f5"),
+            ]),
+            ..AppSettings::default()
+        };
+        let mut harness = dialog_harness(DialogFixture::new(
+            &draft,
+            SettingsTab::Hotkeys,
+            VideoPinChoice::default(),
+            &[],
+        ));
+
+        // 重複の注意書きは、重複している 2 つのアクション名を挙げる
+        let warning = i18n::hotkey_duplicates_warning(&[
+            HotkeyAction::Screenshot.label(),
+            HotkeyAction::VolumeUp.label(),
+        ]);
+        let shows_warning = |harness: &egui_kittest::Harness<'_, DialogFixture>| {
+            harness
+                .query_by(|node| {
+                    node.role() == Role::Label
+                        && node.value().is_some_and(|value| value.contains(&warning))
+                })
+                .is_some()
+        };
+        assert!(shows_warning(&harness));
+
+        // 「設定...」はダイアログを開かず、その行のアクションをイベントで返す
+        row_button(
+            &harness,
+            Text::ButtonConfigure.get(),
+            HotkeyAction::VolumeUp,
+        )
+        .click();
+        harness.run();
+        assert!(harness
+            .state()
+            .events
+            .contains(&SettingsEvent::OpenHotkeyCapture(HotkeyAction::VolumeUp)));
+
+        // 片方をクリアするとドラフトから外れ、注意書きが消える
+        row_button(&harness, Text::ButtonClear.get(), HotkeyAction::VolumeUp).click();
+        harness.run();
+        assert_eq!(harness.state().draft().hotkey(HotkeyAction::VolumeUp), None);
+        assert_eq!(
+            harness.state().draft().hotkey(HotkeyAction::Screenshot),
+            Some("F5")
+        );
+        assert!(!shows_warning(&harness));
     }
 }
