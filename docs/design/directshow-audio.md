@@ -319,7 +319,7 @@ input_device_name = "Line (AVerMedia Live Gamer)"   # "video_pin" の間は使�
 - DirectShow の列挙（`devices::enumerate`）の名札からフィルターを作り（`bind_filter`）、出力ピンのどれかが `MEDIATYPE_Audio` のメディアタイプを勧めるかを見る（`video::directshow::audio_pin::probe_presence`）。グラフには入れず、繋がない。結果は `AudioPinPresence`（ある / 無い / 不明）。フィルターを作れない・ピンやメディアタイプを列挙できないときは「不明」
 - `ICaptureGraphBuilder2::FindPin`（開くときの `find_audio_pin`）を使わずにピンを自分で見るのは、「見つからない」と「調べられなかった」を分けるため。どちらも `E_FAIL` で返る
 - **DirectShow で開いている映像は掴み直さない**（「不明」にする）。その有無は開いた結果（`ActiveVideo::audio_pin`）で分かり、動いているグラフのデバイスのフィルターをもう 1 つ作ると、ドライバーによっては映像を乱すおそれがあるため。Media Foundation で開いている映像は掴み直す（KS のフィルターのインスタンスを作ってピンの対応形式を読むだけで、ピンのインスタンスは作らない）
-- 有無はデバイスごとに変わらないので、分かったもの（ある / 無い）は `DirectShowCapture` が表示名ごとに覚え、次からはフィルターを作らない。「不明」は覚えない
+- 有無はデバイスごとに変わらないので、分かったもの（ある / 無い）は `DirectShowCapture` が表示名ごとに覚え、次からはフィルターを作らない。調べられなかった（不明）ものは 60 秒（`PIN_PROBE_RETRY`）空けてから調べ直す（ダイアログを開いている間の 5 秒ごとの取り直しで、遅いデバイスがワーカーを毎回塞がないように。CodeRabbit の指摘）。キャッシュの鍵を表示名にするのは、DirectShow のデバイスを表示名で選んで開いている（`find`）のと揃えるため
 - 呼ぶのはワーカーのデバイス一覧の取り直し（`refresh_device_lists`。設定ダイアログを開いている間 5 秒ごと）だけ。trait に `VideoBackend::audio_pin_presence` を足し（既定は空の一覧。フェイクはシナリオ `audio-pin` で全台「ある」、無ければ全台「無い」）、結果は `WorkerState::video_audio_pins` → `DeviceSnapshot::video_audio_pins` で UI へ渡す。(3) の「trait に音声ピンを問い合わせるメソッドは足さない」は開いた映像の状態の話で、こちらは開く前の一覧の 1 項目なので別に扱う
 - ダイアログは、開いている映像の名前（無ければドラフトの映像デバイス名）で一覧を引く（`monitor_audio_pin::presence_of`。「(DirectShow)」の印を外して突き合わせる）
 - 所要時間（実機、AVerMedia GC551、2026-10-02）: 1 回目（フィルターを作って調べる）55ms、2 回目（覚えた結果を返すだけ、列挙のみ）0.8ms。ログには調べた回だけ `DirectShow の映像デバイスの音声ピンを調べた（N 台中 M 台、…ms）` を出す

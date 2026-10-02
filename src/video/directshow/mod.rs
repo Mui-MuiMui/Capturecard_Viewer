@@ -55,6 +55,9 @@ use graph::{CaptureGraph, FormatRequest, GraphError};
 /// 翻訳しない。**
 const DISPLAY_SUFFIX: &str = " (DirectShow)";
 
+/// 音声ピンの有無を調べられなかったデバイスを、調べ直すまでの間（#409）
+const PIN_PROBE_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// 表示名（「(DirectShow)」付き）を作る
 pub fn display_name(friendly_name: &str) -> String {
     format!("{friendly_name}{DISPLAY_SUFFIX}")
@@ -81,8 +84,8 @@ pub struct DirectShowCapture {
     /// いまのグラフで、音声ピンから届いた塊の長さをログへ出したか。`link_state` が
     /// `&self` で書くので `Cell`（触るのはワーカーだけ）
     pin_chunk_logged: Cell<bool>,
-    /// 列挙の時点で分かった音声ピンの有無（#409、`audio_pin_presence`）。表示名ごと
-    pin_presence: HashMap<String, AudioPinPresence>,
+    /// 列挙の時点で調べた音声ピンの有無と、調べた時刻（#409、`audio_pin_presence`）。表示名ごと
+    pin_presence: HashMap<String, (AudioPinPresence, Instant)>,
     /// **最後に落とす。** グラフや名札（COM のオブジェクト）を手放してから
     /// COM の初期化を戻す。フィールドは宣言順に落ちるので、末尾に置いてある
     _com: Option<ComApartment>,
@@ -166,7 +169,10 @@ impl DirectShowCapture {
     /// 開いた結果（`ActiveVideo::audio_pin`）で分かり、動いているグラフのデバイスの
     /// フィルターをもう 1 つ作ると、ドライバーによっては映像を乱すおそれがあるため。
     /// 有無はデバイスごとに変わらないので、分かったもの（ある / ない）は覚えておき、
-    /// 次からは調べない。列挙に失敗したら空の一覧。
+    /// 次からは調べない。調べられなかった（不明）ものは `PIN_PROBE_RETRY` の間は
+    /// 調べ直さない（設定ダイアログを開いている間は 5 秒ごとに呼ばれ、遅いデバイスが
+    /// あるとそのたびにワーカーを塞ぐため）。開いていて飛ばした分はここに含めない。
+    /// 列挙に失敗したら空の一覧。
     pub fn audio_pin_presence(&mut self) -> Vec<(String, AudioPinPresence)> {
         let start = Instant::now();
         let open = self.active.as_ref().map(|active| {
@@ -188,14 +194,16 @@ impl DirectShowCapture {
             let name = entry.friendly_name.clone();
             let found = if skip == Some(name.as_str()) {
                 AudioPinPresence::Unknown
-            } else if let Some(known) = self.pin_presence.get(&name) {
+            } else if let Some((known, _)) = self.pin_presence.get(&name).filter(|(known, at)| {
+                // 調べられなかったものは、間を空けてから調べ直す
+                *known != AudioPinPresence::Unknown || at.elapsed() < PIN_PROBE_RETRY
+            }) {
                 *known
             } else {
                 probed += 1;
                 let found = audio_pin::probe_presence(entry);
-                if found != AudioPinPresence::Unknown {
-                    self.pin_presence.insert(name.clone(), found);
-                }
+                self.pin_presence
+                    .insert(name.clone(), (found, Instant::now()));
                 found
             };
             presence.push((name, found));
