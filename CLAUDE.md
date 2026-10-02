@@ -47,7 +47,8 @@ cargo build --release
 | `src/app/worker_audio_connect.rs` | ワーカーが行うデバイス操作のうち音声側。音声を開く（`try_connect_audio`）、入力が未指定のときと音声ピンが使えないときに開かずに待つ、映像の復帰に合わせた開き直し、対応設定の問い合わせ |
 | `src/app/worker_default_input.rs` | 入力が未設定のまま起動したときの入力の既定（#394）。最初の映像の試行のあとに、音声ピンがあれば `video_pin`、無ければ WASAPI の先頭に決める（`settle_default_input`）。決めるまでと UI の書き戻しが届くまで音声を理由なしで待たせる（`DefaultInput`） |
 | `src/app/backend/mod.rs` | ワーカーがデバイスに触るときの入口の trait（`VideoBackend` / `AudioBackend` / `DeviceBackends`）と、本番かフェイクかを環境変数で選ぶ `backends_from_env`。テスト用のモックもここ（`#[cfg(test)]`） |
-| `src/app/backend/system.rs` | 本番のバックエンド `SystemBackends`。映像は `VideoCapture`（Media Foundation）と `DirectShowCapture` を `SystemVideo` で束ね、音声は `AudioCapture` を trait に載せる。一覧の突き合わせ（`merge_video_devices`）とどちらで開くかの判定（`route_for`） |
+| `src/app/backend/system.rs` | 本番のバックエンド `SystemBackends`。映像は `VideoCapture`（Media Foundation）と `DirectShowCapture` を `SystemVideo` で束ね、音声は `AudioCapture` を trait に載せる。一覧の突き合わせとどちらで開くかの判定は `system_route.rs` |
+| `src/app/backend/system_route.rs` | `system.rs` が使う映像の経路の判定（純粋関数）。一覧の突き合わせ（`merge_video_devices`）、どちらで開くか（`route_for`）、自動で Media Foundation が開けないときの DirectShow への倒し方（`directshow_fallback` / `attempt_with_fallback`） |
 | `src/app/backend/fake.rs` | フェイクのバックエンド `FakeBackends`。`FakeVideoCapture` / `FakeAudioCapture` を trait に載せる実装と、環境変数（`CAPTURECARD_VIEWER_FAKE_DEVICES` / `CAPTURECARD_VIEWER_FAKE_SCENARIO`）の解釈 |
 | `src/app/monitor.rs` | 切断や既定デバイスの切り替え、列挙をログへ出す回と「Windows 側にも見えていない」の**判定**（純粋関数）。ワーカーが使う |
 | `src/app/monitor_audio_pin.rs` | 音声の入力が映像デバイスの音声ピンのときの**判定**（純粋関数）。開くか待つか（`decide_pin_readiness`）、映像の開き直しに合わせて音声を開き直すか（`should_resync_pin_audio`）、設定ダイアログで選べるか（`pin_choice`。列挙の時点の有無は `presence_of` で引く、#409）、初回の入力の既定を音声ピンにするか（`default_input_uses_pin`）。`monitor.rs` が 800 行に近いので分けた |
@@ -65,7 +66,8 @@ cargo build --release
 | `src/video/mod.rs` | `VideoError` とログ用の `elapsed_ms`。外から使う経路（`crate::video::...`）の `pub use` もここ |
 | `src/video/capture.rs` | nokhwa `CallbackCamera` によるキャプチャ。開く・閉じる・列挙する、フレームコールバック（nokhwa の `Buffer` から取り出して `FrameSink` へ渡す）、途絶の観測（`VideoLinkState`） |
 | `src/video/directshow/mod.rs` | DirectShow の映像デバイス `DirectShowCapture`（列挙・能力・開く・閉じる・観測）と、表示名の「(DirectShow)」の付け外し |
-| `src/video/directshow/devices.rs` | DirectShow の列挙（`ICreateDevEnum`）と対応形式（`IAMStreamConfig::GetStreamCaps`）、いまの解像度（`GetFormat`）、開く解像度と形式の選び方（`target_resolution` / `choose_candidate`） |
+| `src/video/directshow/devices.rs` | DirectShow の列挙（`ICreateDevEnum`）と対応形式（`IAMStreamConfig::GetStreamCaps`）、いまの解像度（`GetFormat`）の読み取り |
+| `src/video/directshow/stream_select.rs` | 対応形式の一覧から開く解像度と形式を選ぶ判定（`target_resolution` / `choose_candidate`）、fps の範囲と選択肢（`fps_range` / `fps_list` / `fps_choices`）、設定画面向けの並べ替え（`capabilities_from_candidates`）。純粋関数 |
 | `src/video/directshow/graph.rs` | DirectShow のフィルターグラフの組み立て・開始・停止・破棄（`CaptureGraph`） |
 | `src/video/directshow/filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`）。媒体を問わず、受け取る形式の判定と渡し先だけを映像と音声で分ける |
 | `src/video/directshow/video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |

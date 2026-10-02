@@ -28,6 +28,7 @@ mod devices;
 mod filter;
 mod graph;
 mod media_type;
+mod stream_select;
 #[cfg(test)]
 mod timestamp_probe;
 mod video_stream;
@@ -249,7 +250,7 @@ impl DirectShowCapture {
             );
             return Ok(Vec::new());
         };
-        let capabilities = devices::capabilities_from_candidates(
+        let capabilities = stream_select::capabilities_from_candidates(
             &queried.candidates,
             queried.current,
             queried.current_fps,

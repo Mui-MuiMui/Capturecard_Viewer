@@ -28,7 +28,7 @@ WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の�
 | 入力のコールバック（`src/audio/stream.rs` の `process_input`） | **cpal 以外のスレッドからも呼ばれている**。フェイクの入力スレッド（`src/audio/fake_stream.rs`）が正弦波を同じ関数へ渡している。リングと `AudioTap` はどちらも `try_lock` で、待たない |
 | 出力側（`stream_output.rs` の `process_output`、`convert.rs` の `PassthroughConverter`、`resample.rs`） | 入力の出どころを知らない。見るのはリングの中身と水位だけ |
 | バックエンドの組み立て（`src/app/backend/system.rs` の `SystemBackends::create`） | 映像（`SystemVideo` = `VideoCapture` + `DirectShowCapture`）と音声（`AudioCapture`）を**別々の `Box` で返す**。いまは両者をつなぐものが無い。`BackendShared` は UI スレッドから来る共有だけを運ぶ |
-| 自動の倒し込み（#387、`src/app/backend/system.rs` の `attempt_with_fallback`） | 開き方が「自動」で Media Foundation が「見つかったが開けない」なら、**同じ `start_capture` の呼び出しの中で** DirectShow でも試す。GC551 は両方の一覧に同じ名前で出て Media Foundation では開けないので、既定の設定のまま DirectShow で開く。倒したことは覚えず、開くたびに Media Foundation から試す |
+| 自動の倒し込み（#387、`src/app/backend/system_route.rs` の `attempt_with_fallback`） | 開き方が「自動」で Media Foundation が「見つかったが開けない」なら、**同じ `start_capture` の呼び出しの中で** DirectShow でも試す。GC551 は両方の一覧に同じ名前で出て Media Foundation では開けないので、既定の設定のまま DirectShow で開く。倒したことは覚えず、開くたびに Media Foundation から試す |
 | 接続の順番（`src/app/worker_timers.rs` の `poll_connection`） | 同じ `tick` で両方の期限が来ていれば、**映像を先に、音声を後に**試す |
 | 終了（`WorkerState::shutdown`、`app::recording`） | `on_exit` は録画を止めてからワーカーを止める。ワーカーは映像 → 音声の順に閉じる |
 | 接続対象（`src/app/worker.rs`） | `VideoTarget` は `(デバイス名, 解像度, フォーマット, fps, 開き方)`、`AudioTarget` は `(入力, 出力, レート, チャンネル数, バッファ長)` のタプル。差分が立つと開き直す |
