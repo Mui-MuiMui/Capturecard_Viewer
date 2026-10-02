@@ -77,13 +77,14 @@ texts! {
     VideoDeviceNotSelected { ja: "映像デバイスが選ばれていません。「デバイス設定」タブで選んでください", en: "No video device is selected. Choose one in the Devices tab" },
     // ワーカーが入力の未指定で音声を開かないときの理由（app/worker_connect.rs、#304）
     AudioInputNotSelected { ja: "オーディオ入力デバイスが選ばれていません。「デバイス設定」タブで選んでください", en: "No audio input device is selected. Choose one in the Devices tab" },
-    // 入力が映像デバイスの音声ピンなのに使えず、音声を開かずに待つ理由（app/monitor_audio_pin.rs、#388）
+    // 入力が映像デバイスの音声ピンなのに使えず、音声を開かずに待つ理由（app/monitor_audio_pin.rs、#388）。
+    // 設定ダイアログの選べない理由にも出るので「DirectShow」「音声ピン」の語を使わない（#409）
     AudioPinVideoNotOpen { ja: "映像デバイスが開いていないので、映像デバイスの音声は使えません", en: "The video device is not open, so its audio cannot be used" },
-    AudioPinMediaFoundation { ja: "Media Foundation で開いた映像には音声ピンがありません。「デバイス設定」タブで映像の開き方を DirectShow にすると使えます", en: "Video opened with Media Foundation has no audio pin. Set the video backend to DirectShow in the Devices tab to use it" },
-    AudioPinMissing { ja: "この映像デバイスには音声ピンがありません", en: "This video device has no audio pin" },
-    AudioPinNotConnected { ja: "映像デバイスの音声ピンを繋ぐために、映像デバイスを開き直すのを待っています", en: "Waiting for the video device to reopen with its audio pin connected" },
+    AudioPinMediaFoundation { ja: "いまの映像の開き方では、映像デバイスの音声を使えません。「デバイス設定」タブの「映像の開き方」を切り替えると使えることがあります", en: "The video device's audio is not available with the current way of opening the video. Changing \"Open video with\" in the Devices tab may make it available" },
+    AudioPinMissing { ja: "この映像デバイスからは音声を受け取れません", en: "This video device does not provide audio" },
+    AudioPinNotConnected { ja: "映像デバイスの音声を使うために、映像デバイスを開き直すのを待っています", en: "Waiting for the video device to reopen so that its audio can be used" },
     // 音声ピンの入力で開こうとしたが、繋いだ音声ピンが無かった（audio::AudioError::VideoPinUnavailable）
-    AudioPinUnavailable { ja: "映像デバイスの音声ピンが繋がっていないので、音声を開けません", en: "The audio pin of the video device is not connected, so audio cannot be opened" },
+    AudioPinUnavailable { ja: "映像デバイスの音声がつながっていないので、音声を開けません", en: "The video device's audio is not connected, so audio cannot be opened" },
     // 自動再接続が無効な間に音声ストリームがエラーで止まったときの理由（app/worker_timers.rs、#310）
     AudioStreamStoppedWithoutReconnect { ja: "音声ストリームがエラーで止まりました。自動再接続が無効なので、右クリックメニューの「デバイス再接続」で開き直してください", en: "The audio stream stopped with an error. Automatic reconnection is off, so use Reconnect devices in the right-click menu" },
     DeviceNotVisibleNoDevices { ja: "Windows 側にもデバイスが見えていない可能性があります（1 台も見えていません）。デバイスマネージャーで接続を確認してください", en: "Windows may not see the device either (no devices are visible). Check the connection in Device Manager" },
@@ -187,9 +188,11 @@ texts! {
     SaturationHint { ja: "色の濃さを強く（＋）または弱く（－）します。-100 で白黒になります", en: "Makes colors more (+) or less (-) vivid. At -100 the picture becomes black and white" },
     AudioSettings { ja: "オーディオ設定", en: "Audio" },
     AudioInputDevice { ja: "オーディオ入力デバイス", en: "Audio input device" },
-    // 「オーディオ入力デバイス」の先頭の項目（ui/audio_input.rs、#394）。設定に残るのは
-    // `video_pin` で、これは表示だけの文言なので翻訳してよい（docs/design/directshow-audio.md の (5)）
-    AudioInputVideoPin { ja: "映像デバイスの音声 (DirectShow)", en: "Video device audio (DirectShow)" },
+    // 「オーディオ入力デバイス」の先頭の項目（ui/audio_input.rs、#394）。ふだんは映像デバイスの
+    // 名前を項目名にし、これは名前が無いときだけ出す（#409）。設定に残るのは `video_pin` で、
+    // これは表示だけの文言なので翻訳してよい（docs/design/directshow-audio.md の (5)）
+    AudioInputVideoPin { ja: "映像デバイスの音声", en: "Video device audio" },
+    AudioInputVideoPinHint { ja: "この映像デバイスが受け取っている音声（HDMI などの音声）をそのまま使います", en: "Uses the audio that this video device receives (such as HDMI audio)" },
     AudioOutputDevice { ja: "オーディオ出力デバイス", en: "Audio output device" },
     DefaultDevice { ja: "デフォルト", en: "Default" },
     SampleRateLabel { ja: "サンプリングレート:", en: "Sample rate:" },

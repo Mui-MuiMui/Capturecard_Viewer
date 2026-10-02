@@ -156,7 +156,7 @@ impl SettingsDialogState {
         &mut self.audio_input_capabilities
     }
 
-    /// 「映像デバイスの音声 (DirectShow)」を選べるかを差し替える（#394）。
+    /// 映像デバイスの音声を選べるかと項目名（映像デバイスの名前）を差し替える（#394、#409）。
     ///
     /// `CaptureCardViewer` がワーカーの観測値から作り、描画の前に毎回渡す。
     /// 描画はこれを `SettingsDialogView` の借用で読むだけで、デバイスには問い合わせない。
@@ -337,7 +337,7 @@ pub struct SettingsDialogView<'a> {
     pub video_capabilities: &'a VideoCapabilityCache,
     /// オーディオデバイスの対応設定（入力・出力）
     pub audio_capabilities: AudioCapabilityCaches<'a>,
-    /// 「映像デバイスの音声 (DirectShow)」を選べるか（#394）
+    /// 映像デバイスの音声を選べるかと項目名（#394、#409）
     pub video_pin: &'a VideoPinChoice,
     /// 「その他」タブに出す直近の結果
     pub management_message: Option<&'a ManagementMessage>,

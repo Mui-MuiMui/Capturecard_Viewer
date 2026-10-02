@@ -27,7 +27,7 @@ const PRESET_OSD_DURATION: Duration = Duration::from_millis(1500);
 impl CaptureCardViewer {
     /// デバイスワーカーの観測値を読み直す。`update()` の先頭で 1 回だけ呼ぶ。
     ///
-    /// 設定ダイアログを開いていれば、「映像デバイスの音声 (DirectShow)」を選べるかも
+    /// 設定ダイアログを開いていれば、映像デバイスの音声を選べるかと項目名も
     /// 観測値（`DeviceSnapshot::active_video`）から作り直してダイアログへ渡す（#394）。
     /// 観測値の複製から作るだけで、デバイスには問い合わせない。描画はこれを
     /// `SettingsDialogView` の借用で読む。
@@ -36,9 +36,14 @@ impl CaptureCardViewer {
         if !self.show_settings {
             return;
         }
-        let choice = match pin_choice(self.device_snapshot.active_video.as_ref()) {
-            Ok(format) => ui::VideoPinChoice::Selectable(format.map(PinFormat::capabilities)),
-            Err(reason) => ui::VideoPinChoice::Unavailable(reason.message()),
+        let active = self.device_snapshot.active_video.as_ref();
+        // 項目名は開いている映像デバイスの名前（#409）
+        let device = active.map(|video| video.device_name.clone());
+        let choice = match pin_choice(active) {
+            Ok(format) => {
+                ui::VideoPinChoice::selectable(format.map(PinFormat::capabilities), device)
+            }
+            Err(reason) => ui::VideoPinChoice::unavailable(reason.message(), device),
         };
         self.settings_dialog.set_video_pin(choice);
     }
