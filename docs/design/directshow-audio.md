@@ -329,7 +329,7 @@ input_device_name = "Line (AVerMedia Live Gamer)"   # "video_pin" の間は使�
 #409 で「音声ピン」の語を「映像デバイスの音声」に置き換えた。
 
 - 映像の欄に「映像デバイスの音声: あり（使っていない）/ 使っている 48000Hz 2ch 16bit、10 ms ごと / なし / つなげなかった（理由）」を足す。Media Foundation で開いているときは出さない
-- 音声の欄の入力に経路を出す: 「入力: 映像デバイスの音声（AVerMedia GC551 Video Capture (DirectShow)、48000Hz 2ch）」
+- 音声の欄の入力に経路を出す: 「入力: 映像デバイスの音声（AVerMedia GC551 Video Capture、48000Hz 2ch）」（「(DirectShow)」の印は外す）
 - 塊の長さに合わせてリングを広げたときは、バッファの行に「設定 50 ms → 実際 N ms（映像デバイスの音声が M ms ごとに届くため）」と出す（(1) の「塊の長さ」）
 - 「入力の取りこぼし」は、音声ピンでは `IsDiscontinuity` の回数を出す。行の名前は変えない
 - 待っている理由（(3) の表）は、今の失敗の表示（`ErrorSource::Audio`）にそのまま出る

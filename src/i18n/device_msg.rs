@@ -380,8 +380,10 @@ pub fn link_audio_input(device: impl Display, summary: impl Display) -> String {
     }
 }
 
-/// 入力が映像デバイスの音声ピンのときの入力の行（#388）。`device` は映像デバイスの名前
-pub fn link_audio_input_video_pin(device: impl Display, summary: impl Display) -> String {
+/// 入力が映像デバイスの音声ピンのときの入力の行（#388）。`device` は映像デバイスの名前で、
+/// 「(DirectShow)」の印は外して出す（設定ダイアログの項目名と揃える、#409）
+pub fn link_audio_input_video_pin(device: &str, summary: impl Display) -> String {
+    let device = crate::video::directshow_friendly_name(device).unwrap_or(device);
     match language() {
         Language::Japanese => format!("入力: 映像デバイスの音声（{device}、{summary}）"),
         Language::English => {
@@ -509,6 +511,14 @@ mod tests {
             ))
             .as_deref(),
             Some("Video device audio: in use 48000Hz 2ch 16bit")
+        );
+    }
+
+    #[test]
+    fn link_audio_input_video_pin_hides_the_directshow_mark() {
+        assert_eq!(
+            link_audio_input_video_pin("AVerMedia GC551 Video Capture (DirectShow)", "48000Hz 2ch"),
+            "入力: 映像デバイスの音声（AVerMedia GC551 Video Capture、48000Hz 2ch）"
         );
     }
 
