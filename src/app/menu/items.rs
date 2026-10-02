@@ -19,6 +19,20 @@ use eframe::egui;
 /// メニュー全体が閉じるのを防ぐ
 const CONTEXT_MENU_HIT_MARGIN: f32 = 8.0;
 
+/// 右クリックメニューのサブメニューを開くボタン。
+///
+/// egui 0.32 からの `ui.menu_button` は、中の項目を押すとサブメニューを閉じる
+/// （`PopupCloseBehavior::CloseOnClick`）。0.26 と同じく、閉じるのは外を押したときと
+/// 項目が `ui.close()` を呼んだときだけにする。「表示」の切り替えは続けて押すことがある
+fn submenu_button(ui: &mut egui::Ui, text: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::containers::menu::MenuButton::new(text)
+        .config(
+            egui::containers::menu::MenuConfig::new()
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+        )
+        .ui(ui, add_contents);
+}
+
 /// 右クリックメニューで起きた操作。
 ///
 /// 描画関数はこれを列に積むだけで、実際の処理は
@@ -283,7 +297,7 @@ fn view_submenu(
     menu_rects: &mut Vec<egui::Rect>,
     actions: &mut Vec<MenuAction>,
 ) {
-    ui.menu_button(Text::MenuViewSubmenu.get(), |ui| {
+    submenu_button(ui, Text::MenuViewSubmenu.get(), |ui| {
         // サブメニューの幅は egui の既定が 150px で、項目名が折り返す。
         // 本体と同じ幅に揃える（狭いウィンドウでは本体ごと縮んでいる）
         ui.set_max_width(width);
@@ -309,7 +323,7 @@ fn window_submenu(
     menu_rects: &mut Vec<egui::Rect>,
     actions: &mut Vec<MenuAction>,
 ) {
-    ui.menu_button(Text::MenuWindowSubmenu.get(), |ui| {
+    submenu_button(ui, Text::MenuWindowSubmenu.get(), |ui| {
         ui.set_max_width(width);
 
         drag_move_item(ui, view, actions);
@@ -342,7 +356,7 @@ fn preset_submenu(
         return;
     }
 
-    ui.menu_button(Text::MenuPresetSubmenu.get(), |ui| {
+    submenu_button(ui, Text::MenuPresetSubmenu.get(), |ui| {
         ui.set_max_width(width);
 
         for name in &view.preset_names {
