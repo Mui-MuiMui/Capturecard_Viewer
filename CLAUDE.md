@@ -50,7 +50,7 @@ cargo build --release
 | `src/app/backend/system.rs` | 本番のバックエンド `SystemBackends`。映像は `VideoCapture`（Media Foundation）と `DirectShowCapture` を `SystemVideo` で束ね、音声は `AudioCapture` を trait に載せる。一覧の突き合わせ（`merge_video_devices`）とどちらで開くかの判定（`route_for`） |
 | `src/app/backend/fake.rs` | フェイクのバックエンド `FakeBackends`。`FakeVideoCapture` / `FakeAudioCapture` を trait に載せる実装と、環境変数（`CAPTURECARD_VIEWER_FAKE_DEVICES` / `CAPTURECARD_VIEWER_FAKE_SCENARIO`）の解釈 |
 | `src/app/monitor.rs` | 切断や既定デバイスの切り替え、列挙をログへ出す回と「Windows 側にも見えていない」の**判定**（純粋関数）。ワーカーが使う |
-| `src/app/monitor_audio_pin.rs` | 音声の入力が映像デバイスの音声ピンのときの**判定**（純粋関数）。開くか待つか（`decide_pin_readiness`）、映像の開き直しに合わせて音声を開き直すか（`should_resync_pin_audio`）、設定ダイアログで選べるか（`pin_choice`）、初回の入力の既定を音声ピンにするか（`default_input_uses_pin`）。`monitor.rs` が 800 行に近いので分けた |
+| `src/app/monitor_audio_pin.rs` | 音声の入力が映像デバイスの音声ピンのときの**判定**（純粋関数）。開くか待つか（`decide_pin_readiness`）、映像の開き直しに合わせて音声を開き直すか（`should_resync_pin_audio`）、設定ダイアログで選べるか（`pin_choice`。列挙の時点の有無は `presence_of` で引く、#409）、初回の入力の既定を音声ピンにするか（`default_input_uses_pin`）。`monitor.rs` が 800 行に近いので分けた |
 | `src/app/retry.rs` | `ConnectRetry` とバックオフ。「いつ試してよいか」だけを持つ。ワーカーが持つ |
 | `src/app/capabilities.rs` | デバイス一覧のキャッシュと、デバイス能力・対応設定の取得要求（ワーカーへ流すところまで） |
 | `src/app/screenshot.rs` | 撮影、保存スレッドの管理、結果の取り込み |
@@ -69,7 +69,7 @@ cargo build --release
 | `src/video/directshow/graph.rs` | DirectShow のフィルターグラフの組み立て・開始・停止・破棄（`CaptureGraph`） |
 | `src/video/directshow/filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`）。媒体を問わず、受け取る形式の判定と渡し先だけを映像と音声で分ける |
 | `src/video/directshow/video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
-| `src/video/directshow/audio_pin.rs` | 映像デバイスの音声ピン（#388）。有無の記録、10ms の塊の提案と接続、`Run` が通らないときに外してやり直す（`run_with_fallback`）、`WAVEFORMATEX` の読み取り（`pin_format_from_wave`）、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
+| `src/video/directshow/audio_pin.rs` | 映像デバイスの音声ピン（#388）。列挙の時点での有無の判定（`probe_presence`、#409）、有無の記録、10ms の塊の提案と接続、`Run` が通らないときに外してやり直す（`run_with_fallback`）、`WAVEFORMATEX` の読み取り（`pin_format_from_wave`）、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
 | `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
 | `src/video/directshow/timestamp_probe.rs` | テストを含むビルドだけ（`#[cfg(test)]`）。`Receive` に届いたサンプルの到着時刻と `IMediaSample::GetTime` を Atomic の表へ書き、`#[ignore]` のテストが揺れを出す（#406）。グラフに基準時計を付けるかの切り替えもここ |
 | `src/video/frame_sink.rs` | フレームコールバックの本体 `FrameSink`（YUY2→RGB、`FrameBuffer` へ積む、`RepaintWaker` で UI を起こす）。実機（Media Foundation / DirectShow）とフェイクで共有する。DirectShow の RGB24 / MJPEG / 4:2:0 の YUV（NV12 / I420 / YV12）の受け口もここ |
@@ -147,7 +147,7 @@ cargo build --release
 | `src/ui/capability.rs` | `CapabilityCache`（デバイス能力の取得状態）と、そこから作る選択肢まわりの表示 |
 | `src/ui/video_mode.rs` | デバイスを切り替えたときに選び直すビデオの既定値（`select_default_video_mode`） |
 | `src/ui/device_tab.rs` | 「デバイス設定」タブの描画 |
-| `src/ui/audio_input.rs` | 「デバイス設定」タブの「オーディオ入力デバイス」のコンボボックス（先頭の「映像デバイスの音声 (DirectShow)」と WASAPI のデバイス）と、選べるか（`VideoPinChoice`、#394） |
+| `src/ui/audio_input.rs` | 「デバイス設定」タブの「オーディオ入力デバイス」のコンボボックス（先頭の映像デバイスの音声と WASAPI のデバイス）と、選べるか・項目名（`VideoPinChoice`、#394）。項目名は映像デバイスの名前で、「DirectShow」「音声ピン」の語を見せない（`video_pin_label`、#409） |
 | `src/ui/screenshot_tab.rs` | 「スクリーンショット設定」タブの描画 |
 | `src/ui/recording_tab.rs` | 「録画」タブの描画（保存先、ファイル名の書式と例、映像のビットレート、ハードウェアエンコーダ、音声の有無とビットレートと映像とのずれの補正、リプレイバッファの ON / OFF とさかのぼる長さ） |
 | `src/ui/hotkeys_tab.rs` | 「ホットキー」タブの描画と、割り当ての重複判定 |
