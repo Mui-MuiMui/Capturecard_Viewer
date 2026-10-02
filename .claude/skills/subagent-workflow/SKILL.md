@@ -65,7 +65,7 @@ CAPTURECARD_VIEWER_CONFIG_DIR="$(pwd -W)/.agent-config" CAPTURECARD_VIEWER_FAKE_
 ```
 
 - 値は絶対パスにする（`pwd -W` は `C:/...` の形を返す）。相対パスは使われず、WARN を出して `%AppData%` へ倒れる。効いていればログ（`.agent-config/logs/`）の先頭近くに `CAPTURECARD_VIEWER_CONFIG_DIR が指定されているので…` の WARN が出る
-- **アプリを止めるときは起動時の PID で止める。** `./target/release/capturecard_viewer.exe & APP=$!` で起動し、`taskkill //PID $APP` で止める。`taskkill //IM capturecard_viewer.exe` は並行する他のエージェントが確認中のプロセスまで巻き添えにする（2026-10-03 に実際に起きた）。`//F` は `on_exit` を通さないので、終了時の保存を確かめるときは付けない
+- **アプリを止めるときは起動時の PID で止める。** `./target/release/capturecard_viewer.exe & APP=$!` で起動し、`taskkill //PID "$(cat /proc/$APP/winpid)"` で止める（`$!` は Git Bash の PID なので、`/proc/<PID>/winpid` で Windows の PID に直す）。`taskkill //IM capturecard_viewer.exe` は並行する他のエージェントが確認中のプロセスまで巻き添えにする（2026-10-03 に実際に起きた）。`//F` は `on_exit` を通さないので、終了時の保存を確かめるときは付けない
 
 - **実機（キャプチャーボード）を開くのは、指示役が並行作業全体で 1 つだけ選び、依頼文に「実機を使ってよい」と書いたエージェントだけ。** それ以外は `CAPTURECARD_VIEWER_FAKE_DEVICES` に 1 以上の整数を付けて起動し（空・`0`・数字以外は効かず実機で動く）、ログの先頭近くに「フェイクデバイスで動く」の WARN が出ていることを確かめる。出ていなければ実機で動いているので、そこで止める。キャプチャーデバイスは 1 プロセスしか開けないので、並行するエージェントが同時に実機を掴むと、開けなかった側が「デバイスが無い」「接続できない」と誤って報告する。実機で確かめたことは、ログの「開いた形式と fps」と届いたフレーム数を PR 本文に写す（「動いた」だけにしない）。実機が列挙に出ない・開けないときは直さずに止め、最終報告の「未確認事項」に書く（USB や VM 側の状態で変わるため、指示役が確かめる）
 
