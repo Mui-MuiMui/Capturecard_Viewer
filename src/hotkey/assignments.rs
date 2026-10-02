@@ -105,7 +105,7 @@ impl HotkeyManager {
     /// egui へ渡す前のキー入力から、ホットキーに割り当てたキーの押下を取り除く。
     /// 取り除いた数を返す（#217）。
     ///
-    /// UI スレッドが `update()` の先頭で、描画より前に呼ぶ。判定は
+    /// UI スレッドが `App::raw_input_hook` で、egui がフレームを始める前に呼ぶ（#418）。判定は
     /// `parse::remove_hotkey_key_events` が持つ。取り除きうる押下が無いフレームでは
     /// 共有状態のロックを取らない。
     pub fn remove_hotkey_key_events(&self, events: &mut Vec<egui::Event>, typing: bool) -> usize {

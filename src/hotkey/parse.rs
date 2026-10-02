@@ -762,6 +762,83 @@ mod tests {
         assert_eq!(events.len(), 1);
     }
 
+    /// ボタン 2 つの画面で 1 つ目にフォーカスを置き、`key` の押下を 1 回送ったあとに
+    /// フォーカスのある Id と、1 つ目のボタンの Id を返す。
+    ///
+    /// `registered` が `Some` なら、`App::raw_input_hook` と同じく egui へ渡す前の
+    /// `RawInput` から取り除いてから送る（#418）
+    fn focus_after_key_press(
+        key: egui::Key,
+        registered: Option<&HashMap<KeyChord, HotkeyAction>>,
+    ) -> (Option<egui::Id>, egui::Id) {
+        let ctx = egui::Context::default();
+        let mut first = None;
+        let mut run = |events: Vec<egui::Event>, focus_first: bool| {
+            let mut raw_input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            if let Some(registered) = registered {
+                remove_hotkey_key_events(registered, &mut raw_input.events, false);
+            }
+            ctx.run_ui(raw_input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let a = ui.button("a");
+                    let _ = ui.button("b");
+                    if focus_first {
+                        a.request_focus();
+                    }
+                    first = Some(a.id);
+                });
+            })
+            .drop_without_applying_deltas();
+        };
+        run(Vec::new(), true);
+        run(Vec::new(), false);
+        run(
+            vec![key_event(key, egui::Modifiers::NONE, true, false)],
+            false,
+        );
+        run(Vec::new(), false);
+        (
+            ctx.memory(|memory| memory.focused()),
+            first.expect("描画されていること"),
+        )
+    }
+
+    #[test]
+    fn removing_from_raw_input_keeps_egui_focus_on_assigned_tab_and_escape() {
+        // update() の中で input_mut から取り除いても、egui はフレームの始まりで
+        // Tab ならフォーカスを次へ動かし、Escape なら外す。egui へ渡す前の RawInput から
+        // 取り除けば、どちらも動かない（#418）
+        let registered = HashMap::from([
+            (
+                parse_hotkey("Tab").expect("解析できること"),
+                HotkeyAction::ToggleMute,
+            ),
+            (
+                parse_hotkey("Escape").expect("解析できること"),
+                HotkeyAction::Screenshot,
+            ),
+        ]);
+
+        for key in [egui::Key::Tab, egui::Key::Escape] {
+            let (focused, first) = focus_after_key_press(key, Some(&registered));
+            assert_eq!(focused, Some(first), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn unassigned_tab_and_escape_still_move_egui_focus() {
+        // 上のテストの対照。割り当てていなければ（または取り除かなければ）
+        // egui のフォーカスは動く。動かない環境だと上のテストが何も確かめていないことになる
+        let (focused, first) = focus_after_key_press(egui::Key::Tab, Some(&registered_chords()));
+        assert!(focused.is_some_and(|id| id != first));
+
+        let (focused, _) = focus_after_key_press(egui::Key::Escape, None);
+        assert_eq!(focused, None);
+    }
+
     #[test]
     fn hotkey_error_display_is_japanese_for_every_variant() {
         // 英語の文言が混ざると、定型文と繋げたときに日本語と英語が並ぶ
