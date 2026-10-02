@@ -132,8 +132,8 @@ fn show_hotkey_assignments(
             warning_label(ui, i18n::hotkey_duplicates_warning(&names));
         }
 
-        // 修飾キーなしの移動系のキーは、前面にいる間 egui のフォーカス移動と
-        // 重なる（取り除くのが egui の処理に間に合わない、docs/design/hotkeys.md）。
+        // 修飾キーなしの移動系のキーは、前面にいる間 egui のフォーカス移動に
+        // 使えなくなる（egui へ渡さない、docs/design/hotkeys.md）。
         // 動作は変えず、案内だけ出す（#266）
         if has_bare_navigation_key(&settings.hotkeys) {
             ui.add_space(5.0);
@@ -188,8 +188,8 @@ pub fn duplicate_hotkey_actions(
 /// 修飾キーなしで移動系のキー（Tab、矢印、Home、End、PageUp、PageDown）を
 /// 割り当てているものがあるか。
 ///
-/// これらは egui がフォーカスの移動などに使い、前面にいる間はホットキーと
-/// 同時に egui 側も動くことがある（#266）。Backspace / Delete / Insert は
+/// これらは egui がフォーカスの移動などに使う。前面にいる間はホットキーの押下を
+/// egui へ渡さないので、その操作に使えなくなる（#266、#418）。Backspace / Delete / Insert は
 /// テキスト欄の外では egui が使わず、テキスト欄に入力している間はホットキーが
 /// 反応しないので含めない。
 fn has_bare_navigation_key(hotkeys: &BTreeMap<HotkeyAction, String>) -> bool {
