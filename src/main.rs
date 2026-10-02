@@ -31,7 +31,7 @@ mod video;
 use app::CaptureCardViewer;
 use platform::{
     configure_japanese_font, is_position_visible, load_icon, monitor_work_areas,
-    window_size_or_default,
+    redirect_misdirected_close, window_size_or_default,
 };
 use settings::AppSettings;
 
@@ -81,6 +81,13 @@ fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
         viewport: viewport_builder,
+        // winit のイベント用のウィンドウへ届いた閉じる要求を、本来のウィンドウへ
+        // 回す。最小化中の taskkill（/F なし）がそちらへ WM_CLOSE を送るため（#420、
+        // docs/design/window.md の「閉じる要求の取り違え」）
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            builder.with_msg_hook(redirect_misdirected_close);
+        })),
         ..Default::default()
     };
 

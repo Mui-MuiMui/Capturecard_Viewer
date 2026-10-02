@@ -595,6 +595,7 @@ dependencies = [
  "winapi",
  "windows",
  "windows-core",
+ "winit",
 ]
 
 [[package]]
