@@ -4,14 +4,10 @@
 # cargo audit はターゲットを区別せず Cargo.lock 全体を見る。ここに載せるのは
 # 「Windows のビルドに入らない」か「対応する Issue で解消を待っている」勧告だけで、
 # 1 件ごとに理由と Issue 番号を添える。解消したら行ごと消す。
+# いまは載せている勧告が無い（webbrowser の RUSTSEC-2026-0257 は #300 で解消した）。
 #
-# unmaintained の警告（derivative / instant / paste / ttf-parser、2026-09-30 時点）は
-# 既定で失敗扱いにならないので載せていない。derivative と instant は
-# x86_64-pc-windows-msvc のビルドに入らず、paste（accesskit_windows 経由）と
-# ttf-parser（epaint 経由）は egui 系の経由で手元では外せない。
+# unmaintained の警告（paste、2026-10-03 時点）は既定で失敗扱いにならないので
+# 載せていない。paste は nokhwa 経由で手元では外せない。egui 0.26 の経由で出ていた
+# derivative / instant / ttf-parser は #300 で egui を 0.36 へ上げて消えた。
 [advisories]
-ignore = [
-    # webbrowser 0.8.15（egui-winit 0.26 経由）。Unix の BROWSER 環境変数の扱いの
-    # 問題で、Windows では通らない経路。#300 で解消する
-    "RUSTSEC-2026-0257",
-]
+ignore = []

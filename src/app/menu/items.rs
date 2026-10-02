@@ -19,6 +19,20 @@ use eframe::egui;
 /// メニュー全体が閉じるのを防ぐ
 const CONTEXT_MENU_HIT_MARGIN: f32 = 8.0;
 
+/// 右クリックメニューのサブメニューを開くボタン。
+///
+/// egui 0.32 からの `ui.menu_button` は、中の項目を押すとサブメニューを閉じる
+/// （`PopupCloseBehavior::CloseOnClick`）。0.26 と同じく、閉じるのは外を押したときと
+/// 項目が `ui.close()` を呼んだときだけにする。「表示」の切り替えは続けて押すことがある
+fn submenu_button(ui: &mut egui::Ui, text: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::containers::menu::MenuButton::new(text)
+        .config(
+            egui::containers::menu::MenuConfig::new()
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+        )
+        .ui(ui, add_contents);
+}
+
 /// 右クリックメニューで起きた操作。
 ///
 /// 描画関数はこれを列に積むだけで、実際の処理は
@@ -225,7 +239,7 @@ fn auto_reconnect_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<Men
 /// 装飾なしで小さくしすぎて端の帯を掴めなくなったときの復帰手段。
 ///
 /// 戻り値は押されたかどうか。**サブメニューの中から呼ぶ側は、`true` の
-/// ときに `ui.close_menu()` を呼ぶこと。** 呼ばないと開いた状態が egui 側に
+/// ときに `ui.close()` を呼ぶこと。** 呼ばないと開いた状態が egui 側に
 /// 残り、次に右クリックしたときにサブメニューが開いたまま出る。
 fn reset_window_size_item(
     ui: &mut egui::Ui,
@@ -283,7 +297,7 @@ fn view_submenu(
     menu_rects: &mut Vec<egui::Rect>,
     actions: &mut Vec<MenuAction>,
 ) {
-    ui.menu_button(Text::MenuViewSubmenu.get(), |ui| {
+    submenu_button(ui, Text::MenuViewSubmenu.get(), |ui| {
         // サブメニューの幅は egui の既定が 150px で、項目名が折り返す。
         // 本体と同じ幅に揃える（狭いウィンドウでは本体ごと縮んでいる）
         ui.set_max_width(width);
@@ -309,14 +323,14 @@ fn window_submenu(
     menu_rects: &mut Vec<egui::Rect>,
     actions: &mut Vec<MenuAction>,
 ) {
-    ui.menu_button(Text::MenuWindowSubmenu.get(), |ui| {
+    submenu_button(ui, Text::MenuWindowSubmenu.get(), |ui| {
         ui.set_max_width(width);
 
         drag_move_item(ui, view, actions);
         if reset_window_size_item(ui, view, actions) {
             // サブメニュー側も閉じる。本体を閉じるのは
             // `MenuAction::closes_menu` の判定が行う
-            ui.close_menu();
+            ui.close();
         }
 
         menu_rects.push(ui.min_rect().expand(CONTEXT_MENU_HIT_MARGIN));
@@ -342,7 +356,7 @@ fn preset_submenu(
         return;
     }
 
-    ui.menu_button(Text::MenuPresetSubmenu.get(), |ui| {
+    submenu_button(ui, Text::MenuPresetSubmenu.get(), |ui| {
         ui.set_max_width(width);
 
         for name in &view.preset_names {
@@ -351,7 +365,7 @@ fn preset_submenu(
             let is_active = view.active_preset.as_deref() == Some(name.as_str());
             if ui.selectable_label(is_active, name).clicked() {
                 actions.push(MenuAction::ApplyPreset(name.clone()));
-                ui.close_menu();
+                ui.close();
             }
         }
 
@@ -418,7 +432,7 @@ pub(super) fn menu_items_flat(
 /// 出ないときの復帰手段（デバイス再接続）と、装飾を消しているときに他の手段が
 /// 無い操作（フルスクリーン、終了）。** 探し回らずに押せることを優先する。
 ///
-/// サブメニューの中身を足したときは、閉じるボタンに `ui.close_menu()` を
+/// サブメニューの中身を足したときは、閉じるボタンに `ui.close()` を
 /// 忘れないこと。呼ばないと開いた状態が egui 側に残り、次に右クリックした
 /// ときにサブメニューが開いたまま出る。
 pub(super) fn menu_items_collapsed(

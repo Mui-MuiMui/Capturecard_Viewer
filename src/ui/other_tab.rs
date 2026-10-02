@@ -213,7 +213,7 @@ fn show_language_group(ui: &mut egui::Ui, draft: &AppSettings, events: &mut Vec<
 
         let current = draft.ui.language;
         // Id は表示文字列から作らない。言語を切り替えると変わってしまうため
-        egui::ComboBox::from_id_source("language_combo")
+        egui::ComboBox::from_id_salt("language_combo")
             .selected_text(current.label())
             .show_ui(ui, |ui| {
                 for language in LanguageSetting::ALL {

@@ -360,16 +360,19 @@ mod tests {
 
     /// 何も要求していない状態の `egui::Context` を作る。
     ///
-    /// 生成直後の `Context` は最初の描画を要求した状態なので、2 回空回しして
+    /// 生成直後の `Context` は最初の描画を要求した状態で、egui 0.36 は 1 回目の終わりに
+    /// ウィンドウのテーマを送るのでもう 1 回要求する（`ViewportCommand::SetTheme`）。3 回空回しして
     /// 落ち着かせる。画面も入力も無い状態で回せるので、実機は要らない。
     fn settled_context() -> egui::Context {
         let ctx = egui::Context::default();
-        for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |_| {});
+        for _ in 0..3 {
+            ctx.run_ui(egui::RawInput::default(), |_| {})
+                .drop_without_applying_deltas();
         }
         assert!(
             !ctx.has_requested_repaint(),
-            "前提が崩れている: 何も要求していないのに再描画が予約されている"
+            "前提が崩れている: 何も要求していないのに再描画が予約されている {:?}",
+            ctx.repaint_causes()
         );
         ctx
     }
@@ -398,7 +401,8 @@ mod tests {
         waker.bind(&ctx);
 
         waker.set_enabled(true);
-        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
         assert!(!ctx.has_requested_repaint(), "前提が崩れている");
 
         waker.set_enabled(true);

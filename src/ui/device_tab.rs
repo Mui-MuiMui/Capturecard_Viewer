@@ -30,7 +30,7 @@ fn video_adjustment_slider(ui: &mut egui::Ui, value: &mut i32, label: &str, hint
     ui.add(
         egui::Slider::new(value, MIN_VIDEO_ADJUSTMENT..=MAX_VIDEO_ADJUSTMENT)
             .text(label)
-            .clamp_to_range(true),
+            .clamping(egui::SliderClamping::Always),
     )
     .on_hover_text(hint);
 }
@@ -92,7 +92,7 @@ pub(super) fn show_device_settings_tab(
         // （`DeviceConfig` の差分判定に載っている）
         ui.horizontal(|ui| {
             ui.label(Text::VideoBackendLabel.get());
-            egui::ComboBox::from_id_source("video_backend_combo")
+            egui::ComboBox::from_id_salt("video_backend_combo")
                 .selected_text(settings.video.backend.label())
                 .show_ui(ui, |ui| {
                     for backend in VideoBackendSetting::ALL {
@@ -195,7 +195,7 @@ pub(super) fn show_device_settings_tab(
                 .clone()
                 .unwrap_or_else(|| "YUY2".to_string());
 
-            egui::ComboBox::from_id_source("format_combo")
+            egui::ComboBox::from_id_salt("format_combo")
                 .selected_text(&current_format)
                 .show_ui(ui, |ui| {
                     // キャッシュからフォーマット一覧を取得
@@ -257,7 +257,7 @@ pub(super) fn show_device_settings_tab(
             ui.label(Text::ResolutionLabel.get());
             let current_resolution = settings.video.resolution.unwrap_or((1280, 720));
 
-            egui::ComboBox::from_id_source("resolution_combo")
+            egui::ComboBox::from_id_salt("resolution_combo")
                 .selected_text(format!("{}x{}", current_resolution.0, current_resolution.1))
                 .show_ui(ui, |ui| {
                     if let Some(caps) = capabilities.ready(&selected_key) {
@@ -343,7 +343,7 @@ pub(super) fn show_device_settings_tab(
             ui.label(Text::FrameRateLabel.get());
             let current_fps = settings.video.fps.unwrap_or(30);
 
-            egui::ComboBox::from_id_source("fps_combo")
+            egui::ComboBox::from_id_salt("fps_combo")
                 .selected_text(format!("{} fps", current_fps))
                 .show_ui(ui, |ui| {
                     if let Some(caps) = capabilities.ready(&selected_key) {
@@ -387,7 +387,7 @@ pub(super) fn show_device_settings_tab(
         // 通常は解像度から推定する（自動）。推定が外れる機種のために固定できる
         ui.horizontal(|ui| {
             ui.label(Text::ColorSpaceLabel.get());
-            egui::ComboBox::from_id_source("color_space_combo")
+            egui::ComboBox::from_id_salt("color_space_combo")
                 .selected_text(settings.video.color_space.label())
                 .show_ui(ui, |ui| {
                     for space in ColorSpace::ALL {
@@ -402,7 +402,7 @@ pub(super) fn show_device_settings_tab(
         // 信号からも解像度からも判別できないため手で選ばせる
         ui.horizontal(|ui| {
             ui.label(Text::ColorRangeLabel.get());
-            egui::ComboBox::from_id_source("color_range_combo")
+            egui::ComboBox::from_id_salt("color_range_combo")
                 .selected_text(settings.video.color_range.label())
                 .show_ui(ui, |ui| {
                     for range in ColorRange::ALL {
@@ -642,7 +642,7 @@ pub(super) fn show_device_settings_tab(
         ui.horizontal(|ui| {
             ui.label(Text::SampleRateLabel.get());
             let current_rate = settings.audio.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE);
-            egui::ComboBox::from_id_source("sample_rate_combo")
+            egui::ComboBox::from_id_salt("sample_rate_combo")
                 .selected_text(format!("{} Hz", current_rate))
                 .show_ui(ui, |ui| {
                     for rate in &rates.values {
@@ -673,7 +673,7 @@ pub(super) fn show_device_settings_tab(
             // 選択肢が 1 つしか無いときは操作させない。開ける値が 1 つなのに
             // 選べると、選んだ値と実際の値が食い違う
             ui.add_enabled_ui(!single_channel_choice, |ui| {
-                egui::ComboBox::from_id_source("channels_combo")
+                egui::ComboBox::from_id_salt("channels_combo")
                     .selected_text(channel_label(current_channels))
                     .show_ui(ui, |ui| {
                         for channels in &channel_choices.values {

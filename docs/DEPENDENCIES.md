@@ -2,7 +2,7 @@
 
 現在の依存と、更新に向けた調査結果をまとめる。
 
-**バージョン情報は 2026-10-01 時点のもの。** 「Cargo.lock」の列は `Cargo.lock` に載っている版、「最新」の列は同じ日に `cargo search` で crates.io を引いた版（第 1 段 #301、第 2 段 #299、第 3 段 #302 の後）。参照するときは日付を確認し、必要なら取り直すこと（下の「調査の再実行」）。
+**バージョン情報は 2026-10-01 時点のもの。** 「Cargo.lock」の列は `Cargo.lock` に載っている版、「最新」の列は同じ日に `cargo search` で crates.io を引いた版（第 1 段 #301、第 2 段 #299、第 3 段 #302 の後）。`eframe` / `egui` の行だけは第 4 段 #300 で取り直した 2026-10-03 時点のもの。参照するときは日付を確認し、必要なら取り直すこと（下の「調査の再実行」）。
 
 ## 方針
 
@@ -49,13 +49,13 @@
 
 | クレート | 指定（`Cargo.toml`） | `Cargo.lock` | 最新 | 差 | 用途 |
 |---|---|---|---|---|---|
-| `eframe` | 0.26 | 0.26.2 | 0.36.2 | マイナー 10 | ウィンドウとアプリの骨組み（第 4 段、#300。未着手） |
-| `egui` | 0.26 | 0.26.2 | 0.36.2 | マイナー 10 | UI（同上） |
+| `eframe` | 0.36 | 0.36.2 | 0.36.2 | 追随 | ウィンドウとアプリの骨組み（第 4 段、#300）。描画は glow（下の「第 4 段 — UI」） |
+| `egui` | 0.36 | 0.36.2 | 0.36.2 | 追随 | UI（同上） |
 | `nokhwa` | 0.10 | 0.10.11 | 0.10.11 | 追随 | 映像キャプチャ |
 | `cpal` | 0.18 | 0.18.2 | 0.18.2 | 追随 | 音声入出力。`realtime` フィーチャで音声スレッドの優先度を上げる（`docs/design/audio.md` の「cpal 0.18 で変わったこと」）。`rodio` 経由の 0.17.3 も残る（下の「`cpal` 0.17 は `rodio` 経由で残る」） |
 | `toml` | 1.1 | 1.1.6+spec-1.1.0 | 1.1.6+spec-1.1.0 | 追随 | 設定ファイルの読み書き。`confy` 0.6 の代わり（第 3 段、#302） |
 | `log` | 0.4.34 | 0.4.34 | 0.4.34 | 追随 | ログのファサード。出力先の実装は `src/logging.rs` |
-| `image` | 0.25 | 0.25.10 | 0.25.10 | 追随 | スクリーンショットの保存、埋め込みアイコンの読み込み、MJPEG の展開。`eframe` 経由の 0.24.9 も残る（下の「`arboard` は egui-winit が既に使っている」） |
+| `image` | 0.25 | 0.25.10 | 0.25.10 | 追随 | スクリーンショットの保存、埋め込みアイコンの読み込み、MJPEG の展開。`eframe` もこの 0.25 を使う |
 | `rodio` | 0.22 | 0.22.2 | 0.22.2 | 追随 | 効果音の再生。フィーチャは `playback` と使う形式（MP3 / WAV / Vorbis / FLAC）だけ |
 | `dirs` | 7.0 | 7.0.0 | 7.0.0 | 追随 | デスクトップ等のパス取得、設定ファイルの置き場所（`%AppData%`） |
 | `rfd` | 0.17 | 0.17.2 | 0.17.2 | 追随 | ファイル選択ダイアログ |
@@ -82,9 +82,8 @@
 **Windows では `image-data` が `image` 0.25 を要求する。** 本体の `image` は第 1 段（#301）で
 0.25 へ上げたので、本体・`arboard`・`nokhwa` は同じ 0.25 を使う。
 
-ただし **`image` 0.24 はまだビルドに残る。** `eframe` 0.26 が自分の依存として 0.24 を持っている
-ため（`cargo tree -i image@0.24.9` で `eframe` だけがぶら下がる）で、本体からは外せない。
-`png` 0.17 / 0.18 の重複もこれに伴って残る。**第 4 段で `eframe` を上げれば解消する。**
+`eframe` 0.26 が自分の依存として持っていた `image` 0.24（と `png` 0.17 の重複）は、
+第 4 段（#300）で `eframe` を 0.36 へ上げて消えた。いまは `eframe` も同じ 0.25 を使う。
 
 本体の `image` は `default-features = false` にして、使う形式（`png` / `jpeg` / `ico`）だけを
 足している。既定のフィーチャは AVIF のエンコーダ（`rav1e`）や EXR / TIFF / GIF まで引き込むが、
@@ -145,7 +144,7 @@ flowchart TD
 
 | クレート | 状態 | 変えたこと |
 |---|---|---|
-| `image` 0.24 → 0.25 | 済み | `image::io::Reader` → `image::ImageReader`、エンコーダへ渡す色の型が `ExtendedColorType` に。スクリーンショットの保存（`write_with_encoder`）はそのまま使える。フィーチャを `png` / `jpeg` / `ico` に絞った。0.24 は `eframe` 0.26 経由で残る（上の「`arboard` は egui-winit が既に使っている」） |
+| `image` 0.24 → 0.25 | 済み | `image::io::Reader` → `image::ImageReader`、エンコーダへ渡す色の型が `ExtendedColorType` に。スクリーンショットの保存（`write_with_encoder`）はそのまま使える。フィーチャを `png` / `jpeg` / `ico` に絞った。0.24 は `eframe` 0.26 経由で残っていたが、第 4 段（#300）で消えた |
 | `dirs` 5 → 7 | 済み | コードの変更なし。使っているのは `desktop_dir()` / `video_dir()` / `home_dir()` だけで、Windows では既知フォルダを引くのは変わらない |
 | `rfd` 0.11 → 0.17 | 済み | `set_file_name` が値を取るようになった。既定のフィーチャ（`xdg-portal` / `wayland`）は Linux 向けなので切った。0.11 が引き込んでいた gtk 系と `windows` 0.44 が `Cargo.lock` から消えた |
 | `embed-resource` 2.4 → 3.0 | 済み | `compile()` が失敗しても結果を返すだけになったので、`manifest_required()` で失敗をビルドの失敗にした。アイコンとバージョン情報の無い exe を作らないため |
@@ -185,23 +184,27 @@ flowchart TD
 
 ### 第 4 段 — UI
 
-**未着手（#300）。** `eframe` / `egui` 0.26 → 0.36 が最大の山。10 回のマイナー更新をまたぐため、破壊的変更が広範囲に及ぶ。
+**済み（#300、2026-10-03）。** `eframe` / `egui` 0.26 → 0.36 を 1 つの PR で一気に上げた。途中の版を経由しても、どの版でもビルドが通るまで直す手間が増えるだけなので段階は踏んでいない。
 
-影響が想定される箇所。
+| 変えたこと | 中身 |
+|---|---|
+| 描画のバックエンド | **glow（OpenGL）のまま。** 0.36 の `eframe` の既定は wgpu だが、wgpu / naga と DirectX 12・Vulkan のバックエンドまで引き込むわりに、映像 1 枚とダイアログの画面では得るものが無い。`default-features = false` にして `accesskit` / `default_fonts` / `glow` / `links` だけを足す。`wayland` / `x11` は Linux 向けなので切った。`links` は更新の通知と「その他」タブのリンクを開くのに要る（`webbrowser`） |
+| `App` | `update(ctx)` → `ui(ui)`。1 フレームの処理はドキュメントが `update()` と呼んでいるとおり `CaptureCardViewer::update` に残し、`App::ui` から呼ぶ。最小化中だけ呼ばれる `App::logic` は実装しない（0.26 と同じく最小化中は UI スレッドで何も回さない） |
+| パネル | `CentralPanel` / `Panel`（`TopBottomPanel` の後継）は `Context` ではなく `Ui` を受け取る。`Window` / `Area` は `Context` のまま |
+| 名前の変更 | `Context::run` → `run_ui`、`screen_rect` → `content_rect`、`style` → `global_style`、`wants_keyboard_input` → `egui_wants_keyboard_input`、`Frame::none()` → `Frame::NONE`、`Rounding` → `CornerRadius`（`u8`）、`Margin` は `i8`、`ComboBox::from_id_source` → `from_id_salt`、`SelectableLabel` → `Button::selectable`、`Slider::clamp_to_range` → `clamping`、`close_menu` → `close`、`Area::new` は `Id` を取る、`FontData` は `Arc` で渡す、`TextureOptions` に `mipmap_mode` |
+| `Sense` | 構造体から bitflags に。映像エリアはフォーカスを受けないよう `CLICK \| DRAG`（`FOCUSABLE` を立てない） |
+| ホイールの音量 | `InputState::raw_scroll_delta` が無くなった。滑らかにした値は数フレームに分かれて届くので、`Event::MouseWheel` を数える（`app::audio_control` の `wheel_scroll_y`） |
+| 右クリックメニューのサブメニュー | `ui.menu_button` は中の項目を押すと閉じるようになった（`PopupCloseBehavior::CloseOnClick`）。0.26 と同じく外を押したときだけ閉じる（`CloseOnClickOutside`） |
+| 映像の上に重ねる表示 | `Ui::new` が `UiBuilder` を取り、切り抜きを `max_rect` にするようになった。0.26 と同じく画面全体に戻す |
+| テスト | `run_ui` の `FullOutput` は、テクスチャの差分を残したまま落とすと `debug_assert` で止まる。描かないテストでは `drop_without_applying_deltas` で捨てる。生成直後の `Context` は 1 回目の終わりにウィンドウのテーマを送る（`ViewportCommand::SetTheme`）ので、何も要求していない状態まで 3 回回す |
 
-- `ViewportCommand` と `ViewportBuilder`（フルスクリーン、最前面、位置とサイズ）
-- `ComboBox` と `Frame::none()`
-- `TextureOptions` と `ColorImage`
-- `FontDefinitions` の設定方法
-- `Area` / `Window` の API
+ビルドに入るクレート（`x86_64-pc-windows-msvc`）の重複は、`image` 0.24 / `png` 0.17 / `raw-window-handle` 0.5 / `windows` 0.48 / `windows-sys` 0.48・0.59 / `thiserror` 1 / `syn` 1 が消え、`hashbrown` 0.16（`accesskit_windows` 経由）が増えた。`Cargo.lock` の全体は 554 → 493 クレート。`webbrowser` は 1.2 になり、RUSTSEC-2026-0257 の ignore を `.cargo/audit.toml` から外した。
 
-**必ず単独の PR にする。** 他の変更と混ぜるとレビューも切り分けも不可能になる。
+テンキー（#266 で見送った分）は 0.36 でも `egui::Key` に別のキーが無い。`egui-winit` が `Numpad0` を `Num0` に、`NumpadAdd` を `Plus` に読み替えるので、区別して割り当てることはできないまま。
 
-段階的に上げるか一気に上げるかは、実際に着手して破壊的変更の量を見てから判断する。egui は各リリースに移行ガイドが付いていることが多いので、まずそれを集めるところから始める。
+#### 更新して使えるようになったもの
 
-#### 更新すると使えるようになるもの
-
-`egui_kittest`（現在 0.36.2、egui とバージョンが連動）が使えるようになる。AccessKit を利用した egui 向けのテストハーネスで、**ウィジェット単位のテストを自動化できる**。
+`egui_kittest`（egui とバージョンが連動）が使えるようになった（まだ入れていない）。AccessKit を利用した egui 向けのテストハーネスで、**ウィジェット単位のテストを自動化できる**。
 
 `.claude/skills/testing-conventions/SKILL.md` で「要調査」としていた項目はこれに該当する。ただし本アプリの映像表示部分は `ui.painter().image()` による直接描画でアクセシビリティツリーに現れないため、**テストできるのは設定ダイアログやメニューなどのウィジェット部分に限られる**。映像・音声の検証には使えない。
 
@@ -285,7 +288,7 @@ cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES.txt
 - **必須チェックではない。** ジョブ名「依存の脆弱性情報（RustSec）」はルールセットの必須チェック（`fmt / clippy / build / test`）に入れていないので、落ちても PR はマージできる。新しい勧告が出た瞬間に無関係な PR が全部止まるのを避けるため。ビルドしないので `ubuntu-latest` で回し、`ci.yml` の実行時間は増えない
 - **落ちたら:** 脆弱性の勧告が増えている。該当クレートが `x86_64-pc-windows-msvc` のビルドに入るかを `cargo tree -i <crate> --target x86_64-pc-windows-msvc` で確かめ、入るなら Issue を起票して依存を上げる。解消まで待つ場合や Windows に入らない場合は `.cargo/audit.toml` の `ignore` に**理由と Issue 番号を添えて**載せる。解消したら行ごと消す
 - **ターゲットで絞れない。** `cargo audit` は `Cargo.lock` 全体を見るため、配布物に入らないクレートも拾う。除外は `.cargo/audit.toml` の `ignore` で 1 件ずつ行う
-- **unmaintained の警告では落ちない**（`cargo audit` の既定）。2026-09-30 時点で `derivative` / `instant`（Windows のビルドに入らない）と `paste` / `ttf-parser`（egui 系の経由で外せない）が出ている
+- **unmaintained の警告では落ちない**（`cargo audit` の既定）。2026-10-03 時点で `paste`（`nokhwa` 経由で外せない）が出ている。egui 0.26 の経由で出ていた `derivative` / `instant` / `ttf-parser` は第 4 段（#300）で消えた
 
 手元で回すときは次のとおり。
 
@@ -304,14 +307,9 @@ cargo audit
 
 ### 既知の制限 — Ubuntu フォントのライセンス
 
-`epaint` は既定フォントとして Ubuntu Light を exe に埋め込んでいる。Ubuntu Font Licence 1.0 は **Font Software の各コピーに著作権表示とライセンス本文を含めること**を条件にしているため、`THIRD-PARTY-LICENSES.txt` に本文を載せる必要がある。
+`epaint_default_fonts`（egui 0.26 までは `epaint` の中にあった）は既定フォントとして Ubuntu Light を exe に埋め込んでいる。Ubuntu Font Licence 1.0 は **Font Software の各コピーに著作権表示とライセンス本文を含めること**を条件にしているため、`THIRD-PARTY-LICENSES.txt` に両方を載せる必要がある。
 
-ところが `LicenseRef-UFL-1.0` は、SPDX の構文としては正しいユーザー定義参照（`LicenseRef-`）であるものの、SPDX License List には載っていない。載っていない以上 cargo-about が差し込める既定の本文が無く、crate 内のどのファイルが本文かも自動では決まらないため、0.9.2 は本文を出力できない。生成のたびに次の警告が出る（生成自体は成功する）。
+- **本文は自動で出る。** egui 0.36 から crate のライセンスが SPDX License List の識別子 `Ubuntu-font-1.0` になり、cargo-about が本文を差し込む。`about.toml` の `accepted` も `LicenseRef-UFL-1.0` から `Ubuntu-font-1.0` に替えた
+- **著作権表示（Copyright 2011 Canonical Ltd.）は crate のメタデータに無い。** そのため `about.hbs` の末尾に、この 1 行だけの付録を手で書いている。出典は `Ubuntu-Light.ttf` のメタデータ
 
-```
-WARN LicenseRef-UFL-1.0 has no license file for crate 'epaint 0.26.2'
-```
-
-そのため **`about.hbs` の末尾に本文を直接書いた付録**を置いている。出典は `epaint` crate の `fonts/UFL.txt` と `Ubuntu-Light.ttf` のメタデータ。ここだけ自動生成の対象外なので、**egui を更新したときは同梱フォントが変わっていないか確認すること。**
-
-本来は `about.toml` の clarify で「このファイルがこのライセンスの本文」と教えれば済むはずだが、0.9.2 では LicenseRef 向けの本文選択の条件が反転していて、別のライセンス本文が UFL の見出しで出力されてしまう。上流が直れば付録は外せる。
+egui 0.26 までは crate のライセンスが `LicenseRef-UFL-1.0` で、cargo-about 0.9.2 が本文を出せなかったため、付録に本文ごと書いていた。0.36 の同梱フォント（Ubuntu-Light / Hack / NotoEmoji）は 0.26 と同じファイルで、`UFL.txt` も改行コードしか違わない（2026-10-03 に確認）。付録は自動生成の対象外なので、**egui を更新したときは同梱フォントが変わっていないか確認すること。**

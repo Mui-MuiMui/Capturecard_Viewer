@@ -58,6 +58,24 @@ fn mute_overlay_content(muted: bool, volume: f32) -> OverlayContent {
     }
 }
 
+/// このフレームに届いたホイールの縦方向の量。向きだけを使う。
+///
+/// egui 0.26 の `InputState::raw_scroll_delta` の代わり（0.36 で無くなった）。
+/// 滑らかにした `smooth_scroll_delta` は数フレームに分けて届き、`ScrollArea` が
+/// 使った分は差し引かれるので、1 ノッチで 1 段にならない。生のイベントを数える。
+/// 0.26 と同じく Shift を押しているときは横方向のスクロールとして数えない。
+fn wheel_scroll_y(events: &[egui::Event]) -> f32 {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            egui::Event::MouseWheel {
+                delta, modifiers, ..
+            } if !modifiers.shift => Some(delta.y),
+            _ => None,
+        })
+        .sum()
+}
+
 /// 映像上のホイール操作と「音量を上げる / 下げる」のホットキーで音量を変えたときの、
 /// 適用すべき `(音量, ミュート状態)`。
 ///
@@ -78,7 +96,7 @@ impl CaptureCardViewer {
     /// ウィンドウ表示とフルスクリーンの両方から呼ぶ。以前は同じ処理が両方に
     /// 写してあり、片方だけ直す事故が起きやすかった。
     pub(super) fn handle_volume_scroll(&mut self, ctx: &egui::Context) {
-        let scroll_y = ctx.input(|i| i.raw_scroll_delta.y);
+        let scroll_y = ctx.input(|i| wheel_scroll_y(&i.events));
         if scroll_y == 0.0 {
             return;
         }
@@ -184,6 +202,37 @@ impl CaptureCardViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wheel(y: f32, shift: bool) -> egui::Event {
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, y),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers {
+                shift,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn wheel_scroll_y_sums_vertical_wheel_events() {
+        let events = [
+            wheel(1.0, false),
+            egui::Event::PointerGone,
+            wheel(1.0, false),
+        ];
+        assert_eq!(wheel_scroll_y(&events), 2.0);
+        assert_eq!(wheel_scroll_y(&[wheel(-1.0, false)]), -1.0);
+    }
+
+    #[test]
+    fn wheel_scroll_y_ignores_shift_and_other_events() {
+        // Shift + ホイールは横スクロール。音量は変えない（0.26 と同じ）
+        assert_eq!(wheel_scroll_y(&[wheel(1.0, true)]), 0.0);
+        assert_eq!(wheel_scroll_y(&[egui::Event::PointerGone]), 0.0);
+        assert_eq!(wheel_scroll_y(&[]), 0.0);
+    }
 
     /// 音量 OSD のバーの中身を取り出す。テキスト以外の形で返ってきたら落とす
     fn volume_bar(volume: f32) -> (String, f32, f32) {
