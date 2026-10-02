@@ -67,6 +67,40 @@ fn geometry_to_record(minimized: Option<bool>, maximized: Option<bool>) -> Geome
     }
 }
 
+/// 設定へ記録するウィンドウの位置（外枠の左上）と大きさ（内側）の組
+type WindowGeometry = ((f32, f32), (f32, f32));
+
+/// ウィンドウの位置と大きさの記録で、フレームをまたいで覚えておくもの。
+/// フィールドは `app/mod.rs` の `CaptureCardViewer` に 1 つだけ置く
+#[derive(Debug, Default)]
+pub(super) struct WindowRecordState {
+    /// 位置と大きさを最後に書き換える前の値。最大化に入る瞬間の取り違えを戻す先
+    previous_geometry: Option<WindowGeometry>,
+}
+
+/// 最大化に入った瞬間に記録してしまった位置と大きさを、戻す先を返す。
+///
+/// winit は最大化を `WM_SIZE` で知るが、egui が渡す矩形は OS から毎フレーム
+/// 取り直す。そのため最大化した直後に「最大化ではない」と「作業領域いっぱいの
+/// 矩形」が同じフレームで報告されることがある（実測で 3〜6 回に 1 回）。
+/// そのフレームの矩形は通常のウィンドウとして記録されてしまう。
+///
+/// 最大化が報告されたとき、記録済みの値（`saved`）がいまの最大化の矩形
+/// （`maximized_now`）と同じなら、それはこの取り違えで書いたもの。その前の値
+/// （`previous`）を返す。同じでなければ `None`（戻さない）
+fn geometry_to_roll_back(
+    saved: Option<WindowGeometry>,
+    maximized_now: Option<WindowGeometry>,
+    previous: Option<WindowGeometry>,
+) -> Option<WindowGeometry> {
+    match (saved, maximized_now, previous) {
+        (Some(saved), Some(now), Some(previous)) if saved == now && previous != now => {
+            Some(previous)
+        }
+        _ => None,
+    }
+}
+
 /// ウィンドウ端の当たり判定。`pos` が `rect` の縁から `margin` 以内なら、
 /// その縁に対応する `ResizeDirection` を返す。縁から離れていれば `None`。
 ///
@@ -150,11 +184,6 @@ impl CaptureCardViewer {
     /// **ここでは書き出さない。** ウィンドウのドラッグ中は毎フレーム値が変わるため、
     /// 変わるたびに保存すると最大 60 回/秒のディスク書き込みになる。
     pub(super) fn record_window_geometry(&mut self, viewport: &egui::ViewportInfo) {
-        // 起動時に最大化を送ったフレームは、まだ最大化前の状態が報告される。
-        // そのフレームだけは maximized を書き換えない。書き換えると、最大化が効く前に
-        // 終了したとき（on_exit は必ず保存する）に最大化を失う。位置と大きさは
-        // 戻り先そのものなので、このフレームも記録してよい
-        let startup_maximize_pending = std::mem::take(&mut self.startup_maximize_pending);
         if !Self::should_record_window_geometry(self.is_fullscreen, viewport.fullscreen) {
             return;
         }
@@ -165,17 +194,35 @@ impl CaptureCardViewer {
         let maximized = record == GeometryRecord::Maximized;
         let current_size = viewport.inner_rect.map(|r| (r.width(), r.height()));
         let current_pos = viewport.outer_rect.map(|r| (r.left(), r.top()));
+        let previous_geometry = &mut self.window_record.previous_geometry;
         let changed = match self.settings.lock() {
             Ok(mut settings) => {
                 let mut changed = false;
-                let keep_flag = startup_maximize_pending && !maximized;
-                if !keep_flag && settings.ui.maximized != maximized {
+                if settings.ui.maximized != maximized {
                     settings.ui.maximized = maximized;
                     changed = true;
                 }
-                // 最大化中の矩形は残さない。前の位置と大きさが、次回起動して
-                // 最大化を解除したときの戻り先になる
-                if !maximized {
+                let saved = settings
+                    .ui
+                    .last_window_pos
+                    .zip(settings.ui.last_window_size);
+                let current = current_pos.zip(current_size);
+                if maximized {
+                    // 最大化中の矩形は残さない。前の位置と大きさが、次回起動して
+                    // 最大化を解除したときの戻り先になる。最大化に入った瞬間に
+                    // 取り違えて書いていたら、その前の値へ戻す
+                    if let Some((pos, size)) =
+                        geometry_to_roll_back(saved, current, *previous_geometry)
+                    {
+                        info!("最大化に入った瞬間に記録した位置と大きさを、その前の値へ戻した");
+                        settings.ui.last_window_pos = Some(pos);
+                        settings.ui.last_window_size = Some(size);
+                        changed = true;
+                    }
+                } else {
+                    if current.is_some() && saved != current {
+                        *previous_geometry = saved;
+                    }
                     if let Some(size) = current_size {
                         if settings.ui.last_window_size != Some(size) {
                             settings.ui.last_window_size = Some(size);
@@ -201,35 +248,17 @@ impl CaptureCardViewer {
         }
     }
 
-    /// 起動直後の最初のフレームで、最前面表示と最大化をウィンドウへ適用する。
-    /// `apply_settings` で設定を取り込んだあとに呼ぶ。
+    /// 起動直後の最初のフレームで、最前面表示をウィンドウへ適用する。
     ///
-    /// - ウィンドウレベルは `always_on_top` を取り込んだあとに送る。順序を
-    ///   入れ替えると、既定値の false で 1 度適用されてしまう
-    /// - **最大化は `ViewportBuilder::with_maximized` では効かない。** eframe 0.26 は
-    ///   ウィンドウを作ったあとで `with_inner_size` / `with_position` の値を
-    ///   ウィンドウへ設定し直し、winit はそれを受けて最大化を外す。大きさと位置は
-    ///   最大化を解除したときの戻り先として要るので、ビルダーには残したまま、
-    ///   ここで最大化を送る（#318、`docs/design/window.md`）
-    pub(super) fn apply_startup_window_state(&mut self, ctx: &egui::Context) {
+    /// `apply_settings` で `always_on_top` を取り込んだあとに呼ぶ。順序を
+    /// 入れ替えると、既定値の false で 1 度適用されてしまう。最大化はここではなく
+    /// `ViewportBuilder::with_maximized` で決める（`main.rs`）
+    pub(super) fn apply_startup_window_level(&self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
             egui::WindowLevel::AlwaysOnTop
         } else {
             egui::WindowLevel::Normal
         }));
-
-        let maximized = match self.settings.lock() {
-            Ok(settings) => settings.ui.maximized,
-            Err(_) => {
-                warn!("起動時の最大化の判定で settings のロックを取得できない");
-                false
-            }
-        };
-        if maximized {
-            info!("前回は最大化して終了していたので最大化する");
-            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
-            self.startup_maximize_pending = true;
-        }
     }
 
     /// 最前面表示を切り替える。
@@ -457,6 +486,63 @@ mod tests {
     fn geometry_to_record_unknown_state_is_treated_as_normal() {
         // 状態を報告しない環境では、最大化を扱う前と同じく位置と大きさを記録する
         assert_eq!(geometry_to_record(None, None), GeometryRecord::Normal);
+    }
+
+    const NORMAL: WindowGeometry = ((100.0, 100.0), (1280.0, 720.0));
+    const MAXIMIZED: WindowGeometry = ((-8.0, -8.0), (1918.0, 881.0));
+
+    #[test]
+    fn geometry_to_roll_back_recorded_the_maximized_rect_returns_previous() {
+        // 最大化に入った瞬間、「最大化ではない」と最大化の矩形が同じフレームで
+        // 報告されて記録してしまった。その前の値へ戻す
+        assert_eq!(
+            geometry_to_roll_back(Some(MAXIMIZED), Some(MAXIMIZED), Some(NORMAL)),
+            Some(NORMAL)
+        );
+    }
+
+    #[test]
+    fn geometry_to_roll_back_kept_the_normal_rect_returns_none() {
+        // 取り違えが起きなかった（記録済みの値は最大化前のまま）
+        assert_eq!(
+            geometry_to_roll_back(Some(NORMAL), Some(MAXIMIZED), None),
+            None
+        );
+        assert_eq!(
+            geometry_to_roll_back(
+                Some(NORMAL),
+                Some(MAXIMIZED),
+                Some(((0.0, 0.0), (640.0, 480.0)))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn geometry_to_roll_back_without_previous_or_current_returns_none() {
+        // 前の値が無い（起動してから一度も動かしていない）なら戻しようがない
+        assert_eq!(
+            geometry_to_roll_back(Some(MAXIMIZED), Some(MAXIMIZED), None),
+            None
+        );
+        // 矩形が報告されないときは比べられない
+        assert_eq!(
+            geometry_to_roll_back(Some(MAXIMIZED), None, Some(NORMAL)),
+            None
+        );
+        assert_eq!(
+            geometry_to_roll_back(None, Some(MAXIMIZED), Some(NORMAL)),
+            None
+        );
+    }
+
+    #[test]
+    fn geometry_to_roll_back_previous_equal_to_maximized_returns_none() {
+        // 前の値も最大化の矩形と同じなら、戻しても直らないので戻さない
+        assert_eq!(
+            geometry_to_roll_back(Some(MAXIMIZED), Some(MAXIMIZED), Some(MAXIMIZED)),
+            None
+        );
     }
 
     #[test]

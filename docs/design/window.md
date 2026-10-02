@@ -32,6 +32,6 @@
 
 判定は `geometry_to_record`（純粋関数）。最大化か最小化かが分からない（`None`）ときは通常のウィンドウとして記録する。最大化を扱う前と同じ動きになる。
 
-- **最大化中に残した位置と大きさは、最大化を解除したときの戻り先になる。** 起動時はそれを `with_inner_size` / `with_position` に渡したうえで最大化する
-- **起動時の最大化は `ViewportBuilder::with_maximized` では効かない。** eframe 0.26 はウィンドウを作ったあとで `with_inner_size` / `with_position` の値をウィンドウへ設定し直し（`apply_viewport_builder_to_window`）、winit はそれを受けて最大化を外す。そのため最初のフレームで `ViewportCommand::Maximized(true)` を送る（`apply_startup_window_state`）。**そのフレームはまだ最大化前の状態が報告されるので、`maximized` を書き換えない**（`startup_maximize_pending`）。書き換えると、最大化が効く前に終了したとき（`on_exit` は必ず保存する）に最大化を失う。位置と大きさはそのフレームも記録する（最大化の戻り先そのもの）
+- **最大化中に残した位置と大きさは、最大化を解除したときの戻り先になる。** 起動時はそれを `with_inner_size` / `with_position` に渡したうえで `with_maximized` で最大化する（`main.rs`）。eframe 0.36 では最初のフレームから最大化が報告される。0.26 では作成後に大きさと位置を設定し直して最大化が外れていたので、egui を戻すときは確かめ直す
+- **最大化に入った瞬間の 1 フレームで、矩形を取り違えて記録することがある。** winit は最大化を `WM_SIZE` で知るが、egui の矩形は OS から毎フレーム取り直すので、「最大化ではない」と作業領域いっぱいの矩形が同じフレームで報告される（フェイクデバイスで最大化を繰り返して 3〜6 回に 1 回）。そのため位置と大きさを書き換える前の値を 1 つ覚えておき（`WindowRecordState`）、最大化が報告されたときに記録済みの値がいまの最大化の矩形と同じなら、その前の値へ戻す（`geometry_to_roll_back`）
 - 保存された位置が画面外を指していて捨てた場合（`is_position_visible`）も、最大化は OS の既定の配置のモニタで行われる
