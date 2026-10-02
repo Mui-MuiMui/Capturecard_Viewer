@@ -470,13 +470,8 @@ impl eframe::App for CaptureCardViewer {
             info!("起動直後の設定適用とデバイスの接続を始める");
             self.apply_settings(true);
 
-            // ウィンドウレベルは always_on_top を設定から取り込んだあとに適用する。
-            // 順序を入れ替えると、既定値の false で 1 度適用されてしまう
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
-                egui::WindowLevel::AlwaysOnTop
-            } else {
-                egui::WindowLevel::Normal
-            }));
+            // 最前面表示と最大化。設定を取り込んだあとに適用する
+            self.apply_startup_window_state(ctx);
 
             // 前回の更新で残った `.old` / `.new` を消す（別スレッド）
             self.clean_up_update_leftovers();

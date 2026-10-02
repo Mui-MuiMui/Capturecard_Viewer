@@ -123,6 +123,10 @@ pub struct UiSettings {
     pub maintain_aspect_ratio: bool,
     pub last_window_size: Option<(f32, f32)>,
     pub last_window_pos: Option<(f32, f32)>,
+    // 最大化していたか。最大化中は last_window_size / last_window_pos を
+    // 更新しないので、そちらは最大化を解除したときの戻り先になる
+    // （`docs/design/window.md`）
+    pub maximized: bool,
     pub always_on_top: bool,
     pub enable_drag_move: bool,
     // 映像の上に FPS などの統計を重ねて出すか
@@ -147,6 +151,7 @@ impl Default for UiSettings {
             maintain_aspect_ratio: true,
             last_window_size: None,
             last_window_pos: None,
+            maximized: false,
             always_on_top: false,
             enable_drag_move: true,
             // 常時出しているものではないので、既定は非表示にする
@@ -257,6 +262,39 @@ mod tests {
         assert_eq!(settings.ui.volume, 80.0);
         assert!(settings.ui.always_on_top);
         assert!(settings.ui.show_stats_overlay);
+    }
+
+    #[test]
+    fn app_settings_missing_maximized_defaults_to_not_maximized() {
+        // 最大化を記録する前の版の設定ファイルには maximized が無い。
+        // 欠けていても他の項目が保持され、最大化せずに起動すること
+        let config = without_key(FULL_CONFIG, "maximized");
+        assert!(
+            !config.contains("maximized ="),
+            "テスト用の設定から maximized が消えていない"
+        );
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("maximized が欠けていても読めなければならない");
+
+        assert!(!settings.ui.maximized); // 既定値は false
+        assert_eq!(settings.ui.last_window_size, Some((800.0, 600.0)));
+        assert_eq!(settings.ui.last_window_pos, Some((10.0, 20.0)));
+    }
+
+    #[test]
+    fn app_settings_maximized_survives_a_save_and_load_roundtrip() {
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("設定ファイルを読めなければならない");
+        assert!(settings.ui.maximized);
+
+        let saved = toml::to_string(&settings).expect("書き出せなければならない");
+        let restored: AppSettings = toml::from_str(&saved).expect("読み戻せなければならない");
+
+        assert!(restored.ui.maximized);
+        // 最大化を解除したときの戻り先も一緒に残る
+        assert_eq!(restored.ui.last_window_size, Some((800.0, 600.0)));
+        assert_eq!(restored.ui.last_window_pos, Some((10.0, 20.0)));
     }
 
     #[test]

@@ -74,6 +74,11 @@ fn main() -> Result<(), eframe::Error> {
         }
     }
 
+    // 前回最大化して終了していても、ここでは with_maximized を使わない。
+    // eframe がウィンドウを作ったあとに上の大きさと位置を設定し直し、それで
+    // 最大化が外れるため。最大化は最初のフレームで送る（apply_startup_window_state）。
+    // 上の大きさと位置は最大化の前のもので、最大化を解除したときの戻り先になる
+
     let options = eframe::NativeOptions {
         viewport: viewport_builder,
         ..Default::default()

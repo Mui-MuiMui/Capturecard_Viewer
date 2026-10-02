@@ -575,6 +575,7 @@ mod tests {
                 maintain_aspect_ratio: false,
                 last_window_size: Some((800.0, 600.0)),
                 last_window_pos: Some((10.0, 20.0)),
+                maximized: false,
                 always_on_top: true,
                 enable_drag_move: false,
                 show_stats_overlay: true,

@@ -36,6 +36,37 @@ pub(super) fn needs_drag_move_guard(to_borderless: bool, enable_drag_move: bool)
     to_borderless && !enable_drag_move
 }
 
+/// フルスクリーンでないときに、ウィンドウの状態から設定へ何を記録するか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeometryRecord {
+    /// 何も記録しない
+    Skip,
+    /// 最大化していることだけを記録し、位置と大きさは前の値を残す
+    Maximized,
+    /// 最大化していないことと、位置と大きさを記録する
+    Normal,
+}
+
+/// ウィンドウの状態（OS からの報告。`None` は不明）から、何を記録するかを決める。
+///
+/// - **最小化中は何も記録しない。** 報告される位置は画面外の仮の値で、
+///   最大化したまま最小化すると最大化も外れて報告される。記録すると、
+///   最小化したまま終了したときにその前の状態を失う
+/// - **最大化中は最大化したことだけを記録し、位置と大きさは残す。**
+///   最大化中の矩形は作業領域いっぱい（Windows では枠の分だけ外の (-8, -8) から）
+///   なので、記録すると次回は最大化でないウィンドウがその大きさで出る（#318）。
+///   残した位置と大きさは、次回起動して最大化を解除したときの戻り先になる
+/// - 状態が分からないときは通常のウィンドウとして扱う。最大化を扱う前と同じ動き
+fn geometry_to_record(minimized: Option<bool>, maximized: Option<bool>) -> GeometryRecord {
+    if minimized == Some(true) {
+        GeometryRecord::Skip
+    } else if maximized == Some(true) {
+        GeometryRecord::Maximized
+    } else {
+        GeometryRecord::Normal
+    }
+}
+
 /// ウィンドウ端の当たり判定。`pos` が `rect` の縁から `margin` 以内なら、
 /// その縁に対応する `ResizeDirection` を返す。縁から離れていれば `None`。
 ///
@@ -114,7 +145,7 @@ impl CaptureCardViewer {
     /// フルスクリーン中は画面全体の矩形しか取れないため記録しない
     /// （`should_record_window_geometry`）。こうすることで、フルスクリーンへ入る
     /// 直前のジオメトリが設定に残り、フルスクリーンのまま終了しても次回は
-    /// ウィンドウ表示で復元される。
+    /// ウィンドウ表示で復元される。最小化と最大化の扱いは `geometry_to_record`。
     ///
     /// **ここでは書き出さない。** ウィンドウのドラッグ中は毎フレーム値が変わるため、
     /// 変わるたびに保存すると最大 60 回/秒のディスク書き込みになる。
@@ -122,21 +153,34 @@ impl CaptureCardViewer {
         if !Self::should_record_window_geometry(self.is_fullscreen, viewport.fullscreen) {
             return;
         }
+        let record = geometry_to_record(viewport.minimized, viewport.maximized);
+        if record == GeometryRecord::Skip {
+            return;
+        }
+        let maximized = record == GeometryRecord::Maximized;
         let current_size = viewport.inner_rect.map(|r| (r.width(), r.height()));
         let current_pos = viewport.outer_rect.map(|r| (r.left(), r.top()));
         let changed = match self.settings.lock() {
             Ok(mut settings) => {
                 let mut changed = false;
-                if let Some(size) = current_size {
-                    if settings.ui.last_window_size != Some(size) {
-                        settings.ui.last_window_size = Some(size);
-                        changed = true;
-                    }
+                if settings.ui.maximized != maximized {
+                    settings.ui.maximized = maximized;
+                    changed = true;
                 }
-                if let Some(pos) = current_pos {
-                    if settings.ui.last_window_pos != Some(pos) {
-                        settings.ui.last_window_pos = Some(pos);
-                        changed = true;
+                // 最大化中の矩形は残さない。前の位置と大きさが、次回起動して
+                // 最大化を解除したときの戻り先になる
+                if !maximized {
+                    if let Some(size) = current_size {
+                        if settings.ui.last_window_size != Some(size) {
+                            settings.ui.last_window_size = Some(size);
+                            changed = true;
+                        }
+                    }
+                    if let Some(pos) = current_pos {
+                        if settings.ui.last_window_pos != Some(pos) {
+                            settings.ui.last_window_pos = Some(pos);
+                            changed = true;
+                        }
                     }
                 }
                 changed
@@ -148,6 +192,36 @@ impl CaptureCardViewer {
         };
         if changed {
             self.mark_settings_dirty();
+        }
+    }
+
+    /// 起動直後の最初のフレームで、最前面表示と最大化をウィンドウへ適用する。
+    /// `apply_settings` で設定を取り込んだあとに呼ぶ。
+    ///
+    /// - ウィンドウレベルは `always_on_top` を取り込んだあとに送る。順序を
+    ///   入れ替えると、既定値の false で 1 度適用されてしまう
+    /// - **最大化は `ViewportBuilder::with_maximized` では効かない。** eframe 0.26 は
+    ///   ウィンドウを作ったあとで `with_inner_size` / `with_position` の値を
+    ///   ウィンドウへ設定し直し、winit はそれを受けて最大化を外す。大きさと位置は
+    ///   最大化を解除したときの戻り先として要るので、ビルダーには残したまま、
+    ///   ここで最大化を送る（#318、`docs/design/window.md`）
+    pub(super) fn apply_startup_window_state(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
+            egui::WindowLevel::AlwaysOnTop
+        } else {
+            egui::WindowLevel::Normal
+        }));
+
+        let maximized = match self.settings.lock() {
+            Ok(settings) => settings.ui.maximized,
+            Err(_) => {
+                warn!("起動時の最大化の判定で settings のロックを取得できない");
+                false
+            }
+        };
+        if maximized {
+            info!("前回は最大化して終了していたので最大化する");
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
         }
     }
 
@@ -338,6 +412,44 @@ mod tests {
         assert!(!CaptureCardViewer::should_record_window_geometry(
             true, None
         ));
+    }
+
+    #[test]
+    fn geometry_to_record_normal_window_records_geometry() {
+        assert_eq!(
+            geometry_to_record(Some(false), Some(false)),
+            GeometryRecord::Normal
+        );
+    }
+
+    #[test]
+    fn geometry_to_record_maximized_keeps_previous_geometry() {
+        // 最大化中の矩形は作業領域いっぱい。記録すると次回は最大化でない
+        // ウィンドウがその大きさで出る（#318）
+        assert_eq!(
+            geometry_to_record(Some(false), Some(true)),
+            GeometryRecord::Maximized
+        );
+    }
+
+    #[test]
+    fn geometry_to_record_minimized_records_nothing() {
+        // 最大化したまま最小化すると、最大化も外れて報告される。
+        // 記録すると最小化のまま終了したときに最大化を失う
+        assert_eq!(
+            geometry_to_record(Some(true), Some(false)),
+            GeometryRecord::Skip
+        );
+        assert_eq!(
+            geometry_to_record(Some(true), Some(true)),
+            GeometryRecord::Skip
+        );
+    }
+
+    #[test]
+    fn geometry_to_record_unknown_state_is_treated_as_normal() {
+        // 状態を報告しない環境では、最大化を扱う前と同じく位置と大きさを記録する
+        assert_eq!(geometry_to_record(None, None), GeometryRecord::Normal);
     }
 
     #[test]

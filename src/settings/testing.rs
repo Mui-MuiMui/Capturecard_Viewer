@@ -44,6 +44,7 @@ muted = true
 maintain_aspect_ratio = false
 last_window_size = [800.0, 600.0]
 last_window_pos = [10.0, 20.0]
+maximized = true
 always_on_top = true
 enable_drag_move = false
 show_stats_overlay = true
