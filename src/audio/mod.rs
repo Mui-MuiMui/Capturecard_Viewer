@@ -49,7 +49,8 @@ pub use controls::AudioControls;
 pub use fake::{FakeAudioCapture, FakeAudioOptions};
 pub use fake_stream::FakePinSource;
 pub use pin_feed::{
-    AudioPinFeed, AudioPinState, PinConnection, PinFailure, PinFormat, PinSampleType,
+    AudioPinFeed, AudioPinPresence, AudioPinState, PinConnection, PinFailure, PinFormat,
+    PinSampleType,
 };
 pub(crate) use resample::decide_resample_correction;
 pub use resample::{ResampleStatus, ResampleTelemetry};

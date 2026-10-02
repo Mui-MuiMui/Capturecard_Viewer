@@ -7,10 +7,10 @@
 //! `worker_audio_connect`（開くか待つか）と `worker_audio_timers`（開き直すか）。
 //! 理由は `docs/design/directshow-audio.md` の (3)。
 
-use crate::audio::{AudioInputRoute, AudioPinState, PinFailure, PinFormat};
+use crate::audio::{AudioInputRoute, AudioPinPresence, AudioPinState, PinFailure, PinFormat};
 use crate::i18n::{self, Text};
 use crate::video::capture::CaptureApi;
-use crate::video::ActiveVideo;
+use crate::video::{directshow_friendly_name, ActiveVideo};
 
 /// 音声ピンを使えないので、音声を開かずに待っている理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,22 +101,56 @@ pub(super) fn should_resync_pin_audio(
     }
 }
 
-/// 設定ダイアログで映像デバイスの音声（項目名は映像デバイスの名前）を選べるか（#394）。
+/// 設定ダイアログで映像デバイスの音声（項目名は映像デバイスの名前）を選べるか
+/// （#394、#409）。
 ///
-/// 選べるのは、いま開いている映像に音声ピンがあるとき（繋いでいる・繋いでいない・
-/// 繋げなかった）だけ。`Ok` には繋いでいる音声ピンの形式を入れる。サンプリング
-/// レートとチャンネル数の選択肢をこの形式 1 つで作るためで、繋いでいない間は
-/// `None`（入力側の制約なし）。選べないときは理由を返す
+/// - `video`: いま開いている映像の観測値
+/// - `presence`: 列挙の時点で調べた、対象の映像デバイス（開いていればその相手、
+///   開いていなければ設定の映像デバイス）の音声ピンの有無（`presence_of`）。
+///   一覧に載っていなければ `None`
+///
+/// **選べないのは、音声ピンが無いと分かっているときだけ。** 開いた結果で無い
+/// （DirectShow で開いて無かった）か、列挙の時点で無いと分かったとき。開いていない・
+/// Media Foundation で開いた・有無が分からないときは選べる側に倒し、選んで適用したら
+/// 「開かずに待つ + 理由」の経路（`decide_pin_readiness`）に乗る（#409）。
+///
+/// `Ok` には繋いでいる音声ピンの形式を入れる。サンプリングレートとチャンネル数の
+/// 選択肢をこの形式 1 つで作るためで、繋いでいない間は `None`（入力側の制約なし）
 /// （`docs/design/directshow-audio.md` の (5)、(6)）。
-pub(super) fn pin_choice(video: Option<&ActiveVideo>) -> Result<Option<PinFormat>, PinWait> {
+pub(super) fn pin_choice(
+    video: Option<&ActiveVideo>,
+    presence: Option<AudioPinPresence>,
+) -> Result<Option<PinFormat>, PinWait> {
     match decide_pin_readiness(video) {
         PinReadiness::Ready { .. } => Ok(video.and_then(|video| match &video.audio_pin {
             AudioPinState::Connected(connection) => Some(connection.format),
             _ => None,
         })),
         PinReadiness::Wait(PinWait::NotConnected | PinWait::ConnectFailed(_)) => Ok(None),
-        PinReadiness::Wait(reason) => Err(reason),
+        // 開いた結果で無いと分かっている
+        PinReadiness::Wait(PinWait::NoPin) => Err(PinWait::NoPin),
+        // 開いていない・Media Foundation で開いた。列挙の時点の有無で決める
+        PinReadiness::Wait(_) => match presence {
+            Some(AudioPinPresence::Absent) => Err(PinWait::NoPin),
+            Some(AudioPinPresence::Present | AudioPinPresence::Unknown) | None => Ok(None),
+        },
     }
+}
+
+/// 列挙の時点の有無の一覧から、映像デバイス `device` の分を引く（#409）。
+///
+/// 一覧の名前と `device` は「(DirectShow)」の印の有無が揃っていない（一覧は
+/// DirectShow の表示名、設定と開いた結果は印付きのことがある）ので、両方から
+/// 印を外して突き合わせる。載っていなければ `None`。
+pub(super) fn presence_of(
+    list: &[(String, AudioPinPresence)],
+    device: &str,
+) -> Option<AudioPinPresence> {
+    let bare = |name: &str| directshow_friendly_name(name).unwrap_or(name).to_string();
+    let wanted = bare(device);
+    list.iter()
+        .find(|(name, _)| bare(name) == wanted)
+        .map(|(_, presence)| *presence)
 }
 
 /// 入力が未設定のまま起動したとき、最初の映像の試行の結果から入力を
@@ -316,27 +350,90 @@ mod tests {
             sample_type: PinSampleType::I16,
         };
         let active = video(CaptureApi::DirectShow, connected(1));
-        assert_eq!(pin_choice(Some(&active)), Ok(Some(format)));
+        assert_eq!(pin_choice(Some(&active), None), Ok(Some(format)));
         // 繋いでいない・繋げなかったときも選べる。形式は分からないので制約にしない
         for pin in [
             AudioPinState::Available,
             AudioPinState::Failed(PinFailure::Connect("E_FAIL".to_string())),
         ] {
             let active = video(CaptureApi::DirectShow, pin);
-            assert_eq!(pin_choice(Some(&active)), Ok(None));
+            assert_eq!(pin_choice(Some(&active), None), Ok(None));
+            // 開いた結果が先。列挙の時点の有無が食い違っても見ない
+            let absent = Some(AudioPinPresence::Absent);
+            assert_eq!(pin_choice(Some(&active), absent), Ok(None));
         }
     }
 
     #[test]
-    fn pin_choice_gives_the_reason_when_not_selectable() {
-        assert_eq!(pin_choice(None), Err(PinWait::VideoNotOpen));
-        let media_foundation = video(CaptureApi::MediaFoundation, AudioPinState::NotApplicable);
-        assert_eq!(
-            pin_choice(Some(&media_foundation)),
-            Err(PinWait::MediaFoundation)
-        );
+    fn pin_choice_is_not_selectable_only_when_known_to_have_no_pin() {
+        // DirectShow で開いて音声ピンが無かった。列挙の時点の有無は見ない
         let missing = video(CaptureApi::DirectShow, AudioPinState::Missing);
-        assert_eq!(pin_choice(Some(&missing)), Err(PinWait::NoPin));
+        for presence in [
+            None,
+            Some(AudioPinPresence::Present),
+            Some(AudioPinPresence::Unknown),
+        ] {
+            assert_eq!(pin_choice(Some(&missing), presence), Err(PinWait::NoPin));
+        }
+        // 開いていない・Media Foundation で開いたときは、列挙の時点で無いと分かった
+        // ときだけ選べない
+        let media_foundation = video(CaptureApi::MediaFoundation, AudioPinState::NotApplicable);
+        for active in [None, Some(&media_foundation)] {
+            assert_eq!(
+                pin_choice(active, Some(AudioPinPresence::Absent)),
+                Err(PinWait::NoPin)
+            );
+        }
+    }
+
+    #[test]
+    fn pin_choice_is_selectable_before_the_video_opens_unless_known_absent() {
+        // 開いていなくても、ある・不明・一覧に無いなら選べる。適用したら開かずに待つ
+        // 経路（decide_pin_readiness）に乗る
+        let media_foundation = video(CaptureApi::MediaFoundation, AudioPinState::NotApplicable);
+        for active in [None, Some(&media_foundation)] {
+            for presence in [
+                None,
+                Some(AudioPinPresence::Present),
+                Some(AudioPinPresence::Unknown),
+            ] {
+                assert_eq!(pin_choice(active, presence), Ok(None), "{presence:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn presence_of_matches_names_with_or_without_the_directshow_mark() {
+        let list = vec![
+            (
+                "AVerMedia GC551 Video Capture".to_string(),
+                AudioPinPresence::Present,
+            ),
+            ("OBS Virtual Camera".to_string(), AudioPinPresence::Absent),
+        ];
+        assert_eq!(
+            presence_of(&list, "AVerMedia GC551 Video Capture (DirectShow)"),
+            Some(AudioPinPresence::Present)
+        );
+        assert_eq!(
+            presence_of(&list, "AVerMedia GC551 Video Capture"),
+            Some(AudioPinPresence::Present)
+        );
+        assert_eq!(
+            presence_of(&list, "OBS Virtual Camera (DirectShow)"),
+            Some(AudioPinPresence::Absent)
+        );
+        assert_eq!(presence_of(&list, "USB Video"), None);
+        assert_eq!(presence_of(&[], "USB Video"), None);
+        // 一覧の側が印付きでも突き合わせる
+        let marked = vec![(
+            "USB Video (DirectShow)".to_string(),
+            AudioPinPresence::Absent,
+        )];
+        assert_eq!(
+            presence_of(&marked, "USB Video"),
+            Some(AudioPinPresence::Absent)
+        );
     }
 
     #[test]

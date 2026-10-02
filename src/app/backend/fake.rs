@@ -13,8 +13,8 @@ use super::{
     AudioBackend, BackendShared, CaptureRequest, DeviceBackends, VideoBackend, VideoEnumeration,
 };
 use crate::audio::{
-    ActiveAudio, AudioCapabilities, AudioDirection, AudioError, AudioPinFeed, FakeAudioCapture,
-    FakeAudioOptions, PassthroughRequest, ResampleStatus, ResampleTelemetry,
+    ActiveAudio, AudioCapabilities, AudioDirection, AudioError, AudioPinFeed, AudioPinPresence,
+    FakeAudioCapture, FakeAudioOptions, PassthroughRequest, ResampleStatus, ResampleTelemetry,
 };
 use crate::settings::VideoBackendSetting;
 use crate::video::{
@@ -246,6 +246,19 @@ impl VideoBackend for FakeVideoCapture {
 
     fn active(&self) -> Option<ActiveVideo> {
         FakeVideoCapture::active(self)
+    }
+
+    /// シナリオ audio-pin なら全台に音声ピンがあり、無ければ全台に無い（#409）
+    fn audio_pin_presence(&mut self) -> Vec<(String, AudioPinPresence)> {
+        let presence = if self.has_audio_pin() {
+            AudioPinPresence::Present
+        } else {
+            AudioPinPresence::Absent
+        };
+        FakeVideoCapture::list_devices(self)
+            .into_iter()
+            .map(|(name, _)| (name, presence))
+            .collect()
     }
 
     fn enumerate(&self) -> VideoEnumeration {

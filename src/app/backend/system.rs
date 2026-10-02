@@ -22,7 +22,7 @@ use super::{
 };
 use crate::audio::{
     self, ActiveAudio, AudioCapabilities, AudioCapture, AudioDirection, AudioError, AudioPinFeed,
-    PassthroughRequest, ResampleStatus, ResampleTelemetry,
+    AudioPinPresence, PassthroughRequest, ResampleStatus, ResampleTelemetry,
 };
 use crate::settings::VideoBackendSetting;
 use crate::video::{
@@ -318,6 +318,10 @@ impl VideoBackend for SystemVideo {
             Some(VideoRoute::DirectShow) => self.direct_show.active(),
             _ => self.media_foundation.active(),
         }
+    }
+
+    fn audio_pin_presence(&mut self) -> Vec<(String, AudioPinPresence)> {
+        self.direct_show.audio_pin_presence()
     }
 
     fn enumerate(&self) -> VideoEnumeration {

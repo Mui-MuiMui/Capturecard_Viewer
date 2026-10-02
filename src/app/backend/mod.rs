@@ -27,8 +27,8 @@
 //! `DeviceWorker::spawn` の 1 か所だけ。
 
 use crate::audio::{
-    ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, AudioError, AudioTap,
-    PassthroughRequest, ResampleStatus, ResampleTelemetry,
+    ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, AudioError, AudioPinPresence,
+    AudioTap, PassthroughRequest, ResampleStatus, ResampleTelemetry,
 };
 use crate::repaint::RepaintWaker;
 use crate::settings::VideoBackendSetting;
@@ -78,6 +78,14 @@ pub(super) trait VideoBackend {
 
     /// 実際に開いたストリームの内容。開いていなければ `None`
     fn active(&self) -> Option<ActiveVideo>;
+
+    /// 列挙の時点で調べた、各デバイスの音声ピンの有無（#409）。`(名前, 有無)` で、
+    /// 名前は「(DirectShow)」の印の有無を問わない（`monitor_audio_pin::presence_of`
+    /// が印を外して突き合わせる）。設定ダイアログで映像デバイスの音声を選べるかを
+    /// 開く前に決めるためだけに使う。既定は空（モック。載っていない名前は「不明」）
+    fn audio_pin_presence(&mut self) -> Vec<(String, AudioPinPresence)> {
+        Vec::new()
+    }
 
     /// 経路ごとの列挙結果。**ログと「Windows 側にも見えていない」の判定専用**
     /// （`super::worker_connect::log_device_enumeration`）。

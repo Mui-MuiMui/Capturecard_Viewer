@@ -147,6 +147,11 @@ impl FakeVideoCapture {
         self
     }
 
+    /// 音声ピンを持つか（シナリオ audio-pin）。列挙の時点の有無に使う（#409）
+    pub fn has_audio_pin(&self) -> bool {
+        self.audio_pin.is_some()
+    }
+
     /// シナリオ reopen-fail を足す。途絶（disconnect）のあと `reopen_fail` の間は
     /// 開き直しを失敗させ、USB を抜いたままの状態を再現する。
     /// `FakeVideoOptions` に足さないのは、録画のテストが構造体リテラルで組んでいるため

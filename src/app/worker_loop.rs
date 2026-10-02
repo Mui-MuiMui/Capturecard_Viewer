@@ -31,7 +31,7 @@ use super::worker::{
     SharedSnapshot, VideoTarget,
 };
 use super::worker_default_input::DefaultInput;
-use crate::audio::{AudioCapabilities, AudioControls, AudioDirection};
+use crate::audio::{AudioCapabilities, AudioControls, AudioDirection, AudioPinPresence};
 use crate::repaint::RepaintWaker;
 use log::{debug, trace, warn};
 use std::collections::HashMap;
@@ -206,6 +206,8 @@ pub(super) struct WorkerState {
     /// 入力が未設定のまま起動したときの、入力の既定の決まり方（#394）。
     /// 決めている間は音声を理由なしで待たせる（`worker_audio_connect::DefaultInput`）
     pub(super) default_input: DefaultInput,
+    /// 列挙の時点で調べた音声ピンの有無（#409）。`DeviceSnapshot` へ写す
+    pub(super) video_audio_pins: Vec<(String, AudioPinPresence)>,
 }
 
 impl WorkerState {
@@ -246,6 +248,7 @@ impl WorkerState {
             last_audio_failure: None,
             audio_pin_wait: None,
             default_input: DefaultInput::Settled,
+            video_audio_pins: Vec::new(),
         }
     }
 
@@ -291,6 +294,7 @@ impl WorkerState {
             audio_underruns: self.audio.underrun_count(),
             audio_dropped_frames: self.audio.dropped_frame_count(),
             audio_xruns: self.audio.xrun_count(),
+            video_audio_pins: self.video_audio_pins.clone(),
         };
         match self.snapshot.write() {
             Ok(mut slot) => *slot = next,

@@ -28,9 +28,10 @@ use windows::Win32::Media::MediaFoundation::{
     FORMAT_WaveFormatEx, MEDIATYPE_Audio, AM_MEDIA_TYPE, PIN_CATEGORY_CAPTURE,
 };
 
+use super::devices::{bind_filter, DeviceEntry};
 use super::filter::Renderer;
 use super::media_type::delete_media_type;
-use crate::audio::{AudioPinFeed, PinFailure, PinFormat, PinSampleType};
+use crate::audio::{AudioPinFeed, AudioPinPresence, PinFailure, PinFormat, PinSampleType};
 
 /// 音声ピンに提案する 1 塊の長さ（ms）。このアプリの前提（パススルーの
 /// リングと録画の PTS）は 10ms 前後の塊で成り立っている（設計の「塊の長さ」）
@@ -236,6 +237,62 @@ fn find_audio_pin(builder: &ICaptureGraphBuilder2, source: &IBaseFilter) -> Opti
         }
     }
     None
+}
+
+/// 列挙の時点で、映像デバイスに音声ピンがあるかを調べる（#409）。
+///
+/// 名札からフィルターを作り、出力ピンが勧めるメディアタイプに音声があるかを
+/// 見るだけで、グラフには入れず繋がない。`find_audio_pin` の「カテゴリを問わず
+/// 探す」と同じ範囲を、組み立て役なしで見る（見つからないのか失敗したのかを
+/// 分けるため）。途中で失敗したら「不明」。
+pub(super) fn probe_presence(entry: &DeviceEntry) -> AudioPinPresence {
+    let Ok(filter) = bind_filter(entry) else {
+        return AudioPinPresence::Unknown;
+    };
+    match filter_has_audio_output(&filter) {
+        Ok(true) => AudioPinPresence::Present,
+        Ok(false) => AudioPinPresence::Absent,
+        Err(_) => AudioPinPresence::Unknown,
+    }
+}
+
+/// フィルターの出力ピンのどれかが、音声のメディアタイプを勧めるか。
+fn filter_has_audio_output(filter: &IBaseFilter) -> windows::core::Result<bool> {
+    let pins = unsafe { filter.EnumPins()? };
+    loop {
+        let mut slot = [None];
+        let mut fetched = 0u32;
+        if unsafe { pins.Next(&mut slot, Some(&mut fetched)) } != S_OK || fetched == 0 {
+            return Ok(false);
+        }
+        let Some(pin) = slot[0].take() else {
+            return Ok(false);
+        };
+        if unsafe { pin.QueryDirection()? } == PINDIR_OUTPUT && pin_offers_audio(&pin)? {
+            return Ok(true);
+        }
+    }
+}
+
+/// ピンが勧めるメディアタイプに音声があるか。受け取ったメディアタイプは都度解放する。
+fn pin_offers_audio(pin: &IPin) -> windows::core::Result<bool> {
+    let types = unsafe { pin.EnumMediaTypes()? };
+    loop {
+        let mut slot = [ptr::null_mut::<AM_MEDIA_TYPE>()];
+        let mut fetched = 0u32;
+        if unsafe { types.Next(&mut slot, Some(&mut fetched)) } != S_OK || fetched == 0 {
+            return Ok(false);
+        }
+        let mt = slot[0];
+        if mt.is_null() {
+            return Ok(false);
+        }
+        let audio = unsafe { (*mt).majortype } == MEDIATYPE_Audio;
+        unsafe { delete_media_type(mt) };
+        if audio {
+            return Ok(true);
+        }
+    }
 }
 
 /// 音声ピンの対応形式をログへ出す。第 1 段では選ばない（`SetFormat` は第 3 段）。
