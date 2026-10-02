@@ -18,15 +18,11 @@ use std::sync::Arc;
 ///
 /// クリック（右クリックメニュー・ダブルクリック・中クリック）とドラッグ
 /// （ウィンドウの移動）だけを受け、**キーボードフォーカスは受けない**
-/// （`focusable: false`）。`Sense::click_and_drag()` はフォーカスを受けるため、
+/// （`Sense::FOCUSABLE` を立てない）。`Sense::click_and_drag()` はフォーカスを受けるため、
 /// Tab キーで映像エリアにフォーカスが移ると、以後ずっと「何かのウィジェットに
 /// フォーカスがある」状態が続く（#238）。映像エリアにはキーボードで操作する
 /// ものが無いので、フォーカスを受ける理由も無い。
-pub(super) const VIDEO_AREA_SENSE: egui::Sense = egui::Sense {
-    click: true,
-    drag: true,
-    focusable: false,
-};
+pub(super) const VIDEO_AREA_SENSE: egui::Sense = egui::Sense::CLICK.union(egui::Sense::DRAG);
 
 /// 統計オーバーレイに出す行を組み立てる。
 ///
@@ -168,6 +164,7 @@ impl CaptureCardViewer {
                 magnification: egui::TextureFilter::Nearest,
                 minification: egui::TextureFilter::Linear,
                 wrap_mode: egui::TextureWrapMode::ClampToEdge,
+                mipmap_mode: None,
             };
 
             // 長さが合わないフレームは描かず、前のテクスチャを保つ。`from_rgb` は
@@ -195,7 +192,8 @@ impl CaptureCardViewer {
         false
     }
 
-    pub(super) fn show_windowed_ui(&mut self, ctx: &egui::Context) {
+    pub(super) fn show_windowed_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         // 映像が無いときの文言は描画に入る前に決める。
         // 描画のクロージャの中でロックを取らないため
         let placeholder = video_placeholder_text(
@@ -210,8 +208,8 @@ impl CaptureCardViewer {
         let on_resize_edge = self.handle_borderless_resize(ctx);
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().inner_margin(egui::Margin::same(2.0))) // マージンを2pxに設定
-            .show(ctx, |ui| {
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(2))) // マージンを2pxに設定
+            .show(ui, |ui| {
                 // 映像表示エリア
                 let available_size = ui.available_size();
 
@@ -295,7 +293,8 @@ impl CaptureCardViewer {
             });
     }
 
-    pub(super) fn show_fullscreen_ui(&mut self, ctx: &egui::Context) {
+    pub(super) fn show_fullscreen_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         // ウィンドウ表示と同じ理由で、描画に入る前に文言を決める
         let placeholder = video_placeholder_text(
             self.device_snapshot.video_capturing,
@@ -304,8 +303,8 @@ impl CaptureCardViewer {
         );
         // フルスクリーンUI（装飾なし、ウィンドウ版と同等の機能）
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().inner_margin(egui::Margin::same(0.0))) // フルスクリーンはマージン0
-            .show(ctx, |ui| {
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(0))) // フルスクリーンはマージン0
+            .show(ui, |ui| {
                 let available_size = ui.available_size();
 
                 if let Some(texture) = &self.video_texture {
@@ -394,7 +393,7 @@ impl CaptureCardViewer {
         lines.extend(self.recording_stats_lines());
 
         // 設定ダイアログより下に描く（#284）。理由は `show_video_overlay` にある
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
         let area = egui::Rect::from_min_max(
             screen.min + egui::Vec2::splat(STATS_OVERLAY_MARGIN),
             screen.max,
@@ -405,10 +404,10 @@ impl CaptureCardViewer {
             area,
             egui::Align2::LEFT_TOP,
             |ui| {
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(egui::Color32::from_black_alpha(160))
-                    .rounding(4.0)
-                    .inner_margin(egui::Margin::same(6.0))
+                    .corner_radius(4)
+                    .inner_margin(egui::Margin::same(6))
                     .show(ui, |ui| {
                         for line in &lines {
                             ui.label(
@@ -434,7 +433,7 @@ impl CaptureCardViewer {
             return;
         };
         // 設定ダイアログより下に描く（#284）。理由は `show_video_overlay` にある
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
         let area = egui::Rect::from_min_max(
             egui::pos2(
                 screen.left(),
@@ -451,7 +450,7 @@ impl CaptureCardViewer {
                 // 映像の上でも読めるよう、テーマの不透明な地（popup と同じ）に
                 // 設定ダイアログと同じ注意書きを載せる
                 egui::Frame::popup(ui.style())
-                    .inner_margin(egui::Margin::same(2.0))
+                    .inner_margin(egui::Margin::same(2))
                     .show(ui, |ui| {
                         crate::ui::warning_label(ui, text);
                     });

@@ -242,14 +242,14 @@ impl CaptureCardViewer {
         show_video_overlay(
             ctx,
             egui::Id::new("recording_indicator"),
-            ctx.screen_rect().shrink(INDICATOR_MARGIN),
+            ctx.content_rect().shrink(INDICATOR_MARGIN),
             egui::Align2::RIGHT_TOP,
             |ui| {
                 // 統計 OSD と同じ半透明の黒地に白の文字（映像の上で読めるように）
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(egui::Color32::from_black_alpha(160))
-                    .rounding(4.0)
-                    .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+                    .corner_radius(4)
+                    .inner_margin(egui::Margin::symmetric(6, 3))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let (rect, _) = ui.allocate_exact_size(

@@ -16,8 +16,12 @@ print_stdout = "warn"
 print_stderr = "warn"
 
 [dependencies]
-eframe = "0.26"
-egui = "0.26"
+# 描画は 0.26 までの既定と同じ OpenGL（glow）にする。0.36 の既定は wgpu だが、
+# wgpu / naga と DirectX 12・Vulkan のバックエンドまで引き込むわりに、この画面
+# （映像 1 枚とダイアログ）では得るものが無い。wayland / x11 は Linux 向けなので切る。
+# links は更新の通知と「その他」タブのリンクを開くのに要る（webbrowser）
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "links"] }
+egui = "0.36"
 nokhwa = { version = "0.10", features = ["input-msmf", "output-threaded", "decoding"] }
 # realtime は音声のスレッドを MMCSS（Pro Audio）で優先させる。0.15 は常に
 # THREAD_PRIORITY_TIME_CRITICAL へ上げていたが、0.18 からはこのフィーチャが要る

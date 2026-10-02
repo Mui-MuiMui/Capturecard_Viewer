@@ -144,7 +144,7 @@ pub(super) fn show_audio_input_combo(
         .show_ui(ui, |ui| {
             let response = ui.add_enabled(
                 pin.is_selectable(),
-                egui::SelectableLabel::new(pin_selected, pin_label),
+                egui::Button::selectable(pin_selected, pin_label),
             );
             let response = match pin.unavailable_reason() {
                 Some(reason) => response.on_disabled_hover_text(reason),

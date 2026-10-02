@@ -71,7 +71,7 @@ pub(super) struct ListenerState {
     pub(super) focused: bool,
     /// 「フォーカスがあるときだけ反応する」がオンか。設定の反映のたびに書く。
     pub(super) only_when_focused: bool,
-    /// egui がキーボード入力を受けているか（`Context::wants_keyboard_input`）。
+    /// このアプリのテキスト欄に入力中か（`app::hotkeys::is_typing_in_text_field`）。
     /// UI スレッドが毎フレーム書き込む。
     ///
     /// キーを奪わなくなったので、設定ダイアログのテキスト欄へ打った文字も

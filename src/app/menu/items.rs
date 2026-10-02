@@ -225,7 +225,7 @@ fn auto_reconnect_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<Men
 /// 装飾なしで小さくしすぎて端の帯を掴めなくなったときの復帰手段。
 ///
 /// 戻り値は押されたかどうか。**サブメニューの中から呼ぶ側は、`true` の
-/// ときに `ui.close_menu()` を呼ぶこと。** 呼ばないと開いた状態が egui 側に
+/// ときに `ui.close()` を呼ぶこと。** 呼ばないと開いた状態が egui 側に
 /// 残り、次に右クリックしたときにサブメニューが開いたまま出る。
 fn reset_window_size_item(
     ui: &mut egui::Ui,
@@ -316,7 +316,7 @@ fn window_submenu(
         if reset_window_size_item(ui, view, actions) {
             // サブメニュー側も閉じる。本体を閉じるのは
             // `MenuAction::closes_menu` の判定が行う
-            ui.close_menu();
+            ui.close();
         }
 
         menu_rects.push(ui.min_rect().expand(CONTEXT_MENU_HIT_MARGIN));
@@ -351,7 +351,7 @@ fn preset_submenu(
             let is_active = view.active_preset.as_deref() == Some(name.as_str());
             if ui.selectable_label(is_active, name).clicked() {
                 actions.push(MenuAction::ApplyPreset(name.clone()));
-                ui.close_menu();
+                ui.close();
             }
         }
 
@@ -418,7 +418,7 @@ pub(super) fn menu_items_flat(
 /// 出ないときの復帰手段（デバイス再接続）と、装飾を消しているときに他の手段が
 /// 無い操作（フルスクリーン、終了）。** 探し回らずに押せることを優先する。
 ///
-/// サブメニューの中身を足したときは、閉じるボタンに `ui.close_menu()` を
+/// サブメニューの中身を足したときは、閉じるボタンに `ui.close()` を
 /// 忘れないこと。呼ばないと開いた状態が egui 側に残り、次に右クリックした
 /// ときにサブメニューが開いたまま出る。
 pub(super) fn menu_items_collapsed(

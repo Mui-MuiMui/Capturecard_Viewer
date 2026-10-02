@@ -420,8 +420,11 @@ impl Default for CaptureCardViewer {
     }
 }
 
-impl eframe::App for CaptureCardViewer {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl CaptureCardViewer {
+    /// 1 フレームぶんの処理。eframe の `App::ui` から毎フレーム呼ばれる。
+    /// 最小化している間は呼ばれない。
+    fn update(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         // ホットキー入力ダイアログの開閉を検出するため、このフレームに入る前の
         // 状態を控えておく。設定ダイアログの描画（一覧の「設定...」）で
         // `show_hotkey_dialog` が変わるより前に取る必要がある
@@ -518,9 +521,9 @@ impl eframe::App for CaptureCardViewer {
 
         // メインUI
         if self.is_fullscreen {
-            self.show_fullscreen_ui(ctx);
+            self.show_fullscreen_ui(ui);
         } else {
-            self.show_windowed_ui(ctx);
+            self.show_windowed_ui(ui);
         }
 
         // 統計オーバーレイ。ウィンドウ表示とフルスクリーンで同じものを出すため、
@@ -749,6 +752,17 @@ impl eframe::App for CaptureCardViewer {
         self.hotkey_manager
             .set_window_state(minimized, focused, typing);
         ctx.request_repaint_after(next_repaint_delay(condition));
+    }
+}
+
+impl eframe::App for CaptureCardViewer {
+    // eframe 0.36 で `App::update(ctx)` は `App::ui(ui)` になった（#300）。
+    // 1 フレームぶんの処理は、コメントやドキュメントが `update()` と呼んでいるとおり
+    // `CaptureCardViewer::update` に置いてある。`App::logic` は実装しない。
+    // 最小化中にも呼ばれる口だが、0.26 と同じく最小化中は UI スレッドで何も回さない
+    // （時間で動く処理はワーカーが持つ。`docs/design/device-worker.md`）
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.update(ui);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

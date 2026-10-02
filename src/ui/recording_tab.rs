@@ -105,7 +105,7 @@ pub(super) fn show_recording_settings_tab(
             ui.horizontal(|ui| {
                 ui.label(Text::RecordingBitrateLabel.get());
                 // Id は表示文字列から作らない（`docs/design/i18n.md`）
-                egui::ComboBox::from_id_source("recording_audio_bitrate")
+                egui::ComboBox::from_id_salt("recording_audio_bitrate")
                     .selected_text(format!("{} kbps", settings.recording.audio_bitrate_kbps))
                     .show_ui(ui, |ui| {
                         for kbps in RECORDING_AUDIO_BITRATES_KBPS {

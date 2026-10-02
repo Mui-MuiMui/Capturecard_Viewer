@@ -250,14 +250,14 @@ const NOTICE_STROKE_FACTOR: f32 = 0.55;
 /// 注意書きと状態表示を入れる枠。
 fn notice_frame(ui: &egui::Ui, kind: NoticeKind) -> egui::Frame {
     let accent = kind.accent(ui.visuals());
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(accent.gamma_multiply(NOTICE_FILL_FACTOR))
         .stroke(egui::Stroke::new(
             1.0_f32,
             accent.gamma_multiply(NOTICE_STROKE_FACTOR),
         ))
-        .rounding(egui::Rounding::same(4.0))
-        .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(6, 3))
 }
 
 /// 種別を指定して注意書きを描く。失敗なら `NoticeKind::Error` を渡す。
@@ -373,7 +373,7 @@ pub fn show_settings_dialog(
     // 押せなくなる（Issue #137）。ウィンドウそのものを画面内へ収め、
     // タブの中身だけをスクロールさせることで、OK / キャンセル / 適用は
     // どんな高さでも必ず見える位置に残す
-    let screen_rect = ctx.screen_rect();
+    let screen_rect = ctx.content_rect();
     let max_size = (screen_rect.size() - egui::Vec2::splat(SETTINGS_WINDOW_SCREEN_MARGIN))
         .max(SETTINGS_WINDOW_MIN_SIZE);
     // max_size は SETTINGS_WINDOW_MIN_SIZE との component-wise max で
@@ -424,11 +424,11 @@ pub fn show_settings_dialog(
             // 領域を上から順に消費するだけなので、ScrollArea を先に描くと
             // 「まだ描いていないボタン列の分」を差し引けず、ScrollArea が
             // 残り全部を使い切ってボタン列がウィンドウの外へ押し出される。
-            // `TopBottomPanel::bottom` は呼んだ時点で自分の高さぶんを
+            // `Panel::bottom` は呼んだ時点で自分の高さぶんを
             // 親 Ui の下端から確保し、以降の ScrollArea が使える高さを
             // 先に縮めてくれるので、コード上の見た目の順序とは逆に
             // 「ボタン列 → タブの中身」の順で描く
-            egui::TopBottomPanel::bottom("settings_dialog_buttons").show_inside(ui, |ui| {
+            egui::Panel::bottom("settings_dialog_buttons").show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if ui.button(Text::ButtonOk.get()).clicked() {

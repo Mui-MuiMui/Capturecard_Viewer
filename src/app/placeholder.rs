@@ -128,13 +128,13 @@ mod tests {
             )),
             ..Default::default()
         };
-        let output = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let available_size = ui.available_size();
                 show_video_placeholder(ui, available_size, "placeholder");
             });
         });
-        output
+        let rects = output
             .shapes
             .iter()
             .filter_map(|clipped| match &clipped.shape {
@@ -144,7 +144,10 @@ mod tests {
                 )),
                 _ => None,
             })
-            .collect()
+            .collect();
+        // 描かないのでテクスチャの差分も捨てる。そのまま落とすと debug_assert で止まる
+        output.drop_without_applying_deltas();
+        rects
     }
 
     #[test]

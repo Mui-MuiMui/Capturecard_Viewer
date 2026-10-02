@@ -259,7 +259,7 @@ pub fn show_hotkey_capture_dialog(
     // 大きさを固定するだけで、`constrain_to` は位置しか動かさない）。
     // `default_size` + 画面由来の `max_size` に変え、中身はスクロールできる
     // ようにしておく
-    let screen_rect = ctx.screen_rect();
+    let screen_rect = ctx.content_rect();
     let max_size = (screen_rect.size() - egui::Vec2::splat(SETTINGS_WINDOW_SCREEN_MARGIN))
         .max(HOTKEY_CAPTURE_DIALOG_MIN_SIZE);
 
@@ -278,7 +278,7 @@ pub fn show_hotkey_capture_dialog(
             // ボタン列と同じ（コード上の順序に関わらず、呼んだ時点で
             // 親 Ui の下端から高さを確保するので、あとに続く ScrollArea が
             // このぶんを押し出して隠すことがない）
-            egui::TopBottomPanel::bottom("hotkey_capture_dialog_buttons").show_inside(ui, |ui| {
+            egui::Panel::bottom("hotkey_capture_dialog_buttons").show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.vertical_centered(|ui| {
                     if ui.button(Text::ButtonCancel.get()).clicked() {

@@ -35,7 +35,7 @@ pub(super) fn show_video_overlay(
     add_contents: impl Fn(&mut egui::Ui),
 ) -> egui::Rect {
     let mut measure = overlay_ui(ctx, id.with("measure"), area);
-    measure.set_visible(false);
+    measure.set_invisible();
     add_contents(&mut measure);
     let size = measure.min_rect().size();
 
@@ -54,11 +54,14 @@ pub(super) fn show_video_overlay(
 fn overlay_ui(ctx: &egui::Context, id: egui::Id, max_rect: egui::Rect) -> egui::Ui {
     let mut ui = egui::Ui::new(
         ctx.clone(),
-        egui::LayerId::background(),
         id,
-        max_rect,
-        ctx.screen_rect(),
+        egui::UiBuilder::new()
+            .layer_id(egui::LayerId::background())
+            .max_rect(max_rect),
     );
+    // egui 0.36 の `Ui::new` は切り抜きを `max_rect` にするので、0.26 と同じく画面全体に戻す。
+    // 枠の影などが寄せた範囲の外へ少しはみ出しても切れないように
+    ui.set_clip_rect(ctx.content_rect());
     ui.style_mut().interaction.selectable_labels = false;
     ui
 }
@@ -83,8 +86,9 @@ mod tests {
     /// 映像の代わりに塗りつぶした `CentralPanel`、重ねる表示、設定ダイアログ役の
     /// `egui::Window` を、実際の `update()` と同じ順で描く。
     fn draw_frame(ctx: &egui::Context, overlay: bool, dialog: bool) -> egui::FullOutput {
-        ctx.run(screen_input(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let mut output = ctx.run_ui(screen_input(), |ui| {
+            let ctx = &ui.ctx().clone();
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.painter()
                     .rect_filled(ui.max_rect(), 0.0, egui::Color32::BLUE);
             });
@@ -92,7 +96,7 @@ mod tests {
                 show_video_overlay(
                     ctx,
                     egui::Id::new("test_overlay"),
-                    ctx.screen_rect(),
+                    ctx.content_rect(),
                     egui::Align2::LEFT_TOP,
                     |ui| {
                         ui.label(OVERLAY_TEXT);
@@ -105,7 +109,10 @@ mod tests {
                     .fixed_pos(egui::pos2(0.0, 0.0))
                     .show(ctx, |ui| ui.label(DIALOG_TEXT));
             }
-        })
+        });
+        // 描かないのでテクスチャの差分は捨てる。残したまま落とすと debug_assert で止まる
+        output.textures_delta.clear();
+        output
     }
 
     /// 描かれた順（奥から手前）で、`text` を含む文字の図形が何番目かを返す。
@@ -166,11 +173,13 @@ mod tests {
     fn placed_rect(area: egui::Rect, align: egui::Align2) -> egui::Rect {
         let ctx = egui::Context::default();
         let mut placed = egui::Rect::NOTHING;
-        let _ = ctx.run(screen_input(), |ctx| {
-            placed = show_video_overlay(ctx, egui::Id::new("test_overlay"), area, align, |ui| {
-                ui.label(OVERLAY_TEXT);
-            });
-        });
+        ctx.run_ui(screen_input(), |ui| {
+            placed =
+                show_video_overlay(ui.ctx(), egui::Id::new("test_overlay"), area, align, |ui| {
+                    ui.label(OVERLAY_TEXT);
+                });
+        })
+        .drop_without_applying_deltas();
         placed
     }
 

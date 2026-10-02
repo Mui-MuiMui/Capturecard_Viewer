@@ -10,6 +10,7 @@ use eframe::egui;
 use image::GenericImageView;
 use log::{info, warn};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// 保存されたウィンドウサイズが使えない場合に使う大きさ
 pub(crate) const DEFAULT_WINDOW_SIZE: (f32, f32) = (1280.0, 720.0);
@@ -239,9 +240,10 @@ pub(crate) fn configure_japanese_font(ctx: &egui::Context) {
                         path.display()
                     );
                     let mut fonts = egui::FontDefinitions::default();
-                    fonts
-                        .font_data
-                        .insert("japanese".to_string(), egui::FontData::from_owned(data));
+                    fonts.font_data.insert(
+                        "japanese".to_string(),
+                        Arc::new(egui::FontData::from_owned(data)),
+                    );
                     // 優先度のためにプロポーショナル・等幅フォントファミリーの先頭に挿入する。
                     // egui 既定の絵文字フォント等はそのまま残るため、Meiryo 等に無い記号は
                     // 引き続きフォールバックで描画される
