@@ -246,6 +246,8 @@ git push origin --delete <branch>
 
 ```bash
 gh issue close <番号> --comment "<何で確かめたか>"
+# Project の Workflows（Item closed → 完了）が無効なら、閉じたものは手で完了にする
+bash ~/.claude/skills/github-issues/set-status.sh <番号> -- 完了
 # 人の確認が要るものだけ
 bash ~/.claude/skills/github-issues/set-status.sh <番号> -- 人間確認待ち
 ```

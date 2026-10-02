@@ -34,7 +34,7 @@ PR タイトルは `naming-conventions` skill の「PR タイトル」に従う�
 `~/.claude/skills/github-issues/SKILL.md` に従って、Issue へ PR の URL をコメントする。
 
 - ブランチ名と変更の要点を添える
-- **「人間が dev で確認すること」を箇条書きで書く。** マージ後にこれが確認の手順になる
+- 人の感覚か Claude の環境に無い機器・状況が要る場合だけ、「人が確かめること」を 3 行以内で書き、どの環境で見るかを添える（基準は `naming-conventions` skill の「Issue を閉じる基準」）
 - Issue の一部だけを実装した PR なら、その旨と残りのスコープを明記する
 - 対応する Issue がない場合は、ここで起票するか確認する
 
