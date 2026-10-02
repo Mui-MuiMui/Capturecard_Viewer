@@ -136,7 +136,8 @@ impl VideoBackend for SystemVideo {
         // `open` には実際に開けた経路を入れるので、`link_state` / `stop_capture` /
         // `active` もそちらを見る（「接続状態」タブの「開き方」も `active` から出る）。
         // 音声ピンを繋ぐ指定は、倒したときの DirectShow にも渡す（GC551 はこの経路で開く）。
-        // 自動で音声ピンを繋ぐ指定があれば最初から DirectShow で開く（#425、`route_for`）
+        // 自動で音声ピンを繋ぐ指定があれば最初から DirectShow で開き、DirectShow の一覧に
+        // 無いときだけ Media Foundation で開く（#425、`route_for` / `attempt_with_fallback`）
         let media_foundation = &mut self.media_foundation;
         let direct_show = &mut self.direct_show;
         let (result, route) = attempt_with_fallback(
