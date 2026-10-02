@@ -311,7 +311,7 @@ impl CaptureCardViewer {
         let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else {
             return false;
         };
-        let Some(direction) = resize_direction_at(pos, ctx.screen_rect(), RESIZE_BORDER) else {
+        let Some(direction) = resize_direction_at(pos, ctx.content_rect(), RESIZE_BORDER) else {
             return false;
         };
 

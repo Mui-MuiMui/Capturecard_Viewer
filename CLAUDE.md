@@ -30,7 +30,7 @@ cargo build --release
 | `src/main.rs` | エントリポイント。ロガーの初期化、`NativeOptions` の組み立て、`run_native` だけ |
 | `src/platform.rs` | Windows 固有処理。日本語フォントの探索、埋め込みアイコンの読み込み、モニタの作業領域の列挙、保存されたウィンドウの大きさ・位置が使えるかの判定、OS の表示言語からの言語の推定 |
 | `src/com.rs` | COM（`ComApartment`、STA / MTA をモデル引数で選ぶ）と Media Foundation（`MfPlatform`）の初期化の RAII。DirectShow のバックエンドがデバイスワーカーで STA、録画スレッドが MTA で使う |
-| `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`Default`、`eframe::App` 実装（`update` / `on_exit`） |
+| `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`Default`、1 フレームの処理 `update`、`eframe::App` 実装（`ui` が `update` を呼ぶ / `on_exit`） |
 | `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、統計 OSD、テクスチャの取り込み |
 | `src/app/placeholder.rs` | 映像が出ていないときのプレースホルダー。文言の決め方（`video_placeholder_text`）と映像エリアの中央への配置（`show_video_placeholder`） |
 | `src/app/video_overlay.rs` | 映像の上に常設で重ねる表示（統計 OSD・フェイクデバイスの帯・録画中の印）を、映像の上・設定ダイアログの下の層へ寄せて描く `show_video_overlay` |

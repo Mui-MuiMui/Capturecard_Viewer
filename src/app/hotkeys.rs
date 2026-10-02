@@ -16,7 +16,7 @@ use std::sync::mpsc::Sender;
 
 /// このアプリのテキスト欄に入力中か。ホットキーを止める「入力中」の判定に使う（#206、#238）。
 ///
-/// **`Context::wants_keyboard_input()` は使わない。** あちらはテキスト欄に限らず、
+/// **`Context::egui_wants_keyboard_input()` は使わない。** あちらはテキスト欄に限らず、
 /// 何かのウィジェットにキーボードフォーカスがあるだけで真になる。Tab キーで
 /// 映像エリアやボタンへフォーカスが移ると、以後ずっと入力中と判定されて
 /// ホットキーが効かなくなっていた。
@@ -27,7 +27,7 @@ use std::sync::mpsc::Sender;
 /// `TextEdit`）のどれでも、個別に `has_focus()` を集めずに拾える。
 pub(super) fn is_typing_in_text_field(ctx: &egui::Context) -> bool {
     // memory のロックを握ったまま data を読まない（同じ Context の中のロック）
-    let focused = ctx.memory(|memory| memory.focus());
+    let focused = ctx.memory(|memory| memory.focused());
     focused.is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some())
 }
 
@@ -195,10 +195,11 @@ mod tests {
     use crate::keyboard_hook::KeyboardHookError;
 
     /// 何もしない入力で 1 フレーム回す。描画の中身は `add_contents` が決める
-    fn run_frame(ctx: &egui::Context, add_contents: impl FnMut(&mut egui::Ui)) {
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, add_contents);
-        });
+    fn run_frame(ctx: &egui::Context, mut add_contents: impl FnMut(&mut egui::Ui)) {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, &mut add_contents);
+        })
+        .drop_without_applying_deltas();
     }
 
     #[test]
@@ -233,7 +234,7 @@ mod tests {
     #[test]
     fn is_typing_in_text_field_ignores_focus_on_other_widgets() {
         // Tab キーで映像エリアやボタンへフォーカスが移った状態（#238）。
-        // wants_keyboard_input() は真になるが、テキスト欄ではないので入力中ではない
+        // egui_wants_keyboard_input() は真になるが、テキスト欄ではないので入力中ではない
         let ctx = egui::Context::default();
         let mut focus_requested = false;
         for _ in 0..2 {
@@ -246,7 +247,7 @@ mod tests {
             });
         }
 
-        assert!(ctx.wants_keyboard_input());
+        assert!(ctx.egui_wants_keyboard_input());
         assert!(!is_typing_in_text_field(&ctx));
     }
 

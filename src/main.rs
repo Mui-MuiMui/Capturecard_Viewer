@@ -103,7 +103,7 @@ fn main() -> Result<(), eframe::Error> {
             // 言語を書き換えてしまうため（#256）。`default()` は文言を作らないので、
             // 作った直後に決めても最初の描画から設定の言語で出る
             app.apply_language();
-            Box::new(app)
+            Ok(Box::new(app))
         }),
     )
 }

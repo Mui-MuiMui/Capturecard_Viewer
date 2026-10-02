@@ -165,9 +165,9 @@ impl CaptureCardViewer {
         self.show_context_menu = true;
         self.context_menu_pos = pos;
 
-        let frame = egui::Frame::popup(&ctx.style());
+        let frame = egui::Frame::popup(&ctx.global_style());
         let (_, max_height) =
-            context_menu_size_limits(ctx.screen_rect().size(), frame.inner_margin.sum());
+            context_menu_size_limits(ctx.content_rect().size(), frame.inner_margin.sum());
         // プリセットが 1 つでもあれば、平らな一覧に「プリセット」の行が
         // 1 行増える（preset_submenu、詳細は estimate_flat_menu_height）
         let has_presets = match self.settings.lock() {
@@ -177,7 +177,7 @@ impl CaptureCardViewer {
                 false
             }
         };
-        let flat_height = estimate_flat_menu_height(&ctx.style().spacing, has_presets);
+        let flat_height = estimate_flat_menu_height(&ctx.global_style().spacing, has_presets);
         self.context_menu_layout = context_menu_layout(max_height, flat_height);
     }
 
@@ -201,19 +201,19 @@ impl CaptureCardViewer {
         let mut actions: Vec<MenuAction> = Vec::new();
 
         // ポップアップの枠が食う分を引いてから、中身に使える大きさを決める
-        let frame = egui::Frame::popup(&ctx.style());
+        let frame = egui::Frame::popup(&ctx.global_style());
         let (width, max_height) =
-            context_menu_size_limits(ctx.screen_rect().size(), frame.inner_margin.sum());
+            context_menu_size_limits(ctx.content_rect().size(), frame.inner_margin.sum());
 
         // 描画へ渡すのは読み取り専用のスナップショットだけ
         let view = self.menu_view();
         let layout = self.context_menu_layout;
 
-        egui::Area::new("context_menu")
+        egui::Area::new(egui::Id::new("context_menu"))
             .fixed_pos(self.context_menu_pos)
             .order(egui::Order::Foreground)
             // 画面の下端や右端の近くで開いたときに、メニューごと画面内へ押し戻す
-            .constrain_to(ctx.screen_rect())
+            .constrain_to(ctx.content_rect())
             .show(ctx, |outer_ui| {
                 // 固定幅でポップアップコンテンツをラップ
                 frame.show(outer_ui, |ui| {
