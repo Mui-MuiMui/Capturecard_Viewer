@@ -80,7 +80,7 @@ texts! {
     // 入力が映像デバイスの音声ピンなのに使えず、音声を開かずに待つ理由（app/monitor_audio_pin.rs、#388）。
     // 設定ダイアログの選べない理由にも出るので「DirectShow」「音声ピン」の語を使わない（#409）
     AudioPinVideoNotOpen { ja: "映像デバイスが開いていないので、映像デバイスの音声は使えません", en: "The video device is not open, so its audio cannot be used" },
-    AudioPinMediaFoundation { ja: "いまの映像の開き方では、映像デバイスの音声を使えません。「デバイス設定」タブの「映像の開き方」を切り替えると使えることがあります", en: "The video device's audio is not available with the current way of opening the video. Changing \"Open video with\" in the Devices tab may make it available" },
+    AudioPinMediaFoundation { ja: "いまの映像の開き方では、映像デバイスの音声を使えません。「デバイス設定」タブの「映像の開き方」を「DirectShow」にすると使えます", en: "The video device's audio is not available with the current way of opening the video. Set \"Open video with\" to \"DirectShow\" in the Devices tab to use it" },
     AudioPinMissing { ja: "この映像デバイスからは音声を受け取れません", en: "This video device does not provide audio" },
     AudioPinNotConnected { ja: "映像デバイスの音声を使うために、映像デバイスを開き直すのを待っています", en: "Waiting for the video device to reopen so that its audio can be used" },
     // 音声ピンの入力で開こうとしたが、繋いだ音声ピンが無かった（audio::AudioError::VideoPinUnavailable）
