@@ -40,11 +40,12 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 
 use super::audio_pin::{self, AttachedAudio, AudioPinRequest, PinOutcome};
-use super::devices::{self, choose_candidate, target_resolution, DeviceEntry, StreamCandidate};
+use super::devices::{self, DeviceEntry, StreamCandidate};
 use super::filter::Renderer;
 use super::media_type::{
     delete_media_type, interval_within_caps, set_avg_time_per_frame, SampleFormat,
 };
+use super::stream_select::{choose_candidate, target_resolution};
 use crate::video::elapsed_ms;
 use crate::video::frame_sink::FrameSink;
 

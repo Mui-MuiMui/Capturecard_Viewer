@@ -106,13 +106,13 @@ flowchart LR
 | 置き場所 | 持つもの |
 |---|---|
 | `src/video/directshow/mod.rs` | `DirectShowCapture`。`VideoCapture` と同じ窓口（列挙・能力・開く・閉じる・観測）と、表示名の「(DirectShow)」の付け外し |
-| `src/video/directshow/devices.rs` | 列挙（`ICreateDevEnum` の `CLSID_VideoInputDeviceCategory`、表示名は `IPropertyBag` の `FriendlyName`）、対応形式（`IAMStreamConfig::GetStreamCaps`）、開く形式の選び方（`choose_candidate`、純粋関数） |
+| `src/video/directshow/devices.rs` | 列挙（`ICreateDevEnum` の `CLSID_VideoInputDeviceCategory`、表示名は `IPropertyBag` の `FriendlyName`）、対応形式（`IAMStreamConfig::GetStreamCaps`）。開く形式の選び方（`choose_candidate`、純粋関数）は `stream_select.rs` |
 | `src/video/directshow/graph.rs` | `CaptureGraph`。`IGraphBuilder` / `ICaptureGraphBuilder2` の組み立て、`SetFormat`、`RenderStream`、`Run`、`Stop` と破棄。グラフのイベント（`IMediaEventEx`）を待たずに読み、デバイスの喪失を拾う（`poll_device_lost`） |
 | `src/video/directshow/filter.rs` | サンプルを受ける自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`、`windows` クレートの `#[implement]`）。媒体を問わず、受け取る形式の判定と渡し先だけを映像（`video_stream.rs`）と音声（`audio_pin.rs`）で分ける |
 | `src/video/directshow/video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
 | `src/video/directshow/audio_pin.rs` | 音声ピン（#388）。有無の記録、10ms の塊の提案と接続、`Run` が通らないときに外してやり直す、受け取った PCM を `AudioPinFeed` へ渡す |
 | `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
-| `src/app/backend/system.rs` | `SystemVideo`。Media Foundation と DirectShow を 1 つの `VideoBackend` に束ねる |
+| `src/app/backend/system.rs` | `SystemVideo`。Media Foundation と DirectShow を 1 つの `VideoBackend` に束ねる。経路の判定（`route_for` / `attempt_with_fallback` / `merge_video_devices`）は `system_route.rs` |
 
 #### 一覧と名前
 
