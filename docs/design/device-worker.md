@@ -117,7 +117,7 @@ flowchart LR
 #### 一覧と名前
 
 - **一覧は Media Foundation を優先する。** DirectShow の列挙には Media Foundation に出るデバイス（WDM のキャプチャーボードや Web カメラ）も並ぶので、表示名が Media Foundation の一覧と同じものは捨て、DirectShow にしか無いものだけを「(DirectShow)」を添えて足す（`merge_video_devices`）。同じデバイスを 2 経路で並べても選び間違えるだけで、実績があるのは Media Foundation のほう
-- **どちらで開くかは、名前の印と設定の「映像の開き方」（`video.backend`、#237）で決まる**（`route_for`）。ただし自動で Media Foundation が開けないときは DirectShow でも試す（#387、下の「映像の開き方」）。設定に保存されるのも「(DirectShow)」付きの名前。**この印は翻訳しない。** 設定に残る識別子なので、画面の言語を切り替えると別のデバイス扱いになってしまう
+- **どちらで開くかは、名前の印と設定の「映像の開き方」（`video.backend`、#237）で決まる**（`route_for`）。ただし自動で Media Foundation が開けないときは DirectShow でも試す（#387、下の「映像の開き方」）。自動で音声の入力が映像デバイスの音声（`input_source = "video_pin"`）なら最初から DirectShow で開き、DirectShow の一覧に無いときだけ Media Foundation で開く（#425。`docs/design/directshow-audio.md` の (5)。能力の問い合わせはこの指定を見ない）。設定に保存されるのも「(DirectShow)」付きの名前。**この印は翻訳しない。** 設定に残る識別子なので、画面の言語を切り替えると別のデバイス扱いになってしまう
 
 #### 映像の開き方（#237）
 

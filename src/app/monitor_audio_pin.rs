@@ -104,10 +104,12 @@ pub(super) fn should_resync_pin_audio(
 /// 設定ダイアログで映像デバイスの音声（項目名は映像デバイスの名前）を選べるか
 /// （#394、#409）。
 ///
-/// - `video`: いま開いている映像の観測値
-/// - `presence`: 列挙の時点で調べた、対象の映像デバイス（開いていればその相手、
-///   開いていなければ設定の映像デバイス）の音声ピンの有無（`presence_of`）。
-///   一覧に載っていなければ `None`
+/// - `video`: 対象の映像デバイスを開いているならその観測値。開いていない
+///   （別のデバイスを開いている場合も含む）なら `None`
+/// - `presence`: 列挙の時点で調べた、対象の映像デバイスの音声ピンの有無
+///   （`presence_of`）。一覧に載っていなければ `None`
+///
+/// 対象の映像デバイス（ドラフトの映像デバイス）の決め方は `draft_pin_choice`（#425）。
 ///
 /// **選べないのは、音声ピンが無いと分かっているときだけ。** 開いた結果で無い
 /// （DirectShow で開いて無かった）か、列挙の時点で無いと分かったとき。開いていない・
@@ -146,11 +148,62 @@ pub(super) fn presence_of(
     list: &[(String, AudioPinPresence)],
     device: &str,
 ) -> Option<AudioPinPresence> {
-    let bare = |name: &str| directshow_friendly_name(name).unwrap_or(name).to_string();
-    let wanted = bare(device);
     list.iter()
-        .find(|(name, _)| bare(name) == wanted)
+        .find(|(name, _)| same_video_device(name, device))
         .map(|(_, presence)| *presence)
+}
+
+/// 2 つの映像デバイス名が同じデバイスを指すか。「(DirectShow)」の印を外して比べる。
+fn same_video_device(a: &str, b: &str) -> bool {
+    directshow_friendly_name(a).unwrap_or(a) == directshow_friendly_name(b).unwrap_or(b)
+}
+
+/// 設定ダイアログの「映像デバイスの音声」の項目（#425）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DraftPinChoice {
+    /// 項目名に使う映像デバイスの名前。ドラフトの映像デバイス、無ければ開いている映像
+    pub(super) device: Option<String>,
+    /// 選べるか。形は `pin_choice` と同じ
+    pub(super) choice: Result<Option<PinFormat>, PinWait>,
+}
+
+/// 設定ダイアログで映像デバイスの音声を選べるかを、**ドラフトの映像デバイス**を
+/// 基準に決める（#425）。`refresh_device_snapshot` が呼ぶ。
+///
+/// - `draft_device`: ドラフトの `video.device_name`（「適用」の前の選択）
+/// - `video`: いま開いている映像の観測値
+/// - `presence_list`: 列挙の時点の音声ピンの有無（`DeviceSnapshot::video_audio_pins`）
+///
+/// | ドラフトの映像デバイス | 判定 |
+/// |---|---|
+/// | 開いている映像と同じ（印を外して比べる） | `pin_choice(開いた結果, 列挙の有無)`。開いた結果が先 |
+/// | 開いている映像と違う・映像が開いていない | 列挙の有無だけ。無い → 選べない、ある・不明・一覧に無い → 選べる（形式は分からないので制約なし） |
+/// | 未指定 | 開いている映像を基準にする（#409 までと同じ） |
+///
+/// **決めるのは表示だけで、ドラフトの音声の選択は変えない。** 映像を選び直しても、
+/// 音声の入力はユーザーが項目を選んだときにしか変わらない（ユーザー決定
+/// 2026-10-03、`docs/design/directshow-audio.md` の (5)）。
+pub(super) fn draft_pin_choice(
+    draft_device: Option<&str>,
+    video: Option<&ActiveVideo>,
+    presence_list: &[(String, AudioPinPresence)],
+) -> DraftPinChoice {
+    let Some(draft) = draft_device.filter(|name| !name.trim().is_empty()) else {
+        let device = video.map(|video| video.device_name.clone());
+        let presence = device
+            .as_deref()
+            .and_then(|name| presence_of(presence_list, name));
+        return DraftPinChoice {
+            device,
+            choice: pin_choice(video, presence),
+        };
+    };
+    // 開いている相手が別のデバイスなら、その開いた結果はドラフトのデバイスの話ではない
+    let opened = video.filter(|video| same_video_device(&video.device_name, draft));
+    DraftPinChoice {
+        device: Some(draft.to_string()),
+        choice: pin_choice(opened, presence_of(presence_list, draft)),
+    }
 }
 
 /// 入力が未設定のまま起動したとき、最初の映像の試行の結果から入力を
@@ -433,6 +486,114 @@ mod tests {
         assert_eq!(
             presence_of(&marked, "USB Video"),
             Some(AudioPinPresence::Absent)
+        );
+    }
+
+    fn named(name: &str, api: CaptureApi, audio_pin: AudioPinState) -> ActiveVideo {
+        ActiveVideo {
+            device_name: name.to_string(),
+            ..video(api, audio_pin)
+        }
+    }
+
+    #[test]
+    fn draft_pin_choice_follows_the_draft_device_not_the_open_one() {
+        // 1 台目（音声ピンなし、DirectShow で開いて Missing）が開いている状態で、
+        // ドラフトで 2 台目（列挙の時点で「ある」）を選んだ（#425）
+        let open = named("USB Video", CaptureApi::DirectShow, AudioPinState::Missing);
+        let list = vec![
+            ("USB Video".to_string(), AudioPinPresence::Absent),
+            ("GC551".to_string(), AudioPinPresence::Present),
+        ];
+        assert_eq!(
+            draft_pin_choice(Some("GC551 (DirectShow)"), Some(&open), &list),
+            DraftPinChoice {
+                device: Some("GC551 (DirectShow)".to_string()),
+                choice: Ok(None),
+            }
+        );
+        // 不明・一覧に無いときも選べる。形式は分からないので制約なし
+        let unknown = vec![("GC551".to_string(), AudioPinPresence::Unknown)];
+        for list in [unknown, Vec::new()] {
+            assert_eq!(
+                draft_pin_choice(Some("GC551"), Some(&open), &list).choice,
+                Ok(None)
+            );
+        }
+        // 列挙の時点で無いと分かっているデバイスは選べない
+        let absent = vec![("GC551".to_string(), AudioPinPresence::Absent)];
+        let connected_elsewhere = named("USB Video", CaptureApi::DirectShow, connected(3));
+        assert_eq!(
+            draft_pin_choice(Some("GC551"), Some(&connected_elsewhere), &absent).choice,
+            Err(PinWait::NoPin)
+        );
+        // 映像が開いていなくても同じ規則
+        assert_eq!(
+            draft_pin_choice(Some("GC551"), None, &absent).choice,
+            Err(PinWait::NoPin)
+        );
+        assert_eq!(draft_pin_choice(Some("GC551"), None, &[]).choice, Ok(None));
+    }
+
+    #[test]
+    fn draft_pin_choice_uses_the_open_result_for_the_same_device() {
+        // ドラフトと開いている映像が同じ（印の有無は問わない）なら、開いた結果が先
+        let list = vec![(
+            "AVerMedia GC551 Video Capture".to_string(),
+            AudioPinPresence::Absent,
+        )];
+        let open = video(CaptureApi::DirectShow, connected(2));
+        let choice = draft_pin_choice(
+            Some("AVerMedia GC551 Video Capture (DirectShow)"),
+            Some(&open),
+            &list,
+        );
+        assert_eq!(
+            choice.device.as_deref(),
+            Some("AVerMedia GC551 Video Capture (DirectShow)")
+        );
+        assert_eq!(choice.choice, pin_choice(Some(&open), None));
+        assert!(matches!(choice.choice, Ok(Some(_))));
+        // 開いた結果で無いと分かっていれば、列挙の時点の有無によらず選べない
+        let missing = video(CaptureApi::DirectShow, AudioPinState::Missing);
+        let present = vec![(
+            "AVerMedia GC551 Video Capture".to_string(),
+            AudioPinPresence::Present,
+        )];
+        assert_eq!(
+            draft_pin_choice(
+                Some("AVerMedia GC551 Video Capture"),
+                Some(&missing),
+                &present
+            )
+            .choice,
+            Err(PinWait::NoPin)
+        );
+    }
+
+    #[test]
+    fn draft_pin_choice_without_a_draft_device_uses_the_open_one() {
+        // ドラフトの映像デバイスが未指定（空も含む）なら #409 までと同じ
+        let open = video(CaptureApi::DirectShow, AudioPinState::Available);
+        let list = vec![(
+            "AVerMedia GC551 Video Capture".to_string(),
+            AudioPinPresence::Present,
+        )];
+        for draft in [None, Some(""), Some("  ")] {
+            let choice = draft_pin_choice(draft, Some(&open), &list);
+            assert_eq!(
+                choice.device.as_deref(),
+                Some("AVerMedia GC551 Video Capture"),
+                "{draft:?}"
+            );
+            assert_eq!(choice.choice, Ok(None), "{draft:?}");
+        }
+        assert_eq!(
+            draft_pin_choice(None, None, &[]),
+            DraftPinChoice {
+                device: None,
+                choice: pin_choice(None, None),
+            }
         );
     }
 

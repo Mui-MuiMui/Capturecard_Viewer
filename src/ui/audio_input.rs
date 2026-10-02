@@ -1,11 +1,12 @@
-//! 「デバイス設定」タブの「オーディオ入力デバイス」（#394、#409）。
+//! 「デバイス設定」タブの「オーディオ入力デバイス」（#394、#409、#425）。
 //!
 //! 先頭に映像デバイスの音声（`[audio] input_source = "video_pin"`）を置き、区切りの
 //! 下に WASAPI の入力デバイスを並べる。先頭の項目名は**映像デバイスの表示名そのもの**
-//! で、「DirectShow」「音声ピン」の語は利用者に見せない（#409）。選べるかどうかと
-//! 選べない理由、開いている映像の名前は `app` がワーカーの観測値（`ActiveVideo`）から
-//! 作り、`SettingsDialogView` の借用で受け取る。**描画の中でデバイスに問い合わせない**
-//! （`docs/design/directshow-audio.md` の (5)）。
+//! で、「DirectShow」「音声ピン」の語は利用者に見せない（#409）。項目名と選べるかの
+//! 基準は**ドラフトの映像デバイス**で、「適用」の前でも選んだ映像デバイスの音声が出る
+//! （#425）。選べるかどうかと選べない理由は `app` がドラフトとワーカーの観測値から作り、
+//! `SettingsDialogView` の借用で受け取る。**描画の中でデバイスに問い合わせない**
+//! （`docs/design/directshow-audio.md` の (5)）。映像を選び直しても音声の選択は変えない。
 
 use crate::audio::AudioCapabilities;
 use crate::i18n::Text;
@@ -31,9 +32,10 @@ enum PinAvailability {
 #[derive(Debug, Clone, PartialEq)]
 pub struct VideoPinChoice {
     availability: PinAvailability,
-    /// 開いている映像デバイスの名前。開いていなければ `None` で、項目名は設定の
-    /// `video.device_name` から作る
-    active_device: Option<String>,
+    /// `app` が判定に使った映像デバイスの名前（ドラフトの映像デバイス、無ければ
+    /// 開いている映像。#425）。項目名はドラフトの `video.device_name` を先に使い、
+    /// これは予備
+    device: Option<String>,
 }
 
 impl Default for VideoPinChoice {
@@ -45,21 +47,18 @@ impl Default for VideoPinChoice {
 
 impl VideoPinChoice {
     /// 選べる。`capabilities` は繋いでいる音声ピンの形式 1 つの対応設定
-    pub fn selectable(
-        capabilities: Option<AudioCapabilities>,
-        active_device: Option<String>,
-    ) -> Self {
+    pub fn selectable(capabilities: Option<AudioCapabilities>, device: Option<String>) -> Self {
         Self {
             availability: PinAvailability::Selectable(capabilities),
-            active_device,
+            device,
         }
     }
 
     /// 選べない。`reason` はホバーとコンボボックスの下に出す
-    pub fn unavailable(reason: String, active_device: Option<String>) -> Self {
+    pub fn unavailable(reason: String, device: Option<String>) -> Self {
         Self {
             availability: PinAvailability::Unavailable(reason),
-            active_device,
+            device,
         }
     }
 
@@ -84,16 +83,18 @@ impl VideoPinChoice {
 
     /// 先頭の項目名。`configured_device` は設定（ドラフト）の映像デバイス名
     fn label(&self, configured_device: Option<&str>) -> String {
-        video_pin_label(self.active_device.as_deref(), configured_device)
+        video_pin_label(configured_device, self.device.as_deref())
     }
 }
 
-/// 映像デバイスの音声の項目名を決める（#409）。
+/// 映像デバイスの音声の項目名を決める（#409、#425）。
 ///
-/// 開いている映像の名前、無ければ設定の映像デバイス名を、「(DirectShow)」の印を
-/// 外して出す。どちらも無い（空の）ときは従来の文言（`Text::AudioInputVideoPin`）。
-fn video_pin_label(active_device: Option<&str>, configured_device: Option<&str>) -> String {
-    [active_device, configured_device]
+/// 設定（ドラフト）の映像デバイス名、無ければ `app` が渡した名前（開いている映像）を、
+/// 「(DirectShow)」の印を外して出す。ドラフトを先にするのは、映像デバイスを選び
+/// 直したフレームから項目名を合わせるため（`app` の判定は次のフレームで追いつく）。
+/// どちらも無い（空の）ときは従来の文言（`Text::AudioInputVideoPin`）。
+fn video_pin_label(configured_device: Option<&str>, device: Option<&str>) -> String {
+    [configured_device, device]
         .into_iter()
         .flatten()
         .map(|name| directshow_friendly_name(name).unwrap_or(name).trim())
@@ -203,13 +204,13 @@ mod tests {
     }
 
     #[test]
-    fn video_pin_label_prefers_the_open_device_without_the_directshow_mark() {
-        // 開いている映像の名前が先。「(DirectShow)」の印は外す
+    fn video_pin_label_prefers_the_draft_device_without_the_directshow_mark() {
+        // ドラフトの映像デバイス名が先（#425）。「(DirectShow)」の印は外す
         assert_eq!(
-            video_pin_label(Some("GC551 (DirectShow)"), Some("別のデバイス")),
+            video_pin_label(Some("GC551 (DirectShow)"), Some("開いている別のデバイス")),
             "GC551"
         );
-        // 開いていなければ設定の映像デバイス名
+        // ドラフトに無ければ app が渡した名前（開いている映像）
         assert_eq!(video_pin_label(None, Some("USB Video")), "USB Video");
         assert_eq!(
             video_pin_label(None, Some("USB Video (DirectShow)")),
@@ -333,6 +334,79 @@ mod tests {
             "{:?}",
             events
         );
+    }
+
+    /// `app` の `draft_pin_choice` の代わり。音声ピンがあるのは GC551 だけで、
+    /// 開いている映像（USB Video）には無い。項目名にはドラフトの映像デバイスを渡す
+    fn pin_for_draft(draft: &AppSettings) -> VideoPinChoice {
+        let device = draft.video.device_name.clone();
+        if device.as_deref() == Some("GC551 (DirectShow)") {
+            VideoPinChoice::selectable(None, device)
+        } else {
+            VideoPinChoice::unavailable(Text::AudioPinMissing.get().to_string(), device)
+        }
+    }
+
+    #[test]
+    fn audio_input_combo_lists_the_draft_video_device_before_applying() {
+        // 音声ピンの無い USB Video が開いている状態で、ドラフトの映像デバイスを
+        // GC551 にすると、「適用」の前でも先頭が GC551 になり選べる（#425）
+        let mut draft = AppSettings::default();
+        draft.video.device_name = Some("USB Video".to_string());
+        draft.audio.input_device_name = Some("ライン入力".to_string());
+        let fixture = DialogFixture::new(
+            &draft,
+            SettingsTab::Device,
+            pin_for_draft(&draft),
+            &["ライン入力", "マイク"],
+        )
+        .with_video_devices(&["USB Video", "GC551 (DirectShow)"])
+        .with_pin_for_draft(pin_for_draft);
+        let mut harness = dialog_harness(fixture);
+
+        // はじめは開いている USB Video。音声ピンが無いので選べない
+        assert_eq!(
+            open_input_combo(&mut harness),
+            ["USB Video", "ライン入力", "マイク"]
+        );
+        assert!(harness
+            .get_by_label("USB Video")
+            .accesskit_node()
+            .is_disabled());
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+
+        // ドラフトの映像デバイスを GC551 に選び直す
+        harness.get_by_label(Text::VideoDevice.get()).click();
+        harness.run();
+        harness.get_by_label("GC551 (DirectShow)").click();
+        harness.run();
+        let unchanged = |harness: &egui_kittest::Harness<'_, DialogFixture>| {
+            let audio = &harness.state().draft().audio;
+            assert_eq!(audio.input_source, AudioInputSource::Device);
+            assert_eq!(audio.input_device_name.as_deref(), Some("ライン入力"));
+        };
+        assert_eq!(
+            harness.state().draft().video.device_name.as_deref(),
+            Some("GC551 (DirectShow)")
+        );
+        // 映像を選び直しただけでは音声の選択は変わらない
+        unchanged(&harness);
+
+        // 一覧の先頭が GC551 になり、選べる。開いて見ただけでも選択は変わらない
+        assert_eq!(
+            open_input_combo(&mut harness),
+            ["GC551", "ライン入力", "マイク"]
+        );
+        assert!(!harness.get_by_label("GC551").accesskit_node().is_disabled());
+        unchanged(&harness);
+
+        // 選んだときに初めて変わる
+        harness.get_by_label("GC551").click();
+        harness.run();
+        let audio = &harness.state().draft().audio;
+        assert_eq!(audio.input_source, AudioInputSource::VideoPin);
+        assert_eq!(audio.input_device_name.as_deref(), Some("ライン入力"));
     }
 
     #[test]

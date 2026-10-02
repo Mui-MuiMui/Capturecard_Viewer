@@ -4,7 +4,7 @@
 //! 持たせないため（`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
 //! ディスクへの書き出しそのものは `super::settings_store`。
 
-use super::monitor_audio_pin::{pin_choice, presence_of};
+use super::monitor_audio_pin::{draft_pin_choice, DraftPinChoice};
 use super::update::CheckOrigin;
 use super::CaptureCardViewer;
 use crate::audio::PinFormat;
@@ -28,28 +28,27 @@ impl CaptureCardViewer {
     /// デバイスワーカーの観測値を読み直す。`update()` の先頭で 1 回だけ呼ぶ。
     ///
     /// 設定ダイアログを開いていれば、映像デバイスの音声を選べるかと項目名も
-    /// 観測値（`DeviceSnapshot::active_video` と、列挙の時点の音声ピンの有無
-    /// `video_audio_pins`）から作り直してダイアログへ渡す（#394、#409）。
-    /// 観測値の複製から作るだけで、デバイスには問い合わせない。描画はこれを
-    /// `SettingsDialogView` の借用で読む。
+    /// ドラフトの映像デバイスと観測値（`DeviceSnapshot::active_video` と、列挙の
+    /// 時点の音声ピンの有無 `video_audio_pins`）から作り直してダイアログへ渡す
+    /// （#394、#409、#425）。基準はドラフトの映像デバイスなので、「適用」の前でも
+    /// 選んだ映像デバイスの音声が一覧に出る。判定は `draft_pin_choice`。
+    /// 観測値の複製から作るだけで、デバイスには問い合わせない。ドラフトの音声の
+    /// 選択も変えない。描画はこれを `SettingsDialogView` の借用で読む。
     pub(super) fn refresh_device_snapshot(&mut self) {
         self.device_snapshot = self.device.snapshot();
         if !self.show_settings {
             return;
         }
-        let active = self.device_snapshot.active_video.as_ref();
-        // 項目名は開いている映像デバイスの名前（#409）
-        let device = active.map(|video| video.device_name.clone());
-        // 有無を引く相手は、開いていればその相手、開いていなければドラフトの映像デバイス
-        let target = device.clone().or_else(|| {
-            self.settings_dialog
-                .draft()
-                .and_then(|draft| draft.video.device_name.clone())
-        });
-        let presence = target
-            .as_deref()
-            .and_then(|name| presence_of(&self.device_snapshot.video_audio_pins, name));
-        let choice = match pin_choice(active, presence) {
+        let draft_device = self
+            .settings_dialog
+            .draft()
+            .and_then(|draft| draft.video.device_name.as_deref());
+        let DraftPinChoice { device, choice } = draft_pin_choice(
+            draft_device,
+            self.device_snapshot.active_video.as_ref(),
+            &self.device_snapshot.video_audio_pins,
+        );
+        let choice = match choice {
             Ok(format) => {
                 ui::VideoPinChoice::selectable(format.map(PinFormat::capabilities), device)
             }

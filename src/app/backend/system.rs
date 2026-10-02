@@ -3,7 +3,8 @@
 //! trait に包むだけ。どれも中身には手を入れない。
 //!
 //! **Media Foundation と DirectShow のどちらで開くかは、デバイス名と設定の
-//! 「映像の開き方」（`video.backend`）で決まる**（`route_for`）。自動なら
+//! 「映像の開き方」（`video.backend`）と音声ピンを繋ぐ指定で決まる**（`route_for`）。
+//! 自動で音声ピンを繋ぐなら DirectShow（#425）。それ以外の自動は
 //! まず名前で決め、DirectShow のデバイスは名前に「(DirectShow)」が
 //! 付いていて、設定にもその名前で残る。一覧は Media Foundation を優先し、
 //! DirectShow にしか無いものだけを足す（`merge_video_devices`）。
@@ -104,9 +105,14 @@ impl VideoBackend for SystemVideo {
         // 対応形式を返す（#387）。キャッシュの (名前, 自動) にはこちらが入り、
         // 自動で開くときもやはり DirectShow へ倒れるので食い違わない
         let direct_show = &self.direct_show;
+        // 音声ピンを繋ぐ指定は見ない。能力キャッシュの鍵は (名前, 開き方) で、
+        // 入力の種類を含まないため。音声ピンのために自動のまま DirectShow で開く
+        // とき（#425）は選択肢が Media Foundation 側の対応形式のことがあるが、
+        // DirectShow は近い形式を選んで開く（`stream_select`）
         let (result, _) = attempt_with_fallback(
             device_name,
             backend,
+            false,
             "対応形式の取得",
             |route, name| match (route, name) {
                 (VideoRoute::DirectShow, Some(name)) => direct_show.capabilities(name),
@@ -129,18 +135,23 @@ impl VideoBackend for SystemVideo {
         // 自動で Media Foundation が開けなければ DirectShow でも試す（#387）。
         // `open` には実際に開けた経路を入れるので、`link_state` / `stop_capture` /
         // `active` もそちらを見る（「接続状態」タブの「開き方」も `active` から出る）。
-        // 音声ピンを繋ぐ指定は、倒したときの DirectShow にも渡す（GC551 はこの経路で開く）
+        // 音声ピンを繋ぐ指定は、倒したときの DirectShow にも渡す（GC551 はこの経路で開く）。
+        // 自動で音声ピンを繋ぐ指定があれば最初から DirectShow で開き、DirectShow の一覧に
+        // 無いときだけ Media Foundation で開く（#425、`route_for` / `attempt_with_fallback`）
         let media_foundation = &mut self.media_foundation;
         let direct_show = &mut self.direct_show;
-        let (result, route) =
-            attempt_with_fallback(device_name, backend, "接続", |route, name| {
-                match (route, name) {
-                    (VideoRoute::DirectShow, Some(name)) => {
-                        direct_show.start_capture(name, resolution, format, fps, connect_audio_pin)
-                    }
-                    (_, name) => media_foundation.start_capture(name, resolution, format, fps),
+        let (result, route) = attempt_with_fallback(
+            device_name,
+            backend,
+            connect_audio_pin,
+            "接続",
+            |route, name| match (route, name) {
+                (VideoRoute::DirectShow, Some(name)) => {
+                    direct_show.start_capture(name, resolution, format, fps, connect_audio_pin)
                 }
-            });
+                (_, name) => media_foundation.start_capture(name, resolution, format, fps),
+            },
+        );
         if result.is_ok() {
             self.open = Some(route);
         }

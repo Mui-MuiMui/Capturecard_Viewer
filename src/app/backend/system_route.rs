@@ -19,12 +19,20 @@ pub(super) enum VideoRoute {
 ///
 /// | 開き方 | 経路 | 渡す名前 |
 /// |---|---|---|
+/// | 自動（音声ピンを繋ぐ指定あり） | DirectShow | そのまま |
 /// | 自動 | 「(DirectShow)」付きなら DirectShow、それ以外は Media Foundation | そのまま |
 /// | Media Foundation | Media Foundation | 「(DirectShow)」を外した名前 |
 /// | DirectShow | DirectShow | そのまま（`DirectShowCapture` が印の有無を問わず探す） |
 ///
 /// **デバイスが未指定なら開き方によらず Media Foundation**（先頭のデバイス）。
 /// DirectShow の経路は名前が無いと開けない。
+///
+/// `audio_pin` は音声ピンを繋ぐ指定（`CaptureRequest::connect_audio_pin`、
+/// `[audio] input_source = "video_pin"` のときだけ真）。自動でこれが立っていれば
+/// 最初から DirectShow で開く（#425）。利用者がこの映像デバイスの音声を使うと
+/// 決めていて、音声ピンは DirectShow にしか無いため。DirectShow の一覧に無ければ
+/// Media Foundation で開き直すが、一覧にあって開けなかったときは倒さない
+/// （`attempt_with_fallback`）。開き方を Media Foundation に固定した設定では従わない。
 ///
 /// ここで決めるのは最初に試す経路だけ。自動で Media Foundation が「見つかったが
 /// 開けない」ときは、`attempt_with_fallback` が DirectShow でも試す（#387）。
@@ -35,12 +43,14 @@ pub(super) enum VideoRoute {
 pub(super) fn route_for(
     device_name: Option<&str>,
     backend: VideoBackendSetting,
+    audio_pin: bool,
 ) -> (VideoRoute, Option<&str>) {
     let Some(name) = device_name else {
         return (VideoRoute::MediaFoundation, None);
     };
     let friendly = directshow_friendly_name(name);
     match backend {
+        VideoBackendSetting::Auto if audio_pin => (VideoRoute::DirectShow, Some(name)),
         VideoBackendSetting::Auto => match friendly {
             Some(_) => (VideoRoute::DirectShow, Some(name)),
             None => (VideoRoute::MediaFoundation, Some(name)),
@@ -80,6 +90,26 @@ pub(super) fn directshow_fallback<'a>(
     }
 }
 
+/// 「自動」で音声ピンのために DirectShow で開こうとして、DirectShow の一覧に
+/// 無かったとき、Media Foundation で開き直す名前（#425）。
+///
+/// 返すのは、開き方が自動で、音声ピンの指定があり、名前が「(DirectShow)」付き
+/// でなく（付いていればもともと DirectShow の経路）、失敗が `DeviceNotFound` の
+/// ときだけ。見つかったが開けなかったときは倒さない（Media Foundation には音声ピンが
+/// 無い）。
+fn media_foundation_fallback<'a>(
+    name: Option<&'a str>,
+    backend: VideoBackendSetting,
+    audio_pin: bool,
+    error: &VideoError,
+) -> Option<&'a str> {
+    let name = name?;
+    let by_pin = backend == VideoBackendSetting::Auto
+        && audio_pin
+        && directshow_friendly_name(name).is_none();
+    (by_pin && matches!(error, VideoError::DeviceNotFound(_))).then_some(name)
+}
+
 /// 経路を決めて `attempt` を呼び、「自動」で Media Foundation が開けなければ
 /// **同じ呼び出しの中で** DirectShow でも試す（#387）。返すのは結果と、その
 /// 結果を出した経路。`what` はログに出す操作の名前（「接続」など、
@@ -90,17 +120,35 @@ pub(super) fn directshow_fallback<'a>(
 /// あっても開けなければ、**Media Foundation の失敗をそのまま返す。** 利用者が
 /// 選んだのは自動で、DirectShow は代わりに試しただけなので、画面に出す理由は
 /// 本来の経路のものにする（DirectShow の失敗は WARN でログに残す）。
+///
+/// `audio_pin` は `route_for` へそのまま渡す。立っていれば自動でも最初から
+/// DirectShow なので、Media Foundation → DirectShow の倒し込みは起きない（#425）。
+/// その代わり、DirectShow の一覧に同じ名前が無い（`DeviceNotFound`）ときだけは
+/// 今までどおり Media Foundation で開く（`media_foundation_fallback`）。映像まで
+/// 開けなくなるのを避けるためで、音声は「Media Foundation で開いた映像には音声ピンが
+/// 無い」の理由で待つ。DirectShow の一覧にあって開けなかったときは倒さない。
 pub(super) fn attempt_with_fallback<T>(
     device_name: Option<&str>,
     backend: VideoBackendSetting,
+    audio_pin: bool,
     what: &str,
     mut attempt: impl FnMut(VideoRoute, Option<&str>) -> Result<T, VideoError>,
 ) -> (Result<T, VideoError>, VideoRoute) {
-    let (route, name) = route_for(device_name, backend);
+    let (route, name) = route_for(device_name, backend, audio_pin);
     let first = attempt(route, name);
     let Err(first_error) = &first else {
         return (first, route);
     };
+    if let Some(mf_name) = media_foundation_fallback(name, backend, audio_pin, first_error) {
+        info!(
+            "映像デバイスの音声のために DirectShow で{}しようとしたが、DirectShow の一覧に無いので Media Foundation で試す: {}",
+            what, mf_name
+        );
+        return (
+            attempt(VideoRoute::MediaFoundation, Some(mf_name)),
+            VideoRoute::MediaFoundation,
+        );
+    }
     let Some(fallback_name) = directshow_fallback(route, name, backend, first_error) else {
         return (first, route);
     };
@@ -213,15 +261,18 @@ mod tests {
     fn route_for_auto_uses_the_directshow_suffix() {
         let auto = VideoBackendSetting::Auto;
         assert_eq!(
-            route_for(Some(DS_ONLY), auto),
+            route_for(Some(DS_ONLY), auto, false),
             (VideoRoute::DirectShow, Some(DS_ONLY))
         );
         assert_eq!(
-            route_for(Some(BOTH), auto),
+            route_for(Some(BOTH), auto, false),
             (VideoRoute::MediaFoundation, Some(BOTH))
         );
         // 未指定は今までどおり Media Foundation の先頭
-        assert_eq!(route_for(None, auto), (VideoRoute::MediaFoundation, None));
+        assert_eq!(
+            route_for(None, auto, false),
+            (VideoRoute::MediaFoundation, None)
+        );
     }
 
     #[test]
@@ -229,12 +280,12 @@ mod tests {
         let ds = VideoBackendSetting::DirectShow;
         // 両方に出るデバイス。同じ表示名を DirectShow の一覧から探す
         assert_eq!(
-            route_for(Some(BOTH), ds),
+            route_for(Some(BOTH), ds, false),
             (VideoRoute::DirectShow, Some(BOTH))
         );
         // もともと DirectShow のデバイスは自動と同じ
         assert_eq!(
-            route_for(Some(DS_ONLY), ds),
+            route_for(Some(DS_ONLY), ds, false),
             (VideoRoute::DirectShow, Some(DS_ONLY))
         );
     }
@@ -244,11 +295,11 @@ mod tests {
         let mf = VideoBackendSetting::MediaFoundation;
         // 印を外した本来の名前で Media Foundation の一覧を探す
         assert_eq!(
-            route_for(Some(DS_ONLY), mf),
+            route_for(Some(DS_ONLY), mf, false),
             (VideoRoute::MediaFoundation, Some("OBS Virtual Camera"))
         );
         assert_eq!(
-            route_for(Some(BOTH), mf),
+            route_for(Some(BOTH), mf, false),
             (VideoRoute::MediaFoundation, Some(BOTH))
         );
     }
@@ -258,7 +309,7 @@ mod tests {
         // DirectShow の経路は名前が無いと開けないので、開き方によらず先頭へ
         for backend in VideoBackendSetting::ALL {
             assert_eq!(
-                route_for(None, backend),
+                route_for(None, backend, false),
                 (VideoRoute::MediaFoundation, None),
                 "{backend:?}"
             );
@@ -271,12 +322,40 @@ mod tests {
         // （`directshow_friendly_name` が空の名前を返さない）
         let bare = " (DirectShow)";
         assert_eq!(
-            route_for(Some(bare), VideoBackendSetting::Auto),
+            route_for(Some(bare), VideoBackendSetting::Auto, false),
             (VideoRoute::MediaFoundation, Some(bare))
         );
         assert_eq!(
-            route_for(Some(bare), VideoBackendSetting::MediaFoundation),
+            route_for(Some(bare), VideoBackendSetting::MediaFoundation, false),
             (VideoRoute::MediaFoundation, Some(bare))
+        );
+    }
+
+    #[test]
+    fn route_for_auto_with_an_audio_pin_prefers_directshow() {
+        // 「映像デバイスの音声」を選んだ自動は、両方に出るデバイスも DirectShow（#425）
+        let auto = VideoBackendSetting::Auto;
+        assert_eq!(
+            route_for(Some(BOTH), auto, true),
+            (VideoRoute::DirectShow, Some(BOTH))
+        );
+        assert_eq!(
+            route_for(Some(DS_ONLY), auto, true),
+            (VideoRoute::DirectShow, Some(DS_ONLY))
+        );
+        // 未指定は DirectShow では開けないので今までどおり
+        assert_eq!(
+            route_for(None, auto, true),
+            (VideoRoute::MediaFoundation, None)
+        );
+        // 開き方を固定した設定には従う。Media Foundation 固定なら倒さず理由を出す
+        assert_eq!(
+            route_for(Some(DS_ONLY), VideoBackendSetting::MediaFoundation, true),
+            (VideoRoute::MediaFoundation, Some("OBS Virtual Camera"))
+        );
+        assert_eq!(
+            route_for(Some(BOTH), VideoBackendSetting::DirectShow, true),
+            (VideoRoute::DirectShow, Some(BOTH))
         );
     }
 
@@ -295,21 +374,32 @@ mod tests {
     }
 
     /// 経路ごとにモックを 1 つずつ置き、`SystemVideo::start_capture` と同じ形で
-    /// `attempt_with_fallback` を通す
+    /// `attempt_with_fallback` を通す。音声ピンは繋がない
     fn start_on_mocks(
         media_foundation: &mut MockVideoBackend,
         direct_show: &mut MockVideoBackend,
         device_name: Option<&str>,
         backend: VideoBackendSetting,
     ) -> (Result<(), VideoError>, VideoRoute) {
-        attempt_with_fallback(device_name, backend, "接続", |route, name| {
+        start_on_mocks_with_pin(media_foundation, direct_show, device_name, backend, false)
+    }
+
+    /// `start_on_mocks` に音声ピンを繋ぐ指定（`connect_audio_pin`）を足したもの
+    fn start_on_mocks_with_pin(
+        media_foundation: &mut MockVideoBackend,
+        direct_show: &mut MockVideoBackend,
+        device_name: Option<&str>,
+        backend: VideoBackendSetting,
+        audio_pin: bool,
+    ) -> (Result<(), VideoError>, VideoRoute) {
+        attempt_with_fallback(device_name, backend, audio_pin, "接続", |route, name| {
             let request = CaptureRequest {
                 device_name: name,
                 resolution: None,
                 format: None,
                 fps: None,
                 backend,
-                connect_audio_pin: true,
+                connect_audio_pin: audio_pin,
             };
             match route {
                 VideoRoute::DirectShow => direct_show.start_capture(&request),
@@ -418,6 +508,115 @@ mod tests {
     }
 
     #[test]
+    fn auto_with_an_audio_pin_opens_directshow_without_trying_media_foundation() {
+        // 「映像デバイスの音声」を選んで適用した自動（#425）。Media Foundation には
+        // 音声ピンが無いので試さない
+        let mut mf = MockVideoBackend::default();
+        let mut ds = MockVideoBackend::default();
+        let (result, route) = start_on_mocks_with_pin(
+            &mut mf,
+            &mut ds,
+            Some(GC551),
+            VideoBackendSetting::Auto,
+            true,
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(route, VideoRoute::DirectShow);
+        assert_eq!(mf.with(|state| state.start_calls), 0);
+        assert_eq!(ds.with(|state| state.start_calls), 1);
+        assert_eq!(ds.with(|state| state.last_connect_audio_pin), Some(true));
+    }
+
+    #[test]
+    fn auto_with_an_audio_pin_does_not_fall_back_to_media_foundation() {
+        // DirectShow の一覧にあって開けなかったときは Media Foundation へは倒さず、
+        // DirectShow の失敗を返す
+        let open_failed = VideoError::StreamOpenFailed {
+            device: GC551.to_string(),
+            source: "VFW_E_NO_ACCEPTABLE_TYPES".to_string(),
+        };
+        let mut mf = MockVideoBackend::default();
+        let mut ds = MockVideoBackend::default();
+        ds.with(|state| {
+            state.failures_before_success = 1;
+            state.failure = Some(open_failed.clone());
+        });
+        let (result, route) = start_on_mocks_with_pin(
+            &mut mf,
+            &mut ds,
+            Some(GC551),
+            VideoBackendSetting::Auto,
+            true,
+        );
+        assert_eq!(result, Err(open_failed));
+        assert_eq!(route, VideoRoute::DirectShow);
+        assert_eq!(mf.with(|state| state.start_calls), 0);
+    }
+
+    #[test]
+    fn auto_with_an_audio_pin_opens_media_foundation_when_directshow_lacks_the_device() {
+        // DirectShow の一覧に無い（Media Foundation にだけ居る機種）。映像まで開けなく
+        // ならないよう、今までどおり Media Foundation で開く。音声は理由を出して待つ
+        let mut mf = MockVideoBackend::default();
+        let mut ds = MockVideoBackend::default();
+        ds.with(|state| state.failures_before_success = 1); // 既定の失敗は DeviceNotFound
+        let (result, route) = start_on_mocks_with_pin(
+            &mut mf,
+            &mut ds,
+            Some(GC551),
+            VideoBackendSetting::Auto,
+            true,
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(route, VideoRoute::MediaFoundation);
+        assert_eq!(ds.with(|state| state.start_calls), 1);
+        assert_eq!(mf.with(|state| state.start_calls), 1);
+        assert_eq!(
+            mf.with(|state| state.last_device_name.clone()),
+            Some(GC551.to_string())
+        );
+        // 「(DirectShow)」付きの名前はもともと DirectShow の経路なので倒さない
+        let not_found = VideoError::DeviceNotFound(DS_ONLY.to_string());
+        let auto = VideoBackendSetting::Auto;
+        assert_eq!(
+            media_foundation_fallback(Some(DS_ONLY), auto, true, &not_found),
+            None
+        );
+        // 音声ピンの指定が無い・開き方を固定した設定でも倒さない
+        assert_eq!(
+            media_foundation_fallback(Some(GC551), auto, false, &not_found),
+            None
+        );
+        assert_eq!(
+            media_foundation_fallback(
+                Some(GC551),
+                VideoBackendSetting::DirectShow,
+                true,
+                &not_found
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn media_foundation_setting_with_an_audio_pin_stays_on_media_foundation() {
+        // 開き方を Media Foundation に固定していれば、音声ピンの指定があっても従う。
+        // 音声は「開かずに待つ」の経路で理由を出す（monitor_audio_pin）
+        let mut mf = MockVideoBackend::default();
+        let mut ds = MockVideoBackend::default();
+        let (result, route) = start_on_mocks_with_pin(
+            &mut mf,
+            &mut ds,
+            Some(GC551),
+            VideoBackendSetting::MediaFoundation,
+            true,
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(route, VideoRoute::MediaFoundation);
+        assert_eq!(ds.with(|state| state.start_calls), 0);
+    }
+
+    #[test]
     fn directshow_fallback_only_for_auto_media_foundation_open_failures() {
         let auto = VideoBackendSetting::Auto;
         let mf = VideoRoute::MediaFoundation;
@@ -477,6 +676,7 @@ mod tests {
         let (result, route) = attempt_with_fallback(
             Some(GC551),
             VideoBackendSetting::Auto,
+            false,
             "対応形式の取得",
             |route, name| {
                 asked.push((route, name.map(str::to_string)));
