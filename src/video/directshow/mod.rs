@@ -184,16 +184,34 @@ impl DirectShowCapture {
             );
             return Ok(Vec::new());
         };
-        let capabilities =
-            devices::capabilities_from_candidates(&queried.candidates, queried.current);
+        let capabilities = devices::capabilities_from_candidates(
+            &queried.candidates,
+            queried.current,
+            queried.current_fps,
+        );
         debug!(
-            "DirectShow のデバイス能力の内訳（{}、{:.1}ms、いまの解像度: {:?}）: {}",
+            "DirectShow のデバイス能力の内訳（{}、{:.1}ms、いまの解像度: {:?}、いまの fps: {:?}）: {}",
             display,
             elapsed_ms(start),
             queried.current,
+            queried.current_fps,
             capabilities
                 .iter()
-                .map(|capability| format!("{}: {} 件", capability.name, capability.modes.len()))
+                .map(|capability| {
+                    // いまの解像度で選べる fps も出す（#410）
+                    let fps: Vec<u32> = capability
+                        .modes
+                        .iter()
+                        .filter(|mode| Some((mode.width, mode.height)) == queried.current)
+                        .map(|mode| mode.fps)
+                        .collect();
+                    format!(
+                        "{}: {} 件（いまの解像度の fps: {:?}）",
+                        capability.name,
+                        capability.modes.len(),
+                        fps
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("、")
         );
@@ -484,6 +502,41 @@ mod tests {
         // 警告画面も同じ大きさのフレームとして届くので、映っているかは目で確かめる
         assert_eq!((frame.width as u32, frame.height as u32), current);
         capture.stop_capture();
+    }
+
+    #[test]
+    #[ignore = "DirectShow のキャプチャーボード（AVerMedia GC551）に 1920x1080 60Hz の入力信号を入れておく"]
+    fn capabilities_list_only_the_input_fps_for_ranged_formats() {
+        // 実行: cargo test capabilities_list_only_the_input_fps -- --ignored --nocapture
+        // #410: fps が範囲の形式では、GetFormat のいまの fps（入力信号の 60）だけを出す
+        let capture = capture();
+        let name = capture
+            .list_friendly_names()
+            .into_iter()
+            .next()
+            .expect("DirectShow のデバイスがある");
+        let display = display_name(&name);
+        let entry = DirectShowCapture::find(&display).expect("見つかる");
+        let queried = graph::query_candidates(&entry)
+            .expect("対応形式を読める")
+            .expect("IAMStreamConfig がある");
+        println!(
+            "いまの解像度: {:?}、いまの fps: {:?}",
+            queried.current, queried.current_fps
+        );
+        let capabilities = capture.capabilities(&display).expect("能力を読める");
+        for capability in &capabilities {
+            let fps: Vec<u32> = capability
+                .modes
+                .iter()
+                .filter(|mode| (mode.width, mode.height) == (1920, 1080))
+                .map(|mode| mode.fps)
+                .collect();
+            println!("{}: 1920x1080 の fps の候補 {:?}", capability.name, fps);
+            if !fps.is_empty() {
+                assert_eq!(fps, vec![60]);
+            }
+        }
     }
 
     #[test]
