@@ -97,22 +97,27 @@ impl CaptureCardViewer {
         }
     }
 
-    /// このフレームで egui へ渡るキー入力から、ホットキーに割り当てたキーの
-    /// 押下を取り除く（#217）。
+    /// egui へ渡す前の入力から、ホットキーに割り当てたキーの押下を取り除く
+    /// （#217、#418）。
     ///
     /// キーを奪わないフックにしたので、前面にいる間は割り当てたキーが egui にも
     /// 届き、Escape を割り当てると右クリックメニューも同時に閉じていた。
-    /// **描画より前に呼ぶこと。** 描画の中で `key_pressed` を見る処理
-    /// （右クリックメニューの Escape など）より後だと取り除いても間に合わない。
+    /// **`App::raw_input_hook` から呼ぶ。** egui はフレームの始まり（`begin_pass`）で
+    /// Tab / Escape / 矢印キーによるフォーカスの移動を済ませるので、`update()` の
+    /// 中で `input_mut` から取り除いても間に合わない。押下の検出と実行はこれまで
+    /// どおりフックとリスナーが受け持ち、ここは egui へ渡さないことだけを行う。
     ///
-    /// 入力中かはフレームの先頭の値で見る。リスナーへ渡している旗（`update()` の
-    /// 末尾で書く）と同じく、前のフレームの描画を終えた時点の状態になる。
-    pub(super) fn remove_hotkey_key_events(&self, ctx: &egui::Context) {
+    /// 入力中かは前のフレームの描画を終えた時点の状態で見る。リスナーへ渡している
+    /// 旗（`update()` の末尾で書く）と同じ値になる。
+    pub(super) fn remove_hotkey_key_events(
+        &self,
+        ctx: &egui::Context,
+        raw_input: &mut egui::RawInput,
+    ) {
         let typing = is_typing_in_text_field(ctx);
-        let removed = ctx.input_mut(|input| {
-            self.hotkey_manager
-                .remove_hotkey_key_events(&mut input.events, typing)
-        });
+        let removed = self
+            .hotkey_manager
+            .remove_hotkey_key_events(&mut raw_input.events, typing);
         if removed > 0 {
             trace!("ホットキーのキー入力 {removed} 件を egui へ渡さずに捨てた");
         }
