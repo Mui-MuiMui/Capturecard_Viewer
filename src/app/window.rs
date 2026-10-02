@@ -150,6 +150,11 @@ impl CaptureCardViewer {
     /// **ここでは書き出さない。** ウィンドウのドラッグ中は毎フレーム値が変わるため、
     /// 変わるたびに保存すると最大 60 回/秒のディスク書き込みになる。
     pub(super) fn record_window_geometry(&mut self, viewport: &egui::ViewportInfo) {
+        // 起動時に最大化を送ったフレームは、まだ最大化前の状態が報告される。
+        // そのフレームだけは maximized を書き換えない。書き換えると、最大化が効く前に
+        // 終了したとき（on_exit は必ず保存する）に最大化を失う。位置と大きさは
+        // 戻り先そのものなので、このフレームも記録してよい
+        let startup_maximize_pending = std::mem::take(&mut self.startup_maximize_pending);
         if !Self::should_record_window_geometry(self.is_fullscreen, viewport.fullscreen) {
             return;
         }
@@ -163,7 +168,8 @@ impl CaptureCardViewer {
         let changed = match self.settings.lock() {
             Ok(mut settings) => {
                 let mut changed = false;
-                if settings.ui.maximized != maximized {
+                let keep_flag = startup_maximize_pending && !maximized;
+                if !keep_flag && settings.ui.maximized != maximized {
                     settings.ui.maximized = maximized;
                     changed = true;
                 }
@@ -222,6 +228,7 @@ impl CaptureCardViewer {
         if maximized {
             info!("前回は最大化して終了していたので最大化する");
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            self.startup_maximize_pending = true;
         }
     }
 

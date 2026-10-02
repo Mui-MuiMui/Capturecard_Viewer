@@ -195,6 +195,8 @@ pub struct CaptureCardViewer {
     // フルスクリーン中は OS 側が元から装飾を外しているので、この値は
     // 「フルスクリーンから戻ったときにどちらへ戻すか」を保持しているだけになる
     borderless: bool,
+    // 起動時の最大化を送ったフレームか。そのフレームは最大化前の状態が報告される（window.rs）
+    startup_maximize_pending: bool,
 
     // 進行中のスクリーンショット保存スレッド。クリップボードへの転送も
     // このスレッドが行う。
@@ -320,6 +322,7 @@ impl Default for CaptureCardViewer {
             // ウィンドウ管理
             always_on_top: false,
             borderless: false,
+            startup_maximize_pending: false,
 
             screenshot_save_threads: Vec::new(),
             sound_load_threads: Vec::new(),
