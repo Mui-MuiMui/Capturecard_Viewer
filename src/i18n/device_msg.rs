@@ -147,16 +147,16 @@ pub fn audio_pin_failure(failure: &crate::audio::PinFailure) -> String {
     use crate::audio::PinFailure;
     match (failure, language()) {
         (PinFailure::Connect(source), Language::Japanese) => {
-            format!("音声ピンとつなげない: {source}")
+            format!("つなげない: {source}")
         }
         (PinFailure::Connect(source), Language::English) => {
-            format!("cannot connect the audio pin: {source}")
+            format!("cannot connect: {source}")
         }
         (PinFailure::Run(source), Language::Japanese) => {
-            format!("音声ピンをつなぐと映像を動かせないので外した: {source}")
+            format!("つなぐと映像を動かせないので外した: {source}")
         }
         (PinFailure::Run(source), Language::English) => {
-            format!("removed the audio pin because the video could not run with it: {source}")
+            format!("disconnected because the video could not run with it: {source}")
         }
     }
 }
@@ -165,9 +165,9 @@ pub fn audio_pin_failure(failure: &crate::audio::PinFailure) -> String {
 pub fn audio_pin_connect_failed(failure: &crate::audio::PinFailure) -> String {
     let reason = audio_pin_failure(failure);
     match language() {
-        Language::Japanese => format!("映像デバイスの音声ピンに繋げませんでした（{reason}）"),
+        Language::Japanese => format!("映像デバイスの音声をつなげませんでした（{reason}）"),
         Language::English => {
-            format!("Could not connect the audio pin of the video device ({reason})")
+            format!("Could not connect the video device's audio ({reason})")
         }
     }
 }
@@ -220,12 +220,12 @@ pub fn underrun_count(count: u32) -> String {
     }
 }
 
-/// 統計 OSD の音声の行に、入力が映像デバイスの音声ピンであることを添える
+/// 統計 OSD の音声の行に、入力が映像デバイスの音声ピンであることを「映像デバイスの音声」と添える
 /// （`status::format_osd_audio_line`、#394）
 pub fn via_audio_pin(line: &str) -> String {
     match language() {
-        Language::Japanese => format!("{line}（音声ピン）"),
-        Language::English => format!("{line} (audio pin)"),
+        Language::Japanese => format!("{line}（映像デバイスの音声）"),
+        Language::English => format!("{line} (video device audio)"),
     }
 }
 
@@ -380,12 +380,14 @@ pub fn link_audio_input(device: impl Display, summary: impl Display) -> String {
     }
 }
 
-/// 入力が映像デバイスの音声ピンのときの入力の行（#388）。`device` は映像デバイスの名前
-pub fn link_audio_input_video_pin(device: impl Display, summary: impl Display) -> String {
+/// 入力が映像デバイスの音声ピンのときの入力の行（#388）。`device` は映像デバイスの名前で、
+/// 「(DirectShow)」の印は外して出す（設定ダイアログの項目名と揃える、#409）
+pub fn link_audio_input_video_pin(device: &str, summary: impl Display) -> String {
+    let device = crate::video::directshow_friendly_name(device).unwrap_or(device);
     match language() {
-        Language::Japanese => format!("入力: 映像デバイスの音声（{device} の音声ピン、{summary}）"),
+        Language::Japanese => format!("入力: 映像デバイスの音声（{device}、{summary}）"),
         Language::English => {
-            format!("Input: video device audio (audio pin of {device}, {summary})")
+            format!("Input: video device audio ({device}, {summary})")
         }
     }
 }
@@ -394,10 +396,10 @@ pub fn link_audio_input_video_pin(device: impl Display, summary: impl Display) -
 pub fn link_audio_buffer_widened(configured_ms: u32, actual_ms: u32, chunk_ms: u32) -> String {
     match language() {
         Language::Japanese => format!(
-            "バッファ: 設定 {configured_ms} ms → 実際 {actual_ms} ms（音声ピンの塊が {chunk_ms} ms のため）"
+            "バッファ: 設定 {configured_ms} ms → 実際 {actual_ms} ms（映像デバイスの音声が {chunk_ms} ms ごとに届くため）"
         ),
         Language::English => format!(
-            "Buffer: {configured_ms} ms set → {actual_ms} ms used (the audio pin delivers {chunk_ms} ms chunks)"
+            "Buffer: {configured_ms} ms set → {actual_ms} ms used (the video device delivers audio in {chunk_ms} ms chunks)"
         ),
     }
 }
@@ -408,28 +410,34 @@ pub fn link_audio_pin(state: &crate::audio::AudioPinState) -> Option<String> {
     let japanese = language() == Language::Japanese;
     let text = match state {
         AudioPinState::NotApplicable => return None,
-        AudioPinState::Missing if japanese => "音声ピン: なし".to_string(),
-        AudioPinState::Missing => "Audio pin: none".to_string(),
-        AudioPinState::Available if japanese => "音声ピン: あり（繋いでいない）".to_string(),
-        AudioPinState::Available => "Audio pin: present (not connected)".to_string(),
+        AudioPinState::Missing if japanese => "映像デバイスの音声: なし".to_string(),
+        AudioPinState::Missing => "Video device audio: none".to_string(),
+        AudioPinState::Available if japanese => {
+            "映像デバイスの音声: あり（使っていない）".to_string()
+        }
+        AudioPinState::Available => "Video device audio: present (not in use)".to_string(),
         AudioPinState::Connected(connection) => {
             let summary = connection.format.summary();
             let chunk = connection
                 .chunk_bytes
                 .and_then(|bytes| connection.format.chunk_ms(bytes));
             match (chunk, japanese) {
-                (Some(ms), true) => format!("音声ピン: 繋いでいる {summary}、塊 {ms} ms"),
-                (Some(ms), false) => format!("Audio pin: connected {summary}, {ms} ms chunks"),
-                (None, true) => format!("音声ピン: 繋いでいる {summary}"),
-                (None, false) => format!("Audio pin: connected {summary}"),
+                (Some(ms), true) => {
+                    format!("映像デバイスの音声: 使っている {summary}、{ms} ms ごと")
+                }
+                (Some(ms), false) => {
+                    format!("Video device audio: in use {summary}, {ms} ms chunks")
+                }
+                (None, true) => format!("映像デバイスの音声: 使っている {summary}"),
+                (None, false) => format!("Video device audio: in use {summary}"),
             }
         }
         AudioPinState::Failed(failure) => {
             let reason = audio_pin_failure(failure);
             if japanese {
-                format!("音声ピン: 繋げなかった（{reason}）")
+                format!("映像デバイスの音声: つなげなかった（{reason}）")
             } else {
-                format!("Audio pin: not connected ({reason})")
+                format!("Video device audio: not connected ({reason})")
             }
         }
     };
@@ -480,15 +488,15 @@ mod tests {
         assert_eq!(link_audio_pin(&AudioPinState::NotApplicable), None);
         assert_eq!(
             link_audio_pin(&AudioPinState::Connected(connection.clone())).as_deref(),
-            Some("音声ピン: 繋いでいる 48000Hz 2ch 16bit、塊 10 ms")
+            Some("映像デバイスの音声: 使っている 48000Hz 2ch 16bit、10 ms ごと")
         );
         assert_eq!(
             link_audio_pin(&AudioPinState::Available).as_deref(),
-            Some("音声ピン: あり（繋いでいない）")
+            Some("映像デバイスの音声: あり（使っていない）")
         );
         assert_eq!(
             link_audio_pin(&AudioPinState::Missing).as_deref(),
-            Some("音声ピン: なし")
+            Some("映像デバイスの音声: なし")
         );
         let failed = link_audio_pin(&AudioPinState::Failed(PinFailure::Run("E_FAIL".into())))
             .expect("繋げなかった旨を出す");
@@ -502,7 +510,15 @@ mod tests {
                 &AudioPinState::Connected(without_chunk)
             ))
             .as_deref(),
-            Some("Audio pin: connected 48000Hz 2ch 16bit")
+            Some("Video device audio: in use 48000Hz 2ch 16bit")
+        );
+    }
+
+    #[test]
+    fn link_audio_input_video_pin_hides_the_directshow_mark() {
+        assert_eq!(
+            link_audio_input_video_pin("AVerMedia GC551 Video Capture (DirectShow)", "48000Hz 2ch"),
+            "入力: 映像デバイスの音声（AVerMedia GC551 Video Capture、48000Hz 2ch）"
         );
     }
 
@@ -510,7 +526,7 @@ mod tests {
     fn link_audio_buffer_widened_shows_the_reason() {
         assert_eq!(
             link_audio_buffer_widened(50, 1000, 500),
-            "バッファ: 設定 50 ms → 実際 1000 ms（音声ピンの塊が 500 ms のため）"
+            "バッファ: 設定 50 ms → 実際 1000 ms（映像デバイスの音声が 500 ms ごとに届くため）"
         );
     }
 

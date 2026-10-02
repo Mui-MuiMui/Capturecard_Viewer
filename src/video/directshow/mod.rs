@@ -12,7 +12,7 @@
 //! | `devices.rs` | 列挙（`ICreateDevEnum`）、対応形式（`IAMStreamConfig::GetStreamCaps`）、いまの解像度（`GetFormat`）、開く解像度と形式の選び方 |
 //! | `graph.rs` | フィルターグラフの組み立て・開始・停止・破棄 |
 //! | `filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`）。媒体を問わない |
-//! | `audio_pin.rs` | 音声ピン（#388）。有無の記録、塊の長さの提案と接続、`Run` が通らないときに外してやり直す、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
+//! | `audio_pin.rs` | 音声ピン（#388）。列挙の時点での有無の判定（#409）、有無の記録、塊の長さの提案と接続、`Run` が通らないときに外してやり直す、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
 //! | `video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
 //! | `media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放（COM の初期化は `crate::com`） |
 //! | `timestamp_probe.rs` | テストを含むビルドだけ。サンプルの到着時刻とタイムスタンプの計測（#406） |
@@ -34,6 +34,7 @@ mod video_stream;
 
 use log::{debug, info, warn};
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -43,7 +44,7 @@ use super::color::SharedColorConversion;
 use super::frame_buffer::VideoFrames;
 use super::frame_sink::FrameSink;
 use super::{elapsed_ms, VideoError};
-use crate::audio::{AudioPinFeed, AudioPinState, PinConnection};
+use crate::audio::{AudioPinFeed, AudioPinPresence, AudioPinState, PinConnection};
 use crate::com::{ComApartment, ComModel};
 use crate::repaint::RepaintWaker;
 use audio_pin::{AudioPinRequest, PinOutcome};
@@ -53,6 +54,9 @@ use graph::{CaptureGraph, FormatRequest, GraphError};
 /// DirectShow のデバイス名に添える印。**設定に保存される識別子の一部なので、
 /// 翻訳しない。**
 const DISPLAY_SUFFIX: &str = " (DirectShow)";
+
+/// 音声ピンの有無を調べられなかったデバイスを、調べ直すまでの間（#409）
+const PIN_PROBE_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 表示名（「(DirectShow)」付き）を作る
 pub fn display_name(friendly_name: &str) -> String {
@@ -80,6 +84,8 @@ pub struct DirectShowCapture {
     /// いまのグラフで、音声ピンから届いた塊の長さをログへ出したか。`link_state` が
     /// `&self` で書くので `Cell`（触るのはワーカーだけ）
     pin_chunk_logged: Cell<bool>,
+    /// 列挙の時点で調べた音声ピンの有無と、調べた時刻（#409、`audio_pin_presence`）。表示名ごと
+    pin_presence: HashMap<String, (AudioPinPresence, Instant)>,
     /// **最後に落とす。** グラフや名札（COM のオブジェクト）を手放してから
     /// COM の初期化を戻す。フィールドは宣言順に落ちるので、末尾に置いてある
     _com: Option<ComApartment>,
@@ -111,6 +117,7 @@ impl DirectShowCapture {
             repaint_waker,
             pin_feed,
             pin_chunk_logged: Cell::new(false),
+            pin_presence: HashMap::new(),
             _com: com,
         }
     }
@@ -153,6 +160,64 @@ impl DirectShowCapture {
                 Err(VideoError::DeviceQueryFailed(e.to_string()))
             }
         }
+    }
+
+    /// 各デバイスに音声ピンがあるか（#409）。`(表示名（「(DirectShow)」なし）, 有無)`。
+    ///
+    /// 名札からフィルターを作ってピンを見る（`audio_pin::probe_presence`）。
+    /// **DirectShow で開いている映像は掴み直さずに「不明」にする。** その有無は
+    /// 開いた結果（`ActiveVideo::audio_pin`）で分かり、動いているグラフのデバイスの
+    /// フィルターをもう 1 つ作ると、ドライバーによっては映像を乱すおそれがあるため。
+    /// 有無はデバイスごとに変わらないので、分かったもの（ある / ない）は覚えておき、
+    /// 次からは調べない。調べられなかった（不明）ものは `PIN_PROBE_RETRY` の間は
+    /// 調べ直さない（設定ダイアログを開いている間は 5 秒ごとに呼ばれ、遅いデバイスが
+    /// あるとそのたびにワーカーを塞ぐため）。開いていて飛ばした分はここに含めない。
+    /// 列挙に失敗したら空の一覧。
+    pub fn audio_pin_presence(&mut self) -> Vec<(String, AudioPinPresence)> {
+        let start = Instant::now();
+        let open = self.active.as_ref().map(|active| {
+            friendly_name(&active.device_name)
+                .unwrap_or(&active.device_name)
+                .to_string()
+        });
+        let skip = open.as_deref();
+        let devices = match devices::enumerate() {
+            Ok(devices) => devices,
+            Err(e) => {
+                debug!("DirectShow の音声ピンを調べるための列挙に失敗した: {}", e);
+                return Vec::new();
+            }
+        };
+        let mut probed = 0usize;
+        let mut presence = Vec::with_capacity(devices.len());
+        for entry in &devices {
+            let name = entry.friendly_name.clone();
+            let found = if skip == Some(name.as_str()) {
+                AudioPinPresence::Unknown
+            } else if let Some((known, _)) = self.pin_presence.get(&name).filter(|(known, at)| {
+                // 調べられなかったものは、間を空けてから調べ直す
+                *known != AudioPinPresence::Unknown || at.elapsed() < PIN_PROBE_RETRY
+            }) {
+                *known
+            } else {
+                probed += 1;
+                let found = audio_pin::probe_presence(entry);
+                self.pin_presence
+                    .insert(name.clone(), (found, Instant::now()));
+                found
+            };
+            presence.push((name, found));
+        }
+        if probed > 0 {
+            info!(
+                "DirectShow の映像デバイスの音声ピンを調べた（{} 台中 {} 台、{:.1}ms）: {:?}",
+                devices.len(),
+                probed,
+                elapsed_ms(start),
+                presence
+            );
+        }
+        presence
     }
 
     /// 表示名（「(DirectShow)」付き）からデバイスを探す。
@@ -429,6 +494,25 @@ mod tests {
             !names.is_empty(),
             "DirectShow のデバイスが 1 つも見つからない"
         );
+    }
+
+    #[test]
+    #[ignore = "DirectShow の映像入力デバイス（音声ピンを持つキャプチャーボードなど）が必要"]
+    fn audio_pin_presence_probes_once_and_remembers() {
+        // 列挙の時点の音声ピンの有無（#409）。1 回目はフィルターを作って調べ、
+        // 2 回目は覚えた結果を返す。所要時間は PR 本文に写す
+        let mut capture = capture();
+        let start = Instant::now();
+        let first = capture.audio_pin_presence();
+        println!("1 回目（{:.1}ms）: {first:?}", elapsed_ms(start));
+        let start = Instant::now();
+        let second = capture.audio_pin_presence();
+        println!("2 回目（{:.1}ms）: {second:?}", elapsed_ms(start));
+        assert!(
+            !first.is_empty(),
+            "DirectShow のデバイスが 1 つも見つからない"
+        );
+        assert_eq!(first, second);
     }
 
     #[test]

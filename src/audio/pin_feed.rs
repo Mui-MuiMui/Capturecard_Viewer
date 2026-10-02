@@ -169,6 +169,22 @@ pub enum AudioPinState {
     Failed(PinFailure),
 }
 
+/// 列挙の時点で調べた、映像デバイスに音声ピンがあるか（#409）。
+///
+/// 開く前に、設定ダイアログで映像デバイスの音声を選べるかを決めるためだけに使う。
+/// 開いたあとは開いた結果（`AudioPinState`）が優先する
+/// （`docs/design/directshow-audio.md` の (5)）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioPinPresence {
+    /// 音声を出す出力ピンがある
+    Present,
+    /// 出力ピンを最後まで見たが、音声を出すものが無い
+    Absent,
+    /// 調べられなかった（フィルターを作れない、ピンを列挙できない、開いている映像
+    /// なので掴み直さなかった）。**選べる側に倒す**
+    Unknown,
+}
+
 /// 音声のバックエンドが差し込む受け口。
 pub(super) struct PinSink {
     /// 差し込んだときのグラフの番号

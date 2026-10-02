@@ -139,7 +139,7 @@ cpal を 0.15 から 0.18 へ上げたとき（#299）に、WASAPI での振る�
 
 ## DirectShow の音声ピン（#388、第 1 段・第 2 段を実装済み）
 
-WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の音は、DirectShow のキャプチャーフィルターが映像ピンと並べて持つ音声ピンから取る（`[audio] input_source = "video_pin"`。設定ダイアログの「オーディオ入力デバイス」の先頭の「映像デバイスの音声 (DirectShow)」で選ぶ）。**音声ピンは cpal の入力ストリームの代わりとして扱い、リングより後ろ（出力コールバック、変換、クロックドリフト補正、音量・ミュート、アンダーランの数え方）と録画への分岐（`AudioTap`）は今の経路をそのまま通す。** 音声ピンのレンダラーの `Receive` が `AudioPinFeed::push` 経由で `process_input_iter`（`process_input` の本体）を呼ぶ形で、フェイクの入力スレッドが cpal の代わりに `process_input` を呼んでいるのと同じ。
+WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の音は、DirectShow のキャプチャーフィルターが映像ピンと並べて持つ音声ピンから取る（`[audio] input_source = "video_pin"`。設定ダイアログの「オーディオ入力デバイス」の先頭の、映像デバイスと同じ名前の項目で選ぶ。#409）。**音声ピンは cpal の入力ストリームの代わりとして扱い、リングより後ろ（出力コールバック、変換、クロックドリフト補正、音量・ミュート、アンダーランの数え方）と録画への分岐（`AudioTap`）は今の経路をそのまま通す。** 音声ピンのレンダラーの `Receive` が `AudioPinFeed::push` 経由で `process_input_iter`（`process_input` の本体）を呼ぶ形で、フェイクの入力スレッドが cpal の代わりに `process_input` を呼んでいるのと同じ。
 
 - `AudioCapture::start_passthrough` は入力の種類（`PassthroughInput::Device` / `VideoPin { graph }`）で入力側だけを分け、出力側（`passthrough_output.rs`）は共有する。音声ピンの入力は音声ピンの形式 1 つで開き、出力をそれに揃える（設定のレート・チャンネル数は使わない）
 - **塊の長さは 10ms を提案する**（`IAMBufferNegotiation::SuggestAllocatorProperties`）。GC551 では提案が通り、1 塊 1920 バイト（48kHz 2ch 16bit の 10ms）で届く（2026-10-01 の実測）。提案を無視して長い塊を返す機種では、そのストリームに限ってリングを塊 2 つぶんまで広げ、「接続状態」タブに出す

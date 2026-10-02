@@ -322,7 +322,7 @@ pub fn format_underrun_count(count: Option<u32>) -> String {
 }
 
 /// 統計 OSD の音声の行。アンダーランの行（`format_underrun_count`）に、入力が
-/// 映像デバイスの音声ピンなら「（音声ピン）」を添える（#394）。経路が違うと
+/// 映像デバイスの音声ピンなら「（映像デバイスの音声）」を添える（#394、#409）。経路が違うと
 /// アンダーランの出方も変わりうるので、OSD だけを見て比べるときに取り違えないため。
 /// 詳しい経路は「接続状態」タブに出す
 pub fn format_osd_audio_line(underruns: Option<u32>, via_audio_pin: bool) -> String {
@@ -778,7 +778,7 @@ mod tests {
     fn format_osd_audio_line_marks_the_audio_pin() {
         assert_eq!(
             format_osd_audio_line(Some(3), true),
-            "アンダーラン: 3 回（音声ピン）"
+            "アンダーラン: 3 回（映像デバイスの音声）"
         );
         assert_eq!(format_osd_audio_line(Some(3), false), "アンダーラン: 3 回");
     }

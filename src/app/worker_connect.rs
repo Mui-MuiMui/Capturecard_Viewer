@@ -338,6 +338,10 @@ impl WorkerState {
         let video = self.video.list_devices();
         let input = self.audio.list_input_devices();
         let output = self.audio.list_output_devices();
+        // 音声ピンの有無は一覧と同じ間隔で取り直す。分かったものは実装が覚えて
+        // いるので、2 回目からはフィルターを作らない（#409）
+        self.video_audio_pins = self.video.audio_pin_presence();
+        self.publish_snapshot();
         self.emit(DeviceEvent::DeviceLists {
             video,
             input,

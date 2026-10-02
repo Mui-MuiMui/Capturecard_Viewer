@@ -22,8 +22,8 @@
 
 use super::backend::{self, BackendShared};
 use crate::audio::{
-    ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, AudioInputRoute, AudioTap,
-    ResampleStatus,
+    ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, AudioInputRoute,
+    AudioPinPresence, AudioTap, ResampleStatus,
 };
 use crate::repaint::RepaintWaker;
 use crate::settings::{AppSettings, AudioInputSource, VideoBackendSetting};
@@ -245,6 +245,10 @@ pub(super) struct DeviceSnapshot {
     pub(super) audio_dropped_frames: Option<u32>,
     /// cpal が知らせた入力の取りこぼし（`Xrun`）の累計（Issue #377）。開いていなければ `None`
     pub(super) audio_xruns: Option<u32>,
+    /// 列挙の時点で調べた、映像デバイスごとの音声ピンの有無（#409）。デバイス一覧を
+    /// 取り直したとき（`refresh_device_lists`）だけ変わる。設定ダイアログが、映像を
+    /// 開く前に映像デバイスの音声を選べるかを決めるのに使う
+    pub(super) video_audio_pins: Vec<(String, AudioPinPresence)>,
 }
 
 impl DeviceSnapshot {
