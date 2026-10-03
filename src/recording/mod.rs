@@ -11,6 +11,7 @@
 //! | `replay_config.rs` | リプレイバッファの設定（UI スレッドが組み立てて渡す）と、エンコーダの作り直しが要るかの判定 |
 //! | `replay_recording.rs` | リプレイバッファを通す録画。リングからエンコードなしの Sink Writer へ書く |
 //! | `replay_ring.rs` | エンコード済みのリングと、書き出す位置・捨てる境界・PTS の付け替え（純粋関数） |
+//! | `replay_save.rs` | リプレイバッファの中身だけを保存する操作（#438）。録画か保存かの種類と、保存できない理由の判定（純粋関数） |
 //! | `encoder.rs` | エンコーダ MFT（H.264 / AAC、同期型と非同期型） |
 //! | `encoder_setup.rs` | エンコーダ MFT を作るときだけ使う補助（列挙、候補を先頭から開く、入出力の形の組み立て） |
 //! | `passthrough.rs` | エンコードなしの Sink Writer |
@@ -43,6 +44,7 @@ mod replay;
 mod replay_config;
 mod replay_recording;
 mod replay_ring;
+mod replay_save;
 mod sample_pool;
 mod session;
 mod storage;
@@ -56,6 +58,7 @@ pub use recorder::{
     ReplayRingStats,
 };
 pub use replay_config::ReplayConfig;
+pub use replay_save::SaveReplayBlock;
 
 use std::fmt;
 use std::path::PathBuf;

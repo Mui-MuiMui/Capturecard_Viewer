@@ -164,6 +164,30 @@ pub fn recording_saved(file_name: impl Display) -> String {
     }
 }
 
+/// リプレイバッファの中身を保存したときのトースト（#438）。`file_name` は拡張子まで含めたファイル名。
+pub fn replay_saved(file_name: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("リプレイを保存した: {file_name}"),
+        Language::English => format!("Saved the replay: {file_name}"),
+    }
+}
+
+/// リプレイバッファの中身を保存できなかった（#438）。`reason` は `RecordingError` の文言。
+pub fn replay_save_failed(reason: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("リプレイを保存できなかった: {reason}"),
+        Language::English => format!("Could not save the replay: {reason}"),
+    }
+}
+
+/// 右クリックメニューの「リプレイを保存（直近 30 秒）」（#438）。`seconds` はさかのぼる長さの設定
+pub fn menu_save_replay(seconds: u32) -> String {
+    match language() {
+        Language::Japanese => format!("リプレイを保存（直近 {seconds} 秒）"),
+        Language::English => format!("Save replay (last {seconds} s)"),
+    }
+}
+
 /// 右クリックメニューの「録画を停止（00:12:34）」
 pub fn menu_stop_recording(elapsed: impl Display) -> String {
     match language() {
@@ -247,6 +271,16 @@ mod tests {
             assert!(text.contains("1920x1080"), "{text}");
             assert!(text.contains("1280x720"), "{text}");
         }
+    }
+
+    #[test]
+    fn menu_save_replay_names_the_seconds_in_every_language() {
+        for language in [Language::Japanese, Language::English] {
+            let text = with_language(language, || menu_save_replay(300));
+            assert!(text.contains("300"), "{text}");
+        }
+        let english = with_language(Language::English, || menu_save_replay(30));
+        assert_eq!(english, "Save replay (last 30 s)");
     }
 
     #[test]

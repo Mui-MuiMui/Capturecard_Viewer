@@ -369,6 +369,11 @@ texts! {
     RecordingNoVideo { ja: "映像が届かなかったので、ファイルを作りませんでした", en: "No video arrived, so no file was created" },
     RecordingEncoderNotFound { ja: "エンコーダが登録されていない", en: "No encoder is registered" },
     RecordingThreadStopped { ja: "録画スレッドが止まっている", en: "The recording thread has stopped" },
+    // リプレイを保存できない理由（#438、recording::SaveReplayBlock）。メニューのホバーとトーストに出す
+    SaveReplayOff { ja: "リプレイバッファが OFF です（設定の「録画」タブで ON にします）", en: "The replay buffer is off (turn it on in the Recording tab of the settings)" },
+    SaveReplayWhileRecording { ja: "録画中はリプレイを保存できません（録画のファイルに含まれます）", en: "Cannot save a replay while recording (the recording already contains it)" },
+    SaveReplaySaving { ja: "リプレイを保存しています...", en: "Saving the replay..." },
+    SaveReplayEmpty { ja: "リプレイバッファにまだ映像が溜まっていません", en: "The replay buffer has no footage yet" },
     RecordingFileNameEmpty { ja: "ファイル名の書式が空です", en: "The file name format is empty" },
     RecordingFileNameInvalidSpecifier { ja: "ファイル名の書式に使えない指定子（% で始まるもの）が含まれています", en: "The file name format contains an unknown % specifier" },
     RecordingFileNameTrailingDot { ja: "ファイル名の末尾を空白や「.」にはできません", en: "A file name cannot end with a space or a period" },

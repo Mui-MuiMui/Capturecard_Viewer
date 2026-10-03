@@ -19,6 +19,10 @@
 //! どちらを使うかは録画スレッドが決める。窓口は録画の開始・停止とリプレイバッファの設定を
 //! 送るだけで、経路を知らない。
 //!
+//! リプレイバッファの中身だけを保存する操作（#438、`Recorder::save_replay`）も窓口から送る。
+//! 録画スレッドは③の録画と同じ書き出しを押した時刻で止め、結果を録画とは別のイベント
+//! （`ReplaySaved` / `ReplaySaveFailed` / `ReplaySaveRefused`）で返す。
+//!
 //! やり取りは mpsc。UI → 録画が `RecordingCommand`、録画 → UI が `RecordingEvent`。
 //! **録画スレッドから直接 `error!` を出さない。** 失敗を画面に出せるのは UI スレッド
 //! だけなので、受け取った UI スレッドがログと通知を出す（スクリーンショットの保存
@@ -40,6 +44,7 @@ use log::{debug, warn};
 use super::audio::{AudioDriftCorrection, AudioStats};
 use super::pts::{AUDIO_SAMPLE_RATE, UNITS_PER_SECOND};
 use super::replay_config::ReplayConfig;
+use super::replay_save::{save_replay_block, SaveReplayBlock};
 use super::{EncoderInfo, RecordingError};
 use crate::audio::AudioTap;
 use crate::video::VideoTap;
@@ -73,6 +78,8 @@ pub(super) enum RecordingCommand {
     Stop,
     /// リプレイバッファの設定。`None` なら OFF
     Replay(Option<ReplayConfig>),
+    /// リプレイバッファの中身だけを保存する（#438）。保存先とファイル名は録画と同じ組み立て
+    SaveReplay(RecordingRequest),
     /// 録画を閉じ、リプレイバッファを止めて抜ける
     Shutdown,
 }
@@ -111,6 +118,18 @@ pub enum RecordingEvent {
     /// リプレイバッファを続けられない（エンコーダを用意できない など）。録画していないときだけ
     /// 送る。設定が変わるまで作り直さず、その間の録画はリプレイバッファを通さない経路で行う
     ReplayFailed(RecordingError),
+    /// リプレイバッファの中身を保存した（#438）
+    ReplaySaved(RecordingSummary),
+    /// リプレイバッファの中身を保存できなかった、または途中で止まった（#438）。
+    /// `summary` はファイルを閉じてあれば入る
+    ReplaySaveFailed {
+        error: RecordingError,
+        summary: Option<RecordingSummary>,
+    },
+    /// いまはリプレイを保存できないので何もしなかった（#438）。窓口の判定をすり抜けたとき
+    /// （リプレイバッファを用意できずに止まっている、「押した時刻 − N 秒」以降に
+    /// キーフレームが無い など）。窓口の「保存中」を落とすため、必ず返事を返す
+    ReplaySaveRefused(SaveReplayBlock),
 }
 
 /// 録画スレッドと UI スレッドで共有する観測値。**書くのは録画スレッドだけ**、UI は読むだけ。
@@ -302,6 +321,8 @@ pub struct Recorder {
     /// 最後に送ったリプレイバッファの設定。`None` なら OFF
     replay: Option<ReplayConfig>,
     recording: Option<ActiveRecording>,
+    /// リプレイバッファの中身を保存している（`SaveReplay` を送ってから結果が届くまで。#438）
+    saving_replay: bool,
 }
 
 impl Recorder {
@@ -313,14 +334,20 @@ impl Recorder {
             thread: None,
             replay: None,
             recording: None,
+            saving_replay: false,
         }
     }
 
     /// 録画を始める。スレッドが無ければ起こす。起こせなければ失敗。
-    /// 録画中（`Finalize` を待っている間も含む）は何もしない。
+    /// 録画中（`Finalize` を待っている間も含む）とリプレイを保存している間は何もしない
+    /// （差し込み口も、リプレイバッファの書き出しの口も 1 つずつしか無い）。
     pub fn start(&mut self, request: RecordingRequest) -> Result<(), RecordingError> {
         if self.recording.is_some() {
             debug!("録画中の開始要求は無視する");
+            return Ok(());
+        }
+        if self.saving_replay {
+            debug!("リプレイを保存している間の録画の開始要求は無視する");
             return Ok(());
         }
         let audio = request.audio_bitrate_kbps.is_some();
@@ -346,6 +373,35 @@ impl Recorder {
                 let _ = thread.commands.send(RecordingCommand::Stop);
             }
         }
+    }
+
+    /// リプレイバッファの中身だけを保存できるか。できなければ理由（#438）。
+    pub fn save_replay_block(&self) -> Option<SaveReplayBlock> {
+        let held = self.replay_ring().map_or(Duration::ZERO, |ring| ring.held);
+        save_replay_block(
+            self.replay.is_some(),
+            held,
+            self.recording.is_some(),
+            self.saving_replay,
+        )
+    }
+
+    /// リプレイバッファの中身だけを保存するよう頼む（#438）。録画は始めない。
+    /// 保存できないとき（`save_replay_block` が理由を返すとき）は何もしない。結果は
+    /// `ReplaySaved` / `ReplaySaveFailed` / `ReplaySaveRefused` で届き、届くまでは「保存中」。
+    pub fn save_replay(&mut self, request: RecordingRequest) -> Result<(), RecordingError> {
+        if let Some(block) = self.save_replay_block() {
+            debug!("リプレイを保存しない: {:?}", block);
+            return Ok(());
+        }
+        self.send(RecordingCommand::SaveReplay(request))?;
+        self.saving_replay = true;
+        Ok(())
+    }
+
+    /// リプレイバッファの中身を保存している最中か（#438）。
+    pub fn is_saving_replay(&self) -> bool {
+        self.saving_replay
     }
 
     /// リプレイバッファの設定を渡す。前に渡したものと同じなら何もしない。
@@ -402,6 +458,7 @@ impl Recorder {
                     thread.join();
                 }
                 self.recording = None;
+                self.saving_replay = false;
                 None
             }
         }
@@ -412,6 +469,7 @@ impl Recorder {
     pub fn shutdown(&mut self) -> Vec<RecordingEvent> {
         self.recording = None;
         self.replay = None;
+        self.saving_replay = false;
         match self.thread.take() {
             Some(thread) => thread.shutdown(),
             None => Vec::new(),
@@ -481,6 +539,18 @@ impl Recorder {
         self.thread.is_some()
     }
 
+    /// 窓口の判定（`save_replay_block`）を通さずに保存を頼む。録画スレッドの側でも
+    /// 断ることをテストが確かめるのに使う（#438）。
+    #[cfg(test)]
+    pub(super) fn send_save_replay_unchecked(
+        &mut self,
+        request: RecordingRequest,
+    ) -> Result<(), RecordingError> {
+        self.send(RecordingCommand::SaveReplay(request))?;
+        self.saving_replay = true;
+        Ok(())
+    }
+
     /// コマンドを送る。スレッドが無ければ起こす。
     fn send(&mut self, command: RecordingCommand) -> Result<(), RecordingError> {
         if self.thread.is_none() {
@@ -507,14 +577,18 @@ impl Recorder {
                 }
             }
             RecordingEvent::Stopped(_) | RecordingEvent::Failed { .. } => self.recording = None,
+            RecordingEvent::ReplaySaved(_)
+            | RecordingEvent::ReplaySaveFailed { .. }
+            | RecordingEvent::ReplaySaveRefused(_) => self.saving_replay = false,
             RecordingEvent::Started | RecordingEvent::ReplayFailed(_) => {}
         }
     }
 
     /// 録画もリプレイバッファも無ければスレッドを止める。止まるまで待つが、
-    /// 何もしていないスレッドなのですぐ返る。
+    /// 何もしていないスレッドなのですぐ返る。リプレイを保存している間は止めない
+    /// （止めても書き切られるが、結果のイベントが UI へ届かない）。
     fn shutdown_if_idle(&mut self) {
-        if self.recording.is_some() || self.replay.is_some() {
+        if self.recording.is_some() || self.replay.is_some() || self.saving_replay {
             return;
         }
         if let Some(thread) = self.thread.take() {

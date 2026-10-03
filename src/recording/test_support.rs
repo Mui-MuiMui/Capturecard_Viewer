@@ -419,6 +419,27 @@ pub(super) fn poll_for(recorder: &mut Recorder, duration: Duration) -> Vec<Recor
     events
 }
 
+/// 届いたイベントを集めながら、`found` に当てはまるものが届くまで（最長 `timeout`）待つ。
+/// 当てはまったものを返す。届かなければ集めたイベントを添えて落とす。
+pub(super) fn poll_until<T>(
+    recorder: &mut Recorder,
+    timeout: Duration,
+    found: impl Fn(&RecordingEvent) -> Option<T>,
+) -> T {
+    let until = Instant::now() + timeout;
+    let mut events = Vec::new();
+    while Instant::now() < until {
+        while let Some(event) = recorder.try_recv() {
+            if let Some(value) = found(&event) {
+                return value;
+            }
+            events.push(event);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("待っていたイベントが届かない: {events:?}");
+}
+
 /// テストで使うリプレイバッファの設定（ソフトウェアのエンコーダ、4000kbps、音声 160kbps）。
 pub(super) fn replay_config(seconds: u32) -> ReplayConfig {
     ReplayConfig {
