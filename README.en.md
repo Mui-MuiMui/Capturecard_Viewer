@@ -7,7 +7,7 @@ A viewer for displaying video and audio from a capture card. For Windows 10/11.
 ## Overview
 
 - This application displays video and audio from a capture card (capture board) with low latency, good image quality, and a minimal interface.
-- Recent capture cards (as of 2025) should work, but older ones may not. The author has no way to verify this, as those devices are not available for testing.
+- Recent capture cards (as of 2026) should work, but older ones may not. The author has no way to verify this, as those devices are not available for testing.
   - More precisely, it should work with any device that Windows recognizes as a webcam.
   - Devices that only support DirectShow (such as the OBS Virtual Camera) also work. They appear in the device list with "(DirectShow)" appended to their name.
 - The interface is available in English and Japanese. By default it follows the Windows display language (see "Language").
