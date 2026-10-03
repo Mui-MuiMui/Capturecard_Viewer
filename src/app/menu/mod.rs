@@ -539,14 +539,14 @@ mod tests {
     #[test]
     fn estimate_flat_menu_height_counts_rows_from_the_flat_menu_table() {
         // 行数とセパレータの数は items::FLAT_MENU から数える。いまの並びは
-        // 16 行（音量の 3 行を含む）とセパレータ 5 本
+        // 16 行（音量の 3 行を含む）とセパレータ 5 本。egui の既定では
+        // 1 行 18 + 3、セパレータ 6 + 3 なので 16 * 21 + 5 * 9 = 381。
+        // 期待値は実装と同じ式で組み立てず、数字で書く
         let spacing = egui::Style::default().spacing;
-        let row = spacing.interact_size.y + spacing.item_spacing.y;
-        let separator = EGUI_SEPARATOR_SPACING + spacing.item_spacing.y;
 
         let estimate = estimate_flat_menu_height(&spacing, DEFAULT_TEXT_ROW, false);
 
-        assert!((estimate - (16.0 * row + 5.0 * separator)).abs() < 1e-3);
+        assert!((estimate - 381.0).abs() < 1e-3, "{estimate}");
     }
 
     #[test]
