@@ -123,8 +123,11 @@ cargo build --release
 | `src/hotkey/parse.rs` | `HotkeyError` と、ホットキー文字列のパース |
 | `src/hotkey/manager.rs` | `HotkeyManager` の本体（リスナーの起動と停止、ウィンドウ状態の受け渡し）と `BackgroundHotkeyRunner` |
 | `src/hotkey/assignments.rs` | `HotkeyAssignmentError`、アクション別の登録（差分適用・一時停止と再開・試し登録）と押下の取り出し |
-| `src/hotkey/listener.rs` | リスナースレッドと共有状態 `ListenerState`、押下の照合とデバウンス |
-| `src/keyboard_hook.rs` | 低レベルキーボードフック（`WH_KEYBOARD_LL`）。キーを奪わずに押下を観測し、リスナースレッドのメッセージループへ渡す。前面でもフックが呼ばれるよう、winit が登録したキーボードの Raw Input を外す（`stop_raw_keyboard_input`） |
+| `src/hotkey/method.rs` | 押下を受け取る方式の切り替え（`set_method`）と、キーを奪う方式（`RegisterHotKey`）の登録の反映・失敗の記録・試し登録（#207） |
+| `src/hotkey/listener.rs` | リスナーと共有する状態 `ListenerState`、押下の照合とデバウンス |
+| `src/hotkey/listener_thread.rs` | リスナースレッドの本体（メッセージループ）と UI スレッドからの要求の受け口、`HotkeyMethod`、方式ごとに OS へ登録するものの判定（`plan_sync`、純粋関数） |
+| `src/keyboard_hook.rs` | 低レベルキーボードフック（`WH_KEYBOARD_LL`）。キーを奪わずに押下を観測し、リスナースレッドのメッセージループ（`pump_messages`、`WM_HOTKEY` も受け取る）へ渡す。前面でもフックが呼ばれるよう、winit が登録したキーボードの Raw Input を外す（`stop_raw_keyboard_input`） |
+| `src/system_hotkey.rs` | キーを奪う方式の `RegisterHotKey` / `UnregisterHotKey`（`SystemHotkey`、`windows` クレート）。リスナースレッドの中だけで使う（#207） |
 | `src/screenshot.rs` | `ScreenshotError`（クリップボードへのコピーと効果音で共通）と、映像フレームのクリップボードへのコピー（`copy_frame_to_clipboard`） |
 | `src/screenshot_sound.rs` | rodio による効果音の読み込みと再生。埋め込みの既定音、設定のパスの解決（`resolve_sound_path`）、読み込み要求の番号の管理（`ScreenshotManager`） |
 | `src/settings/mod.rs` | 設定の入口。`AppSettings` と、読み込みで必ず通る `RawAppSettings` → `From`（旧形式からの移行とプリセットの整え）、`SettingsError`、`APP_NAME`。外から使う経路（`crate::settings::...`）の `pub use` もここ |
