@@ -5,6 +5,7 @@
 //! 「接続状態」タブへ渡す形に整える側をまとめてある。
 
 use super::CaptureCardViewer;
+use crate::audio::AudioInputRoute;
 use crate::i18n;
 use crate::overlay::OverlayContent;
 use crate::status::{self, ConnectionStatus, ErrorSource, LinkStatus};
@@ -17,25 +18,7 @@ use std::time::{Duration, Instant};
 /// よいが、エラーは予期していない内容を読ませるため。
 const ERROR_TOAST_DURATION: Duration = Duration::from_secs(4);
 
-/// フェイクデバイスの知らせを見せておく時間。起動直後はウィンドウが出るまでに
-/// 間があるので、エラーのトーストより長くする
-const FAKE_DEVICES_TOAST_DURATION: Duration = Duration::from_secs(8);
-
 impl CaptureCardViewer {
-    /// フェイクデバイスで動いているなら、起動直後に 1 回だけトーストで知らせる（#252）。
-    ///
-    /// **`ErrorCenter` を通さない。** 失敗ではなく、間引く対象でもないため。
-    pub(super) fn notify_fake_devices(&mut self) {
-        let Some(text) = status::fake_devices_notice(self.device.fake_devices()) else {
-            return;
-        };
-        self.transient_overlay.show(
-            OverlayContent::Text(text.to_string()),
-            FAKE_DEVICES_TOAST_DURATION,
-            Instant::now(),
-        );
-    }
-
     /// 失敗を記録し、必要ならトーストで見せる。
     ///
     /// **ログは呼び出し側が従来どおり出す。** ここは画面へ出すための記録で、
@@ -46,6 +29,10 @@ impl CaptureCardViewer {
     /// 勝つ（`TransientOverlay` は 1 件しか持たない）。**どれを見せるかを
     /// 優先度で決めない。** 全てログと「接続状態」タブに残っており、
     /// 消えたほうも次の再試行でまた記録されるため。
+    ///
+    /// フェイクデバイスの知らせ（#252）をこの置き場に入れないのも同じ理由による。
+    /// 入れると直後の接続失敗に上書きされて見えないので、`view.rs` の
+    /// `draw_fake_devices_banner` が常設の帯として別に描く。
     pub(super) fn report_error(&mut self, source: ErrorSource, message: String) {
         let notify = self
             .errors
@@ -100,10 +87,14 @@ impl CaptureCardViewer {
                 .details
                 .push(i18n::link_capture_api(active.api.label()));
             video.details.push(i18n::link_video(active.summary()));
-            // 実際の fps はデバイスから取れない（video.rs の start_capture を参照）
+            // 実際の fps はデバイスから取れない（video/capture.rs の ActiveVideo の説明を参照）
             video
                 .details
                 .push(i18n::link_requested_fps(active.requested_fps));
+            // 音声ピン（#388）。Media Foundation で開いているときは出さない
+            video
+                .details
+                .extend(i18n::link_audio_pin(&active.audio_pin));
         }
 
         let mut audio = LinkStatus {
@@ -114,10 +105,22 @@ impl CaptureCardViewer {
             error: self.status_error(ErrorSource::Audio),
         };
         if let Some(active) = active_audio {
-            audio.details.push(i18n::link_audio_input(
-                &active.input_device,
-                active.input_summary(),
-            ));
+            // 入力の経路を出す。音声ピンなら映像デバイスの名前で（#388）
+            audio.details.push(match active.input_route {
+                AudioInputRoute::Device => {
+                    i18n::link_audio_input(&active.input_device, active.input_summary())
+                }
+                AudioInputRoute::VideoPin { .. } => {
+                    i18n::link_audio_input_video_pin(&active.input_device, active.input_summary())
+                }
+            });
+            if let Some(widened) = active.widened_buffer {
+                audio.details.push(i18n::link_audio_buffer_widened(
+                    widened.configured_ms,
+                    widened.actual_ms,
+                    widened.chunk_ms,
+                ));
+            }
             audio.details.push(i18n::link_audio_output(
                 &active.output_device,
                 active.output_summary(),
@@ -128,24 +131,25 @@ impl CaptureCardViewer {
             audio.details.push(status::format_underrun_count(
                 self.device_snapshot.audio_underruns,
             ));
+            audio.details.push(status::format_dropped_frame_count(
+                self.device_snapshot.audio_dropped_frames,
+            ));
+            audio
+                .details
+                .push(i18n::xrun_count(self.device_snapshot.audio_xruns));
         }
 
         ConnectionStatus {
             fake_devices: self.device.fake_devices(),
             video,
             audio,
+            screenshot_sound_error: self.status_error(ErrorSource::ScreenshotSound),
         }
     }
 
     /// 「接続状態」タブに出す直近の失敗。`(整形済みの文言, 発生時刻)`。
-    ///
-    /// トーストやプレースホルダーと違い、ここでは切り詰めない。
-    /// 原因を調べるための場所なので、全文が読めるほうがよい。
     fn status_error(&self, source: ErrorSource) -> Option<(String, String)> {
         let recorded = self.errors.latest(source)?;
-        Some((
-            status::format_message(source, &recorded.message),
-            recorded.time_text(),
-        ))
+        Some(status::recorded_error_line(source, recorded))
     }
 }

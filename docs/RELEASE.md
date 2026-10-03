@@ -77,7 +77,7 @@ gh pr create --base main --head dev --title "chore: 1.0.7 をリリースする"
 
 - **`main` へ PR を出してよいのはこのときだけ。** 通常の PR は `dev` へ向ける（`.claude/skills/naming-conventions/SKILL.md`）
 - マージは merge commit。squash も rebase も使わない
-- CI が緑になってからマージする
+- CI が緑で、レビュースレッド（CodeRabbit の指摘も人のレビューも含めて全て）が解決されてからマージする。ルールセットが両方をマージの条件にしているので、未解決があるとマージできない。リリース PR で初めて出た指摘は、このリリースに含めるか別 Issue に回すかを決め、返信して Resolve する
 
 ## 4. タグを打つ
 
@@ -90,6 +90,7 @@ git push origin v1.0.7
 ```
 
 - **タグ名は `v<バージョン>`。** `Cargo.toml` の version と一致していないとワークフローが失敗する（`v1.0.7` ↔ `1.0.7`）
+- ワークフローが受け付けるタグの形は `^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?\z`（大文字小文字を区別する）。`-` の後ろが付いたタグは pre-release として出る（「pre-release を出す」）。`v1.0.7+build` や `V1.0.7` はビルドの前に落ちる
 - 1.0.6 以前のタグは `Ver1.0.6` の形式だったが、今後は小文字の `v` を使う。ワークフローの起動条件が `v*` なので、`Ver1.0.7` では何も動かない
 - **タグは `dev` ではなく `main` で打つ**
 - Release が作られる前に間違いに気付いたら、タグを消して打ち直してよい。公開後は打ち直さず、次の版で直す
@@ -109,11 +110,13 @@ git push origin :refs/tags/v1.0.7 && git tag -d v1.0.7
 
 `.github/workflows/release.yml` が以下を順に行う。
 
-1. タグ名と `Cargo.toml` の version が一致するか確認する（不一致ならここで失敗）
+1. タグの形を確かめ、pre-release かどうかを決める。タグ名と `Cargo.toml` の version が一致するか確認する（どちらかが駄目ならここで失敗）
 2. `CHANGELOG.md` から該当する版の節を抜き出す（無ければここで失敗）
 3. `cargo build --locked --release`
 4. `target/release/capturecard_viewer.exe` の SHA-256 を `SHA256SUMS.txt` に書く（exe は写さず、そのまま添付する）
-5. `gh release create` で Release を作り、2 つの資産を添付して CHANGELOG の節を説明にする
+5. `gh release create` で Release を作り、2 つの資産を添付して CHANGELOG の節を説明にする。pre-release のタグなら `--prerelease --latest=false` を付ける
+
+**リリースのジョブでは cargo のキャッシュ（`Swatinem/rust-cache`）を使わず、毎回クリーンビルドする。** 配布して自動更新で全員へ届く exe に、復元した `target/` の依存物がそのままリンクされるのを避けるため。`SHA256SUMS.txt` は同じジョブでその exe から作るので、照合では混入を検出できない。その分ビルドに時間がかかるが、リリースは頻度が低いので受け入れる。CI（`ci.yml`）のキャッシュはそのまま使う。
 
 ```bash
 gh run list --workflow release.yml --limit 1
@@ -121,6 +124,15 @@ gh release view v1.0.7
 ```
 
 **Release に資産が 2 つ（exe・`SHA256SUMS.txt`）付いていることを確認する。** そのうえで **exe を実際に落として起動することを確認する。** ビルドが通ったことと、配った物が動くことは別。
+
+## pre-release を出す
+
+`v1.4.0-rc.1` のように `-` の後ろが付いたタグは、**拒否せず pre-release として出す。** ワークフローはタグに `-` が含まれるかだけで判定し、`gh release create` に `--prerelease --latest=false` を付ける。
+
+- pre-release の印を付けた Release は GitHub の `/releases/latest` から外れる。**印を付けずに Latest で出すと、`/releases/latest` がその rc を返す。** アプリは rc を勧めない（`update::is_newer_stable`、`docs/design/update.md` の「検知」）ので、そのあいだは公開済みの正式版の更新も誰にも知らされなくなる。印はワークフローが付けるので、手で付け忘れることは無い
+- 手順は正式版と同じ。`Cargo.toml` の version をタグから `v` を外した文字列（`1.4.0-rc.1`）にし、`CHANGELOG.md` に `## [1.4.0-rc.1] - YYYY-MM-DD` の節を作る。どちらかが無ければワークフローはビルドの前に落ちる
+- 自動アップデートは pre-release を落とさない。試してもらう人には Release のページから exe を手で落としてもらう
+- 手動で出す場合（「ワークフローが失敗したとき」）も、pre-release なら `gh release create` に `--prerelease --latest=false` を足す
 
 ## 配布物
 
@@ -147,10 +159,10 @@ SHA256SUMS.txt           exe の SHA-256
 
 `dev` → `main` をマージコミットで取り込むと、`main` に `dev` が持たないコミット（マージコミットそのもの）ができる。そのままにすると次のリリース PR の差分が読みにくくなるため、`main` を `dev` へマージして揃える。
 
+`dev` はルールセットで PR 経由のマージしか受け付けないため、直接 push ではなく `main` → `dev` の PR を作ってマージする。差分はリリース PR のマージコミットだけなので、CI はそのまま通る。
+
 ```bash
-git checkout dev && git pull --ff-only
-git merge origin/main
-git push origin dev
+gh pr create --base dev --head main --title "chore: 1.0.7 のリリース後に main を dev へ戻す" --body "Refs #<リリース PR の番号>"
 ```
 
 早送りで済む場合はこの操作自体が不要になる。`git log --oneline dev..main` が空なら何もしなくてよい。
@@ -163,6 +175,7 @@ https://github.com/Mui-MuiMui/Capturecard_Viewer/labels/area%3Arelease
 
 | 症状 | 原因 | 対処 |
 |---|---|---|
+| タグ名が `v<バージョン>` の形式ではないと言われて落ちる | `+build` や大文字の `V` を付けた、`-` の後ろが空、など | タグを消し、「4. タグを打つ」の形で打ち直す |
 | タグ名と version の不一致で落ちる | `Cargo.toml` の version を上げ忘れた、またはタグを打ち間違えた | タグを消し、`Cargo.toml` を直してから打ち直す |
 | CHANGELOG に節が無いと言われて落ちる | 「未リリース」を版に切り忘れた | CHANGELOG を直してタグを打ち直す |
 | `--locked` で lock の更新が必要と言われる | `Cargo.lock` を更新せずにコミットした | `cargo check` で更新してコミットし、タグを打ち直す |

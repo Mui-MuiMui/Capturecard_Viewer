@@ -14,6 +14,9 @@ Windows 側の既定デバイスの切り替えを追いかける仕組みもこ
 - 自動再接続を無効にしてもテクスチャは捨てる。止まった画を残し続けるのが元の不具合であって、開き直すかどうかとは別の話
 - **同じ処置を繰り返さないための記録は、真偽値ではなく「何をしたか」（`last_video_link_action`）で持つ。** 「一度扱った」という真偽値にすると、自動再接続を切ったまま途絶したあとに有効化しても、記録に阻まれて開き直せない
 - **見送った音声のエラーを捨てない。** `take_stream_error` は読んだ時点で旗を下ろすため、自動再接続が無効な間や開き直しの下限（`AUDIO_ERROR_RECONNECT_MIN_INTERVAL`、5 秒）に達していない間のエラーは `audio_stream_error_pending` へ移して持ち越す。捨てると、誰も開き直さないまま音が戻らなくなる
+  - 扱いは純粋関数 `decide_audio_reconnect`（`app::monitor`）が `AudioErrorAction` で返す。間隔は `tick` の `now` で数える（`Instant::now()` を読むと、ワーカーのテストから下限を跨げない）
+  - **自動再接続が無効でも、新しいエラーを拾った回は閉じて知らせる（`CloseAndReport`、#310）。** `stop_capture` で `active_audio` を落とし、「音声ストリームがエラーで止まりました」を `AudioFailed` で 1 度だけ返す。以前は保留するだけで何も出さず、止まったストリームが「接続状態」タブに接続中として残り、トーストも出なかった。開き直しはせず、保留は持ち越す。自動再接続を有効にし直すと次の回で `Reconnect` に変わる。同じ保留で次の回からは `Wait` なので、通知は繰り返さない
+  - **保留を落とすのは、開き直しを要求したとき（`Reconnect`、`reconnect_now`）と、`try_connect_audio` が新しいストリームを開けたときだけ（#310）。** 保留しているエラーは古いストリームのもので、エラーの旗は開き直すたびに新しい `Arc` へ替わる。開けたときに落とさないと、下限の内側で保留したあと設定の変更（`buffer_ms` など）や既定デバイスの追従で正常に開いたストリームを、下限が明けた回に閉じて開き直してしまい、数百 ms 音が途切れる。自動再接続が無効な間に残った保留も、あとで有効にした瞬間に正常なストリームを壊す。**見送っている間（開けていない間）は落とさない**ので、上の「捨てない」とは食い違わない
 - 表示は「デバイスは開けているが信号が来ていない（`映像信号がありません`）」と「デバイスそのものが消えた（`デバイスが接続されていません`）」で分ける。ユーザーが見るべきものが入力機器かケーブルかで違うため。文言は `video_placeholder_message` が決める
 - **映像が途絶から復帰したら、音声の再接続も要求する。** 同じ USB 機器なので映像が戻ったなら音声も戻っている。`monitor_video_link` が `video_reconnect_after_loss` を立て、次に映像が繋がった時点で `resync_audio_after_video_recovery` が音声側のバックオフの残り（最大 5 秒）を飛ばす。**主経路ではなく保険。** 音声の切断は cpal のエラーコールバックが拾う。起動時の接続と区別するために旗を持つ（毎回やると、音声が無事なときまで開き直して 300ms ぶん音が途切れる）
 - **DirectShow のデバイスは、グラフのイベントでも切断を検出する（#229）。** DirectShow のフィルターグラフはデバイスが消えると `EC_DEVICE_LOST` を積む。`CaptureGraph::poll_device_lost` がこれを `IMediaEventEx::GetEvent`（タイムアウト 0、待たない）で読み、`VideoLinkState::device_lost` を立てる。`decide_video_link` は `device_lost` なら途絶時間を待たずに切断とみなすので、抜いた次の監視の周期（100〜500ms）で反応する
@@ -39,16 +42,32 @@ Windows 側の既定デバイスの切り替えを追いかける仕組みもこ
 
 **起動時も同じ扱いにしてある。** 「設定のデバイスが無いときの救済」として入っていたが、黙って別のデバイスを開くのは音が出ないことより分かりにくい誤動作で、マイクを繋いでいる環境ではハウリングの元になる。繋がっていないことは「接続状態」タブと通知に出るので、気付く手段はある。
 
-**例外は設けていない。** 「入出力とも未指定のときだけ、レートとチャンネル数を緩めて開き直す」案も検討したが、デバイスワーカーが起動直後の `ApplyConfig` で入力の未指定を列挙結果の先頭で埋めるため（`resolve_default_devices`）、実機のある環境では到達しない枝になる。未指定の意図を別に持ち回してまで残す価値が無いので置いていない。レートとチャンネル数はもともと `select_best_config` がデバイスの対応範囲へ寄せる。
+**例外は設けていない。** 「入出力とも未指定のときだけ、レートとチャンネル数を緩めて開き直す」案も検討したが、入力が未指定のときはそもそも音声を開かない（次の節）ので、成り立たない枝になる。レートとチャンネル数はもともと `select_best_config` がデバイスの対応範囲へ寄せる。
+
+### 入力が未指定なら音声を開かない（#304）
+
+**入力デバイスが未指定（`None`、空文字も含む）のとき、ワーカーは音声を開かない。** `start_passthrough` は入力が `None` なら `default_input_device()` を開くが、そこへ届かせない。判定は純粋関数 `audio_input_is_selected`（`app::worker_audio_connect`）で、`try_connect_audio` の入口で見る。未指定なら開いているパススルーを閉じ、`audio_retry` を取り下げ、「オーディオ入力デバイスが選ばれていません」を `AudioFailed` で返す（「接続状態」タブと通知に出る）。同じ設定が 2 秒ごとに届いても繰り返さないよう、その設定を `last_audio_target` に記録する。入力を選べば設定が変わるので、`apply_config` の差分判定で要求が立つ。
+
+- **抑えているのは、同じ設定の定期的な再適用（2 秒ごとの `apply_settings`）による再通知だけ。** `last_audio_target` を捨てて音声の要求を立て直す経路（映像の途絶からの復帰に合わせた `resync_audio_after_video_recovery`、右クリックの「デバイス再接続」、起動直後の `ApplyConfig`）を通ると、入力が未指定のままなら同じ通知がもう 1 度出る。どれもユーザーの操作か映像の復帰のときだけなので、分けて抑えていない。同じ内容のトーストは `ErrorCenter` が 60 秒間引く
+
+未指定の入力は、起動直後なら最初の映像の試行のあとに `settle_default_input`（`app::worker_default_input`）が埋める（音声ピンがあれば `video_pin`、無ければ WASAPI の列挙の先頭。`docs/design/directshow-audio.md` の「初回の既定」）。決めるまでは音声を理由なしで待たせる。**埋めずに届くのは、設定ダイアログの「初期化」「読み込み」（`AudioSettings::default()` の `input_device_name` は `None`）と、起動時に入力が 1 台も列挙できなかったとき。** 以前はこれがそのまま `start_passthrough` へ届き、ノート PC では内蔵マイクの音がスピーカーへ流れていた（#134 / #165 と同じ症状）。
+
+**初期化・読み込みのときに列挙の先頭で埋める案は採らなかった。** 列挙の先頭が内蔵マイクであることは珍しくなく、キャプチャーボードを使っていた人の入力を黙って別のデバイスへ替えることになる。これは上の「黙って別のデバイスを開かない」と同じ理由で避けたい。起動時の `settle_default_input` だけは、初回起動で入力が空のまま音が出ないのを避けるための例外として残してある。
+
+**映像デバイスが未指定になったときも音声と揃えてある（#334）。** `apply_config` は未指定でも要求を立て、`try_connect_video` が純粋関数 `selected_video_device` で未指定と判断したら、開いているストリームを閉じ（`VideoSignalLost` で最後のフレームも落とす）、`video_retry` を取り下げ、「映像デバイスが選ばれていません」を `VideoFailed` で 1 度だけ返す（`last_video_target` に記録）。以前は要求を立てないだけだったので、初期化・読み込みのあとも古いストリームが開いたまま映り続け、設定の表示だけが「未選択」になっていた。
 
 - 接続に失敗するたびに、音声デバイスの能力キャッシュを `retry` で捨てて取り直す。挿し直しでデバイスの対応設定が変わっても、古い一覧で失敗し続けないため。**フォールバックが成功扱いになっていた間はこの経路が通らず、キャッシュが抜く前の状態のまま残っていた**
 - 繋がらないまま再試行を続けることは、3 回目に 1 度だけ `warn` で残す（`AUDIO_RETRY_WARN_AFTER`）。毎回出すとログが埋まり、一度も出さないと「音が出ない」の調査でこの状態に気付けない。回数を以前のフォールバックと同じ 3 に合わせてあるのは、古いログと同じ位置に目印を置くため
 
 ## 「既定のデバイス」設定は Windows 側の既定切り替えを追いかける
 
-cpal は WASAPI の `IMMNotificationClient` を公開していないため、開いたあとに Windows 側で既定入出力デバイスが変わっても通知が来ない。`poll_default_audio_device` が `DEFAULT_AUDIO_DEVICE_POLL_INTERVAL`（4 秒）おきに `default_input_device()` / `default_output_device()` の名前を問い合わせ、実際に開いている名前（`audio::ActiveAudio`）と食い違っていれば再接続を要求する（#135）。判定は純粋関数 `default_audio_device_changed`。設定で明示的にデバイスを選んでいる向きは対象にしない（フォールバックの話とは別）。`audio_retry` が既に再試行中のフレームは何もしない。設定ダイアログの開閉に関係なく動く点が `cached_output_devices` の 5 秒キャッシュと違う。切り替わったと判定した向きは、対応設定のキャッシュ（`DEFAULT_DEVICE_KEY` のキーのまま）も `retry` で取り直す。物理デバイスが変わっても文字列としてのキーは同じままなので、取り直さないと古いデバイスの対応設定で開こうとする。
+cpal は WASAPI の `IMMNotificationClient` を公開していないため、開いたあとに Windows 側で既定の出力デバイスが変わっても通知が来ない。`poll_default_audio_device` が `DEFAULT_AUDIO_DEVICE_POLL_INTERVAL`（4 秒）おきに `default_output_device()` の名前を問い合わせ、実際に開いている名前（`audio::ActiveAudio`）と食い違っていれば再接続を要求する（#135）。判定は純粋関数 `default_audio_device_changed`。出力を明示的に選んでいるときは対象にしない（フォールバックの話とは別）。`audio_retry` が既に再試行中のフレームは何もしない。設定ダイアログの開閉に関係なく動く点が `cached_output_devices` の 5 秒キャッシュと違う。切り替わったと判定したら、出力の対応設定のキャッシュ（`DEFAULT_DEVICE_KEY` のキーのまま）も `retry` で取り直す。物理デバイスが変わっても文字列としてのキーは同じままなので、取り直さないと古いデバイスの対応設定で開こうとする。
 
-**入力側の追従（`track_input`）は、実運用ではほぼ発生しない。** デバイスワーカーが起動直後の `ApplyConfig` で入力デバイス未設定（`None`）を列挙した先頭のデバイス名へ書き換え（`resolve_default_devices`）、`DefaultDevicesResolved` を受けた `device::store_resolved_devices` が設定へ書き戻す（`mark_settings_dirty` 経由なので、実際の書き出しは 2 秒後のデバウンス保存か終了時）。このため次回起動以降は常に具体的なデバイス名になる。これは意図的で、消さないこと。**入力の既定を出力と同じく `None`（Windows の既定デバイス）のまま残すと、ノート PC などでは内蔵マイクが開かれ、パススルーでその音がスピーカーへ流れる。** #134（PR #147）で切断時に同じ誤動作を直したばかりで、初回起動で再発させるわけにいかない。設定画面のオーディオ入力デバイスの選択肢にも出力と違って「デフォルト」が無い（追加するかは別 Issue で判断）。入力側の追従を試すには、設定ファイルを手で編集して `input_device_name` を消す。
+**cpal 0.18 からは、既定のデバイスで開いたストリームへ切り替えが `StreamInvalidated` として届く**（#299）。cpal が内部で既定デバイスの変化を監視するようになったため。これは通常のストリームのエラーと同じく `monitor_audio_stream` が拾って再接続を要求するが、開き直しの下限（5 秒）に掛かるので、上の問い合わせは外していない。どちらの経路も `audio_retry` への要求になり、再試行中は問い合わせの側が何もしない。WASAPI では cpal が経路を付け替えて鳴らし続けること（`DeviceChanged`）は無い。
+
+**エラーのコールバックに届いても開き直さないものがある**（`audio::stream` の `is_recoverable_stream_error`、#299）。cpal 0.18 はストリームが動き続けている通知もエラーとして送る。入力の取りこぼし（`Xrun`、WASAPI の `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY`）、音声スレッドの優先度を上げられなかった（`RealtimeDenied`）、経路の付け替え（`DeviceChanged`）の 3 つは旗を立てない。切断として開き直すと、そのたびに 300ms 前後途切れるため。`Xrun` はデータのコールバックと同じ音声スレッドから届くので、ログにも出さない。
+
+**入力側は追いかけない（#335 で処理を消した）。** 入力が未指定なら音声を開かない（「入力が未指定なら音声を開かない」）ので、入力を「既定のデバイス」のまま開いている状態が無い。デバイスワーカーは起動直後に入力デバイス未設定（`None`）なら、最初の映像の試行のあとで音声ピンがあれば `video_pin`、無ければ列挙した WASAPI の先頭のデバイス名へ決め（`settle_default_input`、`docs/design/directshow-audio.md` の「初回の既定」。`resolve_default_devices` が埋めるのは映像の名前だけ）、`DefaultDevicesResolved` を受けた `device::store_resolved_devices` が設定へ書き戻す（`mark_settings_dirty` 経由なので、実際の書き出しは 2 秒後のデバウンス保存か終了時）。これは意図的で、消さないこと。**入力の既定を出力と同じく `None`（Windows の既定デバイス）の意味で開くと、ノート PC などでは内蔵マイクが開かれ、パススルーでその音がスピーカーへ流れる。** #134（PR #147）で切断時に同じ誤動作を直しており、初回起動で再発させるわけにいかない。起動後に設定の初期化・読み込みで入力が未指定に戻ることはあり、そのときは開かずに入力が選ばれるのを待つ（#304）。設定画面のオーディオ入力デバイスの選択肢にも出力と違って「デフォルト」が無い（#153 で判断済み）。
 ## デバイスの接続はバックオフで再試行する
 
 **接続を待つために `thread::sleep` を使わない。** 待つ代わりに「次に試してよい時刻」を覚えておき、期限が来たフレームで 1 回だけ試す。以前は起動時に固定 2 秒待ち、さらにリトライで最大 3.2 秒眠っていた。**眠らせる先がワーカースレッドになったいまでも同じ。** 眠っている間はコマンドを受け取れず、設定ダイアログでのデバイス切り替えがその分だけ遅れる。
@@ -68,6 +87,34 @@ cpal は WASAPI の `IMMNotificationClient` を公開していないため、開
 
 - 接続処理を足すときは `apply_config` で開かず、`ConnectRetry::request()` で要求だけ立てる。実際に開くのは `poll_connection()`
 - ユーザーが明示的にやり直しを求める経路（右クリック → デバイス再接続）は `request_now()` を使い、待ち時間を飛ばす
+
+### 両方に出るが Media Foundation では開けないデバイス（#387）
+
+**開き方が「自動」で、Media Foundation で「見つかったが開けない」なら、同じ試行の中で DirectShow でも試す**（`app::backend::system` の `attempt_with_fallback`）。AVerMedia GC551（Live Gamer EXTREME 2、ベンダー ドライバー）は Media Foundation と DirectShow の両方の列挙に同じ名前で出るので、一覧（`merge_video_devices`）は Media Foundation のほうだけを残し、自動の開き方は Media Foundation を選ぶ。ところが Media Foundation では `IMFActivate::ActivateObject` の時点で `0xC00D36B4`（`MF_E_INVALIDMEDIATYPE`）になり、解像度・fps を変えても、対応形式の問い合わせも同じ失敗になる。DirectShow なら 1280x720 / 1920x1080 の YUY2 60fps で開ける。倒さなければ、既定の設定のまま永遠に再試行を繰り返して映らず、利用者は「映像の開き方」を知らないと直せない。
+
+| 条件 | 振る舞い |
+|---|---|
+| 自動で Media Foundation が `CameraOpenFailed` / `StreamOpenFailed` | 同じ名前で DirectShow を試す（`DirectShowCapture` は印の有無を問わず `FriendlyName` で探す） |
+| DirectShow で開けた | 成功。`SystemVideo::open` を DirectShow にし、`link_state` / `stop_capture` / `active` もそちらを見る。「接続状態」タブの「開き方」は `ActiveVideo::api` から DirectShow と出る。INFO で 1 行残す |
+| DirectShow の一覧にも無い（`DeviceNotFound`）・あっても開けない | **Media Foundation の失敗をそのまま返す。** 利用者が選んだのは自動で、DirectShow は代わりに試しただけなので、画面に出す理由は本来の経路のもの。DirectShow の失敗は WARN でログに残す |
+| 自動で Media Foundation が `DeviceNotFound` / `DeviceQueryFailed` / `NoDevices` | 試さない。抜いている間の再試行のたびに DirectShow の列挙を足すことになり、Media Foundation に居ないデバイスはもともと「(DirectShow)」付きで DirectShow の経路へ行く |
+| 開き方を Media Foundation / DirectShow に固定 | 試さない。利用者が選んだ経路の結果をそのまま返す |
+
+- **`ConnectRetry` から見ると試行 1 回のまま。** Media Foundation → DirectShow は `VideoBackend::start_capture` の 1 回の呼び出しの中で済ませ、バックオフの単位も「接続を試す（N 回目）」のログも変えない。上の「再接続の前にデバイスを列挙しない」も守っている。DirectShow で探すのは `DirectShowCapture::start_capture` の中の列挙で、Media Foundation の `start_capture` の中の列挙と同じ扱い
+- **対応形式の問い合わせ（`capabilities`）も同じ規則で倒す。** 能力キャッシュのキーはデバイス名と開き方の組（#249）なので、（GC551、自動）には DirectShow の対応形式が入る。自動で開くときもやはり DirectShow へ倒れるので、選択肢と実際に開く経路は食い違わない
+- **倒したことを覚えておかない。** 次に開くときもまず Media Foundation を試す。ドライバーの更新などで Media Foundation でも開けるようになれば、そのまま Media Foundation へ戻る。Media Foundation の失敗にかかる分だけ毎回の接続が遅れるが、開き直しは設定の変更か切断のときだけなので許容している
+- 判定は純粋関数 `directshow_fallback`（倒すか・どの名前で探すか）で、`attempt_with_fallback` は経路ごとの操作をクロージャで受け取る。テストは経路ごとに `MockVideoBackend` を 1 つずつ置いて回す
+- **音声ピンを繋ぐ指定（`CaptureRequest::connect_audio_pin`、#388）も DirectShow へ倒すときに渡す。** GC551 はこの経路で開くので、渡し忘れると既定の開き方のままでは音声ピンが繋がらない
+
+### 映像の開き直しに合わせて音声も開き直す（音声ピン、#388）
+
+入力が映像デバイスの音声ピン（`[audio] input_source = "video_pin"`）のとき、音声は映像のグラフの中の音声ピンから来る。**映像を開き直すとグラフが作り直され、音声ピンの番号（`AudioPinFeed::begin_graph`）が進む。** 古い番号の差し込み先には何も積まれないので、音声も開き直す。設計の全体は `docs/design/directshow-audio.md` の (3)。
+
+- **要求を立てるのはワーカーの `tick` の監視**（`worker_audio_timers::monitor_audio_pin`。判定は `app::monitor_audio_pin::should_resync_pin_audio`）。映像の音声ピンの番号（`ActiveVideo::audio_pin`）と、音声が差し込んでいる番号（`ActiveAudio::input_route`）を比べ、違えば `last_audio_target = None` にして `audio_retry.request_now` する。`try_connect_video` の成功の枝に書かないのは、映像を開き直す経路（切断からの再接続、設定の変更、右クリックの再接続、#387 の自動の倒し込み）を 1 か所でまとめて拾うため
+- **音声のストリームのエラーの経路では知らせない。** エラーからの開き直しには 5 秒の下限（`AUDIO_ERROR_RECONNECT_MIN_INTERVAL`）があり、映像を開き直すたびに音が 5 秒戻らなくなる。自動再接続を切っていると「エラーで止まった」と通知まで出る（#310）
+- 形式が同じでも毎回開き直す。映像の開き直しはそれ自体で 1 秒前後途切れるので、出力を開き直す数百 ms を惜しむ理由が薄い
+- **音声ピンが使えないときは開かずに待つ**（映像が開いていない、Media Foundation で開いた、音声ピンが無い、繋げなかった。`hold_audio_for_pin`）。扱いは上の「入力が未指定なら音声を開かない（#304）」と同じで、再試行はせず、理由を 1 度だけ返す。映像の状態が変わって理由が変わったら、同じ監視が要求を立て直す。映像が閉じたら音声も閉じる（出力だけを開いたまま無音を流し続けない）
+- 開き直しは `ConnectRetry` の「成功から次の開き直しまで 1 秒」（下の #232）の下限を受ける。起動直後は `poll_connection` が映像を先に試すので、ふつうは同じ `tick` で映像 → 音声の順に開く
 
 ### 成功から次の開き直しまでの下限（#232）
 

@@ -9,10 +9,42 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use super::tap::VideoTap;
+
 pub struct VideoFrame {
     pub width: usize,
     pub height: usize,
     pub data: Vec<u8>,
+}
+
+/// RGB の画素データの長さが `幅 × 高さ × 3` と比べてどうか（`frame_len_status`）。
+///
+/// UI スレッドは `egui::ColorImage::from_rgb` へ渡すが、これは長さが合わないと
+/// assert で落ちる（release は `panic = "abort"` なのでプロセスが終わる、#309）。
+/// `FrameSink` が積む前に揃え、UI 側も描く前に確かめる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameLenStatus {
+    /// ちょうど合っている
+    Exact,
+    /// 長い。先頭の `expected` バイトへ切り詰めれば使える
+    TooLong { expected: usize },
+    /// 短い。使えない。`幅 × 高さ × 3` が `usize` に収まらないときもこれ
+    /// （`expected` は `usize::MAX`）
+    TooShort { expected: usize },
+}
+
+/// `len` バイトの RGB の画素データが `width` x `height` のフレームに合うかを判定する。
+pub fn frame_len_status(len: usize, width: usize, height: usize) -> FrameLenStatus {
+    let Some(expected) = width.checked_mul(height).and_then(|n| n.checked_mul(3)) else {
+        return FrameLenStatus::TooShort {
+            expected: usize::MAX,
+        };
+    };
+    match len.cmp(&expected) {
+        std::cmp::Ordering::Equal => FrameLenStatus::Exact,
+        std::cmp::Ordering::Greater => FrameLenStatus::TooLong { expected },
+        std::cmp::Ordering::Less => FrameLenStatus::TooShort { expected },
+    }
 }
 
 /// フレーム間隔から求めたばらつきの指標。単位はミリ秒。
@@ -132,15 +164,19 @@ impl FrameBuffer {
     ///
     /// 返した `Arc` の参照が呼び出し側だけになっていれば、中の `Vec` を
     /// 次の変換先として回収できる。回収しない場合はそのまま捨ててよい。
+    ///
+    /// **受け取るのは `Arc` に包んだフレーム。** 包むのは呼び出し側で、ロックの
+    /// 外で済ませる。呼び出し側は同じ `Arc` の複製を録画のリング（`VideoTap`）へ
+    /// 積むので、ここで包むと複製を渡せない（`docs/design/recording.md`）。
     pub(super) fn push_back(
         &mut self,
-        frame: VideoFrame,
+        frame: Arc<VideoFrame>,
         received_at: Instant,
         decode_ms: f32,
         fast: bool,
         source_format: &'static str,
     ) -> Option<Arc<VideoFrame>> {
-        let replaced = self.latest.replace(Arc::new(frame));
+        let replaced = self.latest.replace(frame);
         self.generation += 1;
         self.last_decode_ms = decode_ms;
         self.source_format = Some(source_format);
@@ -223,6 +259,10 @@ impl FrameBuffer {
 #[derive(Clone)]
 pub struct VideoFrames {
     inner: Arc<Mutex<FrameBuffer>>,
+    // 録画へ映像を回す差し込み口。**`VideoFrames` の隣に 1 つだけ持つ。**
+    // `FrameSink::new(&frames, ..)` がここから受け取るので、Media Foundation・
+    // DirectShow・フェイクの 3 経路はコンストラクタを変えずに録画へ繋がる
+    tap: VideoTap,
 }
 
 impl Default for VideoFrames {
@@ -235,6 +275,7 @@ impl VideoFrames {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(FrameBuffer::new())),
+            tap: VideoTap::new(),
         }
     }
 
@@ -296,6 +337,40 @@ impl VideoFrames {
     pub(super) fn buffer(&self) -> Arc<Mutex<FrameBuffer>> {
         Arc::clone(&self.inner)
     }
+
+    /// 録画へ映像を回す差し込み口。録画スレッドが差し込み、フレームコールバックが積む。
+    pub fn tap(&self) -> VideoTap {
+        self.tap.clone()
+    }
+}
+
+/// 置き換えたフレーム `previous` を使い回せれば、その中身へ `fill` で書いて返す。
+/// 他にも持ち主がいれば（UI スレッドがテクスチャ化のために、または録画のリングが
+/// 握っている）、そちらは書き換えずに新しく作る。`FrameSink` が使う。
+///
+/// 返り値の 3 つ目は「回収しようとしたが他に持ち主がいた」か。`VideoTap` が録画中
+/// だけ数える。**使い回したときは確保が起きない**（`fill` の中で Vec が足りずに
+/// 広げる場合を除く）。他に持ち主がいたフレームは参照の数を減らして手放すだけで、
+/// 最後の持ち主になっていても解放は呼び出し元（ロックの外）で起きる。
+pub(super) fn fill_recycled<R>(
+    previous: Option<Arc<VideoFrame>>,
+    fill: impl FnOnce(&mut VideoFrame) -> R,
+) -> (Arc<VideoFrame>, R, bool) {
+    let mut missed = false;
+    if let Some(mut frame) = previous {
+        if let Some(target) = Arc::get_mut(&mut frame) {
+            let result = fill(target);
+            return (frame, result, false);
+        }
+        missed = true;
+    }
+    let mut fresh = VideoFrame {
+        width: 0,
+        height: 0,
+        data: Vec::new(),
+    };
+    let result = fill(&mut fresh);
+    (Arc::new(fresh), result, missed)
 }
 
 #[cfg(test)]
@@ -307,12 +382,48 @@ mod tests {
     const TEST_FRAME_LEN: usize = TEST_WIDTH * TEST_HEIGHT * 3;
 
     /// 識別しやすいように全画素を marker で埋めたフレームを作る
-    fn test_frame(marker: u8) -> VideoFrame {
-        VideoFrame {
+    fn test_frame(marker: u8) -> Arc<VideoFrame> {
+        Arc::new(VideoFrame {
             width: TEST_WIDTH,
             height: TEST_HEIGHT,
             data: vec![marker; TEST_FRAME_LEN],
-        }
+        })
+    }
+
+    #[test]
+    fn frame_len_status_exact_length_is_exact() {
+        assert_eq!(frame_len_status(2 * 2 * 3, 2, 2), FrameLenStatus::Exact);
+        // 0x0 の空フレームも長さ 0 なら合っている（`from_rgb` も通る）
+        assert_eq!(frame_len_status(0, 0, 0), FrameLenStatus::Exact);
+    }
+
+    #[test]
+    fn frame_len_status_longer_data_can_be_truncated() {
+        // nokhwa の YUYV → RGB は入力の長さから出力の長さを決めるので、
+        // 幅が奇数や行に詰め物があると長い Vec が来る
+        assert_eq!(
+            frame_len_status(2 * 2 * 3 + 1, 2, 2),
+            FrameLenStatus::TooLong { expected: 12 }
+        );
+    }
+
+    #[test]
+    fn frame_len_status_shorter_data_is_unusable() {
+        assert_eq!(
+            frame_len_status(2 * 2 * 3 - 1, 2, 2),
+            FrameLenStatus::TooShort { expected: 12 }
+        );
+    }
+
+    #[test]
+    fn frame_len_status_overflowing_size_is_too_short() {
+        // 幅 × 高さ × 3 が usize に収まらない大きさは、どんな長さでも足りない扱い
+        assert_eq!(
+            frame_len_status(usize::MAX, usize::MAX, 2),
+            FrameLenStatus::TooShort {
+                expected: usize::MAX
+            }
+        );
     }
 
     /// 期待値との差が許容範囲に収まっているか調べる。
@@ -557,5 +668,54 @@ mod tests {
             Arc::try_unwrap(replaced).is_ok(),
             "取り出し側が保持していなければ Vec を回収できる"
         );
+    }
+
+    fn frame_of(data: Vec<u8>) -> Arc<VideoFrame> {
+        Arc::new(VideoFrame {
+            width: 1,
+            height: 1,
+            data,
+        })
+    }
+
+    #[test]
+    fn fill_recycled_reuses_unshared_frame_in_place() {
+        // 他に持ち主がいなければ `Arc` も Vec も使い回す（確保が起きない）
+        let previous = frame_of(vec![1, 2, 3]);
+        let arc_ptr = Arc::as_ptr(&previous);
+        let data_ptr = previous.data.as_ptr();
+
+        let (frame, (), missed) = fill_recycled(Some(previous), |target| {
+            target.data.copy_from_slice(&[4, 5, 6]);
+        });
+
+        assert!(!missed);
+        assert_eq!(Arc::as_ptr(&frame), arc_ptr);
+        assert_eq!(frame.data.as_ptr(), data_ptr);
+        assert_eq!(frame.data, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn fill_recycled_leaves_shared_frame_untouched() {
+        // UI スレッドや録画のリングが握っているフレームは書き換えず、新しく作る
+        let previous = frame_of(vec![1, 2, 3]);
+        let held = Arc::clone(&previous);
+
+        let (frame, (), missed) = fill_recycled(Some(previous), |target| {
+            target.data.extend_from_slice(&[4, 5, 6]);
+        });
+
+        assert!(missed);
+        assert!(!Arc::ptr_eq(&frame, &held));
+        assert_eq!(held.data, vec![1, 2, 3]);
+        assert_eq!(frame.data, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn fill_recycled_without_previous_is_not_a_miss() {
+        // 最初のフレームは回収するものが無いだけで、取りこぼしではない
+        let (frame, (), missed) = fill_recycled(None, |target| target.data.push(7));
+        assert!(!missed);
+        assert_eq!(frame.data, vec![7]);
     }
 }

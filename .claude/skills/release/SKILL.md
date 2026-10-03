@@ -40,6 +40,8 @@ description: 版を切って GitHub Release を出すときの進め方。バー
 
 `docs/RELEASE.md` の手順 3。**`--base main` を明示する。** 通常の PR は `dev` 向けなので、ここだけが例外。
 
+CodeRabbit の指摘はこの PR にも付く（複数の PR が合わさって初めて見える指摘が出る）。このリリースに含めるか別 Issue に回すかを決め、返信して Resolve しないとマージできない（ルールセット）。別 Issue に回すときは Issue のリンクを返信に書く。
+
 **この PR にだけはクローズ用キーワードが実際に効く。絶対に書かないこと。** 通常の `dev` 向け PR では無視されるのに対し、ここは既定ブランチ向けなのでそのまま発火し、実機確認の済んでいない Issue まで閉じる。含まれる変更は `Refs #<番号>` で並べるか、`CHANGELOG.md` の該当節を指すに留める。
 
 同じ理由で、**`dev` に積まれたコミットメッセージにキーワードが紛れていないか**も確認する。コミット側のキーワードは `main` に載った時点で発火する。
@@ -63,17 +65,17 @@ gh pr view <番号> --json headRefOid --jq .headRefOid
 
 **PR がマージされたことを確認してから。** `main` の最新を取得して打つ。
 
-タグ push は Release の公開を起動する。**打つ直前にタグ名と `Cargo.toml` の version を読み上げ、承認を得てから push する。**
+タグ push は Release の公開を起動する。**打つ直前にタグ名と `Cargo.toml` の version を読み上げ、承認を得てから push する。** タグに `-` が含まれる（`v1.4.0-rc.1`）なら pre-release として出ること（Latest にならず、自動アップデートも勧めない）も合わせて伝える（`docs/RELEASE.md` の「pre-release を出す」）。
 
 ### 6. 結果を確認する
 
-`docs/RELEASE.md` の手順 5。Release ができたら URL を報告する。**資産が 2 つ（`capturecard_viewer.exe` と `SHA256SUMS.txt`）付いていることを `gh release view <tag>` で確かめる。** 資産名は自動アップデートが読むので変えない（`docs/RELEASE.md` の「配布物」）。**exe を落として起動するかの確認はユーザーに依頼する。** ビルドが通ったことと、配った物が動くことは別。
+`docs/RELEASE.md` の手順 5。Release ができたら URL を報告する。**資産が 2 つ（`capturecard_viewer.exe` と `SHA256SUMS.txt`）付いていることを `gh release view <tag>` で確かめる。** 資産名は自動アップデートが読むので変えない（`docs/RELEASE.md` の「配布物」）。pre-release のタグなら、`gh release view <tag> --json isPrerelease` が `true` で、`gh release view`（タグなし、Latest を表示する）が直前の正式版のままであることも確かめる。**exe を落として起動するかの確認はユーザーに依頼する。** ビルドが通ったことと、配った物が動くことは別。
 
 失敗していたら「ワークフローが失敗したとき」の表で切り分ける。**手動でリリースを出す前に、タグを打ち直せる状況か（Release がまだ無いか）を確認する。**
 
 ### 7. 後片付け
 
-`docs/RELEASE.md` の手順 6（`main` を `dev` へ戻す）と、`area:release` ラベルの付いた Issue の更新（`~/.claude/skills/github-issues/SKILL.md`）。
+`docs/RELEASE.md` の手順 6（`main` → `dev` の PR を作ってマージする。直接 push はルールセットで塞がれている）と、`area:release` ラベルの付いた Issue の更新（`~/.claude/skills/github-issues/SKILL.md`）。
 
 ## やらないこと
 

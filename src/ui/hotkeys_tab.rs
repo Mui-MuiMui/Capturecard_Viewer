@@ -132,6 +132,14 @@ fn show_hotkey_assignments(
             warning_label(ui, i18n::hotkey_duplicates_warning(&names));
         }
 
+        // 修飾キーなしの移動系のキーは、前面にいる間 egui のフォーカス移動に
+        // 使えなくなる（egui へ渡さない、docs/design/hotkeys.md）。
+        // 動作は変えず、案内だけ出す（#266）
+        if has_bare_navigation_key(&settings.hotkeys) {
+            ui.add_space(5.0);
+            warning_label(ui, Text::HotkeyNavigationKeyHint.get());
+        }
+
         // 登録に失敗したものを、理由とともに出す。トーストは気付かせるための
         // もので流れて消えるため、どのアクションが失敗しているかはここで見る。
         // 見出しは status.rs の定型文をそのまま使い、通知と表現を揃える
@@ -177,6 +185,23 @@ pub fn duplicate_hotkey_actions(
         .collect()
 }
 
+/// 修飾キーなしで移動系のキー（Tab、矢印、Home、End、PageUp、PageDown）を
+/// 割り当てているものがあるか。
+///
+/// これらは egui がフォーカスの移動などに使う。前面にいる間はホットキーの押下を
+/// egui へ渡さないので、その操作に使えなくなる（#266、#418）。Backspace / Delete / Insert は
+/// テキスト欄の外では egui が使わず、テキスト欄に入力している間はホットキーが
+/// 反応しないので含めない。
+fn has_bare_navigation_key(hotkeys: &BTreeMap<HotkeyAction, String>) -> bool {
+    const NAVIGATION_KEYS: [&str; 9] = [
+        "tab", "up", "down", "left", "right", "home", "end", "pageup", "pagedown",
+    ];
+    hotkeys
+        .values()
+        .map(|hotkey| normalize_hotkey(hotkey))
+        .any(|normalized| NAVIGATION_KEYS.contains(&normalized.as_str()))
+}
+
 /// ホットキー文字列を、同じキーの組み合わせなら同じになる形へ正規化する。
 ///
 /// 大文字小文字と空白を落とし、`+` で分けた要素を並べ替える。
@@ -195,6 +220,10 @@ pub(super) fn normalize_hotkey(hotkey: &str) -> String {
 mod tests {
     use super::*;
     use crate::hotkey::HotkeyAction;
+    use crate::ui::testing::{dialog_harness, DialogFixture};
+    use crate::ui::{SettingsTab, VideoPinChoice};
+    use eframe::egui::accesskit::Role;
+    use egui_kittest::kittest::Queryable;
 
     use std::collections::BTreeMap;
 
@@ -270,5 +299,106 @@ mod tests {
         );
         assert_ne!(normalize_hotkey("Ctrl+S"), normalize_hotkey("Ctrl+A"));
         assert_ne!(normalize_hotkey("Ctrl+S"), normalize_hotkey("Alt+S"));
+    }
+
+    // ---- 修飾キーなしの移動系のキー（#266） ----
+
+    #[test]
+    fn has_bare_navigation_key_detects_navigation_keys_without_modifiers() {
+        for key in [
+            "Tab", "Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown", " tab ",
+        ] {
+            let assigned = hotkeys(&[(HotkeyAction::VolumeUp, key)]);
+            assert!(has_bare_navigation_key(&assigned), "{key}");
+        }
+    }
+
+    #[test]
+    fn has_bare_navigation_key_ignores_combinations_and_other_keys() {
+        // 修飾キーと組み合わせていれば egui の操作と重ならない。Delete などの
+        // 移動系でないキーも案内の対象にしない
+        let assigned = hotkeys(&[
+            (HotkeyAction::Screenshot, "F5"),
+            (HotkeyAction::VolumeUp, "Ctrl+Up"),
+            (HotkeyAction::VolumeDown, "Ctrl+Down"),
+            (HotkeyAction::ToggleFullscreen, "Shift+Tab"),
+            (HotkeyAction::ToggleMute, "Delete"),
+            (HotkeyAction::ReconnectDevices, "Backspace"),
+        ]);
+        assert!(!has_bare_navigation_key(&assigned));
+        assert!(!has_bare_navigation_key(&BTreeMap::new()));
+    }
+
+    // ---- ウィジェットのテスト（egui_kittest、#419） ----
+
+    /// 一覧の `action` の行にある、`label` のボタン。行は `HotkeyAction::ALL` の順に並ぶ
+    fn row_button<'h>(
+        harness: &'h egui_kittest::Harness<'_, DialogFixture>,
+        label: &'h str,
+        action: HotkeyAction,
+    ) -> egui_kittest::Node<'h> {
+        let row = HotkeyAction::ALL
+            .iter()
+            .position(|candidate| *candidate == action)
+            .expect("ALL に含まれるはず");
+        harness
+            .get_all_by_label(label)
+            .nth(row)
+            .expect("どの行にもボタンがあるはず")
+    }
+
+    #[test]
+    fn hotkeys_tab_warns_about_duplicates_until_one_is_cleared() {
+        let draft = AppSettings {
+            hotkeys: hotkeys(&[
+                (HotkeyAction::Screenshot, "F5"),
+                (HotkeyAction::VolumeUp, "f5"),
+            ]),
+            ..AppSettings::default()
+        };
+        let mut harness = dialog_harness(DialogFixture::new(
+            &draft,
+            SettingsTab::Hotkeys,
+            VideoPinChoice::default(),
+            &[],
+        ));
+
+        // 重複の注意書きは、重複している 2 つのアクション名を挙げる
+        let warning = i18n::hotkey_duplicates_warning(&[
+            HotkeyAction::Screenshot.label(),
+            HotkeyAction::VolumeUp.label(),
+        ]);
+        let shows_warning = |harness: &egui_kittest::Harness<'_, DialogFixture>| {
+            harness
+                .query_by(|node| {
+                    node.role() == Role::Label
+                        && node.value().is_some_and(|value| value.contains(&warning))
+                })
+                .is_some()
+        };
+        assert!(shows_warning(&harness));
+
+        // 「設定...」はダイアログを開かず、その行のアクションをイベントで返す
+        row_button(
+            &harness,
+            Text::ButtonConfigure.get(),
+            HotkeyAction::VolumeUp,
+        )
+        .click();
+        harness.run();
+        assert!(harness
+            .state()
+            .events
+            .contains(&SettingsEvent::OpenHotkeyCapture(HotkeyAction::VolumeUp)));
+
+        // 片方をクリアするとドラフトから外れ、注意書きが消える
+        row_button(&harness, Text::ButtonClear.get(), HotkeyAction::VolumeUp).click();
+        harness.run();
+        assert_eq!(harness.state().draft().hotkey(HotkeyAction::VolumeUp), None);
+        assert_eq!(
+            harness.state().draft().hotkey(HotkeyAction::Screenshot),
+            Some("F5")
+        );
+        assert!(!shows_warning(&harness));
     }
 }

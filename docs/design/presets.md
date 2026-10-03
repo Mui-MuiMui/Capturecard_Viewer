@@ -13,6 +13,8 @@
 
 **`video.backend`（映像の開き方、#237）は対象に含める。** 設定ダイアログで選ぶ項目で、どの経路で開くかはデバイスと一体なので、キャプチャーボードの使い分けというプリセットの用途に合う。`video` を丸ごと写す・比べる作りなので、`apply_to` にも `matches_preset` にも手を入れずに揃っている。
 
+**`audio.input_source`（音声の入力の種類、#388）も対象に含める。** WASAPI のデバイスか、DirectShow で開いた映像デバイスの音声ピンかで、キャプチャーボードと一体の選択だから。`audio` を丸ごと写す・比べるので、`backend` と同じく手を入れずに揃う（`matches_preset_different_audio_input_source_returns_false`）。プリセットの適用で入力の種類が変わると、音声ピンを繋ぐかが変わるので映像も 1 度開き直る（`docs/design/directshow-audio.md` の「音声ピンをいつ繋ぐか」）。
+
 `active_preset` は「いま選んでいるプリセット名」。`resolved_active_preset` が実際の `video` / `audio` と突き合わせ、食い違っていれば `None` を返す（これが「（変更あり）」表示の判定そのもの）。`video` / `audio` を書き換えたあとは `refresh_active_preset()` を呼んで辻褄を合わせる。**`commit_draft` の末尾で呼んでいるのを外さないこと。** 外すと、プリセットを読み込んだあと解像度を変えて「適用」したときに選択が残り、右クリックメニューのチェックが実際の設定と食い違う。
 
 **名前の検証は 2 か所にある。** 設定ダイアログの入力は `validate_preset_name`、設定ファイルから読んだ一覧は `sanitize_presets`（`From<RawAppSettings>` の中）。後者が無いと、手で書き換えた設定ファイルからダイアログを通さずに不正な状態を作れる。空の名前はメニューに空の項目として並び、重複した名前は `preset()` も `remove_preset()` も先頭しか見ないため 2 つ目以降を選ぶことも消すこともできない。名前の前後の空白は両方で落とし、`active_preset` も同じ形に揃える。

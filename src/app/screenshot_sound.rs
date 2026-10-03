@@ -1,19 +1,31 @@
-//! スクリーンショットの効果音ファイルの読み込み。
+//! スクリーンショットの効果音ファイルの読み込みと再生。
 //!
 //! 適用（`apply_settings`）と設定画面の「テスト再生」の両方の読み込みを、
-//! 要求ごとに起こすスレッドで行う。UI スレッドは結果をチャネルで受け取り、
-//! 反映と失敗の報告だけをする。スクリーンショットの保存スレッドと同じ流儀
-//! （`docs/design/threads.md`）。
+//! 要求ごとに起こすスレッドで行う。再生も 1 回ごとのスレッドで行う。
+//! UI スレッドは結果をチャネルで受け取り、反映と失敗の報告だけをする。
+//! スクリーンショットの保存スレッドと同じ流儀（`docs/design/threads.md`）。
 //!
 //! 大きなファイルや遅いドライブでは、読み込みとデコードの確認に時間がかかる。
 //! UI スレッドで行うと、適用やテスト再生の瞬間に描画が止まる（Issue #214）。
 
 use super::screenshot::drop_finished_threads;
 use super::CaptureCardViewer;
-use crate::screenshot::{self, ScreenshotError};
+use crate::screenshot::ScreenshotError;
+use crate::screenshot_sound;
 use crate::status::ErrorSource;
+use chrono::Local;
 use log::{debug, warn};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
+
+/// 効果音のスレッドから UI スレッドへ返すもの。
+pub(super) enum SoundMessage {
+    /// 読み込みの結果（適用・テスト再生）
+    Loaded(SoundLoadResult),
+    /// 再生スレッドが出力先を開けたか。開けなかったときは理由
+    Output(Result<(), ScreenshotError>),
+}
 
 /// 読み込みスレッドから UI スレッドへ返す結果。
 ///
@@ -22,7 +34,7 @@ use std::path::{Path, PathBuf};
 /// 中身をそのまま返すため。`error` は報告するためだけのもの。
 pub(super) struct SoundLoadResult {
     purpose: SoundLoadPurpose,
-    data: Vec<u8>,
+    data: Arc<[u8]>,
     error: Option<ScreenshotError>,
 }
 
@@ -71,19 +83,19 @@ impl CaptureCardViewer {
     }
 
     fn spawn_sound_load(&mut self, path: PathBuf, purpose: SoundLoadPurpose) {
-        let result_tx = self.sound_load_tx.clone();
+        let result_tx = self.sound_tx.clone();
         // 映像が止まっている間は update() の間隔が広がっているので、届いたら起こす。
         // 起こさないとテスト再生の音が次の再描画まで鳴らない
         let waker = self.repaint_waker.clone();
         let handle = std::thread::spawn(move || {
-            let (data, error) = screenshot::load_sound_data(&path);
+            let (data, error) = screenshot_sound::load_sound_data(&path);
             // ログは受け取った UI スレッド側で出す（保存スレッドと同じ）
             if result_tx
-                .send(SoundLoadResult {
+                .send(SoundMessage::Loaded(SoundLoadResult {
                     purpose,
                     data,
                     error,
-                })
+                }))
                 .is_err()
             {
                 // 受信側が無いのはアプリが終了したときだけ。結果は捨ててよい
@@ -99,11 +111,57 @@ impl CaptureCardViewer {
         self.sound_load_threads.push(handle);
     }
 
-    /// 別スレッドから届いた効果音の読み込み結果を取り込む。`update()` の先頭で呼ぶ。
-    pub(super) fn drain_sound_load_results(&mut self) {
-        while let Ok(result) = self.sound_load_rx.try_recv() {
-            self.apply_sound_load_result(result);
+    /// 効果音を別スレッドで 1 回鳴らす。撮影とテスト再生の両方がここを通る。
+    ///
+    /// 出力先を開けたかは `SoundMessage::Output` で UI スレッドへ返る。
+    /// **`screenshot_manager` のロックを握ったまま呼ばない。** 渡すのは `Arc` の複製だけ。
+    pub(super) fn play_sound(&self, data: Arc<[u8]>, volume: f32) {
+        let tx = self.sound_tx.clone();
+        let waker = self.repaint_waker.clone();
+        screenshot_sound::play_sound_data(data, volume, move |outcome| {
+            let failed = outcome.is_err();
+            // 受信側が無いのはアプリが終了したときだけ。結果は捨ててよい
+            if tx.send(SoundMessage::Output(outcome)).is_ok() && failed {
+                // 映像が止まっている間でも、通知がすぐ出るよう起こす
+                waker.wake();
+            }
+        });
+    }
+
+    /// 別スレッドから届いた効果音の読み込みと再生の結果を取り込む。`update()` の先頭で呼ぶ。
+    pub(super) fn drain_sound_results(&mut self) {
+        while let Ok(message) = self.sound_rx.try_recv() {
+            match message {
+                SoundMessage::Loaded(result) => self.apply_sound_load_result(result),
+                SoundMessage::Output(outcome) => self.apply_sound_output(outcome),
+            }
         }
+    }
+
+    /// 再生スレッドが出力先を開けたかを取り込む。
+    ///
+    /// **同じ理由が続く間は 1 度だけ報告する。** 撮影のたびに鳴らそうとするので、
+    /// 出力デバイスが無いまま撮り続けると同じ失敗が撮影の回数だけ届く。
+    /// 一定時間ごとの再通知（`ErrorCenter` の間隔）も入れていない。画像は保存できて
+    /// いて、撮るたびに思い出させる必要が無いため。理由は「接続状態」タブに残る。
+    ///
+    /// 出力先を開けるようになったら記録を落とし（タブからも消える）、次に開けなく
+    /// なったときはまた知らせる。
+    fn apply_sound_output(&mut self, outcome: Result<(), ScreenshotError>) {
+        let reason = outcome.err().map(|e| e.to_string());
+        let report = should_report_sound_output(self.sound_output_failure.as_deref(), &reason);
+        match &reason {
+            Some(reason) if report => {
+                warn!("効果音を鳴らせない: {}", reason);
+                self.report_error(ErrorSource::ScreenshotSound, reason.clone());
+            }
+            Some(reason) => debug!("効果音を鳴らせない（報告済み）: {}", reason),
+            None if self.sound_output_failure.is_some() => {
+                self.errors.clear(ErrorSource::ScreenshotSound);
+            }
+            None => {}
+        }
+        self.sound_output_failure = reason;
     }
 
     fn apply_sound_load_result(&mut self, result: SoundLoadResult) {
@@ -130,6 +188,27 @@ impl CaptureCardViewer {
                     return;
                 }
                 let Some(e) = error else {
+                    // 読み込めたので、前に読めなかった記録を取り下げる。ただし
+                    // 出力先を開けない失敗が続いている間は、記録をその理由へ戻す
+                    // （読めなかった記録が上書きしていることがあるため）。
+                    // 報告済みの理由なので、トーストは出さない
+                    match self.sound_output_failure.clone() {
+                        None => self.errors.clear(ErrorSource::ScreenshotSound),
+                        Some(reason) => {
+                            let latest = self
+                                .errors
+                                .latest(ErrorSource::ScreenshotSound)
+                                .map(|recorded| recorded.message.as_str());
+                            if latest != Some(reason.as_str()) {
+                                self.errors.record(
+                                    ErrorSource::ScreenshotSound,
+                                    reason,
+                                    Instant::now(),
+                                    Local::now(),
+                                );
+                            }
+                        }
+                    }
                     return;
                 };
                 warn!("効果音の適用: {}", e);
@@ -139,7 +218,7 @@ impl CaptureCardViewer {
                 if !matches!(e, ScreenshotError::SoundFileUndecodable { .. }) {
                     self.last_sound_file = None;
                 }
-                self.report_error(ErrorSource::Screenshot, e.to_string());
+                self.report_error(ErrorSource::ScreenshotSound, e.to_string());
             }
             SoundLoadPurpose::TestPlay { id, volume } => {
                 let accepted = match self.screenshot_manager.lock() {
@@ -156,9 +235,9 @@ impl CaptureCardViewer {
                 // 読めなければ内蔵音で鳴らし、理由をトーストへ出す
                 if let Some(e) = error {
                     warn!("テスト再生で効果音を読み込めない: {}", e);
-                    self.report_error(ErrorSource::Screenshot, e.to_string());
+                    self.report_error(ErrorSource::ScreenshotSound, e.to_string());
                 }
-                screenshot::play_sound_data(data, volume);
+                self.play_sound(data, volume);
             }
         }
     }
@@ -180,5 +259,50 @@ impl CaptureCardViewer {
                 warn!("効果音の読み込みスレッドがパニックした");
             }
         }
+    }
+}
+
+/// 再生スレッドの結果を報告するかを決める。
+///
+/// `previous` は前回の再生で開けなかった理由（開けていれば `None`）、
+/// `current` は今回の結果。開けなかったうえで、前回と違う理由のときだけ報告する。
+fn should_report_sound_output(previous: Option<&str>, current: &Option<String>) -> bool {
+    match current {
+        Some(reason) => previous != Some(reason.as_str()),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_report_sound_output_first_failure_is_reported() {
+        assert!(should_report_sound_output(None, &Some("NoDevice".into())));
+    }
+
+    #[test]
+    fn should_report_sound_output_same_failure_again_is_not_reported() {
+        // 出力デバイスが無いまま撮り続けた場合。撮影のたびにトーストを出さない
+        assert!(!should_report_sound_output(
+            Some("NoDevice"),
+            &Some("NoDevice".into())
+        ));
+    }
+
+    #[test]
+    fn should_report_sound_output_different_failure_is_reported() {
+        assert!(should_report_sound_output(
+            Some("NoDevice"),
+            &Some("Busy".into())
+        ));
+    }
+
+    #[test]
+    fn should_report_sound_output_success_is_never_reported() {
+        // 開けたときは報告しない。記録は落とすので、次に開けなくなったらまた知らせる
+        assert!(!should_report_sound_output(Some("NoDevice"), &None));
+        assert!(!should_report_sound_output(None, &None));
     }
 }

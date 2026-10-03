@@ -3,25 +3,35 @@
 //! trait に包むだけ。どれも中身には手を入れない。
 //!
 //! **Media Foundation と DirectShow のどちらで開くかは、デバイス名と設定の
-//! 「映像の開き方」（`video.backend`）で決まる**（`route_for`）。自動なら
-//! 名前だけで決まり、DirectShow のデバイスは名前に「(DirectShow)」が
+//! 「映像の開き方」（`video.backend`）と音声ピンを繋ぐ指定で決まる**（`route_for`）。
+//! 自動で音声ピンを繋ぐなら DirectShow（#425）。それ以外の自動は
+//! まず名前で決め、DirectShow のデバイスは名前に「(DirectShow)」が
 //! 付いていて、設定にもその名前で残る。一覧は Media Foundation を優先し、
 //! DirectShow にしか無いものだけを足す（`merge_video_devices`）。
 //! Web カメラやキャプチャーボードの多くは両方に出るが、同じデバイスを
 //! 2 つ並べても選び間違えるだけなので、実績のある Media Foundation を使う。
 //! それを DirectShow で開きたいときは開き方を DirectShow にする（#237）。
+//!
+//! **自動のときだけ、Media Foundation で「見つかったが開けない」なら同じ
+//! 呼び出しの中で DirectShow でも試す**（`attempt_with_fallback`、#387）。
+//! 両方に出るのに Media Foundation では開けないボード（AVerMedia GC551）が
+//! あり、自動のままでは永遠に再試行を繰り返すため。対応形式の問い合わせも
+//! 同じ規則で倒す。開き方を Media Foundation に固定した設定では倒さない。
 
-use super::{AudioBackend, BackendShared, DeviceBackends, VideoBackend, VideoEnumeration};
+use super::{
+    AudioBackend, BackendShared, CaptureRequest, DeviceBackends, VideoBackend, VideoEnumeration,
+};
 use crate::audio::{
-    self, ActiveAudio, AudioCapabilities, AudioCapture, AudioDirection, AudioError,
-    PassthroughRequest, ResampleStatus, ResampleTelemetry,
+    self, ActiveAudio, AudioCapabilities, AudioCapture, AudioDirection, AudioError, AudioPinFeed,
+    AudioPinPresence, PassthroughRequest, ResampleStatus, ResampleTelemetry,
 };
 use crate::settings::VideoBackendSetting;
 use crate::video::{
-    directshow_display_name, directshow_friendly_name, ActiveVideo, DeviceCapabilities,
-    DirectShowCapture, VideoCapture, VideoError, VideoLinkState,
+    ActiveVideo, DeviceCapabilities, DirectShowCapture, VideoCapture, VideoError, VideoLinkState,
 };
 use std::sync::Arc;
+
+use super::system_route::{attempt_with_fallback, merge_video_devices, VideoRoute};
 
 /// 本番のバックエンド。映像は Media Foundation（nokhwa）と DirectShow、音声は
 /// WASAPI（cpal）。
@@ -36,8 +46,12 @@ impl DeviceBackends for SystemBackends {
             frames,
             color_conversion,
             audio_controls,
+            audio_tap,
             repaint_waker,
         } = shared;
+        // 映像の音声ピンと音声のバックエンドをつなぐ差し込み口（#388）。ワーカーの
+        // 中で閉じた共有で、UI スレッドからは触らない（`ResampleTelemetry` と同じ扱い）
+        let pin_feed = AudioPinFeed::new();
         // どちらも同じフレームバッファへ積む。同時に開くのは片方だけ
         let video = SystemVideo {
             media_foundation: VideoCapture::new(
@@ -45,79 +59,19 @@ impl DeviceBackends for SystemBackends {
                 color_conversion.clone(),
                 repaint_waker.clone(),
             ),
-            direct_show: DirectShowCapture::new(frames, color_conversion, repaint_waker),
+            direct_show: DirectShowCapture::new(
+                frames,
+                color_conversion,
+                repaint_waker,
+                pin_feed.clone(),
+            ),
             open: None,
         };
-        (Box::new(video), Box::new(AudioCapture::new(audio_controls)))
+        (
+            Box::new(video),
+            Box::new(AudioCapture::new(audio_controls, audio_tap, pin_feed)),
+        )
     }
-}
-
-/// どちらの経路でデバイスを扱うか。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VideoRoute {
-    MediaFoundation,
-    DirectShow,
-}
-
-/// デバイス名と設定の「映像の開き方」から、経路とその経路へ渡す名前を決める。
-///
-/// | 開き方 | 経路 | 渡す名前 |
-/// |---|---|---|
-/// | 自動 | 「(DirectShow)」付きなら DirectShow、それ以外は Media Foundation | そのまま |
-/// | Media Foundation | Media Foundation | 「(DirectShow)」を外した名前 |
-/// | DirectShow | DirectShow | そのまま（`DirectShowCapture` が印の有無を問わず探す） |
-///
-/// **デバイスが未指定なら開き方によらず Media Foundation**（先頭のデバイス）。
-/// DirectShow の経路は名前が無いと開けない。
-///
-/// Media Foundation で「(DirectShow)」を外すのは、印は「DirectShow にしか
-/// 無い」という一覧の上の目印で、デバイスの本来の名前ではないため。多くは
-/// Media Foundation に居ないので「見つからない」になる（それが正しい結果）。
-fn route_for(
-    device_name: Option<&str>,
-    backend: VideoBackendSetting,
-) -> (VideoRoute, Option<&str>) {
-    let Some(name) = device_name else {
-        return (VideoRoute::MediaFoundation, None);
-    };
-    let friendly = directshow_friendly_name(name);
-    match backend {
-        VideoBackendSetting::Auto => match friendly {
-            Some(_) => (VideoRoute::DirectShow, Some(name)),
-            None => (VideoRoute::MediaFoundation, Some(name)),
-        },
-        VideoBackendSetting::MediaFoundation => {
-            (VideoRoute::MediaFoundation, Some(friendly.unwrap_or(name)))
-        }
-        VideoBackendSetting::DirectShow => (VideoRoute::DirectShow, Some(name)),
-    }
-}
-
-/// Media Foundation の一覧に、DirectShow にしか無いデバイスを足す。
-///
-/// 照合は表示名で行う。**同じ名前が両方にあれば Media Foundation のほうだけを
-/// 残す。** DirectShow 側で同じ名前が重なっていれば 1 つにする（同じ名前では
-/// 選び分けられない）。DirectShow のデバイスの説明は空にする（設定画面は
-/// 「名前 (説明)」と出すので、「(DirectShow)」が二重に見えるのを避ける）。
-fn merge_video_devices(
-    media_foundation: Vec<(String, String)>,
-    direct_show: Vec<String>,
-) -> Vec<(String, String)> {
-    let mut merged = media_foundation;
-    let mut added: Vec<String> = Vec::new();
-    for name in direct_show {
-        let known = merged.iter().any(|(mf_name, _)| *mf_name == name);
-        if known || added.contains(&name) {
-            continue;
-        }
-        added.push(name);
-    }
-    merged.extend(
-        added
-            .iter()
-            .map(|name| (directshow_display_name(name), String::new())),
-    );
-    merged
 }
 
 /// Media Foundation と DirectShow を 1 つの映像バックエンドに束ねたもの。
@@ -146,31 +100,58 @@ impl VideoBackend for SystemVideo {
     ) -> Result<DeviceCapabilities, VideoError> {
         // 開くときと同じ規則で経路を決める（#249）。設定ダイアログの能力
         // キャッシュはデバイス名と開き方の組で引くので、DirectShow で開く
-        // 設定なら選択肢も DirectShow 側の対応形式になる
-        match route_for(device_name, backend) {
-            (VideoRoute::DirectShow, Some(name)) => self.direct_show.capabilities(name),
-            (_, name) => VideoCapture::get_device_capabilities(name),
-        }
+        // 設定なら選択肢も DirectShow 側の対応形式になる。自動で Media
+        // Foundation が開けないデバイスは、開くときと同じく DirectShow の
+        // 対応形式を返す（#387）。キャッシュの (名前, 自動) にはこちらが入り、
+        // 自動で開くときもやはり DirectShow へ倒れるので食い違わない
+        let direct_show = &self.direct_show;
+        // 音声ピンを繋ぐ指定は見ない。能力キャッシュの鍵は (名前, 開き方) で、
+        // 入力の種類を含まないため。音声ピンのために自動のまま DirectShow で開く
+        // とき（#425）は選択肢が Media Foundation 側の対応形式のことがあるが、
+        // DirectShow は近い形式を選んで開く（`stream_select`）
+        let (result, _) = attempt_with_fallback(
+            device_name,
+            backend,
+            false,
+            "対応形式の取得",
+            |route, name| match (route, name) {
+                (VideoRoute::DirectShow, Some(name)) => direct_show.capabilities(name),
+                (_, name) => VideoCapture::get_device_capabilities(name),
+            },
+        );
+        result
     }
 
-    fn start_capture(
-        &mut self,
-        device_name: Option<&str>,
-        resolution: Option<(u32, u32)>,
-        format: Option<&str>,
-        fps: Option<u32>,
-        backend: VideoBackendSetting,
-    ) -> Result<(), VideoError> {
+    fn start_capture(&mut self, request: &CaptureRequest<'_>) -> Result<(), VideoError> {
         self.stop_capture();
-        let (route, name) = route_for(device_name, backend);
-        let result = match (route, name) {
-            (VideoRoute::DirectShow, Some(name)) => self
-                .direct_show
-                .start_capture(name, resolution, format, fps),
-            (_, name) => self
-                .media_foundation
-                .start_capture(name, resolution, format, fps),
-        };
+        let CaptureRequest {
+            device_name,
+            resolution,
+            format,
+            fps,
+            backend,
+            connect_audio_pin,
+        } = *request;
+        // 自動で Media Foundation が開けなければ DirectShow でも試す（#387）。
+        // `open` には実際に開けた経路を入れるので、`link_state` / `stop_capture` /
+        // `active` もそちらを見る（「接続状態」タブの「開き方」も `active` から出る）。
+        // 音声ピンを繋ぐ指定は、倒したときの DirectShow にも渡す（GC551 はこの経路で開く）。
+        // 自動で音声ピンを繋ぐ指定があれば最初から DirectShow で開き、DirectShow の一覧に
+        // 無いときだけ Media Foundation で開く（#425、`route_for` / `attempt_with_fallback`）
+        let media_foundation = &mut self.media_foundation;
+        let direct_show = &mut self.direct_show;
+        let (result, route) = attempt_with_fallback(
+            device_name,
+            backend,
+            connect_audio_pin,
+            "接続",
+            |route, name| match (route, name) {
+                (VideoRoute::DirectShow, Some(name)) => {
+                    direct_show.start_capture(name, resolution, format, fps, connect_audio_pin)
+                }
+                (_, name) => media_foundation.start_capture(name, resolution, format, fps),
+            },
+        );
         if result.is_ok() {
             self.open = Some(route);
         }
@@ -198,6 +179,10 @@ impl VideoBackend for SystemVideo {
             Some(VideoRoute::DirectShow) => self.direct_show.active(),
             _ => self.media_foundation.active(),
         }
+    }
+
+    fn audio_pin_presence(&mut self) -> Vec<(String, AudioPinPresence)> {
+        self.direct_show.audio_pin_presence()
     }
 
     fn enumerate(&self) -> VideoEnumeration {
@@ -244,10 +229,6 @@ impl AudioBackend for AudioCapture {
         AudioCapture::list_output_devices(self)
     }
 
-    fn default_input_device_name(&self) -> Option<String> {
-        AudioCapture::default_input_device_name(self)
-    }
-
     fn default_output_device_name(&self) -> Option<String> {
         AudioCapture::default_output_device_name(self)
     }
@@ -286,6 +267,14 @@ impl AudioBackend for AudioCapture {
         AudioCapture::underrun_count(self)
     }
 
+    fn dropped_frame_count(&self) -> Option<u32> {
+        AudioCapture::dropped_frame_count(self)
+    }
+
+    fn xrun_count(&self) -> Option<u32> {
+        AudioCapture::xrun_count(self)
+    }
+
     fn take_stream_error(&self) -> bool {
         AudioCapture::take_stream_error(self)
     }
@@ -298,48 +287,6 @@ impl AudioBackend for AudioCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn names(list: &[(String, String)]) -> Vec<&str> {
-        list.iter().map(|(name, _)| name.as_str()).collect()
-    }
-
-    #[test]
-    fn merge_video_devices_prefers_media_foundation_for_the_same_name() {
-        let merged = merge_video_devices(
-            vec![("USB Video".to_string(), "MF".to_string())],
-            vec!["USB Video".to_string(), "OBS Virtual Camera".to_string()],
-        );
-        assert_eq!(
-            names(&merged),
-            vec!["USB Video", "OBS Virtual Camera (DirectShow)"]
-        );
-        // Media Foundation の説明は残し、DirectShow の説明は空
-        assert_eq!(merged[0].1, "MF");
-        assert_eq!(merged[1].1, "");
-    }
-
-    #[test]
-    fn merge_video_devices_collapses_duplicate_directshow_names() {
-        let merged = merge_video_devices(
-            Vec::new(),
-            vec!["Virtual Cam".to_string(), "Virtual Cam".to_string()],
-        );
-        assert_eq!(names(&merged), vec!["Virtual Cam (DirectShow)"]);
-    }
-
-    #[test]
-    fn merge_video_devices_without_directshow_keeps_the_media_foundation_list() {
-        let mf = vec![
-            ("A".to_string(), String::new()),
-            ("B".to_string(), String::new()),
-        ];
-        assert_eq!(merge_video_devices(mf.clone(), Vec::new()), mf);
-    }
-
-    #[test]
-    fn merge_video_devices_both_empty_is_empty() {
-        assert!(merge_video_devices(Vec::new(), Vec::new()).is_empty());
-    }
 
     #[test]
     fn enumeration_from_merges_the_selectable_names_like_list_devices() {
@@ -379,79 +326,5 @@ mod tests {
         assert_eq!(enumeration.selectable, None);
         assert_eq!(enumeration.sources[1].1, Err(failure));
         assert_eq!(enumeration.sources[0].1, Ok(Vec::new()));
-    }
-
-    const DS_ONLY: &str = "OBS Virtual Camera (DirectShow)";
-    const BOTH: &str = "USB Video";
-
-    #[test]
-    fn route_for_auto_uses_the_directshow_suffix() {
-        let auto = VideoBackendSetting::Auto;
-        assert_eq!(
-            route_for(Some(DS_ONLY), auto),
-            (VideoRoute::DirectShow, Some(DS_ONLY))
-        );
-        assert_eq!(
-            route_for(Some(BOTH), auto),
-            (VideoRoute::MediaFoundation, Some(BOTH))
-        );
-        // 未指定は今までどおり Media Foundation の先頭
-        assert_eq!(route_for(None, auto), (VideoRoute::MediaFoundation, None));
-    }
-
-    #[test]
-    fn route_for_direct_show_opens_even_a_media_foundation_name_with_directshow() {
-        let ds = VideoBackendSetting::DirectShow;
-        // 両方に出るデバイス。同じ表示名を DirectShow の一覧から探す
-        assert_eq!(
-            route_for(Some(BOTH), ds),
-            (VideoRoute::DirectShow, Some(BOTH))
-        );
-        // もともと DirectShow のデバイスは自動と同じ
-        assert_eq!(
-            route_for(Some(DS_ONLY), ds),
-            (VideoRoute::DirectShow, Some(DS_ONLY))
-        );
-    }
-
-    #[test]
-    fn route_for_media_foundation_strips_the_directshow_suffix() {
-        let mf = VideoBackendSetting::MediaFoundation;
-        // 印を外した本来の名前で Media Foundation の一覧を探す
-        assert_eq!(
-            route_for(Some(DS_ONLY), mf),
-            (VideoRoute::MediaFoundation, Some("OBS Virtual Camera"))
-        );
-        assert_eq!(
-            route_for(Some(BOTH), mf),
-            (VideoRoute::MediaFoundation, Some(BOTH))
-        );
-    }
-
-    #[test]
-    fn route_for_without_a_device_is_media_foundation_for_every_setting() {
-        // DirectShow の経路は名前が無いと開けないので、開き方によらず先頭へ
-        for backend in VideoBackendSetting::ALL {
-            assert_eq!(
-                route_for(None, backend),
-                (VideoRoute::MediaFoundation, None),
-                "{backend:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn route_for_treats_a_bare_suffix_as_a_plain_name() {
-        // 「(DirectShow)」だけの名前は印ではなく名前そのものとして扱う
-        // （`directshow_friendly_name` が空の名前を返さない）
-        let bare = " (DirectShow)";
-        assert_eq!(
-            route_for(Some(bare), VideoBackendSetting::Auto),
-            (VideoRoute::MediaFoundation, Some(bare))
-        );
-        assert_eq!(
-            route_for(Some(bare), VideoBackendSetting::MediaFoundation),
-            (VideoRoute::MediaFoundation, Some(bare))
-        );
     }
 }

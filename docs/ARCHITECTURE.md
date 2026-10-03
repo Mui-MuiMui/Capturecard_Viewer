@@ -27,6 +27,7 @@ flowchart TD
     settings["settings<br/>永続化"]
     hotkey["hotkey<br/>ホットキー"]
     device["device<br/>ワーカー層"]
+    recording["recording<br/>録画（映像と音声）"]
     video["video"]
     audio["audio"]
     platform["platform"]
@@ -39,6 +40,9 @@ flowchart TD
     app --> device
     device --> video
     device --> audio
+    app --> recording
+    recording --> video
+    recording --> audio
 
     subgraph shared ["全レイヤーから利用"]
         platform
@@ -55,12 +59,13 @@ flowchart TD
 | `ui` | 描画と入力の受け取り | 状態、副作用 |
 | `device` | デバイス操作をワーカースレッドへ隔離し、チャネルで橋渡しする | UI の知識 |
 | `video` / `audio` | デバイス固有の処理 | アプリ状態の知識 |
+| `recording` | 録画スレッド、Media Foundation の Sink Writer による H.264 / AAC の MP4 への書き出し、PTS、リプレイバッファ（エンコーダ MFT でエンコード済みのリングへ積み、さかのぼって書き出す）。**第 1 段（映像、#281）、第 2 段（音声、#282）、リプレイバッファ（③、#182）を実装済み**（設計は `docs/design/recording.md`、#120 / #182） | デバイスの開閉（`video` / `audio` がコールバックから渡すリングを読むだけ）、UI の知識 |
 | `settings` | 設定の型と永続化 | 実行時状態 |
 | `hotkey` | 割り当てられる操作の定義、ホットキーの登録と押下の検出（押下は `keyboard_hook` の低レベルキーボードフックでキーを奪わずに観測する） | 操作そのものの実行（`app` が行う） |
 | `platform` | Windows 固有処理（フォント、アイコン、モニタ情報） | 汎用ロジック |
 | `logging` | ログの初期化と出力先 | — |
 
-`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_connect.rs` / `worker_timers.rs`（再試行・切断監視・既定デバイスの追従などタイマー駆動の監視）で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
+`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_commands.rs`（コマンドの受け口）/ `worker_connect.rs` / `worker_audio_connect.rs` / `worker_default_input.rs`（デバイス操作）/ `worker_timers.rs` / `worker_audio_timers.rs`（再試行・切断監視・既定デバイスの追従などタイマー駆動の監視）と、デバイスの入口の trait を持つ `backend/` で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
 
 ## 状態管理
 
@@ -183,7 +188,7 @@ flowchart LR
 | Media Foundation | `video::VideoCapture`（`capture.rs`） | `nokhwa::query` | `Camera::compatible_list_by_resolution` | nokhwa のフレームコールバック |
 | DirectShow | `video::DirectShowCapture`（`directshow/`） | `ICreateDevEnum`（`CLSID_VideoInputDeviceCategory`） | `IAMStreamConfig::GetStreamCaps` | 自前のレンダラーフィルターの `IMemInputPin::Receive` |
 
-2 本を束ねるのは `app::backend::system` の `SystemVideo` で、ワーカーから見れば `VideoBackend` 1 つのまま。一覧は Media Foundation を優先し、DirectShow にしか無いデバイスだけを名前に「(DirectShow)」を添えて足す。どちらで開くかはこの印で決まる。詳しくは `docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」。
+2 本を束ねるのは `app::backend::system` の `SystemVideo` で、ワーカーから見れば `VideoBackend` 1 つのまま。一覧は Media Foundation を優先し、DirectShow にしか無いデバイスだけを名前に「(DirectShow)」を添えて足す。どちらで開くかはまずこの印で決まり、開き方が「自動」で Media Foundation では開けない（見つかったが開けない）ときは、同じ試行の中で DirectShow でも試す（#387、`docs/design/reconnect.md` の「両方に出るが Media Foundation では開けないデバイス」）。詳しくは `docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」。
 
 ### 要求どおりのフォーマットで開く
 
@@ -191,7 +196,7 @@ flowchart LR
 
 要求が通らなかった場合はフォールバックしてよいが、その事実をログに残し、UI にも反映する。ユーザーが選んだ設定と実際に動いている設定が食い違ったまま黙っている状態を作らない。
 
-**ログに残す側は実装済み。** `video::VideoCapture::start_capture` が、要求した組み合わせ（`debug`）、フォーマットを YUY2 へ差し替えたこと（`warn`）、実際に開けた解像度とピクセルフォーマット（`info`）を出す。UI への反映は未実装。
+**ログに残す側は実装済み。** `video::VideoCapture::start_capture` が、要求した組み合わせ（`debug`）、フォーマットを YUY2 へ差し替えたこと（`warn`）、実際に開けた解像度とピクセルフォーマット（`info`）を出す。UI では設定ダイアログの「接続状態」タブに、実際に開けた経路・解像度・フォーマット（`ActiveVideo`）を出す。要求と食い違ったこと自体を UI で知らせる表示は無い。
 
 デバイス能力は起動時と接続時にバックグラウンドで取得し、キャッシュする。設定画面を開いた時点で選択肢が揃っている状態にする。
 
@@ -247,7 +252,7 @@ GPU 側（egui のシェーダ）で行う案もあったが、採っていな�
 
 これらはパフォーマンス改善の効果測定にそのまま使えるため、最適化作業より先に整える。
 
-**映像側は実装済み。** `VideoFrames::stats()` が `FrameStats` を返し、右クリックメニューの「情報表示」で OSD に出る。実効 FPS はフレーム間隔の平均から計算する。nokhwa の `camera_format().frame_rate()` は当てにならない値を返すため、デバイスへ問い合わせない。音声のアンダーラン回数はまだ収集していない。
+**映像側は実装済み。** `VideoFrames::stats()` が `FrameStats` を返し、右クリックメニューの「情報表示」で OSD に出る。実効 FPS はフレーム間隔の平均から計算する。nokhwa の `camera_format().frame_rate()` は当てにならない値を返すため、デバイスへ問い合わせない。**音声側も実装済み。** アンダーラン・満杯で捨てたフレーム・取りこぼし（Xrun）の回数を `DeviceSnapshot` に集め、「接続状態」タブに出す（アンダーランは統計 OSD にも出る）。
 
 ## 音声パイプライン
 
@@ -256,13 +261,13 @@ flowchart LR
     in["オーディオ入力<br/>(WASAPI)"]
     incb["入力コールバック"]
     fmt["サンプル形式の正規化<br/>F32 / I16 / U16 / I32"]
-    conv["レート・チャンネル変換<br/>揃えられるなら揃える"]
-    ring["リングバッファ<br/>長さは設定可能"]
-    gate["パススルー判定<br/>音量適用"]
+    ring["リングバッファ<br/>入力の形のまま積む<br/>長さは設定可能"]
     outcb["出力コールバック"]
+    conv["レート・チャンネル変換<br/>PassthroughConverter<br/>揃えられるなら揃える"]
+    gate["パススルー判定<br/>ミュート・音量適用"]
     out["オーディオ出力<br/>(WASAPI)"]
 
-    in --> incb --> fmt --> conv --> ring --> gate --> outcb --> out
+    in --> incb --> fmt --> ring --> outcb --> conv --> gate --> out
     ring -.->|バッファ水位| drift["クロックドリフト補正"]
     drift -.-> conv
 ```
@@ -324,7 +329,7 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 ### エラー型
 
-モジュールごとにエラー型を定義し、呼び出し側が種別で分岐できる状態にする。**ここは `VideoError` / `AudioError` / `ScreenshotError` / `HotkeyError` / `SettingsError` として実装済み**（それぞれ `src/video/mod.rs` / `src/audio/mod.rs` / `src/screenshot.rs` / `src/hotkey/parse.rs` / `src/settings.rs`）。
+モジュールごとにエラー型を定義し、呼び出し側が種別で分岐できる状態にする。**ここは `VideoError` / `AudioError` / `ScreenshotError` / `HotkeyError` / `SettingsError` として実装済み**（それぞれ `src/video/mod.rs` / `src/audio/mod.rs` / `src/screenshot.rs` / `src/hotkey/parse.rs` / `src/settings/mod.rs`）。
 
 `src/logging.rs` だけは `Result<_, String>` のまま残してある。ロガーを初期化する前の失敗なので `report_error` も `log` も使えず、`main.rs` が `let _ = logging::init();` と捨てるだけになる。種別で分岐する読み手がいない。
 
@@ -373,17 +378,18 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 | 目指す姿 | 現状 | 対応するタスク |
 |---|---|---|
-| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_connect` / `worker_timers` / `monitor` / `retry` / `capabilities` / `screenshot` / `settings_dialog` / `settings_store` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
+| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `placeholder` / `video_overlay` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_commands` / `worker_connect` / `worker_audio_connect` / `worker_default_input` / `worker_timers` / `worker_audio_timers` / `backend` / `monitor` / `retry` / `capabilities` / `screenshot` / `screenshot_sound` / `recording` / `settings_dialog` / `settings_store` / `update` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
 | イベント駆動 | 2 秒ごとに設定を再適用するポーリング | apply_settings の 2 秒ごとの再登録 |
-| チャネルでの隔離 | UI と `device` ワーカーの間はコマンドとイベントを mpsc でやり取りする。**この境界で**チャネルを通さず共有するのは 3 つ（映像フレーム、コールバックが読む Atomic、観測値の `Arc<RwLock<DeviceSnapshot>>`）。`settings` や `screenshot_manager` のようにデバイスを跨がない共有はこの話の外 | 完了 |
+| チャネルでの隔離 | UI と `device` ワーカーの間はコマンドとイベントを mpsc でやり取りする。**この境界で**チャネルを通さず共有するのは 4 つ（映像フレーム `VideoFrames`（録画へ回す `VideoTap` を含む）、色変換と映像調整 `SharedColorConversion`、音量・ミュート・パススルー `AudioControls`、録画へ回す音声 `AudioTap`）。数えるのは UI スレッドか録画スレッドがワーカーを通さずにデバイスのコールバックとやり取りする共有ハンドル（`BackendShared` に載せて渡すもの）で、`docs/design/device-worker.md` と `src/app/worker.rs` も同じ数え方。これとは別に観測値は `Arc<RwLock<DeviceSnapshot>>` に写して読む。`settings` や `screenshot_manager` のようにデバイスを跨がない共有はこの話の外 | 完了 |
 | UI をブロックしない | デバイスを開く・閉じる・列挙する処理も含めてワーカースレッドへ移した。スクリーンショットのエンコードは撮影ごとのスレッド。`update()` に残るブロッキングは `rfd` のファイルダイアログだけ | 完了 |
 | 要求どおりに開く | Media Foundation の経路では MJPEG / RGB24 を選んでも YUYV に差し替わる（差し替えたことは `warn` でログに残る）。DirectShow の経路（#143）は選んだ形式で開き、デバイスに無ければ近いものへ倒したことを `warn` で残す | MJPEG/RGB24 が YUYV で開かれる不具合 |
 | 新フレームの判別 | 一定時間フレームが来ないことを検出して「映像信号がありません」を出す。`video.auto_reconnect`（既定 有効、右クリックメニューで切替）が有効なら、対象デバイスが戻ってきたときバックオフで自動再接続する。最小化中や無信号の間は再描画の頻度も落とす | 完了 |
 | 統計の公開 | 映像側は `VideoFrames::stats()` で読み出せ、右クリックの「情報表示」で OSD に出る。初回フレームの解像度・経路・変換時間はログにも出る。音声のアンダーラン回数も `DeviceSnapshot.audio_underruns` として収集し、OSD と「接続状態」タブの両方に出す | 完了 |
 | 音声設定を効かせる | サンプルレート・チャンネル数は反映され、UI の選択肢も入出力の対応設定から生成している。列挙は別スレッドで行い UI を止めない | 完了 |
-| 入出力差の吸収 | 揃えられる場合は揃え、揃えられない場合は線形補間でリサンプルし、チャンネル数はアップ／ダウンミックスする。クロックドリフトはリングバッファの水位から数秒ごとに補正する（`ResampleTelemetry`）。「接続状態」タブへの表示は未実装（`DeviceSnapshot` には値がある） | 「接続状態」タブへのリサンプル比・バッファ水位の表示はタスク未登録 |
-| バッファ長の調整 | 設定ダイアログのデバイス設定タブでスライダーから調整できる（20〜200ms、既定 50ms） | 完了 |
-| エラー型 | 下位モジュールの公開 API は自分のエラー enum（`VideoError` / `AudioError` / `ScreenshotError` / `HotkeyError` / `SettingsError`）を返す。文言はその型の `Display` が `crate::i18n` から引いて出す。`logging` だけはロガー初期化前の失敗で読み手がいないため `Result<_, String>` のまま | 完了 |
+| 入出力差の吸収 | 揃えられる場合は揃え、揃えられない場合は線形補間でリサンプルし、チャンネル数はアップ／ダウンミックスする。クロックドリフトはリングバッファの水位の数秒間の平均から補正する（`ResampleTelemetry`）。**入出力の形が揃っていても補正する**（#308、`docs/design/audio.md`）。リサンプル比・バッファ水位は「接続状態」タブに出る | 完了 |
+| バッファ長の調整 | 設定ダイアログのデバイス設定タブでスライダーから調整できる（20〜200ms、既定 50ms）。出力は最初にリングがその長さまで溜まってから鳴らすので、選んだ長さがそのまま遅延になる（#308） | 完了 |
+| 音声入力の経路 | 音声入力は WASAPI だけ。WASAPI に音声が出ず、DirectShow のキャプチャーフィルターの音声ピンにだけ音声を持つ機種（AVerMedia GC551）の音は取れない。音声ピンを cpal の入力の代わりにする設計は `docs/design/directshow-audio.md`（未実装） | #388 |
+| エラー型 | 下位モジュールの公開 API は自分のエラー enum（`VideoError` / `AudioError` / `RecordingError` / `ScreenshotError` / `HotkeyError` / `SettingsError` / `UpdateError`）を返す。文言はその型の `Display` が `crate::i18n` から引いて出す。`logging` だけはロガー初期化前の失敗で読み手がいないため `Result<_, String>` のまま | 完了 |
 | ユーザー通知 | 接続失敗・ホットキー登録失敗・スクリーンショット保存失敗はトースト（`TransientOverlay`）で数秒表示し、同じ発生源の同じ文言は間引く。映像・音声の接続先は設定ダイアログの「接続状態」タブに、ホットキーの登録失敗は理由も添えてホットキー一覧に出す | 完了 |
 | trait による抽象化 | デバイスワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。本番の実装は映像が `VideoCapture` と `DirectShowCapture` を束ねた `SystemVideo`、音声が `AudioCapture`、テストはモック、環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` で起動したときはフェイク（`FakeVideoCapture` / `FakeAudioCapture`）。**コールバックの経路には挟んでいない**（映像フレームと音量は共有ハンドルを直に流れる） | 完了 |
 

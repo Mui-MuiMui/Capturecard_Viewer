@@ -12,32 +12,42 @@ mod error_report;
 mod hotkeys;
 mod menu;
 mod monitor;
+mod monitor_audio_pin;
+mod placeholder;
+mod recording;
 mod retry;
 mod screenshot;
 mod screenshot_sound;
 mod settings_dialog;
 mod settings_store;
 mod update;
+mod video_overlay;
 mod view;
 mod window;
 mod worker;
+mod worker_audio_connect;
+mod worker_audio_timers;
+mod worker_commands;
 mod worker_connect;
+mod worker_default_input;
 mod worker_loop;
 mod worker_timers;
 
 use self::menu::MenuLayout;
 use self::screenshot::ScreenshotResult;
-use self::screenshot_sound::SoundLoadResult;
+use self::screenshot_sound::SoundMessage;
+use self::settings_store::{SaveFailureStreak, SaveTrigger};
 use self::update::UpdateState;
-use self::window::needs_drag_move_guard;
+use self::window::{needs_drag_move_guard, WindowRecordState};
 use self::worker::{DeviceSnapshot, DeviceWorker};
-use crate::audio::AudioControls;
+use crate::audio::{AudioControls, AudioTap};
 use crate::hotkey::{HotkeyAction, HotkeyManager};
 use crate::i18n::Language;
 use crate::overlay::TransientOverlay;
 use crate::platform;
+use crate::recording::Recorder;
 use crate::repaint::{next_repaint_delay, should_wake_on_event, RepaintCondition, RepaintWaker};
-use crate::screenshot::ScreenshotManager;
+use crate::screenshot_sound::ScreenshotManager;
 use crate::settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace};
 use crate::status::ErrorCenter;
 use crate::ui;
@@ -87,10 +97,14 @@ pub struct CaptureCardViewer {
     // 能力取得と同じく、UI スレッドが update() で try_recv するだけにする
     screenshot_tx: Sender<ScreenshotResult>,
     screenshot_rx: Receiver<ScreenshotResult>,
-    // 効果音ファイルの読み込み結果を受け取るチャネル。適用とテスト再生の両方。
-    // 読み込みも別スレッドで行うため、保存結果と同じ形で受け取る
-    sound_load_tx: Sender<SoundLoadResult>,
-    sound_load_rx: Receiver<SoundLoadResult>,
+    // 効果音ファイルの読み込み結果（適用とテスト再生の両方）と、再生スレッドが
+    // 出力先を開けたかを受け取るチャネル。どちらも別スレッドで行うため、
+    // 保存結果と同じ形で受け取る
+    sound_tx: Sender<SoundMessage>,
+    sound_rx: Receiver<SoundMessage>,
+    // 前回の効果音の再生で出力先を開けなかった理由。開けていれば None。
+    // 同じ理由を撮影のたびに報告しないために持つ（`app::screenshot_sound`）
+    sound_output_failure: Option<String>,
 
     // 発生源ごとの直近の失敗。トーストの間引きもここが判断する
     errors: ErrorCenter,
@@ -129,9 +143,14 @@ pub struct CaptureCardViewer {
     // 自動保存（デバウンス保存と終了時保存）を許してよいか。
     // 読めなかった設定ファイルを退避できなかった場合は止める
     autosave: AutoSavePolicy,
+    // 保存の失敗が何回続いているか。再試行の間隔と、ログ・トーストの間引きに
+    // 使う（`app::settings_store`）
+    settings_save_failures: SaveFailureStreak,
 
     // 映像表示関連
     video_texture: Option<egui::TextureHandle>,
+    // テクスチャへ渡した画像。egui が手放したら次のフレームはこの Vec へ詰め直す（`view.rs`）
+    video_image: Option<Arc<egui::ColorImage>>,
     // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
     last_frame_generation: u64,
     // 最後に新しいフレームをテクスチャへ取り込んだ時刻。
@@ -176,6 +195,8 @@ pub struct CaptureCardViewer {
     // フルスクリーン中は OS 側が元から装飾を外しているので、この値は
     // 「フルスクリーンから戻ったときにどちらへ戻すか」を保持しているだけになる
     borderless: bool,
+    // ウィンドウの位置と大きさの記録で、フレームをまたいで覚えておくもの（window.rs）
+    window_record: WindowRecordState,
 
     // 進行中のスクリーンショット保存スレッド。クリップボードへの転送も
     // このスレッドが行う。
@@ -187,6 +208,11 @@ pub struct CaptureCardViewer {
     // 更新の確認。結果のチャネル、確認のスレッド、「その他」タブに出す状態、
     // 起動時の通知ダイアログをまとめて持つ（`app::update`）
     update_check: UpdateState,
+    // 録画スレッドの窓口。録画へ映像と音声を回す差し込み口（`VideoTap` / `AudioTap`）の
+    // 複製を持ち、録画中かリプレイバッファが ON のあいだだけスレッドを起こす。
+    // **`on_exit` ではデバイスワーカーを止める前に止めて join する**（最後のフレームまで
+    // ファイルに入れるため）。操作とイベントの取り込みは `app::recording`
+    recorder: Recorder,
 
     // OS の表示言語から推定した言語。設定の言語が「自動」のときに使う。
     //
@@ -222,21 +248,25 @@ impl Default for CaptureCardViewer {
 
         let screenshot_manager = Arc::new(Mutex::new(ScreenshotManager::new()));
         let (screenshot_tx, screenshot_rx) = std::sync::mpsc::channel();
-        let (sound_load_tx, sound_load_rx) = std::sync::mpsc::channel();
+        let (sound_tx, sound_rx) = std::sync::mpsc::channel();
 
         // デバイスに触るものは、すべてワーカースレッドの中で作る。
-        // ここから渡すのは UI スレッドとも共有する 3 つだけ
+        // ここから渡すのは UI スレッドとも共有する 4 つだけ
         let frames = VideoFrames::new();
         let color_conversion = Arc::new(SharedColorConversion::new());
         let audio_controls = Arc::new(AudioControls::default());
+        let audio_tap = AudioTap::new();
         let device = DeviceWorker::spawn(
             frames.clone(),
             Arc::clone(&color_conversion),
             Arc::clone(&audio_controls),
+            audio_tap.clone(),
             // **フレームコールバックへ渡る窓口。** キャプチャを開くより前に
             // 渡す必要があるので、ワーカーの起動時に持たせる
             repaint_waker.clone(),
         );
+        // 録画の窓口は差し込み口の複製を持つ。スレッドは録画かリプレイバッファで起こす
+        let recorder = Recorder::new(frames.tap(), audio_tap);
 
         let mut app = Self {
             settings,
@@ -250,8 +280,8 @@ impl Default for CaptureCardViewer {
             repaint_waker,
             screenshot_tx,
             screenshot_rx,
-            sound_load_tx,
-            sound_load_rx,
+            sound_tx,
+            sound_rx,
             errors: ErrorCenter::default(),
             last_screenshot_outcome_at: None,
             show_settings: false,
@@ -272,7 +302,9 @@ impl Default for CaptureCardViewer {
             last_settings_applied: Instant::now(),
             settings_dirty_since: None,
             autosave: AutoSavePolicy::from_load_outcome(load_outcome),
+            settings_save_failures: SaveFailureStreak::default(),
             video_texture: None,
+            video_image: None,
             last_frame_generation: 0,
             last_new_frame_at: None,
             last_color_conversion: None,
@@ -290,16 +322,16 @@ impl Default for CaptureCardViewer {
             // ウィンドウ管理
             always_on_top: false,
             borderless: false,
+            window_record: WindowRecordState::default(),
 
             screenshot_save_threads: Vec::new(),
             sound_load_threads: Vec::new(),
+            sound_output_failure: None,
             update_check: UpdateState::new(),
+            recorder,
 
             os_language,
         };
-
-        // 環境変数でフェイクデバイスが選ばれていれば画面でも知らせる（#252）
-        app.notify_fake_devices();
 
         // 最小化中のホットキーは UI スレッドを通せないので、リスナーから
         // 直接デバイスワーカーへコマンドを積ませる（#133）。
@@ -321,9 +353,10 @@ impl Default for CaptureCardViewer {
         // で切断時に同じことが起きる不具合を直したばかりで、初回起動で
         // 同じ誤動作を起こすわけにいかない。
         //
-        // この結果、入力側の「既定のデバイス」追従は、設定ファイルを手で
-        // 編集して input_device_name を消した場合にだけ効く。設定画面の
-        // コンボボックスに「デフォルト」の選択肢を足すかどうかは別 Issue で判断する
+        // 起動後に設定の初期化・読み込みで入力が未設定に戻った場合も、
+        // ワーカーは既定の入力を開かず、入力が選ばれるのを待つ（#304）。
+        // 設定画面のコンボボックスに「デフォルト」の選択肢は足さない（#153）
+        let mut startup_save = None;
         {
             if let Ok(mut s) = app.settings.lock() {
                 // タイトルバーなしで保存されているのに画面ドラッグ移動が切れている
@@ -340,7 +373,7 @@ impl Default for CaptureCardViewer {
                 // ここで上書きすると、ディスクに残っている壊れたファイルが既定値で
                 // 潰れ、ユーザーが設定を取り戻す最後の手段が消える。
                 if load_outcome.may_write_defaults_on_startup() {
-                    s.save();
+                    startup_save = Some(s.save());
                 } else {
                     warn!(
                         "読めなかった設定ファイルが残っているため、設定の自動保存を止める。設定画面の「適用」か「OK」で保存すると再開する"
@@ -349,6 +382,11 @@ impl Default for CaptureCardViewer {
             } else {
                 warn!("起動時のデバイス自動選択で settings のロックを取得できない");
             }
+        }
+        // ロックを放してから結果を取り込む。失敗したらログとトーストで知らせ、
+        // 保留として残して再試行させる（`app::settings_store`）
+        if let Some(result) = startup_save {
+            app.note_settings_save_result(result, SaveTrigger::Automatic);
         }
 
         // 保存済みのビデオデバイスの能力を先に取りに行く。
@@ -385,8 +423,11 @@ impl Default for CaptureCardViewer {
     }
 }
 
-impl eframe::App for CaptureCardViewer {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl CaptureCardViewer {
+    /// 1 フレームぶんの処理。eframe の `App::ui` から毎フレーム呼ばれる。
+    /// 最小化している間は呼ばれない。
+    fn update(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         // ホットキー入力ダイアログの開閉を検出するため、このフレームに入る前の
         // 状態を控えておく。設定ダイアログの描画（一覧の「設定...」）で
         // `show_hotkey_dialog` が変わるより前に取る必要がある
@@ -397,10 +438,6 @@ impl eframe::App for CaptureCardViewer {
         // 最初のフレームの到着を知らせる先が無い
         self.repaint_waker.bind(ctx);
 
-        // ホットキーに割り当てたキーの押下を egui へ渡さない（#217）。
-        // **描画より前に済ませること**（`remove_hotkey_key_events`）
-        self.remove_hotkey_key_events(ctx);
-
         // ワーカーから届いた結果（接続の成否、デバイス能力、デバイス一覧）を
         // 取り込む。設定ダイアログを開いていなくても受け取る
         self.drain_device_events();
@@ -409,13 +446,15 @@ impl eframe::App for CaptureCardViewer {
         // 「接続状態」タブはここから引く（ロックを取り直さない）。
         // **イベントを取り込んだ後に読む。** ワーカーはイベントを送る前に
         // 観測値を書き出すので、この順なら少なくともそのイベントの時点の値が入る
-        self.device_snapshot = self.device.snapshot();
+        self.refresh_device_snapshot();
 
         // 別スレッドで行ったスクリーンショットの保存結果を取り込む。
         // 失敗はここでトーストになる
         self.drain_screenshot_results();
         // 別スレッドで読み込んだ効果音を取り込む。テスト再生はここで鳴る
-        self.drain_sound_load_results();
+        self.drain_sound_results();
+        // 録画スレッドから届いた結果（開始・保存・失敗）を取り込む
+        self.drain_recording_events();
         // 別スレッドで行った更新の確認の結果を取り込む
         self.drain_update_results();
         // 別スレッドで行っている更新（ダウンロードと差し替え）の進み具合を取り込む。
@@ -433,13 +472,8 @@ impl eframe::App for CaptureCardViewer {
             info!("起動直後の設定適用とデバイスの接続を始める");
             self.apply_settings(true);
 
-            // ウィンドウレベルは always_on_top を設定から取り込んだあとに適用する。
-            // 順序を入れ替えると、既定値の false で 1 度適用されてしまう
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
-                egui::WindowLevel::AlwaysOnTop
-            } else {
-                egui::WindowLevel::Normal
-            }));
+            // 最前面表示。設定を取り込んだあとに適用する
+            self.apply_startup_window_level(ctx);
 
             // 前回の更新で残った `.old` / `.new` を消す（別スレッド）
             self.clean_up_update_leftovers();
@@ -471,64 +505,34 @@ impl eframe::App for CaptureCardViewer {
             self.last_volume_sent = self.volume;
         }
 
-        // ウィンドウサイズと位置を監視して設定に保存
+        // ウィンドウサイズと位置を監視して設定に記録する（書き出しはデバウンス）
         let viewport = ctx.input(|i| i.viewport().clone());
-        let current_size = viewport.inner_rect.map(|r| (r.width(), r.height()));
-        let current_pos = viewport.outer_rect.map(|r| (r.left(), r.top()));
+        self.record_window_geometry(&viewport);
 
         // 最小化しているか。Windows では egui-winit が毎フレーム入れてくれる。
         // 取れない環境では「最小化していない」に倒す（描きすぎる側は安全）
         let minimized = viewport.minimized.unwrap_or(false);
 
-        // サイズまたは位置が変更された場合、設定を更新。
-        // フルスクリーン中は画面全体の矩形しか取れないため記録しない。
-        // こうすることで、フルスクリーンへ入る直前のジオメトリが設定に残り、
-        // フルスクリーンのまま終了しても次回はウィンドウ表示で復元される
-        let mut window_geometry_changed = false;
-        if Self::should_record_window_geometry(self.is_fullscreen, viewport.fullscreen) {
-            if let Ok(mut settings) = self.settings.lock() {
-                let mut changed = false;
-
-                if let Some((width, height)) = current_size {
-                    if settings.ui.last_window_size != Some((width, height)) {
-                        settings.ui.last_window_size = Some((width, height));
-                        changed = true;
-                    }
-                }
-
-                if let Some((x, y)) = current_pos {
-                    if settings.ui.last_window_pos != Some((x, y)) {
-                        settings.ui.last_window_pos = Some((x, y));
-                        changed = true;
-                    }
-                }
-
-                window_geometry_changed = changed;
-            } else {
-                warn!("ウィンドウの位置・大きさの記録で settings のロックを取得できない");
-            }
-        }
-
-        // ここでは書き出さない。ウィンドウのドラッグ中は毎フレーム値が変わるため、
-        // 変わるたびに保存すると最大 60 回/秒のディスク書き込みになる
-        if window_geometry_changed {
-            self.mark_settings_dirty();
-        }
-
         // メインUI
-        // F11によるフルスクリーン切り替えを削除（スクリーンショット用に解放）
-
         if self.is_fullscreen {
-            self.show_fullscreen_ui(ctx);
+            self.show_fullscreen_ui(ui);
         } else {
-            self.show_windowed_ui(ctx);
+            self.show_windowed_ui(ui);
         }
 
         // 統計オーバーレイ。ウィンドウ表示とフルスクリーンで同じものを出すため、
         // どちらの描画のあとでもここで 1 回だけ描く
-        if self.show_stats_overlay {
-            self.show_stats_overlay(ctx);
-        }
+        let stats_bottom = if self.show_stats_overlay {
+            Some(self.show_stats_overlay(ctx))
+        } else {
+            None
+        };
+
+        // フェイクデバイスで動いている間の常設の帯（#252）。統計と重ならない
+        // 位置へずらすため、統計オーバーレイのあとで描く
+        self.draw_fake_devices_banner(ctx, stats_bottom);
+        // 録画中の印（右上の赤い丸と経過時間）。情報表示を切っていても出す
+        self.draw_recording_indicator(ctx);
 
         // 設定ダイアログ
         if self.show_settings {
@@ -743,8 +747,30 @@ impl eframe::App for CaptureCardViewer {
             .set_window_state(minimized, focused, typing);
         ctx.request_repaint_after(next_repaint_delay(condition));
     }
+}
+
+impl eframe::App for CaptureCardViewer {
+    // eframe 0.36 で `App::update(ctx)` は `App::ui(ui)` になった（#300）。
+    // 1 フレームぶんの処理は、コメントやドキュメントが `update()` と呼んでいるとおり
+    // `CaptureCardViewer::update` に置いてある。`App::logic` は実装しない。
+    // 最小化中にも呼ばれる口だが、0.26 と同じく最小化中は UI スレッドで何も回さない
+    // （時間で動く処理はワーカーが持つ。`docs/design/device-worker.md`）
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.update(ui);
+    }
+
+    // ホットキーに割り当てたキーの押下を egui へ渡さない（#217、#418）。
+    // egui がフレームの始まりで行うフォーカスの移動（Tab / Escape / 矢印キー）より
+    // 前に取り除けるのはここだけ（`remove_hotkey_key_events`）
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.remove_hotkey_key_events(ctx, raw_input);
+    }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // **デバイスワーカーより先に**録画を止め、`Finalize` まで待つ。
+        // 待たないと再生できない MP4 が残る
+        self.stop_recording_for_exit();
+
         // デバイスワーカーにストリームを閉じさせ、終わるまで待つ。
         // 待たないと、閉じる途中でプロセスごと落ちる
         self.device.shutdown();
@@ -763,7 +789,7 @@ impl eframe::App for CaptureCardViewer {
         // 例外は、読めなかった設定ファイルを退避できずディスクに残している場合。
         // ここで書き出すと、起動時の書き戻しを止めた意味が無くなる
         if self.autosave.is_allowed() {
-            self.save_settings_now();
+            self.save_settings_automatically();
         } else {
             warn!("読めなかった設定ファイルを残しているため、終了時の保存を行わない");
         }

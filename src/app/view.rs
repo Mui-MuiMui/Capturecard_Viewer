@@ -4,56 +4,25 @@
 //! ここに並べてある。ウィンドウそのものの操作（装飾・リサイズ・
 //! フルスクリーン切替）は `super::window`、右クリックメニューは `super::menu`。
 
+use super::placeholder::{show_video_placeholder, video_placeholder_text};
+use super::video_overlay::show_video_overlay;
 use super::CaptureCardViewer;
 use crate::i18n::{self, Text};
 use crate::status::{self, ErrorSource};
-use crate::video::FrameStats;
+use crate::video::{frame_len_status, FrameLenStatus, FrameStats, VideoFrame};
 use eframe::egui;
 use log::warn;
+use std::sync::Arc;
 
 /// 映像エリア（映像が無いときのプレースホルダーを含む）が受け付ける操作。
 ///
 /// クリック（右クリックメニュー・ダブルクリック・中クリック）とドラッグ
 /// （ウィンドウの移動）だけを受け、**キーボードフォーカスは受けない**
-/// （`focusable: false`）。`Sense::click_and_drag()` はフォーカスを受けるため、
+/// （`Sense::FOCUSABLE` を立てない）。`Sense::click_and_drag()` はフォーカスを受けるため、
 /// Tab キーで映像エリアにフォーカスが移ると、以後ずっと「何かのウィジェットに
 /// フォーカスがある」状態が続く（#238）。映像エリアにはキーボードで操作する
 /// ものが無いので、フォーカスを受ける理由も無い。
-const VIDEO_AREA_SENSE: egui::Sense = egui::Sense {
-    click: true,
-    drag: true,
-    focusable: false,
-};
-
-/// 映像が出ていないときに画面へ出す文言を決める。
-///
-/// 「デバイスは開けているが信号が来ていない」と「デバイスそのものが消えた」は
-/// ユーザーの取るべき行動が違う（入力機器の電源を見るのか、ケーブルを挿し直すのか）
-/// ため、同じ文言にしない。
-fn video_placeholder_message(capturing: bool, reconnecting: bool) -> &'static str {
-    let text = match (capturing, reconnecting) {
-        (true, _) => Text::PlaceholderNoSignal,
-        (false, true) => Text::PlaceholderReconnecting,
-        (false, false) => Text::PlaceholderDisconnected,
-    };
-    text.get()
-}
-
-/// 映像が出ていないときに画面へ出す文言を、理由の 1 行を添えて組み立てる。
-///
-/// `detail` は直近の失敗（`ErrorCenter` に記録されたもの）。**ストリームを
-/// 開けている場合は添えない。** 映像信号が来ていないのはデバイスの手前の
-/// 問題で、そこに古い接続エラーを出すと原因を取り違えさせる。
-///
-/// 理由の切り詰めは呼び出し側（`error_detail`）が済ませてある。ここで
-/// 長さを見ないのは、切り詰めの基準を 1 か所に集めておくため。
-fn video_placeholder_text(capturing: bool, reconnecting: bool, detail: Option<&str>) -> String {
-    let head = video_placeholder_message(capturing, reconnecting);
-    match detail {
-        Some(detail) if !capturing => format!("{}\n{}", head, detail),
-        _ => head.to_string(),
-    }
-}
+pub(super) const VIDEO_AREA_SENSE: egui::Sense = egui::Sense::CLICK.union(egui::Sense::DRAG);
 
 /// 統計オーバーレイに出す行を組み立てる。
 ///
@@ -61,10 +30,10 @@ fn video_placeholder_text(capturing: bool, reconnecting: bool, detail: Option<&s
 /// フレームが 1 枚も来ていない状態で平均を出そうとすると NaN や
 /// 無限大になり、それがそのまま画面に出てしまうため。
 ///
-/// `audio_underruns` は `DeviceSnapshot.audio_underruns`。音声のアンダーランは
-/// 映像の統計ではないが、**バッファ長を詰めたときに音が途切れていないかを、
-/// 設定画面を開かずに見られるようにする**ためにここへ並べてある。
-fn format_stats_lines(stats: &FrameStats, audio_underruns: Option<u32>) -> Vec<String> {
+/// `audio_line` は音声のアンダーランの行（`status::format_osd_audio_line`）。映像の統計では
+/// ないが、**バッファ長を詰めたときに音が途切れていないかを、設定画面を開かずに
+/// 見られるようにする**ためにここへ並べてある。
+fn format_stats_lines(stats: &FrameStats, audio_line: String) -> Vec<String> {
     let mut lines = Vec::new();
 
     match stats.intervals {
@@ -104,8 +73,8 @@ fn format_stats_lines(stats: &FrameStats, audio_underruns: Option<u32>) -> Vec<S
         lines.push(i18n::stats_since_last_frame(elapsed_ms));
     }
 
-    // 文言は「接続状態」タブと共通（`status::format_underrun_count`）
-    lines.push(status::format_underrun_count(audio_underruns));
+    // 文言は「接続状態」タブと共通（`status::format_underrun_count`）。経路の印だけ OSD で足す
+    lines.push(audio_line);
 
     lines
 }
@@ -140,6 +109,37 @@ fn calculate_aspect_ratio_size(image_size: egui::Vec2, available_size: egui::Vec
     }
 }
 
+/// テクスチャへ取り込めるフレームか。画素データの長さが `幅 × 高さ × 3`
+/// ちょうどのときだけ真（`egui::ColorImage::from_rgb` の前提）。
+fn is_drawable_frame(frame: &VideoFrame) -> bool {
+    frame_len_status(frame.data.len(), frame.width, frame.height) == FrameLenStatus::Exact
+}
+
+/// テクスチャへ渡す画像を作る。前に渡した画像を egui が手放していれば、その画素の
+/// Vec へ詰め直して返す（容量が足りていれば確保は起きない）。握られていれば新しく作る。
+/// egui はテクスチャの更新を描画の終わりにレンダラーへ渡し、渡し終えたら `Arc` を
+/// 手放すので、次のフレームでは普通は使い回せる。**呼び出し側は `is_drawable_frame` で長さを確かめてから呼ぶこと**
+/// （`as_chunks` は余りを黙って捨てるので、ここでは長さの食い違いに気づけない）。
+fn reuse_or_new_color_image(
+    previous: Option<Arc<egui::ColorImage>>,
+    frame: &VideoFrame,
+) -> Arc<egui::ColorImage> {
+    if let Some(mut image) = previous {
+        if let Some(target) = Arc::get_mut(&mut image) {
+            target.size = [frame.width, frame.height];
+            target.pixels.clear();
+            let (rgb, _) = frame.data.as_chunks::<3>();
+            target.pixels.extend(
+                rgb.iter()
+                    .map(|&[r, g, b]| egui::Color32::from_rgb(r, g, b)),
+            );
+            return image;
+        }
+    }
+    let image = egui::ColorImage::from_rgb([frame.width, frame.height], &frame.data);
+    Arc::new(image)
+}
+
 impl CaptureCardViewer {
     /// 新着フレームがあればテクスチャへ取り込む。取り込んだら `true`。
     ///
@@ -164,9 +164,22 @@ impl CaptureCardViewer {
                 magnification: egui::TextureFilter::Nearest,
                 minification: egui::TextureFilter::Linear,
                 wrap_mode: egui::TextureWrapMode::ClampToEdge,
+                mipmap_mode: None,
             };
 
-            let image = egui::ColorImage::from_rgb([frame.width, frame.height], &frame.data);
+            // 長さが合わないフレームは描かず、前のテクスチャを保つ。`from_rgb` は
+            // 長さが違うと assert で落ちる（#309）。積む側（`FrameSink`）で揃えて
+            // あるので通常は来ないが、二重の守りとして置いておく。世代は進めて
+            // あるので、同じフレームで毎回ここへ来ることはない
+            if !is_drawable_frame(&frame) {
+                return false;
+            }
+
+            // 前に渡した画像の Vec を使い回す。1080p で約 8MB を毎フレーム確保・
+            // 解放しないため。手元にも `Arc` を 1 つ残しておき、egui が手放したら
+            // 次のフレームで詰め直す
+            let image = reuse_or_new_color_image(self.video_image.take(), &frame);
+            self.video_image = Some(Arc::clone(&image));
             if let Some(texture) = &mut self.video_texture {
                 texture.set(image, texture_options);
             } else {
@@ -179,7 +192,8 @@ impl CaptureCardViewer {
         false
     }
 
-    pub(super) fn show_windowed_ui(&mut self, ctx: &egui::Context) {
+    pub(super) fn show_windowed_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         // 映像が無いときの文言は描画に入る前に決める。
         // 描画のクロージャの中でロックを取らないため
         let placeholder = video_placeholder_text(
@@ -194,8 +208,8 @@ impl CaptureCardViewer {
         let on_resize_edge = self.handle_borderless_resize(ctx);
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().inner_margin(egui::Margin::same(2.0))) // マージンを2pxに設定
-            .show(ctx, |ui| {
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(2))) // マージンを2pxに設定
+            .show(ui, |ui| {
                 // 映像表示エリア
                 let available_size = ui.available_size();
 
@@ -255,10 +269,7 @@ impl CaptureCardViewer {
                         self.handle_volume_scroll(ctx);
                     }
                 } else {
-                    let response = ui.allocate_response(available_size, VIDEO_AREA_SENSE);
-                    ui.centered_and_justified(|ui| {
-                        ui.label(placeholder);
-                    });
+                    let response = show_video_placeholder(ui, available_size, &placeholder);
 
                     // 空エリアでのウィンドウドラッグを処理（設定が有効な場合のみ）
                     if response.dragged() && !on_resize_edge {
@@ -282,7 +293,8 @@ impl CaptureCardViewer {
             });
     }
 
-    pub(super) fn show_fullscreen_ui(&mut self, ctx: &egui::Context) {
+    pub(super) fn show_fullscreen_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         // ウィンドウ表示と同じ理由で、描画に入る前に文言を決める
         let placeholder = video_placeholder_text(
             self.device_snapshot.video_capturing,
@@ -291,8 +303,8 @@ impl CaptureCardViewer {
         );
         // フルスクリーンUI（装飾なし、ウィンドウ版と同等の機能）
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().inner_margin(egui::Margin::same(0.0))) // フルスクリーンはマージン0
-            .show(ctx, |ui| {
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(0))) // フルスクリーンはマージン0
+            .show(ui, |ui| {
                 let available_size = ui.available_size();
 
                 if let Some(texture) = &self.video_texture {
@@ -345,10 +357,7 @@ impl CaptureCardViewer {
                     }
                 } else {
                     // 映像信号がない場合
-                    let response = ui.allocate_response(available_size, VIDEO_AREA_SENSE);
-                    ui.centered_and_justified(|ui| {
-                        ui.label(placeholder);
-                    });
+                    let response = show_video_placeholder(ui, available_size, &placeholder);
 
                     // フルスクリーンではドラッグ移動を完全に無効化
                     // （フルスクリーンでは画面の移動自体が意味をなさないため）
@@ -373,23 +382,34 @@ impl CaptureCardViewer {
     ///
     /// 統計の取り出しは 1 フレームにつきこの 1 回だけ。ロックの中では
     /// 値のコピーと最大 120 要素の集計しか起きないため、毎フレーム呼んでよい。
-    pub(super) fn show_stats_overlay(&self, ctx: &egui::Context) {
+    ///
+    /// 描いた枠の下端の y 座標を返す。フェイクデバイスの帯をその下へずらすため
+    /// （`fake_devices_banner_top`）。
+    pub(super) fn show_stats_overlay(&self, ctx: &egui::Context) -> f32 {
         let stats = self.frames.stats();
         // ワーカーが書き出した観測値の複製。ここでデバイスへは問い合わせない
-        let audio_underruns = self.device_snapshot.audio_underruns;
+        let mut lines = format_stats_lines(&stats, self.device_snapshot.osd_audio_line());
+        // 録画中は録画の行を足す（経過時間、書いた枚数・捨てた枚数、エンコーダ）
+        lines.extend(self.recording_stats_lines());
 
-        egui::Area::new("stats_overlay")
-            .order(egui::Order::Foreground)
-            .fixed_pos(egui::pos2(8.0, 8.0))
-            // 映像のドラッグや右クリックを吸わないようにする
-            .interactable(false)
-            .show(ctx, |ui| {
-                egui::Frame::none()
+        // 設定ダイアログより下に描く（#284）。理由は `show_video_overlay` にある
+        let screen = ctx.content_rect();
+        let area = egui::Rect::from_min_max(
+            screen.min + egui::Vec2::splat(STATS_OVERLAY_MARGIN),
+            screen.max,
+        );
+        let shown = show_video_overlay(
+            ctx,
+            egui::Id::new("stats_overlay"),
+            area,
+            egui::Align2::LEFT_TOP,
+            |ui| {
+                egui::Frame::NONE
                     .fill(egui::Color32::from_black_alpha(160))
-                    .rounding(4.0)
-                    .inner_margin(egui::Margin::same(6.0))
+                    .corner_radius(4)
+                    .inner_margin(egui::Margin::same(6))
                     .show(ui, |ui| {
-                        for line in format_stats_lines(&stats, audio_underruns) {
+                        for line in &lines {
                             ui.label(
                                 egui::RichText::new(line)
                                     .monospace()
@@ -397,7 +417,63 @@ impl CaptureCardViewer {
                             );
                         }
                     });
-            });
+            },
+        );
+        shown.bottom()
+    }
+
+    /// フェイクデバイスで動いている間、映像の上端に常設の帯を描く（#252）。
+    ///
+    /// **トースト（`transient_overlay`）には入れない。** あちらは 1 件しか持たず、
+    /// 起動直後に保存済みの実機名で接続に失敗すると、その `report_error` に
+    /// 上書きされて見えなくなる。帯はフェイクで動いている間ずっと出す。
+    /// 文言は「接続状態」タブの注意書きと同じもの。
+    pub(super) fn draw_fake_devices_banner(&self, ctx: &egui::Context, stats_bottom: Option<f32>) {
+        let Some(text) = status::fake_devices_notice(self.device.fake_devices()) else {
+            return;
+        };
+        // 設定ダイアログより下に描く（#284）。理由は `show_video_overlay` にある
+        let screen = ctx.content_rect();
+        let area = egui::Rect::from_min_max(
+            egui::pos2(
+                screen.left(),
+                screen.top() + fake_devices_banner_top(stats_bottom),
+            ),
+            screen.max,
+        );
+        show_video_overlay(
+            ctx,
+            egui::Id::new("fake_devices_banner"),
+            area,
+            egui::Align2::CENTER_TOP,
+            |ui| {
+                // 映像の上でも読めるよう、テーマの不透明な地（popup と同じ）に
+                // 設定ダイアログと同じ注意書きを載せる
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::same(2))
+                    .show(ui, |ui| {
+                        crate::ui::warning_label(ui, text);
+                    });
+            },
+        );
+    }
+}
+
+/// 統計オーバーレイを画面の左上からどれだけ離して置くか。
+const STATS_OVERLAY_MARGIN: f32 = 8.0;
+
+/// フェイクデバイスの帯と、画面の上端や統計オーバーレイとの間隔。
+const FAKE_DEVICES_BANNER_MARGIN: f32 = 8.0;
+
+/// フェイクデバイスの帯を画面の上端から何 px 下げて描くか。
+///
+/// 統計オーバーレイ（左上）を出しているときはその下へずらす。狭いウィンドウでは
+/// 上端中央の帯と左上の統計が横に重なるため。`stats_bottom` は統計の枠の下端で、
+/// 出していなければ `None`。
+fn fake_devices_banner_top(stats_bottom: Option<f32>) -> f32 {
+    match stats_bottom {
+        Some(bottom) => bottom + FAKE_DEVICES_BANNER_MARGIN,
+        None => FAKE_DEVICES_BANNER_MARGIN,
     }
 }
 
@@ -407,11 +483,31 @@ mod tests {
     use crate::video::frame_buffer::IntervalStats;
     use egui::Vec2;
 
+    fn frame(width: usize, height: usize, len: usize) -> VideoFrame {
+        VideoFrame {
+            width,
+            height,
+            data: vec![0; len],
+        }
+    }
+
+    #[test]
+    fn is_drawable_frame_accepts_exact_length() {
+        assert!(is_drawable_frame(&frame(3, 2, 18)));
+    }
+
+    #[test]
+    fn is_drawable_frame_rejects_mismatched_length() {
+        // `ColorImage::from_rgb` は長さが違うと assert で落ちるので、どちらも描かない
+        assert!(!is_drawable_frame(&frame(3, 2, 17)));
+        assert!(!is_drawable_frame(&frame(3, 2, 19)));
+    }
+
     #[test]
     fn format_stats_lines_without_frames_shows_no_numbers() {
         // デバイスに接続できていない状態。0 除算の結果や NaN を
         // そのまま画面へ出さないことを確かめる
-        let lines = format_stats_lines(&FrameStats::default(), None);
+        let lines = format_stats_lines(&FrameStats::default(), status::format_underrun_count(None));
         let joined = lines.join(
             "
 ",
@@ -464,7 +560,7 @@ mod tests {
             since_last_frame_ms: Some(12.4),
         };
 
-        let lines = format_stats_lines(&stats, Some(3));
+        let lines = format_stats_lines(&stats, status::format_underrun_count(Some(3)));
         let joined = lines.join(
             "
 ",
@@ -479,58 +575,6 @@ mod tests {
         assert!(joined.contains("1920x1080 YUY2"), "{}", joined);
         assert!(joined.contains("最終フレーム 12ms 前"), "{}", joined);
         assert!(joined.contains("アンダーラン: 3 回"), "{}", joined);
-    }
-
-    #[test]
-    fn video_placeholder_message_capturing_says_no_signal() {
-        // デバイスは開けている。ユーザーが見るべきは入力機器側
-        assert_eq!(
-            video_placeholder_message(true, false),
-            "映像信号がありません"
-        );
-        // 開けている間は再接続の有無で文言を変えない
-        assert_eq!(
-            video_placeholder_message(true, true),
-            "映像信号がありません"
-        );
-    }
-
-    #[test]
-    fn video_placeholder_message_not_capturing_says_device_is_gone() {
-        assert_eq!(
-            video_placeholder_message(false, false),
-            "デバイスが接続されていません"
-        );
-        assert_eq!(
-            video_placeholder_message(false, true),
-            "デバイスが接続されていません（再接続を試しています）"
-        );
-    }
-
-    #[test]
-    fn video_placeholder_text_without_detail_is_the_message_alone() {
-        assert_eq!(
-            video_placeholder_text(false, true, None),
-            "デバイスが接続されていません（再接続を試しています）"
-        );
-    }
-
-    #[test]
-    fn video_placeholder_text_adds_the_reason_on_a_second_line() {
-        assert_eq!(
-            video_placeholder_text(false, true, Some("映像デバイスに接続できません: not found")),
-            "デバイスが接続されていません（再接続を試しています）\n映像デバイスに接続できません: not found"
-        );
-    }
-
-    #[test]
-    fn video_placeholder_text_while_capturing_drops_the_reason() {
-        // ストリームは開けている＝接続の失敗ではない。古い接続エラーを
-        // 出すと、入力機器ではなく USB を疑わせてしまう
-        assert_eq!(
-            video_placeholder_text(true, false, Some("映像デバイスに接続できません: not found")),
-            "映像信号がありません"
-        );
     }
 
     // calculate_aspect_ratio_size のテストで使う値は、期待値が 2 進小数で
@@ -656,5 +700,98 @@ mod tests {
                 size
             );
         }
+    }
+
+    #[test]
+    fn fake_devices_banner_sits_at_top_without_stats() {
+        assert_eq!(fake_devices_banner_top(None), FAKE_DEVICES_BANNER_MARGIN);
+    }
+
+    #[test]
+    fn fake_devices_banner_goes_below_stats_overlay() {
+        // 統計の枠の下端より下に来れば、横幅が狭くても重ならない
+        let stats_bottom = 120.0;
+        let top = fake_devices_banner_top(Some(stats_bottom));
+        assert!(
+            top > stats_bottom,
+            "統計の下端 {} に対して {}",
+            stats_bottom,
+            top
+        );
+        assert_eq!(top, stats_bottom + FAKE_DEVICES_BANNER_MARGIN);
+    }
+
+    #[test]
+    fn fake_devices_banner_shown_only_with_fake_devices() {
+        // 帯を出すかどうかは「接続状態」タブの注意書きと同じ判定を使う
+        assert!(status::fake_devices_notice(false).is_none());
+        assert!(status::fake_devices_notice(true).is_some());
+    }
+
+    fn rgb_frame(width: usize, height: usize, data: Vec<u8>) -> VideoFrame {
+        VideoFrame {
+            data,
+            ..frame(width, height, 0)
+        }
+    }
+
+    // 画像の大きさと、画素を RGBA の並びにしたもの。期待値をベタ書きで比べるため
+    fn size_and_rgba(image: &egui::ColorImage) -> ([usize; 2], Vec<[u8; 4]>) {
+        let pixels = image.pixels.iter().map(|pixel| pixel.to_array()).collect();
+        (image.size, pixels)
+    }
+
+    #[test]
+    fn reuse_or_new_color_image_without_previous_converts_rgb() {
+        let frame = rgb_frame(2, 1, vec![10, 20, 30, 40, 50, 60]);
+        let image = reuse_or_new_color_image(None, &frame);
+        assert_eq!(
+            size_and_rgba(&image),
+            ([2, 1], vec![[10, 20, 30, 255], [40, 50, 60, 255]])
+        );
+    }
+
+    #[test]
+    fn reuse_or_new_color_image_refills_unshared_previous_in_place() {
+        // egui が手放した後（手元の `Arc` だけ）なら、同じ画像を詰め直して返す
+        let first = reuse_or_new_color_image(None, &rgb_frame(2, 1, vec![0; 6]));
+        let first_ptr = Arc::as_ptr(&first);
+        let pixels_ptr = first.pixels.as_ptr();
+
+        let frame = rgb_frame(1, 2, vec![1, 2, 3, 4, 5, 6]);
+        let second = reuse_or_new_color_image(Some(first), &frame);
+
+        assert_eq!(Arc::as_ptr(&second), first_ptr);
+        // 同じ画素数なので Vec も確保し直していない
+        assert_eq!(second.pixels.as_ptr(), pixels_ptr);
+        assert_eq!(
+            size_and_rgba(&second),
+            ([1, 2], vec![[1, 2, 3, 255], [4, 5, 6, 255]])
+        );
+    }
+
+    #[test]
+    fn reuse_or_new_color_image_grows_when_frame_gets_larger() {
+        // 解像度が上がったら同じ画像のまま広げる。古い画素が残らない
+        let first = reuse_or_new_color_image(None, &rgb_frame(1, 1, vec![9, 9, 9]));
+        let second = reuse_or_new_color_image(Some(first), &rgb_frame(2, 1, (0..6).collect()));
+        assert_eq!(
+            size_and_rgba(&second),
+            ([2, 1], vec![[0, 1, 2, 255], [3, 4, 5, 255]])
+        );
+    }
+
+    #[test]
+    fn reuse_or_new_color_image_leaves_shared_previous_untouched() {
+        // egui がまだ握っている画像は書き換えず、新しく作る
+        let first = reuse_or_new_color_image(None, &rgb_frame(1, 1, vec![7, 7, 7]));
+        let held_by_egui = Arc::clone(&first);
+
+        let frame = rgb_frame(1, 1, vec![1, 2, 3]);
+        let second = reuse_or_new_color_image(Some(first), &frame);
+
+        assert!(!Arc::ptr_eq(&second, &held_by_egui));
+        assert_eq!(size_and_rgba(&held_by_egui), ([1, 1], vec![[7, 7, 7, 255]]));
+        assert_eq!(size_and_rgba(&second), ([1, 1], vec![[1, 2, 3, 255]]));
     }
 }

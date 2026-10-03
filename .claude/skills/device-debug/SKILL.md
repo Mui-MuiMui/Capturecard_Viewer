@@ -36,9 +36,11 @@ grep -E '\] capturecard_viewer(::| )' "$APPDATA/capturecard_viewer/logs/<ファ�
 | ターゲット | 何を出すか |
 |---|---|
 | `app::worker` | ワーカースレッドの起動と終了（`debug`） |
-| `app::worker_loop` | ワーカーの開始・停止、「デバイス再接続」の要求、最小化中のホットキー（音量・ミュート） |
-| `app::worker_timers` | 切断の検出、再接続の要求、既定デバイスの切り替え、音声のリサンプル比の補正 |
-| `app::worker_connect` | 接続の試行と成否、デバイス能力・対応設定の取得、既定デバイス名の確定 |
+| `app::worker_loop` | ワーカーの開始・停止 |
+| `app::worker_commands` | 設定の受け取り（`trace`）、「デバイス再接続」の要求、最小化中のホットキー（音量・ミュート） |
+| `app::worker_timers` | 映像の切断の検出、再接続の要求 |
+| `app::worker_audio_timers` | 音声ストリームのエラーによる再接続の要求、既定デバイスの切り替え、音声のリサンプル比の補正 |
+| `app::worker_connect` / `app::worker_audio_connect` | 接続の試行と成否、デバイス能力・対応設定の取得、既定デバイス名の確定（音声側は `worker_audio_connect`） |
 | `app::device` | 起動直後の設定適用（`app` 側）。接続そのものは出さない |
 | `video` / `audio` | デバイスを開く処理の中身（列挙、`Camera::new`、選んだ設定、ストリームのエラー） |
 
@@ -50,7 +52,7 @@ Get-PnpDevice -PresentOnly | Where-Object Class -in 'Camera','MEDIA'
 
 ここに出ない（またはデバイスマネージャーで問題コード 45 = 未接続）なら、ケーブル・USB ポート・ドライバーの問題で、アプリ側を直しても戻らない。設定の名前が 5 回続けて一覧に無いときは `設定の映像デバイスが Windows 側にも見えていない` の WARN も出る（画面にも同じ案内が出る。`docs/design/reconnect.md` の「列挙の結果をログへ出し、Windows 側にも無ければ知らせる」）。
 
-**`app::monitor` はログを出さない。** 切断や既定切り替えの「判定」だけを持つ純粋関数の置き場所で、ログは呼び出し側の `app::worker_timers` が出す。
+**`app::monitor` はログを出さない。** 切断や既定切り替えの「判定」だけを持つ純粋関数の置き場所で、ログは呼び出し側の `app::worker_timers` / `app::worker_audio_timers` が出す。
 
 ## 手順 2: 正常時の目安と突き合わせる
 
@@ -93,7 +95,7 @@ AVerMedia Live Gamer EXTREME 3 + Windows 11 での実測（2026-09、release ビ
 
 ## 手順 3: 待ちとリトライの実装を思い出す
 
-`src/app/worker_timers.rs` の `poll_connection()`、`src/app/worker_connect.rs` の `try_connect_video` / `try_connect_audio`、`src/app/retry.rs` の `ConnectRetry`。**`sleep` は使っていないので、リトライで秒単位止まることはない。** 「数秒〜ずっと応答しない」という報告が来たらリトライ以外を疑う。
+`src/app/worker_timers.rs` の `poll_connection()`、`src/app/worker_connect.rs` の `try_connect_video`、`src/app/worker_audio_connect.rs` の `try_connect_audio`、`src/app/retry.rs` の `ConnectRetry`。**`sleep` は使っていないので、リトライで秒単位止まることはない。** 「数秒〜ずっと応答しない」という報告が来たらリトライ以外を疑う。
 
 **デバイスを開く処理は専用のワーカースレッドにある。** UI スレッドは止まらないので、**「接続を試している間だけウィンドウが固まる」という症状はもう出ない。** 出るなら UI スレッド側に別の原因がある（`rfd` のファイルダイアログ、フォントの読み込みなど）。1 回の試行にかかる時間は次のとおりで、**この間はワーカーが次のコマンドを処理できない**（設定ダイアログでのデバイス切り替えがその分だけ遅れる）。
 
@@ -137,7 +139,7 @@ AVerMedia Live Gamer EXTREME 3 + Windows 11 での実測（2026-09、release ビ
 ```mermaid
 flowchart TD
     A[ログを debug で取得] --> B{映像デバイスへの接続を開始する<br/>が出ている?}
-    B -->|出ていない| C[固定待ちの前に止まった<br/>設定の device_name が None<br/>settings.rs と default を見る]
+    B -->|出ていない| C[固定待ちの前に止まった<br/>設定の device_name が None<br/>settings/video.rs と default を見る]
     B -->|出ている| D{映像デバイスに接続した<br/>が出ている?}
     D -->|出ていない| E[失敗理由を読む<br/>映像が出ないの表へ]
     D -->|出ている| F{画面に映像が出る?}
@@ -288,21 +290,24 @@ UI 操作を伴う確認は `docs/MANUAL-TEST.md` のチェックリスト。デ
 
 ## 実機で再現を試すとき
 
-release exe を起動して確かめる場合は、**先に設定ファイルを退避し、終了後に差分がないことを確認する。**
+release exe を起動して確かめる場合は、**環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で作業用のフォルダを指し、`%AppData%` の設定ファイルに触らない。** アプリはウィンドウのサイズと位置を設定に書き戻すため、起動しただけで設定ファイルは変わりうる。今の設定で再現させたいなら、先にそのフォルダへ写しておく。値は絶対パスにする（相対パスは使われず `%AppData%` へ倒れる）。
 
 ```bash
-cp "$APPDATA/capturecard_viewer/config/default-config.toml" /tmp/ccv-config-backup.toml
+mkdir -p .agent-config && cp "$APPDATA/capturecard_viewer/config/default-config.toml" .agent-config/
 ```
 
 ```bash
-taskkill //IM capturecard_viewer.exe //F
+CAPTURECARD_VIEWER_CONFIG_DIR="$(pwd -W)/.agent-config" CAPTURECARD_VIEWER_LOG=debug ./target/release/capturecard_viewer.exe &
+cat /proc/$!/winpid > .agent-config/pid
 ```
+
+終えるときは、起動したプロセスだけを PID で止める。**`taskkill //IM capturecard_viewer.exe` は使わない。** 同名の全プロセスが止まり、別の worktree やエージェントが起動したものまで巻き込む。
 
 ```bash
-diff /tmp/ccv-config-backup.toml "$APPDATA/capturecard_viewer/config/default-config.toml"
+taskkill //PID "$(cat .agent-config/pid)" //F
 ```
 
-アプリはウィンドウのサイズと位置を設定に書き戻すため、**起動しただけで設定ファイルは変わりうる。** 調査で意図的に設定を書き換えた場合は、必ず退避したものへ戻す。
+ログもそのフォルダの `logs/` に出る。`.agent-config/` は `.gitignore` に入っている。
 
 ログは直近 10 回分しか残らない。**再現のために何度も起動すると、目的の回のログが押し出される。** 先に対象のログを別の場所へコピーする。
 
@@ -314,7 +319,7 @@ diff /tmp/ccv-config-backup.toml "$APPDATA/capturecard_viewer/config/default-con
 CAPTURECARD_VIEWER_FAKE_DEVICES=2 CAPTURECARD_VIEWER_LOG=debug ./target/release/capturecard_viewer.exe
 ```
 
-設定ファイルは「実機で再現を試すとき」と同じく**先に退避する。** 退避して空の状態で起動すると、「Fake Camera 1」「Fake Audio Input 1」が既定のデバイスとして選ばれ、設定へ書き戻される。**実機のデバイス名が書かれた設定のまま起動すると、フェイクはその名前を「見つからない」として再試行し続ける**（実機と同じ振る舞いで、別のデバイスへは倒さない）。その場合は設定画面でフェイクのデバイスを選ぶ。
+設定ファイルは「実機で再現を試すとき」と同じく**`CAPTURECARD_VIEWER_CONFIG_DIR` で作業用のフォルダを指す。** 空のフォルダを指して起動すると、「Fake Camera 1」「Fake Audio Input 1」が既定のデバイスとして選ばれ、設定へ書き戻される。**実機のデバイス名が書かれた設定のまま起動すると、フェイクはその名前を「見つからない」として再試行し続ける**（実機と同じ振る舞いで、別のデバイスへは倒さない）。その場合は設定画面でフェイクのデバイスを選ぶ。
 
 フェイクで起動できていれば、ログの先頭近くに `warn` で次の行が出る。**これが無ければ環境変数が効いていない**（値が 0・空・数字でない場合はフェイクを使わず実機で起動する）。
 

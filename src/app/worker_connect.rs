@@ -3,32 +3,37 @@
 //! どれもデバイスワーカースレッド（`super::worker_loop`）の上でだけ走る。
 //! `WorkerState` に生やす形にしてあるのは、`CaptureCardViewer` を
 //! `app` の子モジュールで分担しているのと同じ理由で、状態を 1 つに保ったまま
-//! 役割ごとにファイルを分けるため。
+//! 役割ごとにファイルを分けるため。音声を開く側（`try_connect_audio` など）と
+//! 音声の対応設定の問い合わせは `super::worker_audio_connect` に置く。
 //!
 //! **ここに時計やタイマーを置かない。** 「いつ試すか」は
 //! `super::retry::ConnectRetry`、「途絶したか」は `super::monitor` が決める。
 
-use super::monitor::{
-    decide_audio_fallback, decide_device_not_visible, should_log_enumeration,
-    should_resync_audio_after_video, AudioFallbackAction, DeviceNotVisible,
-};
+use super::backend::CaptureRequest;
+use super::monitor::{decide_device_not_visible, should_log_enumeration, DeviceNotVisible};
 use super::retry::backoff_delay;
-use super::worker::{DeviceConfig, DeviceEvent};
+use super::worker::{DeviceConfig, DeviceEvent, VideoTarget};
 use super::worker_loop::WorkerState;
-use crate::audio::{self, AudioDirection};
+use crate::audio::AudioDirection;
 use crate::i18n;
-use crate::settings::VideoBackendSetting;
+use crate::settings::{AudioInputSource, VideoBackendSetting};
 use log::{debug, info, warn};
 use std::fmt::Display;
 use std::time::Instant;
 
 /// 接続の失敗を UI へ渡す 1 行。「Windows 側にも見えていない」と判定済みなら
 /// 案内を添える。
-fn failure_message(not_visible: Option<&DeviceNotVisible>, reason: &str) -> String {
+pub(super) fn failure_message(not_visible: Option<&DeviceNotVisible>, reason: &str) -> String {
     match not_visible {
         Some(notice) => i18n::failure_with_device_not_visible(notice, reason),
         None => reason.to_string(),
     }
+}
+
+/// 設定で選ばれている映像デバイスの名前。未指定（`None`、空文字も含む）なら
+/// `None` で、そのときは開いているストリームを閉じて待つ（#334、音声の #304 と揃える）。
+fn selected_video_device(name: Option<&str>) -> Option<&str> {
+    name.filter(|name| !name.is_empty())
 }
 
 /// 列挙の結果を 1 経路ぶんだけログへ出す。**台数と名前を必ず並べる。**
@@ -47,60 +52,58 @@ fn log_listing<E: Display>(trigger: &str, source: &str, result: &Result<Vec<Stri
 }
 
 impl WorkerState {
-    /// 未設定のデバイス名を、列挙結果の先頭で埋める。**起動直後の 1 回だけ。**
+    /// 未設定の映像デバイス名を、列挙結果の先頭で埋める。**起動直後の 1 回だけ。**
     ///
-    /// **入力デバイスは出力と違い、未設定のままにしない。** 出力の既定は
-    /// 「スピーカー」でまず無害だが、入力の既定は環境依存（ノート PC ならほぼ
-    /// 確実に内蔵マイク）で、パススルーがそのままマイクの音をスピーカーへ
-    /// 流してしまう。#134（PR #147）で切断時に同じことが起きる不具合を
-    /// 直したばかりで、初回起動で同じ誤動作を起こすわけにいかない。
-    ///
+    /// **入力はここで決めない。** 最初の映像の試行のあとに、映像に音声ピンが
+    /// あるかを見て決める（`worker_audio_connect` の `settle_default_input`、#394）。
+    /// 入力を未設定のままにしない理由（既定の入力は内蔵マイクになりうる）はそちら。
     /// 出力は `None`（Windows の既定デバイス）のままにする。
     ///
     /// 決めた名前は `DefaultDevicesResolved` で UI スレッドへ返し、設定へ
     /// 書き戻してもらう。**返す前にこの場の `config` も書き換える。**
     /// 往復を待つと、最初の接続がその分だけ遅れる。
+    ///
+    /// **映像の名前を埋めたら、解像度は未指定にする**（#391）。設定の解像度は
+    /// 既定の 1280x720 で、このデバイスに合わせて選んだ値ではない。入力信号と
+    /// 違う解像度で開くと警告画面しか出さないボード（AVerMedia GC551）では、
+    /// それで開くと「繋がっているのに映らない」になる。未指定なら DirectShow は
+    /// デバイスのいまの解像度で開き、Media Foundation はこれまでどおり 1280x720 を
+    /// 要求する。開いた解像度は接続後に `VideoResolutionResolved` で返す。
     pub(super) fn resolve_default_devices(&mut self, config: &mut DeviceConfig) {
-        let mut resolved_video = None;
-        let mut resolved_input = None;
-
-        if config.video.0.is_none() {
-            if let Some((name, _)) = self.video.list_devices().into_iter().next() {
-                config.video.0 = Some(name.clone());
-                resolved_video = Some(name);
-            }
-        }
-
-        if config.audio.0.is_none() {
-            let list = self.audio.list_input_devices();
-            debug!("利用できる入力デバイス: {:?}", list);
-            if let Some(name) = list.into_iter().next() {
-                info!("入力デバイスの既定を {} にした", name);
-                config.audio.0 = Some(name.clone());
-                resolved_input = Some(name);
-            }
-        }
-
         // 出力は埋めない。`None` のまま Windows の既定デバイスへ任せる
         if config.audio.1.is_none() {
             debug!("出力デバイスは既定（自動選択）にする");
         }
-
-        if resolved_video.is_some() || resolved_input.is_some() {
-            self.emit(DeviceEvent::DefaultDevicesResolved {
-                video: resolved_video,
-                input: resolved_input,
-            });
+        if config.video.0.is_some() {
+            return;
         }
+        let Some((name, _)) = self.video.list_devices().into_iter().next() else {
+            return;
+        };
+        info!(
+            "映像デバイスの既定を {} にし、解像度はデバイスに合わせる",
+            name
+        );
+        config.video.0 = Some(name.clone());
+        config.video.1 = None;
+        self.emit(DeviceEvent::DefaultDevicesResolved {
+            video: Some(name),
+            input: None,
+            input_source: None,
+        });
     }
 
-    /// 映像デバイスへの接続を 1 回だけ試す。
+    /// 映像デバイスへの接続を 1 回だけ試す。試したあとで、初回の入力の既定を
+    /// 決める（開けたか・音声ピンがあるかで決まる。`settle_default_input`、#394）。
     pub(super) fn try_connect_video(&mut self, config: &DeviceConfig, now: Instant) {
-        let (device_name, resolution, format, fps, backend) = config.video.clone();
-        let Some(device_name) = device_name else {
-            // 繋ぐ相手が無い。要求を取り下げて、デバイスが選ばれるまで待つ
-            debug!("映像デバイスが未設定なので接続の要求を取り下げる");
-            self.video_retry.cancel();
+        self.connect_video_once(config, now);
+        self.settle_default_input();
+    }
+
+    fn connect_video_once(&mut self, config: &DeviceConfig, now: Instant) {
+        let (_, resolution, format, fps, backend, connect_audio_pin) = config.video.clone();
+        let Some(device_name) = selected_video_device(config.video.0.as_deref()) else {
+            self.hold_video_without_device(config);
             return;
         };
 
@@ -110,13 +113,14 @@ impl WorkerState {
             attempt, device_name, backend
         );
 
-        let result = self.video.start_capture(
-            Some(&device_name),
+        let result = self.video.start_capture(&CaptureRequest {
+            device_name: Some(device_name),
             resolution,
-            format.as_deref(),
+            format: format.as_deref(),
             fps,
             backend,
-        );
+            connect_audio_pin,
+        });
 
         match result {
             Ok(()) => {
@@ -126,6 +130,7 @@ impl WorkerState {
                 self.last_video_failure = None;
                 self.last_video_target = Some(config.video.clone());
                 self.emit(DeviceEvent::VideoConnected);
+                self.report_resolved_resolution(&config.video);
                 // 途絶から復帰したのであれば、音声も同時に戻っているはず。
                 // **旗はここで落とす。** 残すと、以降の接続のたびに音声を
                 // 開き直してしまう
@@ -135,6 +140,10 @@ impl WorkerState {
             Err(e) => {
                 warn!("映像デバイスへの接続に失敗した（{} 回目）: {}", attempt, e);
                 self.video_retry.record_failure(now);
+                // **開けなかったら、開いている相手は無い。** `start_capture` は開く前に
+                // 古いストリームを閉じている。前の設定を残すと、元へ戻したときに差分が
+                // 立たず、この失敗で伸びたバックオフを待ってから開くことになる（#311）
+                self.last_video_target = None;
                 // UI へは日本語の 1 行に落として渡す。`DeviceEvent` に種別を
                 // 載せても、いまの再試行は理由で戦略を変えないため
                 let reason = e.to_string();
@@ -151,128 +160,57 @@ impl WorkerState {
         }
     }
 
-    /// 映像が途絶から復帰したときに、音声の再接続も要求する。
-    pub(super) fn resync_audio_after_video_recovery(
-        &mut self,
-        config: &DeviceConfig,
-        recovered: bool,
-    ) {
-        if !should_resync_audio_after_video(
-            recovered,
-            self.audio.active().is_some(),
-            self.audio_retry.is_active(),
-        ) {
-            if recovered {
-                debug!("音声は繋がっているので、映像の復帰にあわせた開き直しはしない");
-            }
-            return;
-        }
-        self.last_audio_target = None;
-        self.audio_retry.request_now(config.audio.clone());
-        info!("映像が戻ったので、音声デバイスの再接続も要求した");
-    }
-
-    /// 音声デバイスへの接続を 1 回だけ試す。
+    /// 解像度が未指定の要求で開けたら、実際に開いた解像度を UI へ返す（#391）。
     ///
-    /// **開けなくても、別のデバイスへは倒さない。** 失敗が続いたときの扱いは
-    /// `monitor::decide_audio_fallback` を参照。
-    pub(super) fn try_connect_audio(&mut self, config: &DeviceConfig, now: Instant) {
-        let (input_device_name, output_device_name, sample_rate, channels, buffer_ms) =
-            config.audio.clone();
-        let attempt = self.audio_retry.attempts() + 1;
-        info!(
-            "音声デバイスへの接続を試す（{} 回目）- 入力: {:?}、出力: {:?}、バッファ: {} ms",
-            attempt, input_device_name, output_device_name, buffer_ms
-        );
-
-        // デバイスの列挙は実測で 300ms 前後かかる。設定値との突き合わせに要るのは
-        // 最初の 1 回だけなので、再試行のたびには出さない
-        if attempt == 1 {
-            debug!(
-                "利用できる入力デバイス: {:?}",
-                self.audio.list_input_devices()
-            );
-            debug!(
-                "利用できる出力デバイス: {:?}",
-                self.audio.list_output_devices()
-            );
-        }
-
-        // 対応設定は `start_passthrough` が要る。**無ければここで取りに行く。**
-        // 以前は UI スレッドで開いていたため、届くまで接続を見送る仕組みを
-        // 持っていた。このスレッドは止まってよいので、素直に待てばよい
-        let input_key = audio::cache_key(input_device_name.as_deref());
-        let output_key = audio::cache_key(output_device_name.as_deref());
-        self.ensure_audio_capabilities(AudioDirection::Input, &input_key);
-        self.ensure_audio_capabilities(AudioDirection::Output, &output_key);
-
-        let result = self.audio.start_passthrough(&audio::PassthroughRequest {
-            input_device_name: input_device_name.as_deref(),
-            output_device_name: output_device_name.as_deref(),
-            sample_rate,
-            channels,
-            input_capabilities: self
-                .audio_capabilities
-                .get(&(AudioDirection::Input, input_key.clone())),
-            output_capabilities: self
-                .audio_capabilities
-                .get(&(AudioDirection::Output, output_key.clone())),
-            buffer_ms,
-        });
-
-        match result {
-            Ok(()) => {
-                info!("音声デバイスに接続した");
-                self.audio_retry.record_success(now);
-                self.audio_not_visible = None;
-                self.last_audio_failure = None;
-                // 形を緩めて繋がった場合も、設定に書かれている値を記録する。
-                // ここで実際に開いた値を入れると、設定のレートやチャンネル数へ
-                // 戻せるようになっても差分が立たず、緩めたままになる
-                self.last_audio_target = Some(config.audio.clone());
-                self.emit(DeviceEvent::AudioConnected);
-            }
-            Err(e) => {
-                warn!("音声デバイスへの接続に失敗した（{} 回目）: {}", attempt, e);
-                // 失敗が続いていることを 1 度だけ記録する。倒す先が無いので、
-                // ここで開く相手が変わることはない
-                if decide_audio_fallback(attempt) == AudioFallbackAction::WarnAndRetry {
-                    warn!(
-                        "音声デバイスに {} 回続けて接続できない。既定のデバイスへは倒さず、戻るまで再試行を続ける",
-                        attempt
-                    );
-                }
-                self.audio_retry.record_failure(now);
-                // 映像と同じく、UI へは日本語の 1 行に落として渡す
-                let reason = e.to_string();
-                self.emit(DeviceEvent::AudioFailed(failure_message(
-                    self.audio_not_visible.as_ref(),
-                    &reason,
-                )));
-                self.last_audio_failure = Some(reason);
-                // **取得済みの対応設定を捨てて取り直す。** デバイスが挿し直された
-                // 場合、古い一覧でしか開けない設定を選び続けて失敗が繰り返される
-                self.audio_capabilities
-                    .remove(&(AudioDirection::Input, input_key));
-                self.audio_capabilities
-                    .remove(&(AudioDirection::Output, output_key));
-                debug!(
-                    "音声デバイスへの再試行は {} ms 後",
-                    backoff_delay(self.audio_retry.attempts()).as_millis()
-                );
-            }
-        }
-    }
-
-    /// 対応設定が手元に無ければ問い合わせる。
-    pub(super) fn ensure_audio_capabilities(&mut self, direction: AudioDirection, key: &str) {
-        if self
-            .audio_capabilities
-            .contains_key(&(direction, key.to_string()))
-        {
+    /// **返す前に、この場の設定と「開いている相手」も開いた解像度にする。**
+    /// UI が書き戻した設定（解像度あり）が届いたときに、差分ありとみなして
+    /// 開き直さないため。書き戻す前の設定（解像度なし）が遅れて届いた場合は
+    /// `worker_commands` の `carry_resolved_resolution` が引き継ぐ。
+    fn report_resolved_resolution(&mut self, target: &VideoTarget) {
+        if target.1.is_some() {
             return;
         }
-        self.query_audio_capabilities(direction, key);
+        let Some(resolution) = self.video.active().and_then(|active| active.resolution) else {
+            return;
+        };
+        info!(
+            "解像度が未指定だったので、開いた解像度 {}x{} を設定へ書き戻してもらう",
+            resolution.0, resolution.1
+        );
+        let mut resolved = target.clone();
+        resolved.1 = Some(resolution);
+        if let Some(config) = self
+            .config
+            .as_mut()
+            .filter(|config| config.video == *target)
+        {
+            config.video = resolved.clone();
+        }
+        self.last_video_target = Some(resolved);
+        self.emit(DeviceEvent::VideoResolutionResolved {
+            target: target.clone(),
+            resolution,
+        });
+    }
+
+    /// 映像デバイスが選ばれていないので、開いているストリームを閉じて待つ（#334）。
+    ///
+    /// 閉じないと古い映像が映り続けたまま、設定の表示だけが「未選択」になる。
+    /// 再試行はしない。扱いは音声の `hold_audio_without_input` と同じ。
+    fn hold_video_without_device(&mut self, config: &DeviceConfig) {
+        info!("映像デバイスが未設定なので映像を開かない");
+        self.video_retry.cancel();
+        if self.video.active().is_some() {
+            self.video.stop_capture();
+            // 最後のフレームを画面から落とし、プレースホルダーへ戻してもらう
+            self.emit(DeviceEvent::VideoSignalLost);
+        }
+        // 同じ設定が 2 秒ごとに届いても通知を繰り返さないよう、扱い済みとして記録する
+        self.last_video_target = Some(config.video.clone());
+        self.video_not_visible = None;
+        let reason = i18n::Text::VideoDeviceNotSelected.get().to_string();
+        self.last_video_failure = Some(reason.clone());
+        self.emit(DeviceEvent::VideoFailed(reason));
     }
 
     /// 列挙の結果をログへ出し、設定のデバイスが Windows 側にも見えていないかを
@@ -334,17 +272,20 @@ impl WorkerState {
         // **入出力のどちらかの列挙に失敗したら、音声は判定しない。** 映像で
         // 失敗した経路があれば判定しないのと同じで、開けない理由が失敗した側に
         // あったかもしれない
+        // 入力が映像デバイスの音声ピンなら、入力は判定しない。比べる WASAPI の名前が無い（#388）
+        let configured_input = match config.audio.5 {
+            AudioInputSource::Device => config.audio.0.as_deref(),
+            AudioInputSource::VideoPin => None,
+        };
         let audio_notice = match (input.as_deref(), output.as_deref()) {
-            (Ok(input), Ok(output)) => {
-                decide_device_not_visible(audio_failures, config.audio.0.as_deref(), Some(input))
-                    .or_else(|| {
-                        decide_device_not_visible(
-                            audio_failures,
-                            config.audio.1.as_deref(),
-                            Some(output),
-                        )
-                    })
-            }
+            (Ok(input), Ok(output)) => decide_device_not_visible(
+                audio_failures,
+                configured_input,
+                Some(input),
+            )
+            .or_else(|| {
+                decide_device_not_visible(audio_failures, config.audio.1.as_deref(), Some(output))
+            }),
             _ => None,
         };
         self.set_video_not_visible(video_notice);
@@ -397,6 +338,10 @@ impl WorkerState {
         let video = self.video.list_devices();
         let input = self.audio.list_input_devices();
         let output = self.audio.list_output_devices();
+        // 音声ピンの有無は一覧と同じ間隔で取り直す。分かったものは実装が覚えて
+        // いるので、2 回目からはフィルターを作らない（#409）
+        self.video_audio_pins = self.video.audio_pin_presence();
+        self.publish_snapshot();
         self.emit(DeviceEvent::DeviceLists {
             video,
             input,
@@ -433,42 +378,6 @@ impl WorkerState {
         self.emit(DeviceEvent::VideoCapabilities(
             device,
             backend,
-            Box::new(result.map_err(|e| e.to_string())),
-        ));
-    }
-
-    /// 音声デバイスの対応設定を問い合わせる。
-    ///
-    /// 成功した分だけワーカー側にも控えておく。`start_passthrough` が
-    /// 一覧を要るためで、渡さないとその場で列挙し直すことになる。
-    pub(super) fn query_audio_capabilities(&mut self, direction: AudioDirection, key: &str) {
-        let started = Instant::now();
-        let result = self
-            .audio
-            .capabilities(direction, audio::device_name_from_key(key));
-        match &result {
-            Ok(caps) => {
-                info!(
-                    "{}デバイスの対応設定を取得した: {}（{} 件、{} ms）",
-                    direction.label(),
-                    key,
-                    caps.configs().len(),
-                    started.elapsed().as_millis()
-                );
-                self.audio_capabilities
-                    .insert((direction, key.to_string()), caps.clone());
-            }
-            Err(e) => warn!(
-                "{}デバイスの対応設定を取得できない: {}: {}",
-                direction.label(),
-                key,
-                e
-            ),
-        }
-        self.emit(DeviceEvent::AudioCapabilities(
-            direction,
-            key.to_string(),
-            // 能力キャッシュは理由を画面に出すだけなので、日本語の 1 行へ落とす
             Box::new(result.map_err(|e| e.to_string())),
         ));
     }
@@ -644,6 +553,70 @@ mod tests {
         );
     }
 
+    // 切り替えに失敗したあとで元へ戻す（#311）。失敗した回は開く前に古い
+    // ストリームを閉じているので、元の設定へ戻したら次の tick ですぐ開く。
+    // B の失敗で伸びたバックオフは、B を選び直したときだけ効く
+
+    #[test]
+    fn worker_reopens_the_previous_video_right_after_a_failed_switch() {
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        let (mut state, _events) = mock_state(&video, &audio);
+        let a = config_for(Some("A"), None);
+        let b = config_for(Some("B"), None);
+        apply_config(&mut state, a.clone(), true);
+        let base = Instant::now();
+        state.tick(base);
+        assert_eq!(video.with(|state| state.start_calls), 1);
+
+        // B は 3 回続けて開けない。3 回目のあとは 800ms 待つ
+        video.with(|state| state.failures_before_success = 3);
+        apply_config(&mut state, b.clone(), false);
+        for step in 2..5 {
+            state.tick(base + Duration::from_secs(step));
+        }
+        assert_eq!(video.with(|state| state.start_calls), 4);
+        assert!(
+            !video.with(|state| state.capturing),
+            "B の失敗で A も閉じている"
+        );
+
+        // A へ戻すと、B のバックオフ（+4.8 秒まで）を待たずに次の tick で開く
+        apply_config(&mut state, a.clone(), false);
+        let back = base + Duration::from_millis(4_100);
+        state.tick(back);
+        assert_eq!(video.with(|state| state.start_calls), 5);
+        assert_eq!(
+            video.with(|state| state.last_device_name.clone()),
+            Some("A".to_string())
+        );
+        assert!(video.with(|state| state.capturing));
+
+        // 2 秒ごとの再適用では開き直さない
+        apply_config(&mut state, a, false);
+        state.tick(back + Duration::from_secs(2));
+        assert_eq!(video.with(|state| state.start_calls), 5);
+
+        // B を選び直すと即座に試し、失敗したら同じ B の再適用ではバックオフを守る
+        video.with(|state| state.failures_before_success = u32::MAX);
+        let again = back + Duration::from_secs(4);
+        apply_config(&mut state, b.clone(), false);
+        state.tick(again);
+        assert_eq!(video.with(|state| state.start_calls), 6);
+        apply_config(&mut state, b, false);
+        state.tick(again + Duration::from_millis(100));
+        assert_eq!(video.with(|state| state.start_calls), 6, "200ms 待つ");
+        state.tick(again + Duration::from_millis(200));
+        assert_eq!(video.with(|state| state.start_calls), 7);
+    }
+
+    #[test]
+    fn selected_video_device_only_with_a_name() {
+        assert_eq!(selected_video_device(Some("カメラ")), Some("カメラ"));
+        assert_eq!(selected_video_device(None), None);
+        assert_eq!(selected_video_device(Some("")), None);
+    }
+
     #[test]
     fn query_video_capabilities_asks_the_route_for_the_given_backend() {
         // 開き方を DirectShow にした設定なら、選択肢も DirectShow 側の対応形式に
@@ -697,6 +670,108 @@ mod tests {
                 Ok(direct_show)
             )]
         );
+    }
+
+    // 初回に映像デバイスを埋めたときの解像度（#391）。設定の 1280x720 は既定値で、
+    // 入力と違う解像度では警告画面しか出さないボードがあるので、未指定で開いて
+    // 開いた解像度を UI へ返す
+
+    /// 設定ファイルが無い初回の設定（デバイス未選択、解像度は既定の 1280x720）
+    fn first_run_config() -> DeviceConfig {
+        let mut config = config_for(None, Some("モック入力"));
+        config.video.1 = Some((1280, 720));
+        config.video.2 = Some("YUY2".to_string());
+        config.video.3 = Some(60);
+        config
+    }
+
+    fn resolved_resolutions(events: &[DeviceEvent]) -> Vec<(VideoTarget, (u32, u32))> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::VideoResolutionResolved { target, resolution } => {
+                    Some((target.clone(), *resolution))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn first_run_state() -> (
+        WorkerState,
+        std::sync::mpsc::Receiver<DeviceEvent>,
+        MockVideoBackend,
+    ) {
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| {
+            state.devices = vec![("キャプチャーボード".to_string(), String::new())];
+            state.opened_resolution = Some((1920, 1080));
+        });
+        audio.with(|state| state.input_devices = vec!["モック入力".to_string()]);
+        let (state, events) = mock_state(&video, &audio);
+        (state, events, video)
+    }
+
+    #[test]
+    fn first_run_opens_the_resolved_video_device_without_a_resolution() {
+        let (mut state, events, _video) = first_run_state();
+        apply_config(&mut state, first_run_config(), true);
+
+        let config = state.config.as_ref().expect("設定を覚えていること");
+        assert_eq!(config.video.0.as_deref(), Some("キャプチャーボード"));
+        assert_eq!(config.video.1, None, "解像度はデバイスに任せること");
+        // 形式と fps は触らない
+        assert_eq!(config.video.2.as_deref(), Some("YUY2"));
+        assert_eq!(config.video.3, Some(60));
+
+        // 返すイベントは開いたときの接続対象（解像度なし）を運ぶ。UI はこれと
+        // 設定を突き合わせてから書き戻す
+        let opened = config.video.clone();
+        state.tick(Instant::now());
+        let events = drain(&events);
+        assert_eq!(resolved_resolutions(&events), vec![(opened, (1920, 1080))]);
+        let config = state.config.as_ref().expect("設定を覚えていること");
+        assert_eq!(config.video.1, Some((1920, 1080)));
+        assert_eq!(state.last_video_target.as_ref(), Some(&config.video));
+    }
+
+    #[test]
+    fn first_run_does_not_reopen_for_the_written_back_or_stale_settings() {
+        let (mut state, events, video) = first_run_state();
+        apply_config(&mut state, first_run_config(), true);
+        let base = Instant::now();
+        state.tick(base);
+        assert_eq!(video.with(|state| state.start_calls), 1);
+        drain(&events);
+
+        // UI が書き戻す前の設定（解像度なし）が遅れて届いても開き直さない
+        let mut stale = first_run_config();
+        stale.video.0 = Some("キャプチャーボード".to_string());
+        stale.video.1 = None;
+        apply_config(&mut state, stale.clone(), false);
+        // 書き戻したあとの設定（開いた解像度）でも開き直さない
+        let mut written = stale;
+        written.video.1 = Some((1920, 1080));
+        apply_config(&mut state, written, false);
+        state.tick(base + Duration::from_secs(6));
+        assert_eq!(video.with(|state| state.start_calls), 1);
+        assert!(resolved_resolutions(&drain(&events)).is_empty());
+    }
+
+    #[test]
+    fn explicit_resolution_is_not_reported_back() {
+        // 利用者が選んだ解像度で開いたときは書き戻さない
+        let (mut state, events, _video) = first_run_state();
+        let mut config = first_run_config();
+        config.video.0 = Some("キャプチャーボード".to_string());
+        apply_config(&mut state, config, true);
+        assert_eq!(
+            state.config.as_ref().map(|config| config.video.1),
+            Some(Some((1280, 720)))
+        );
+        state.tick(Instant::now());
+        assert!(resolved_resolutions(&drain(&events)).is_empty());
     }
 
     #[test]

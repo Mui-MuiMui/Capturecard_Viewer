@@ -2,7 +2,7 @@
 //!
 //! エンコードと書き出し（クリップボードへの転送も）は撮影ごとに起こす
 //! スレッドが行い、UI スレッドは結果をチャネルで受け取るだけにする。
-//! 効果音の再生は `crate::screenshot::ScreenshotManager` の担当で、
+//! 効果音の再生は `crate::screenshot_sound::ScreenshotManager` の担当で、
 //! 効果音ファイルの読み込みは `app::screenshot_sound` の担当。
 
 use super::CaptureCardViewer;
@@ -254,10 +254,16 @@ impl CaptureCardViewer {
         // 効果音は保存の完了を待たずに鳴らす。撮った手応えをその場で返すため。
         // 保存まで待つと、エンコードにかかる数十 ms だけシャッター音が遅れる。
         // 保存に失敗した場合は音だけ鳴ることになるが、失敗はログに残す
-        if let Ok(ss) = self.screenshot_manager.lock() {
-            ss.play_screenshot_sound(sound_volume);
-        } else {
-            warn!("スクリーンショットの効果音で screenshot_manager のロックを取得できない");
+        // ロックの中では音の `Arc` を複製するだけにし、再生スレッドは離してから起こす
+        let sound = match self.screenshot_manager.lock() {
+            Ok(ss) => ss.shot_sound(),
+            Err(_) => {
+                warn!("スクリーンショットの効果音で screenshot_manager のロックを取得できない");
+                None
+            }
+        };
+        if let Some(sound) = sound {
+            self.play_sound(sound, sound_volume);
         }
 
         // エンコードと書き出しは UI スレッドから外す。
@@ -477,7 +483,7 @@ mod tests {
     // 書き出したファイルの中身から画像形式を判定する。
     // 拡張子ではなく実際のバイト列を見る
     fn detect_format(path: &Path) -> image::ImageFormat {
-        let reader = image::io::Reader::open(path)
+        let reader = image::ImageReader::open(path)
             .expect("保存したファイルを開けること")
             .with_guessed_format()
             .expect("形式を判定できること");

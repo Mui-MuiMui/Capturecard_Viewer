@@ -3,9 +3,8 @@
 //! 列挙は `ICreateDevEnum` の `CLSID_VideoInputDeviceCategory`、対応形式は
 //! キャプチャーピンの `IAMStreamConfig::GetStreamCaps`。
 //!
-//! 対応形式の一覧から「どれで開くか」を決める判定（`choose_candidate`）と、
-//! 設定画面向けの形への並べ替え（`capabilities_from_candidates`）は純粋関数に
-//! してあり、デバイスなしで単体テストできる。
+//! 対応形式の一覧から「どれで開くか」を決める判定と設定画面向けの並べ替えは
+//! `stream_select.rs`（#414）。
 
 use std::mem::size_of;
 use std::ptr;
@@ -24,18 +23,8 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Variant::{VariantClear, VARIANT, VT_BSTR};
 
-use super::media_type::{
-    delete_media_type, fps_from_interval, sample_format_of, SampleFormat, SampleKind,
-};
-use crate::video::capabilities::{DeviceCapabilities, FormatCapability, VideoMode};
-
-/// 解像度が未指定のときに開く形。Media Foundation の経路（`VideoCapture`）と同じ
-pub(super) const DEFAULT_RESOLUTION: (u32, u32) = (1280, 720);
-pub(super) const DEFAULT_FPS: u32 = 60;
-
-/// 受け付ける fps の範囲。Media Foundation の経路と同じ
-pub(super) const MIN_FPS: u32 = 15;
-pub(super) const MAX_FPS: u32 = 120;
+use super::media_type::{delete_media_type, fps_from_interval, sample_format_of, SampleFormat};
+use super::stream_select::{fps_list, fps_range};
 
 /// 列挙で見つかった 1 台。
 pub(super) struct DeviceEntry {
@@ -140,8 +129,11 @@ pub(super) struct StreamCandidate {
     /// `GetStreamCaps` に渡す番号
     pub(super) index: i32,
     pub(super) format: SampleFormat,
-    /// 開ける fps。大きい順
+    /// 設定画面に出す fps。大きい順
     pub(super) fps: Vec<u32>,
+    /// `MinFrameInterval` 〜 `MaxFrameInterval` を fps に直した `(最小, 最大)`。
+    /// 範囲を持たない（min = max か読めない）なら `None`（#389）
+    pub(super) fps_range: Option<(u32, u32)>,
 }
 
 /// `IAMStreamConfig` の対応形式を読む。受け取れない形式（UYVY など）は飛ばす。
@@ -187,307 +179,39 @@ pub(super) fn read_candidates(config: &IAMStreamConfig) -> Vec<StreamCandidate> 
         if fps.is_empty() {
             continue;
         }
-        candidates.push(StreamCandidate { index, format, fps });
-    }
-    candidates
-}
-
-/// 1 件の対応形式で開ける fps を並べる。
-///
-/// メディアタイプの既定値と、`VIDEO_STREAM_CONFIG_CAPS` の最短・最長の間隔を
-/// 候補にする。どれも読めなければ空（その形式は選択肢に出さない）。
-pub(super) fn fps_list(avg: i64, min_interval: i64, max_interval: i64) -> Vec<u32> {
-    let mut fps: Vec<u32> = [avg, min_interval, max_interval]
-        .into_iter()
-        .filter_map(fps_from_interval)
-        .collect();
-    fps.sort_unstable_by(|a, b| b.cmp(a));
-    fps.dedup();
-    fps
-}
-
-/// 対応形式を、設定画面の「対応形式」に出す形へ並べ替える。
-///
-/// 形式ごとにまとめ、解像度の大きい順、同じ解像度なら fps の大きい順にする
-/// （Media Foundation の経路の `get_device_capabilities` と同じ並び）。
-/// 形式の並びは `SampleKind::ALL` の順（YUY2・NV12・I420・YV12・MJPEG・RGB24）。
-pub(super) fn capabilities_from_candidates(candidates: &[StreamCandidate]) -> DeviceCapabilities {
-    let mut result = Vec::new();
-    for kind in SampleKind::ALL {
-        let mut modes: Vec<VideoMode> = candidates
-            .iter()
-            .filter(|candidate| candidate.format.kind == kind)
-            .flat_map(|candidate| {
-                candidate.fps.iter().map(|fps| {
-                    VideoMode::new(candidate.format.width, candidate.format.height, *fps)
-                })
-            })
-            .collect();
-        modes.sort_by(|a, b| {
-            b.pixel_count()
-                .cmp(&a.pixel_count())
-                .then(b.width.cmp(&a.width))
-                .then(b.fps.cmp(&a.fps))
-        });
-        modes.dedup();
-        if !modes.is_empty() {
-            result.push(FormatCapability::new(kind.name(), modes));
-        }
-    }
-    result
-}
-
-/// どの対応形式で開くかを決める。`(候補の添字, 開く fps)`。候補が無ければ `None`。
-///
-/// 優先順は次のとおり。
-///
-/// 1. 形式が指定されていて、その形式の候補があれば、その形式だけから選ぶ
-/// 2. 解像度が近いもの（画素数の差が小さいもの。一致が最優先）
-/// 3. 形式が未指定なら YUY2・NV12・I420・YV12・MJPEG・RGB24 の順（YUV の 4 つだけが
-///    色空間と映像調整の効く高速パスを通るため）
-/// 4. 開ける fps が要求に近いもの
-///
-/// 解像度が未指定なら 1280x720 60fps を要求したものとして扱う（Media
-/// Foundation の経路と同じ）。fps は 15〜120 へ丸める。
-pub(super) fn choose_candidate(
-    candidates: &[StreamCandidate],
-    resolution: Option<(u32, u32)>,
-    format: Option<&str>,
-    fps: Option<u32>,
-) -> Option<(usize, u32)> {
-    let (width, height) = resolution.unwrap_or(DEFAULT_RESOLUTION);
-    let requested_pixels = u64::from(width) * u64::from(height);
-    let requested_fps = if resolution.is_some() {
-        fps.unwrap_or(DEFAULT_FPS)
-    } else {
-        DEFAULT_FPS
-    }
-    .clamp(MIN_FPS, MAX_FPS);
-    let requested_kind = format.and_then(SampleKind::from_name);
-    let has_requested_kind = requested_kind.is_some_and(|kind| {
-        candidates
-            .iter()
-            .any(|candidate| candidate.format.kind == kind)
-    });
-
-    let closest_fps = |candidate: &StreamCandidate| {
-        candidate
-            .fps
-            .iter()
-            .copied()
-            .min_by_key(|fps| (fps.abs_diff(requested_fps), u32::MAX - fps))
-    };
-
-    candidates
-        .iter()
-        .enumerate()
-        .filter(|(_, candidate)| {
-            !has_requested_kind || Some(candidate.format.kind) == requested_kind
-        })
-        .filter_map(|(index, candidate)| {
-            let fps = closest_fps(candidate)?;
-            let pixels = u64::from(candidate.format.width) * u64::from(candidate.format.height);
-            let exact = candidate.format.width == width && candidate.format.height == height;
-            let key = (
-                !exact,
-                pixels.abs_diff(requested_pixels),
-                candidate.format.kind,
-                fps.abs_diff(requested_fps),
-            );
-            Some((key, index, fps))
-        })
-        .min_by_key(|(key, _, _)| *key)
-        .map(|(_, index, fps)| (index, fps))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn candidate(
-        index: i32,
-        kind: SampleKind,
-        width: u32,
-        height: u32,
-        fps: &[u32],
-    ) -> StreamCandidate {
-        StreamCandidate {
+        let fps_range = fps_range(caps.MinFrameInterval, caps.MaxFrameInterval);
+        candidates.push(StreamCandidate {
             index,
-            format: SampleFormat {
-                kind,
-                width,
-                height,
-                bottom_up: false,
-                avg_time_per_frame: 0,
-            },
-            fps: fps.to_vec(),
-        }
+            format,
+            fps,
+            fps_range,
+        });
     }
+    candidates
+}
 
-    fn sample_candidates() -> Vec<StreamCandidate> {
-        vec![
-            candidate(0, SampleKind::Yuy2, 1920, 1080, &[30]),
-            candidate(1, SampleKind::Yuy2, 1280, 720, &[60, 30]),
-            candidate(2, SampleKind::Mjpeg, 1920, 1080, &[60, 30]),
-            candidate(3, SampleKind::Rgb24, 640, 480, &[30]),
-        ]
-    }
+/// `IAMStreamConfig::GetFormat` が返す、ピンのいまの形式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CurrentFormat {
+    pub(super) resolution: (u32, u32),
+    /// `AvgTimePerFrame` を fps に直したもの。読めなければ `None`（#410）
+    pub(super) fps: Option<u32>,
+}
 
-    #[test]
-    fn choose_candidate_exact_match_wins() {
-        let candidates = sample_candidates();
-        assert_eq!(
-            choose_candidate(&candidates, Some((1280, 720)), Some("YUY2"), Some(60)),
-            Some((1, 60))
-        );
+/// `IAMStreamConfig::GetFormat` が返す、ピンのいまの形式。読めなければ `None`。
+///
+/// **`SetFormat` する前に呼ぶ。** 入力信号の解像度と fps をここへ映すドライバーがある
+/// （AVerMedia GC551 は入力が 1920x1080 なら、前に 1280x720 で開いたあとでも
+/// 1920x1080 を返す。#391）。受け取れない形式（UYVY など）のときは `None`。
+pub(super) fn current_format(config: &IAMStreamConfig) -> Option<CurrentFormat> {
+    let pmt = unsafe { config.GetFormat() }.ok()?;
+    if pmt.is_null() {
+        return None;
     }
-
-    #[test]
-    fn choose_candidate_requested_format_takes_priority_over_resolution() {
-        // MJPEG を指定したら、解像度が合わなくても MJPEG から選ぶ
-        let candidates = sample_candidates();
-        assert_eq!(
-            choose_candidate(&candidates, Some((1280, 720)), Some("MJPEG"), Some(60)),
-            Some((2, 60))
-        );
-    }
-
-    #[test]
-    fn choose_candidate_unavailable_format_falls_back_to_any_format() {
-        // デバイスに無い形式を指定されたら、形式を問わず解像度で選ぶ
-        let candidates = vec![candidate(0, SampleKind::Yuy2, 1280, 720, &[30])];
-        assert_eq!(
-            choose_candidate(&candidates, Some((1280, 720)), Some("MJPEG"), Some(30)),
-            Some((0, 30))
-        );
-    }
-
-    #[test]
-    fn choose_candidate_without_format_prefers_yuy2_at_the_same_resolution() {
-        // 同じ 1920x1080 に YUY2 と MJPEG があれば YUY2
-        let candidates = sample_candidates();
-        assert_eq!(
-            choose_candidate(&candidates, Some((1920, 1080)), None, Some(30)),
-            Some((0, 30))
-        );
-    }
-
-    #[test]
-    fn choose_candidate_without_format_prefers_420_over_mjpeg() {
-        // YUY2 の無い仮想カメラ。同じ解像度なら係数表を通る NV12 を選ぶ
-        let candidates = vec![
-            candidate(0, SampleKind::Mjpeg, 1280, 720, &[30]),
-            candidate(1, SampleKind::I420, 1280, 720, &[30]),
-            candidate(2, SampleKind::Nv12, 1280, 720, &[30]),
-        ];
-        assert_eq!(
-            choose_candidate(&candidates, Some((1280, 720)), None, Some(30)),
-            Some((2, 30))
-        );
-        assert_eq!(
-            choose_candidate(&candidates, Some((1280, 720)), Some("I420"), Some(30)),
-            Some((1, 30))
-        );
-    }
-
-    #[test]
-    fn capabilities_from_candidates_lists_420_after_yuy2() {
-        let candidates = vec![
-            candidate(0, SampleKind::Rgb24, 640, 480, &[30]),
-            candidate(1, SampleKind::I420, 640, 480, &[30]),
-            candidate(2, SampleKind::Nv12, 640, 480, &[30]),
-            candidate(3, SampleKind::Yuy2, 640, 480, &[30]),
-        ];
-        let names: Vec<String> = capabilities_from_candidates(&candidates)
-            .into_iter()
-            .map(|capability| capability.name)
-            .collect();
-        assert_eq!(names, vec!["YUY2", "NV12", "I420", "RGB24"]);
-    }
-
-    #[test]
-    fn choose_candidate_without_resolution_requests_720p60() {
-        let candidates = sample_candidates();
-        assert_eq!(
-            choose_candidate(&candidates, None, None, None),
-            Some((1, 60))
-        );
-    }
-
-    #[test]
-    fn choose_candidate_picks_the_closest_resolution() {
-        let candidates = vec![
-            candidate(0, SampleKind::Yuy2, 1920, 1080, &[30]),
-            candidate(1, SampleKind::Yuy2, 640, 480, &[30]),
-        ];
-        // 800x600 は 640x480 のほうが画素数が近い
-        assert_eq!(
-            choose_candidate(&candidates, Some((800, 600)), Some("YUY2"), Some(30)),
-            Some((1, 30))
-        );
-    }
-
-    #[test]
-    fn choose_candidate_fps_is_clamped_and_matched_to_the_closest() {
-        let candidates = vec![candidate(0, SampleKind::Yuy2, 1280, 720, &[60, 30])];
-        // 240 は 120 へ丸められ、開ける中で最も近い 60 になる
-        assert_eq!(
-            choose_candidate(&candidates, Some((1280, 720)), None, Some(240)),
-            Some((0, 60))
-        );
-        // 5 は 15 へ丸められ、最も近い 30 になる
-        assert_eq!(
-            choose_candidate(&candidates, Some((1280, 720)), None, Some(5)),
-            Some((0, 30))
-        );
-    }
-
-    #[test]
-    fn choose_candidate_empty_list_is_none() {
-        assert_eq!(
-            choose_candidate(&[], Some((1280, 720)), None, Some(60)),
-            None
-        );
-    }
-
-    #[test]
-    fn fps_list_collects_distinct_rates_in_descending_order() {
-        // 既定 30fps、最短 60fps、最長 15fps
-        assert_eq!(fps_list(333_333, 166_666, 666_666), vec![60, 30, 15]);
-        // 同じ値は 1 つにする
-        assert_eq!(fps_list(333_333, 333_333, 333_333), vec![30]);
-        // 読めない値は捨てる
-        assert_eq!(fps_list(0, 0, 0), Vec::<u32>::new());
-    }
-
-    #[test]
-    fn capabilities_from_candidates_groups_by_format_in_fixed_order() {
-        let caps = capabilities_from_candidates(&sample_candidates());
-        let names: Vec<&str> = caps.iter().map(|cap| cap.name.as_str()).collect();
-        assert_eq!(names, vec!["YUY2", "MJPEG", "RGB24"]);
-        assert_eq!(
-            caps[0].modes,
-            vec![
-                VideoMode::new(1920, 1080, 30),
-                VideoMode::new(1280, 720, 60),
-                VideoMode::new(1280, 720, 30),
-            ]
-        );
-    }
-
-    #[test]
-    fn capabilities_from_candidates_removes_duplicates() {
-        let candidates = vec![
-            candidate(0, SampleKind::Yuy2, 640, 480, &[30]),
-            candidate(1, SampleKind::Yuy2, 640, 480, &[30]),
-        ];
-        let caps = capabilities_from_candidates(&candidates);
-        assert_eq!(caps.len(), 1);
-        assert_eq!(caps[0].modes, vec![VideoMode::new(640, 480, 30)]);
-    }
-
-    #[test]
-    fn capabilities_from_candidates_empty_input_is_empty() {
-        assert!(capabilities_from_candidates(&[]).is_empty());
-    }
+    let format = unsafe { sample_format_of(&*pmt) };
+    unsafe { delete_media_type(pmt) };
+    format.map(|format| CurrentFormat {
+        resolution: (format.width, format.height),
+        fps: fps_from_interval(format.avg_time_per_frame),
+    })
 }

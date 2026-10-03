@@ -5,10 +5,15 @@
 //! `DeviceCommand` を送り、`DeviceEvent` を `update()` の中で非ブロックに
 //! 受け取るだけにする。
 //!
-//! **チャネルを通さない共有が 3 つある。** 映像フレーム（`video::VideoFrames`）、
-//! 色変換と映像調整（`video::SharedColorConversion`）、音量・ミュート・
-//! パススルー（`audio::AudioControls`）。どれもデバイスを開く処理を挟まない
-//! うえ、フレームはコマンドの列に並べると遅延が増える。
+//! **チャネルを通さない共有が 4 つある。** 映像フレーム（`video::VideoFrames`。
+//! 録画へ回す `video::VideoTap` を中に持つ）、色変換と映像調整
+//! （`video::SharedColorConversion`）、音量・ミュート・パススルー
+//! （`audio::AudioControls`）、録画へ音声を回す差し込み口（`audio::AudioTap`）。
+//! 数えるのは、UI スレッドか録画スレッドがワーカーを通さずにデバイスの
+//! コールバックとやり取りする共有ハンドル（`BackendShared` に載せて渡すもの）で、
+//! ワーカーの内側で閉じる `ResampleTelemetry` は入れない
+//! （`docs/design/device-worker.md` と同じ数え方）。
+//! どれもデバイスを開く処理を挟まないうえ、フレームはコマンドの列に並べると遅延が増える。
 //!
 //! これとは別に、「いま何に繋がっているか」のような軽い観測値も
 //! チャネルを通さず `DeviceSnapshot` に写してあり、UI は `Arc<RwLock<..>>`
@@ -16,9 +21,12 @@
 //! 必ずこちらを正とする。
 
 use super::backend::{self, BackendShared};
-use crate::audio::{ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, ResampleStatus};
+use crate::audio::{
+    ActiveAudio, AudioCapabilities, AudioControls, AudioDirection, AudioInputRoute,
+    AudioPinPresence, AudioTap, ResampleStatus,
+};
 use crate::repaint::RepaintWaker;
-use crate::settings::{AppSettings, VideoBackendSetting};
+use crate::settings::{AppSettings, AudioInputSource, VideoBackendSetting};
 use crate::video::{ActiveVideo, DeviceCapabilities, SharedColorConversion, VideoFrames};
 use log::{debug, warn};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -26,29 +34,35 @@ use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 
 /// 映像の接続対象。これが変わったらバックオフを捨てて即座に開き直す。
-/// `(デバイス名, 解像度, フォーマット, fps, 開き方)`
+/// `(デバイス名, 解像度, フォーマット, fps, 開き方, 音声ピンを繋ぐか)`
 ///
 /// 開き方（`video.backend`）を含めてあるのは、同じデバイスでも経路が
-/// 変われば開き直しが要るため（#237）
+/// 変われば開き直しが要るため（#237）。音声ピンを繋ぐか（`[audio] input_source`
+/// が `video_pin` か、#388）も同じで、繋ぐかどうかはグラフを組むときにしか
+/// 決まらない。入力の種類を切り替えると映像も 1 度開き直す
+/// （`docs/design/directshow-audio.md` の「音声ピンをいつ繋ぐか」）
 pub(super) type VideoTarget = (
     Option<String>,
     Option<(u32, u32)>,
     Option<String>,
     Option<u32>,
     VideoBackendSetting,
+    bool,
 );
 
 /// 音声の接続対象。
-/// `(入力デバイス名, 出力デバイス名, サンプリングレート, チャンネル数, バッファ長 ms)`
+/// `(入力デバイス名, 出力デバイス名, サンプリングレート, チャンネル数, バッファ長 ms, 入力の種類)`
 ///
 /// バッファ長を含めてあるのは、リングバッファの長さがストリームを開くときに
-/// しか決まらないため。設定ダイアログで変えたら音声だけを開き直す
+/// しか決まらないため。設定ダイアログで変えたら音声だけを開き直す。
+/// 入力の種類（#388）が `VideoPin` の間は、入力デバイス名とレート・チャンネル数を使わない
 pub(super) type AudioTarget = (
     Option<String>,
     Option<String>,
     Option<u32>,
     Option<u16>,
     u32,
+    AudioInputSource,
 );
 
 /// ワーカーがデバイスを開くために要る設定。
@@ -74,6 +88,7 @@ impl DeviceConfig {
                 settings.video.format.clone(),
                 settings.video.fps,
                 settings.video.backend,
+                settings.audio.input_source == AudioInputSource::VideoPin,
             ),
             audio: (
                 settings.audio.input_device_name.clone(),
@@ -81,6 +96,7 @@ impl DeviceConfig {
                 settings.audio.sample_rate,
                 settings.audio.channels,
                 settings.audio.buffer_ms,
+                settings.audio.input_source,
             ),
             auto_reconnect: settings.video.auto_reconnect,
         }
@@ -93,8 +109,9 @@ pub(super) enum DeviceCommand {
     /// デバイスに関係する設定を渡す。差分の判定はワーカーが行う。
     ///
     /// `initial` はアプリの起動直後の 1 回だけ真にする。未設定のデバイス名を
-    /// 列挙結果の先頭で埋めるのはこのときだけで、以降は設定の `None` を
-    /// 「Windows の既定デバイス」の意味のまま扱う。
+    /// 列挙結果の先頭で埋めるのはこのときだけ。以降の `None` は、出力なら
+    /// 「Windows の既定デバイス」の意味のまま扱い、入力なら音声を開かない
+    /// （設定の初期化・読み込みで届く。既定の入力は内蔵マイクになりうる、#304）。
     ApplyConfig {
         config: Box<DeviceConfig>,
         initial: bool,
@@ -164,11 +181,29 @@ pub(super) enum DeviceEvent {
     /// 最小化中のホットキーでミュートを切り替えた。UI は復帰したときに
     /// 自分の状態も切り替える（`toggle_mute`）
     MuteToggled,
-    /// 未設定だったデバイス名を、列挙結果の先頭で埋めた（起動直後の 1 回だけ）。
-    /// UI スレッドが設定へ書き戻す
+    /// 未設定だったデバイスを決めた（起動直後だけ）。UI スレッドが設定へ書き戻す。
+    ///
+    /// 映像の名前は起動直後の `ApplyConfig` で列挙結果の先頭に決め、入力は最初の
+    /// 映像の試行のあとに決める（#394）。どちらも決めた時点で 1 度ずつ返すので、
+    /// 2 回に分かれて届くことがある。入力は、映像に音声ピンがあれば
+    /// `input_source: Some(VideoPin)`（`input` は `None`）、無ければ WASAPI の
+    /// 列挙の先頭を `input` に入れる（`input_source: Some(Device)`）。
+    ///
+    /// **映像の名前を埋めたときは、解像度も未指定にする**（#391）。設定の解像度は
+    /// そのデバイスを選んで決めた値ではない（既定の 1280x720）ので、開く経路に
+    /// 任せる（DirectShow ならデバイスのいまの解像度）。開いた解像度は
+    /// `VideoResolutionResolved` で返す
     DefaultDevicesResolved {
         video: Option<String>,
         input: Option<String>,
+        input_source: Option<AudioInputSource>,
+    },
+    /// 解像度が未指定の設定で映像を開き、実際に開いた解像度が分かった（#391）。
+    /// `target` は開いたときの接続対象（解像度は未指定のまま）。UI スレッドは、
+    /// 設定の解像度がまだ未指定で、解像度以外が `target` と同じときだけ書き戻す
+    VideoResolutionResolved {
+        target: VideoTarget,
+        resolution: (u32, u32),
     },
 }
 
@@ -204,6 +239,28 @@ pub(super) struct DeviceSnapshot {
     /// の累計回数。音声を開いていなければ `None`。開き直すと 0 から数え直す。
     /// 統計 OSD（`app::view`）と「接続状態」タブの両方がこれを読む
     pub(super) audio_underruns: Option<u32>,
+    /// 音声の入力がリングバッファの満杯で捨てたフレーム数の累計（Issue #350）。
+    /// 音声を開いていなければ `None`。開き直すと 0 から数え直す。
+    /// 「接続状態」タブだけが読む（統計 OSD には出さない）
+    pub(super) audio_dropped_frames: Option<u32>,
+    /// cpal が知らせた入力の取りこぼし（`Xrun`）の累計（Issue #377）。開いていなければ `None`
+    pub(super) audio_xruns: Option<u32>,
+    /// 列挙の時点で調べた、映像デバイスごとの音声ピンの有無（#409）。デバイス一覧を
+    /// 取り直したとき（`refresh_device_lists`）だけ変わる。設定ダイアログが、映像を
+    /// 開く前に映像デバイスの音声を選べるかを決めるのに使う
+    pub(super) video_audio_pins: Vec<(String, AudioPinPresence)>,
+}
+
+impl DeviceSnapshot {
+    /// 統計 OSD の音声の行（アンダーランの回数）。入力が映像デバイスの音声ピンなら
+    /// 「（音声ピン）」を添える（#394、`status::format_osd_audio_line`）
+    pub(super) fn osd_audio_line(&self) -> String {
+        let via_pin = self
+            .active_audio
+            .as_ref()
+            .is_some_and(|active| matches!(active.input_route, AudioInputRoute::VideoPin { .. }));
+        crate::status::format_osd_audio_line(self.audio_underruns, via_pin)
+    }
 }
 
 /// ワーカースレッドと、UI スレッドが共有する読み取り専用のスナップショット。
@@ -240,6 +297,7 @@ impl DeviceWorker {
         frames: VideoFrames,
         color_conversion: Arc<SharedColorConversion>,
         audio_controls: Arc<AudioControls>,
+        audio_tap: AudioTap,
         repaint_waker: RepaintWaker,
     ) -> Self {
         let (command_tx, command_rx) = std::sync::mpsc::channel();
@@ -251,6 +309,7 @@ impl DeviceWorker {
             frames,
             color_conversion,
             audio_controls,
+            audio_tap,
             repaint_waker,
         };
         // 本番かフェイクか。環境変数を読むだけなので UI スレッドで決めてよい

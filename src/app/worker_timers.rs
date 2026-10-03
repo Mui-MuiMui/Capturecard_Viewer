@@ -1,5 +1,6 @@
-//! タイマーで駆動する監視。接続の再試行、フレームの途絶、音声ストリームの
-//! エラー、Windows の既定デバイスの切り替え、クロックドリフト補正。
+//! タイマーで駆動する監視。`tick` の入口、接続の再試行、フレームの途絶。
+//! 音声まわり（ストリームのエラー、Windows の既定デバイスの切り替え、
+//! クロックドリフト補正）は `super::worker_audio_timers` に置く。
 //!
 //! どれもデバイスワーカースレッド（`super::worker_loop`）の `tick` から
 //! 呼ばれ、そのスレッドの上でだけ走る。`WorkerState` に生やす形にしてあるのは
@@ -10,34 +11,11 @@
 //! 純粋関数が持つ。** ここはその結果を受けてデバイスを触る側と、
 //! 「いつ見に行くか」の間隔だけを持つ。
 
-use super::monitor::{
-    decide_audio_reconnect, decide_video_link, default_audio_device_changed,
-    should_poll_default_audio_device, AudioErrorAction, VideoLinkAction, VIDEO_SIGNAL_TIMEOUT,
-};
+use super::monitor::{decide_video_link, VideoLinkAction, VIDEO_SIGNAL_TIMEOUT};
 use super::worker::DeviceEvent;
 use super::worker_loop::WorkerState;
-use crate::audio::{self, AudioDirection};
-use log::{debug, info, warn};
-use std::time::{Duration, Instant};
-
-/// 音声のクロックドリフト補正（レート比の微調整）を行う間隔。
-///
-/// `tick` 自体は 100〜500ms ごとに回るが、補正はもっと粗くてよい。
-/// クロックのずれは秒単位でしか積もらないので、毎 tick 動かしても
-/// 得るものが無く、ログだけ増える。
-const RESAMPLE_CORRECTION_INTERVAL: Duration = Duration::from_secs(3);
-
-/// 水位が目標から大きく外れ続けているときの `warn` を間引く間隔。
-///
-/// 補正が追いつかない状態は一過性のこともあるため、連打せず数十秒に 1 回に留める。
-const RESAMPLE_WARN_INTERVAL: Duration = Duration::from_secs(30);
-
-/// この相対誤差（目標水位に対する比率）を超えたら「大きく外れている」とみなす。
-///
-/// 補正の上限は ±0.1% なので、通常のクロックドリフト（数十〜数百 ppm）は
-/// 吸収できる。それでもここまで外れるのは、デバイス側の極端なドリフトや
-/// バッファ長そのものが実情に合っていない可能性がある
-const RESAMPLE_WARN_RELATIVE_ERROR: f64 = 0.5;
+use log::{debug, info};
+use std::time::Instant;
 
 impl WorkerState {
     /// 期限が来ている接続を試し、稼働中のデバイスが生きているかを見る。
@@ -47,62 +25,12 @@ impl WorkerState {
         // 失敗が節目に届いた回もその場で判定できる
         self.log_device_enumeration();
         self.monitor_video_link();
-        self.monitor_audio_stream();
-        self.poll_default_audio_device();
+        // 映像の途絶を見たあとに置く。映像を閉じた回に、音声ピンの音声も同じ回で閉じる
+        self.monitor_audio_pin();
+        self.monitor_audio_stream(now);
+        self.poll_default_audio_device(now);
         self.adjust_resample_correction(now);
-    }
-
-    /// 音声のクロックドリフト補正。水位を見て、レート比の補正係数を
-    /// `RESAMPLE_CORRECTION_INTERVAL` ごとに動かす。
-    ///
-    /// **揃っている組み合わせ（identity）では何もしない。** `resample_telemetry`
-    /// は変換が要る場合しか作らないので、まだ音声を開いていない場合も含めて
-    /// ここで早期に諦める。
-    fn adjust_resample_correction(&mut self, now: Instant) {
-        let Some(telemetry) = self.audio.resample_telemetry() else {
-            return;
-        };
-
-        let due = self
-            .last_resample_correction
-            .map(|last| now.duration_since(last) >= RESAMPLE_CORRECTION_INTERVAL)
-            .unwrap_or(true);
-        if !due {
-            return;
-        }
-        self.last_resample_correction = Some(now);
-
-        let water_level = telemetry.water_level();
-        let target_level = telemetry.target_level();
-        // ここへ来る時点で identity ではないと分かっているので false 固定。
-        // 純粋関数側の identity 判定は主にテストのための引数
-        let ratio = audio::decide_resample_correction(false, water_level, target_level);
-        telemetry.set_correction(ratio);
-        if (ratio - 1.0).abs() > f32::EPSILON {
-            debug!(
-                "音声のリサンプル比を補正した: {:.5}（水位 {} / 目標 {}）",
-                ratio, water_level, target_level
-            );
-        }
-
-        if target_level == 0 {
-            return;
-        }
-        let relative_error = (water_level as f64 - target_level as f64).abs() / target_level as f64;
-        if relative_error < RESAMPLE_WARN_RELATIVE_ERROR {
-            return;
-        }
-        let should_warn = self
-            .last_resample_warn
-            .map(|last| now.duration_since(last) >= RESAMPLE_WARN_INTERVAL)
-            .unwrap_or(true);
-        if should_warn {
-            self.last_resample_warn = Some(now);
-            warn!(
-                "音声リングバッファの水位が目標から大きく外れている（水位 {}、目標 {}）。補正の上限（±0.1%）で追いつかない可能性がある",
-                water_level, target_level
-            );
-        }
+        self.log_audio_counters(now);
     }
 
     /// 期限が来ているデバイスの接続を 1 回だけ試す。
@@ -120,6 +48,8 @@ impl WorkerState {
             self.try_connect_video(&config, now);
         }
         if audio_due {
+            // 映像の試行のあとで初回の入力の既定が決まると、この場の設定が変わる（#394）
+            let config = self.config.clone().unwrap_or(config);
             self.try_connect_audio(&config, now);
         }
     }
@@ -198,131 +128,14 @@ impl WorkerState {
         self.video_retry.request_now(config.video);
         info!("映像デバイスの再接続を要求した");
     }
-
-    /// 音声ストリームのエラーを拾って、必要なら開き直す。
-    fn monitor_audio_stream(&mut self) {
-        let auto_reconnect = self
-            .config
-            .as_ref()
-            .map(|config| config.auto_reconnect)
-            .unwrap_or(true);
-
-        if self.audio.take_stream_error() {
-            // エラーの内容自体は audio::stream が error! で残している
-            warn!("音声ストリームのエラーを検出したので切断として扱う");
-            // **旗は読んだ時点で下りている。** ここへ移しておかないと、
-            // 自動再接続が無効な間や下限に達していない間のエラーが消え、
-            // 誰も開き直さないまま音が戻らなくなる
-            self.audio_stream_error_pending = true;
-        }
-
-        let since_last = self
-            .last_audio_error_reconnect
-            .map(|reconnected_at| reconnected_at.elapsed());
-        match decide_audio_reconnect(self.audio_stream_error_pending, auto_reconnect, since_last) {
-            // 保留しているエラーが無い / 保留したまま待つ。
-            // 毎回通るのでログは出さない
-            AudioErrorAction::Idle | AudioErrorAction::Wait => return,
-            AudioErrorAction::Reconnect => {}
-        }
-
-        let Some(config) = self.config.clone() else {
-            return;
-        };
-
-        self.audio.stop_capture();
-        self.audio_stream_error_pending = false;
-        self.last_audio_error_reconnect = Some(Instant::now());
-        self.last_audio_target = None;
-        self.audio_retry.request_now(config.audio);
-        info!("音声デバイスの再接続を要求した");
-    }
-
-    /// 「既定のデバイス」設定が、Windows 側の既定切り替えに追従しているかを
-    /// 確認する。内部でタイマーを見て `DEFAULT_AUDIO_DEVICE_POLL_INTERVAL`
-    /// おきにしか動かない（#135）。
-    ///
-    /// cpal は WASAPI の `IMMNotificationClient` を公開しておらず、既定
-    /// デバイスの切り替えを通知では受け取れない。`default_input_device()` /
-    /// `default_output_device()` を都度問い合わせて名前を突き合わせるしかない。
-    fn poll_default_audio_device(&mut self) {
-        let elapsed = self.last_default_audio_check.map(|last| last.elapsed());
-        if !should_poll_default_audio_device(elapsed) {
-            return;
-        }
-        self.last_default_audio_check = Some(Instant::now());
-
-        // 既に音声の再接続を追いかけている最中なら何もしない。ストリームの
-        // エラーや映像復帰による再接続と要求が重なるのを防ぐ
-        if self.audio_retry.is_active() {
-            return;
-        }
-
-        let Some(config) = self.config.clone() else {
-            return;
-        };
-        let (configured_input, configured_output, ..) = config.audio.clone();
-        let track_input = configured_input.is_none();
-        let track_output = configured_output.is_none();
-        if !track_input && !track_output {
-            // 入出力とも明示的にデバイスを選んでいるので、追いかける対象が無い
-            return;
-        }
-
-        // まだ何も開けていない（起動直後・再接続中）なら、開いた時点の名前が
-        // 無いので比べようがない
-        let Some(active) = self.audio.active() else {
-            return;
-        };
-
-        let input_switched = track_input
-            && default_audio_device_changed(
-                configured_input.as_deref(),
-                &active.input_device,
-                self.audio.default_input_device_name().as_deref(),
-            );
-        let output_switched = track_output
-            && default_audio_device_changed(
-                configured_output.as_deref(),
-                &active.output_device,
-                self.audio.default_output_device_name().as_deref(),
-            );
-        if !input_switched && !output_switched {
-            return;
-        }
-
-        info!(
-            "Windows 側の既定音声デバイスが切り替わったので再接続する（入力: {}, 出力: {}）",
-            input_switched, output_switched
-        );
-
-        // 「既定のデバイス」のキャッシュキーは切り替わっても同じ文字列
-        // （`DEFAULT_DEVICE_KEY`）のままなので、古い物理デバイスの対応設定が
-        // 残ってしまう。取り直さないと、新しい既定デバイスが対応しない
-        // サンプリングレートやチャンネル数のまま開こうとしうる
-        let default_key = audio::cache_key(None);
-        if input_switched {
-            self.audio_capabilities
-                .remove(&(AudioDirection::Input, default_key.clone()));
-        }
-        if output_switched {
-            self.audio_capabilities
-                .remove(&(AudioDirection::Output, default_key));
-        }
-
-        self.audio.stop_capture();
-        self.last_audio_target = None;
-        self.audio_retry.request_now(config.audio);
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::backend::mock::{MockAudioBackend, MockVideoBackend};
-    use super::super::worker_loop::testing::{
-        apply_config, config_for, drain, mock_state, state_with,
-    };
+    use super::super::worker_loop::testing::{apply_config, config_for, drain, mock_state};
     use super::*;
+    use std::time::Duration;
 
     // どのテストもモックのバックエンド（`super::super::backend::mock`）を載せ、
     // スレッドを起こさずに `tick` を直接呼ぶ。渡す時刻は自分で進めるので、
@@ -524,114 +337,69 @@ mod tests {
         assert!(!state.video_retry.is_active(), "再試行を要求しないこと");
     }
 
-    #[test]
-    fn worker_audio_stream_error_reopens_the_passthrough() {
-        // cpal のエラーコールバックが旗を立てた場合。ワーカーが回収して開き直す
-        let video = MockVideoBackend::default();
-        let audio = MockAudioBackend::default();
-        let (mut state, events) = mock_state(&video, &audio);
-
-        // 映像は未設定にして、音声だけを動かす
-        let mut config = config_for(None, Some("モック入力"));
-        config.auto_reconnect = true;
-        apply_config(&mut state, config, false);
-
-        let base = Instant::now();
-        state.tick(base);
-        assert_eq!(audio.with(|state| state.start_calls), 1, "まず繋がること");
-        drain(&events);
-
-        audio.with(|state| state.stream_error = true);
-        state.tick(base + Duration::from_millis(100));
-        assert_eq!(
-            audio.with(|state| state.stop_calls),
-            1,
-            "エラーを拾ったらストリームを閉じること"
-        );
-
-        // 映像と同じく、接続に成功してから 1 秒は開き直さない（#232）
-        state.tick(base + Duration::from_millis(200));
-        assert_eq!(
-            audio.with(|state| state.start_calls),
-            1,
-            "成功から 1 秒の下限までは開き直さないこと"
-        );
-
-        state.tick(base + Duration::from_secs(1));
-        assert_eq!(
-            audio.with(|state| state.start_calls),
-            2,
-            "閉じたあと開き直すこと"
-        );
+    /// 映像の失敗の理由を、届いた順に取り出す。
+    fn video_failures(events: &[DeviceEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::VideoFailed(reason) => Some(reason.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
-    fn worker_picks_up_fake_audio_error_scenario_and_reopens() {
-        // フェイクの音声（シナリオ audio-error）が立てたエラーを、本物の cpal の
-        // エラーと同じ経路で拾って開き直す。フェイクの時計を `tick` へ渡す時刻と
-        // 揃え、実時間を待たずに期限を跨ぐ
-        use crate::audio::{AudioControls, FakeAudioCapture, FakeAudioOptions};
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use std::sync::Arc;
-
-        let base = Instant::now();
-        let elapsed_ms = Arc::new(AtomicU64::new(0));
-        let clock = {
-            let elapsed_ms = Arc::clone(&elapsed_ms);
-            move || base + Duration::from_millis(elapsed_ms.load(Ordering::Relaxed))
-        };
-        let at = |ms: u64| {
-            elapsed_ms.store(ms, Ordering::Relaxed);
-            base + Duration::from_millis(ms)
-        };
-
-        let after = Duration::from_secs(5);
-        let audio = FakeAudioCapture::new(
-            Arc::new(AudioControls::default()),
-            FakeAudioOptions {
-                input_count: 1,
-                failures_before_success: 0,
-                stream_error_after: Some(after),
-            },
-        )
-        .with_clock(Arc::new(clock));
+    fn worker_closes_the_video_stream_after_the_device_is_cleared() {
+        // 設定の初期化・読み込みで映像デバイスが未指定になったら、開いている
+        // ストリームを閉じる（#334）。閉じないと古い映像が映り続けたまま、
+        // 設定の表示だけが「未選択」になる
         let video = MockVideoBackend::default();
-        let (mut state, events) = state_with(Box::new(video), Box::new(audio));
+        let audio = MockAudioBackend::default();
+        let (mut state, events) = mock_state(&video, &audio);
+        let selected = config_for(Some("キャプチャーボード"), None);
+        apply_config(&mut state, selected.clone(), false);
+        let base = Instant::now();
+        state.tick(base);
+        assert!(video.with(|state| state.capturing));
+        drain(&events);
 
-        let mut config = config_for(None, Some("Fake Audio Input 1"));
-        config.auto_reconnect = true;
-        apply_config(&mut state, config, false);
+        // 「設定を初期化」→「適用」。映像デバイスが未指定になって届く
+        let cleared = config_for(None, None);
+        apply_config(&mut state, cleared.clone(), false);
+        state.tick(base + Duration::from_secs(2));
 
-        state.tick(at(0));
+        assert_eq!(video.with(|state| state.start_calls), 1, "開き直さないこと");
         assert!(
-            drain(&events)
+            !video.with(|state| state.capturing),
+            "ストリームを閉じること"
+        );
+        assert!(!state.video_retry.is_active(), "再試行も続けないこと");
+        let after_clear = drain(&events);
+        assert!(
+            after_clear
                 .iter()
-                .any(|event| matches!(event, DeviceEvent::AudioConnected)),
-            "まず繋がること"
+                .any(|event| matches!(event, DeviceEvent::VideoSignalLost)),
+            "最後のフレームを画面から落とすこと"
         );
-        state.tick(at(4_900));
+        let reasons = video_failures(&after_clear);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
         assert!(
-            state.last_audio_error_reconnect.is_none(),
-            "期限前は開き直さないこと"
+            reasons[0].contains("映像デバイスが選ばれていません"),
+            "{reasons:?}"
         );
 
-        state.tick(at(5_000));
-        assert!(
-            state.last_audio_error_reconnect.is_some(),
-            "エラーを拾って再接続を積むこと"
-        );
+        // 2 秒ごとの `apply_settings` で同じ設定が届いても、通知を繰り返さない
+        for step in 2..6 {
+            apply_config(&mut state, cleared.clone(), false);
+            state.tick(base + Duration::from_secs(2) * step);
+        }
+        assert_eq!(video.with(|state| state.stop_calls), 1);
+        assert!(video_failures(&drain(&events)).is_empty());
 
-        state.tick(at(5_300));
-        assert!(
-            drain(&events)
-                .iter()
-                .any(|event| matches!(event, DeviceEvent::AudioConnected)),
-            "開き直して繋がること"
-        );
-        // 開き直した時刻から数え直す。元の期限の倍ではまだ立たない
-        at(10_000);
-        assert!(!state.audio.take_stream_error(), "開き直したら数え直すこと");
-        at(10_400);
-        assert!(state.audio.take_stream_error(), "新しい期限で立つこと");
+        // 映像デバイスを選び直せば、また開く
+        apply_config(&mut state, selected, false);
+        state.tick(base + Duration::from_secs(20));
+        assert_eq!(video.with(|state| state.start_calls), 2);
+        assert!(video.with(|state| state.capturing));
     }
 }

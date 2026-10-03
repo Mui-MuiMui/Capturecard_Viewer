@@ -65,12 +65,28 @@ texts! {
     HeadlineVideo { ja: "映像デバイスに接続できません", en: "Cannot connect to the video device" },
     HeadlineAudio { ja: "音声デバイスに接続できません", en: "Cannot connect to the audio device" },
     HeadlineScreenshot { ja: "スクリーンショットを出力できません", en: "Cannot output the screenshot" },
+    HeadlineScreenshotSound { ja: "効果音を再生できません", en: "Cannot play the screenshot sound" },
     HeadlineHotkey { ja: "ホットキーを登録できません", en: "Cannot register the hotkey" },
     HeadlineSettings { ja: "設定ファイルを読み書きできません", en: "Cannot read or write the settings file" },
     HeadlineUpdate { ja: "更新できません", en: "Cannot update" },
+    HeadlineRecording { ja: "録画できません", en: "Cannot record" },
 
     // ---- エラーの文言（各エラー enum の Display） ----
     VideoNoDevices { ja: "映像デバイスが 1 台も見つからない", en: "No video devices found" },
+    // ワーカーが映像デバイスの未指定でストリームを閉じたときの理由（app/worker_connect.rs、#334）
+    VideoDeviceNotSelected { ja: "映像デバイスが選ばれていません。「デバイス設定」タブで選んでください", en: "No video device is selected. Choose one in the Devices tab" },
+    // ワーカーが入力の未指定で音声を開かないときの理由（app/worker_connect.rs、#304）
+    AudioInputNotSelected { ja: "オーディオ入力デバイスが選ばれていません。「デバイス設定」タブで選んでください", en: "No audio input device is selected. Choose one in the Devices tab" },
+    // 入力が映像デバイスの音声ピンなのに使えず、音声を開かずに待つ理由（app/monitor_audio_pin.rs、#388）。
+    // 設定ダイアログの選べない理由にも出るので「DirectShow」「音声ピン」の語を使わない（#409）
+    AudioPinVideoNotOpen { ja: "映像デバイスが開いていないので、映像デバイスの音声は使えません", en: "The video device is not open, so its audio cannot be used" },
+    AudioPinMediaFoundation { ja: "いまの映像の開き方では、映像デバイスの音声を使えません。「デバイス設定」タブの「映像の開き方」を「DirectShow」にすると使えます", en: "The video device's audio is not available with the current way of opening the video. Set \"Open video with\" to \"DirectShow\" in the Devices tab to use it" },
+    AudioPinMissing { ja: "この映像デバイスからは音声を受け取れません", en: "This video device does not provide audio" },
+    AudioPinNotConnected { ja: "映像デバイスの音声を使うために、映像デバイスを開き直すのを待っています", en: "Waiting for the video device to reopen so that its audio can be used" },
+    // 音声ピンの入力で開こうとしたが、繋いだ音声ピンが無かった（audio::AudioError::VideoPinUnavailable）
+    AudioPinUnavailable { ja: "映像デバイスの音声がつながっていないので、音声を開けません", en: "The video device's audio is not connected, so audio cannot be opened" },
+    // 自動再接続が無効な間に音声ストリームがエラーで止まったときの理由（app/worker_timers.rs、#310）
+    AudioStreamStoppedWithoutReconnect { ja: "音声ストリームがエラーで止まりました。自動再接続が無効なので、右クリックメニューの「デバイス再接続」で開き直してください", en: "The audio stream stopped with an error. Automatic reconnection is off, so use Reconnect devices in the right-click menu" },
     DeviceNotVisibleNoDevices { ja: "Windows 側にもデバイスが見えていない可能性があります（1 台も見えていません）。デバイスマネージャーで接続を確認してください", en: "Windows may not see the device either (no devices are visible). Check the connection in Device Manager" },
     HotkeyMultipleKeys { ja: "通常キーを 2 つ以上は指定できません", en: "Only one non-modifier key can be specified" },
     HotkeyMissingKey { ja: "通常キーが指定されていません", en: "No non-modifier key is specified" },
@@ -89,6 +105,7 @@ texts! {
     UpdateChecksumMissing { ja: "SHA256SUMS.txt に exe の行が無い", en: "SHA256SUMS.txt has no line for the exe" },
     UpdateChecksumMismatch { ja: "ダウンロードした exe の SHA-256 が SHA256SUMS.txt と合わない", en: "The SHA-256 of the downloaded exe does not match SHA256SUMS.txt" },
     UpdateCancelled { ja: "キャンセルした", en: "Cancelled" },
+    UpdateThreadEnded { ja: "更新のスレッドが結果を返さずに終わった", en: "The update thread ended without a result" },
 
     // ---- ホットキーのアクション名（HotkeyAction::label） ----
     ActionScreenshot { ja: "スクリーンショット", en: "Screenshot" },
@@ -98,6 +115,7 @@ texts! {
     ActionVolumeUp { ja: "音量を上げる", en: "Volume up" },
     ActionVolumeDown { ja: "音量を下げる", en: "Volume down" },
     ActionToggleMute { ja: "ミュート切替", en: "Toggle mute" },
+    ActionToggleRecording { ja: "録画の開始・停止", en: "Start / stop recording" },
 
     // ---- 色空間・色レンジ（settings::ColorSpace / ColorRange の label） ----
     ColorSpaceAuto { ja: "自動（解像度から判断）", en: "Auto (based on resolution)" },
@@ -125,6 +143,7 @@ texts! {
     ResampleIdentity { ja: "変換なし", en: "No conversion" },
     WaterLevelUnknown { ja: "不明", en: "unknown" },
     UnderrunUnknown { ja: "アンダーラン: -", en: "Underruns: -" },
+    DroppedFramesUnknown { ja: "満杯で捨てた: -", en: "Dropped (buffer full): -" },
     LinkConnected { ja: "接続中", en: "Connected" },
     LinkReconnecting { ja: "未接続（再接続を試しています）", en: "Disconnected (trying to reconnect)" },
     LinkDisconnected { ja: "未接続", en: "Disconnected" },
@@ -133,6 +152,7 @@ texts! {
     SettingsTitle { ja: "設定", en: "Settings" },
     TabDevice { ja: "デバイス設定", en: "Devices" },
     TabScreenshot { ja: "スクリーンショット設定", en: "Screenshots" },
+    TabRecording { ja: "録画", en: "Recording" },
     Hotkeys { ja: "ホットキー", en: "Hotkeys" },
     TabOther { ja: "その他", en: "Other" },
     TabStatus { ja: "接続状態", en: "Connection status" },
@@ -168,6 +188,13 @@ texts! {
     SaturationHint { ja: "色の濃さを強く（＋）または弱く（－）します。-100 で白黒になります", en: "Makes colors more (+) or less (-) vivid. At -100 the picture becomes black and white" },
     AudioSettings { ja: "オーディオ設定", en: "Audio" },
     AudioInputDevice { ja: "オーディオ入力デバイス", en: "Audio input device" },
+    // 「オーディオ入力デバイス」の先頭の項目（ui/audio_input.rs、#394）。ふだんは映像デバイスの
+    // 名前を項目名にし、これは名前が無いときだけ出す（#409）。設定に残るのは `video_pin` で、
+    // これは表示だけの文言なので翻訳してよい（docs/design/directshow-audio.md の (5)）
+    AudioInputVideoPin { ja: "映像デバイスの音声", en: "Video device audio" },
+    // 項目名の接頭辞。後ろに半角空白と映像デバイス名が付く
+    AudioInputVideoPinLinked { ja: "[映像デバイスと連動]", en: "[Linked to video device]" },
+    AudioInputVideoPinHint { ja: "この映像デバイスが受け取っている音声（HDMI などの音声）をそのまま使います", en: "Uses the audio that this video device receives (such as HDMI audio)" },
     AudioOutputDevice { ja: "オーディオ出力デバイス", en: "Audio output device" },
     DefaultDevice { ja: "デフォルト", en: "Default" },
     SampleRateLabel { ja: "サンプリングレート:", en: "Sample rate:" },
@@ -179,7 +206,7 @@ texts! {
     ChannelStereo { ja: "2（ステレオ）", en: "2 (stereo)" },
     ChannelsFixedByDevice { ja: "このデバイスの組み合わせでは 1 つしか選べません（Windows の共有モードではデバイスのミックスフォーマットに固定されます）", en: "Only one choice is available for this device combination (Windows shared mode fixes it to the device's mix format)" },
     AudioBufferLabel { ja: "音声バッファ:", en: "Audio buffer:" },
-    AudioBufferHint { ja: "小さいほど低遅延だがノイズが出やすい（既定: 50 ms）", en: "Smaller means lower latency but more likely to crackle (default: 50 ms)" },
+    AudioBufferHint { ja: "この長さがそのまま音声の遅延になる。小さいほど低遅延だがノイズが出やすい（既定: 50 ms）", en: "This length becomes the audio delay. Smaller means lower latency but more likely to crackle (default: 50 ms)" },
     PassthroughLabel { ja: "音声パススルー:", en: "Audio passthrough:" },
     Enabled { ja: "有効", en: "Enabled" },
     PassthroughDisabledWarning { ja: "音声パススルーが無効です（音は出力されません）", en: "Audio passthrough is disabled (no sound will be output)" },
@@ -221,6 +248,8 @@ texts! {
     ButtonClear { ja: "クリア", en: "Clear" },
     HotkeyModifiersOnly { ja: "修飾キーだけでは登録できません", en: "Modifier keys alone cannot be registered" },
     HotkeyCaptureWaiting { ja: "キー入力待機中...", en: "Waiting for keys..." },
+    HotkeyClipboardCommand { ja: "コピー・切り取り・貼り付けになるキー（Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+Insert / Shift+Insert / Shift+Delete）はここでは割り当てられません", en: "Keys that act as copy, cut, or paste (Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+Insert / Shift+Insert / Shift+Delete) cannot be assigned here" },
+    HotkeyNavigationKeyHint { ja: "Tab・矢印・Home・End・PageUp・PageDown を修飾キーなしで割り当てると、このアプリが前面にある間はそのキーを画面のキー操作（フォーカスの移動など）に使えなくなります。Ctrl などとの組み合わせをおすすめします。", en: "If you assign Tab, an arrow key, Home, End, PageUp, or PageDown without a modifier, that key can no longer be used for keyboard navigation in this app (such as moving focus) while the app is in front. Combining it with Ctrl or another modifier is recommended." },
 
     // ---- 「その他」タブとプリセット（ui/other_tab.rs / ui/preset.rs） ----
     // 日本語の見出しにも英語を添える。読めない言語へ切り替えてしまっても、
@@ -259,6 +288,8 @@ texts! {
     // ---- 「接続状態」タブ（ui/status_tab.rs） ----
     LinkVideo { ja: "映像", en: "Video" },
     LinkAudio { ja: "音声", en: "Audio" },
+    // 直近の失敗があるときだけ出す枠の見出し（Issue #356）
+    LinkScreenshotSound { ja: "スクリーンショットの効果音", en: "Screenshot sound" },
     StatusReadOnlyHint { ja: "この内容は表示だけで、「適用」や「OK」では変わりません。", en: "This tab is for information only. Apply and OK do not change it." },
     StatusLogHint { ja: "詳しい経過はログファイルに残っています（%AppData%\\capturecard_viewer\\logs）。", en: "Details are recorded in the log files (%AppData%\\capturecard_viewer\\logs)." },
     FakeDevicesNotice { ja: "テスト用のフェイクデバイスで動いています（環境変数 CAPTURECARD_VIEWER_FAKE_DEVICES）", en: "Running with fake test devices (environment variable CAPTURECARD_VIEWER_FAKE_DEVICES)" },
@@ -281,6 +312,8 @@ texts! {
     MenuResetWindowSizeDisabledHint { ja: "フルスクリーン中は変更できません", en: "Not available in fullscreen" },
     MenuAdvancedSettings { ja: "詳細設定...", en: "Settings..." },
     MenuQuit { ja: "終了", en: "Quit" },
+    MenuStartRecording { ja: "録画を開始", en: "Start recording" },
+    MenuRecordingFinishing { ja: "録画を保存しています...", en: "Saving the recording..." },
     // サブメニューを開く項目。矢印は項目名の一部として訳ごとに持つ
     MenuViewSubmenu { ja: "表示  ⏵", en: "View  ⏵" },
     MenuWindowSubmenu { ja: "ウィンドウ  ⏵", en: "Window  ⏵" },
@@ -331,6 +364,30 @@ texts! {
     UpdateClearSkipped { ja: "解除", en: "Clear" },
     UpdateHint { ja: "確認は GitHub の Release へ問い合わせるだけです。「更新する」で新しいバージョンをダウンロードし、exe と同じフォルダで置き換えて再起動します。", en: "Checking only asks GitHub Releases. Update downloads the new version, replaces the exe in its folder, and restarts." },
     UpdateDraftHint { ja: "チェックと「解除」は「適用」か「OK」で反映します。", en: "The checkboxes and Clear take effect when you press Apply or OK." },
+
+    // ---- 録画（recording/ / app/recording.rs） ----
+    RecordingNoVideo { ja: "映像が届かなかったので、ファイルを作りませんでした", en: "No video arrived, so no file was created" },
+    RecordingEncoderNotFound { ja: "エンコーダが登録されていない", en: "No encoder is registered" },
+    RecordingThreadStopped { ja: "録画スレッドが止まっている", en: "The recording thread has stopped" },
+    RecordingFileNameEmpty { ja: "ファイル名の書式が空です", en: "The file name format is empty" },
+    RecordingFileNameInvalidSpecifier { ja: "ファイル名の書式に使えない指定子（% で始まるもの）が含まれています", en: "The file name format contains an unknown % specifier" },
+    RecordingFileNameTrailingDot { ja: "ファイル名の末尾を空白や「.」にはできません", en: "A file name cannot end with a space or a period" },
+    RecordingFileNameGroup { ja: "ファイル名", en: "File name" },
+    RecordingFileNameFormatLabel { ja: "書式:", en: "Format:" },
+    RecordingFileNameHint { ja: "日時は chrono の書式（%Y 年、%m 月、%d 日、%H 時、%M 分、%S 秒）で書きます。拡張子（.mp4）は自動で付きます。\n同じ名前のファイルがあれば _2、_3 … を付けます。使えない書式なら既定の書式で保存します。", en: "Write the date and time with chrono specifiers (%Y year, %m month, %d day, %H hour, %M minute, %S second). The .mp4 extension is added automatically.\nIf a file with the same name exists, _2, _3, ... is appended. An invalid format falls back to the default." },
+    RecordingBitrateLabel { ja: "ビットレート:", en: "Bitrate:" },
+    RecordingHardwareEncoder { ja: "ハードウェアエンコーダを使う", en: "Use a hardware encoder" },
+    RecordingVideoHint { ja: "H.264 の MP4 で保存します。ハードウェアエンコーダ（GPU）が使えなければ、ソフトウェアのエンコーダで保存します。\n使ったエンコーダの名前は、録画中の情報表示に出ます。", en: "Recordings are saved as H.264 MP4. If no hardware (GPU) encoder is available, the software encoder is used.\nThe encoder in use is shown in the stats overlay while recording." },
+    RecordingAudioEnabled { ja: "音声も録画する", en: "Record audio" },
+    RecordingAudioHint { ja: "音声入力の音を AAC（48kHz 2ch）で保存します。音量・ミュート・パススルーの設定は録画に効きません（入力の音をそのまま録ります）。\n音声デバイスが無い・開けない間は無音が入ります。", en: "Audio from the audio input is saved as AAC (48 kHz, stereo). Volume, mute, and passthrough do not affect the recording (the input is recorded as is).\nWhile no audio device is available, silence is recorded." },
+    RecordingAudioOffsetLabel { ja: "映像と音声のずれの補正:", en: "Audio offset:" },
+    RecordingAudioOffsetHint { ja: "正の値で音声を遅らせ、負の値で早めます（±200ms、既定 0）。録画の音声が映像より遅れて聞こえるなら負の値にします。\n負の値では録画の先頭の音声がその分削られ、正の値では先頭にその分の無音が入ります。リプレイバッファにも効きます（変えると溜めた分は捨てて溜め直します）。録画中に変えたときは次の録画から効きます。", en: "Positive values delay the audio and negative values advance it (±200 ms, default 0). If the recorded audio is heard later than the video, use a negative value.\nA negative value trims that much audio from the start of the recording; a positive value adds that much silence at the start. It also applies to the replay buffer (changing it discards the buffered footage). Changes made while recording take effect from the next recording." },
+    RecordingTabHint { ja: "録画の開始と停止は、右クリックメニューかホットキー（「録画の開始・停止」）で行います。\n変更は次の録画から効きます（リプレイバッファの ON / OFF と長さはすぐ効きます。ただし録画中に ON にしたときは、その録画が終わってから溜め始めます）。", en: "Start and stop recording from the right-click menu or with the Start / stop recording hotkey.\nChanges take effect from the next recording (the replay buffer switch and length take effect immediately, except that turning it on during a recording starts buffering after that recording ends)." },
+    RecordingReplayGroup { ja: "リプレイバッファ（さかのぼり録画）", en: "Replay buffer" },
+    RecordingReplayEnabled { ja: "録画の開始時に、直前の映像と音声を含める", en: "Include the footage just before the recording starts" },
+    RecordingReplaySecondsLabel { ja: "さかのぼる長さ:", en: "Length:" },
+    RecordingReplayMemoryNotice { ja: "長くするほどメモリを使います（映像 8000kbps で 5 分なら約 300MB。ビットレートに比例して増えます）。", en: "Longer lengths use more memory (about 300 MB for 5 minutes at 8000 kbps video; it grows with the bitrate)." },
+    RecordingReplayHint { ja: "ON のあいだは録画していなくてもエンコーダが動き、直近の映像と音声をメモリに持ちます。録画を始めると、その分をファイルの先頭に入れます（2 秒ごとのキーフレームの位置から）。\nON にしたときから溜め始めます。映像のビットレートやエンコーダ、音声の設定を変えると、溜めた分は捨てて溜め直します。", en: "While on, the encoder runs even when not recording and keeps the latest video and audio in memory. When you start recording, that footage is placed at the beginning of the file (from a keyframe, every 2 seconds).\nBuffering starts when you turn it on. Changing the video bitrate, encoder, or audio settings discards the buffered footage and starts over." },
 }
 
 #[cfg(test)]

@@ -34,7 +34,7 @@ PR タイトルは `naming-conventions` skill の「PR タイトル」に従う�
 `~/.claude/skills/github-issues/SKILL.md` に従って、Issue へ PR の URL をコメントする。
 
 - ブランチ名と変更の要点を添える
-- **「人間が dev で確認すること」を箇条書きで書く。** マージ後にこれが確認の手順になる
+- 人の感覚か Claude の環境に無い機器・状況が要る場合だけ、「人が確かめること」を 3 行以内で書き、どの環境で見るかを添える（基準は `naming-conventions` skill の「Issue を閉じる基準」）
 - Issue の一部だけを実装した PR なら、その旨と残りのスコープを明記する
 - 対応する Issue がない場合は、ここで起票するか確認する
 
@@ -78,6 +78,18 @@ CodeRabbit の指摘も鵜呑みにせず妥当性を判断する。このリポ
 
 対応内容を PR にコメントする。指摘に対して何をどう変えたか、直さなかった場合はその理由を書く。
 
+**返信したらそのスレッドを Resolve する。** 直したもの、直さない理由を書いたもの、別 Issue に回したもの（Issue 番号を書く）のいずれも、返信だけで放置しない。**例外は判断待ちのスレッド。** 「直すか直さないかを確認中」と返信したものは Resolve せず、判断が出てから結果を返信して Resolve する。判断待ちのまま Resolve すると、未決の指摘がマージ条件を素通りする。`main` と `dev` はルールセットで「レビュースレッドが全て解決されていること」をマージの条件にしているので、未解決のスレッドが 1 つでも残っていると `gh pr merge` も UI のマージも通らない。
+
+未解決のスレッドの一覧と Resolve は GraphQL で行う。 1 回で取れるのは 100 件まで（GraphQL の上限）。この上限を超える PR はこのリポジトリでは出ないはずで、出たら `pageInfo{hasNextPage endCursor}` を足して `after:` で続きを取る。
+
+```bash
+gh api graphql -f query='{repository(owner:"Mui-MuiMui",name:"Capturecard_Viewer"){pullRequest(number:<番号>){reviewThreads(first:100){nodes{id isResolved path}}}}}' --jq '.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)|"\(.id) \(.path)"'
+```
+
+```bash
+gh api graphql -f query='mutation{resolveReviewThread(input:{threadId:"<id>"}){thread{isResolved}}}'
+```
+
 PR の題意が変わった場合はタイトルと本文も更新する。
 
 ### 5. Issue へ反映する
@@ -90,9 +102,7 @@ PR の題意が変わった場合はタイトルと本文も更新する。
 
 1. `dev` を同期する
 2. worktree とブランチを削除する（ローカルとリモートの両方）
-3. Project の Status を「人間確認待ち」にする。**部分実装だった場合は変えず、残りをコメントして「作業中」のままにする**
-
-**Issue は閉じない。** 閉じるのは人が実機で確認したとき。
+3. Issue を閉じるか、Status を「人間確認待ち」にする（基準は `naming-conventions` skill の「Issue を閉じる基準」）。**部分実装だった場合は変えず、残りをコメントして「作業中」のままにする**
 
 具体的なコマンドは `naming-conventions` skill の「PR を出したあとにやること」を参照。
 
@@ -102,4 +112,4 @@ PR の題意が変わった場合はタイトルと本文も更新する。
 - auto-merge の有効化
 - `main` へ直接 PR を出す（リリース時を除く）
 - push 済み履歴の force push
-- **Issue を閉じる**（PR 本文に `Closes` を書いて自動で閉じさせることも含む）
+- PR 本文やコミットに `Closes` を書いて Issue を自動で閉じさせる

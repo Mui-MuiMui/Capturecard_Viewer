@@ -10,29 +10,41 @@
 //!
 //! | ファイル | 役割 |
 //! |---|---|
+//! | `audio_input.rs` | 「オーディオ入力デバイス」のコンボボックス（「映像デバイスの音声」と WASAPI のデバイス）と、選べるか（`VideoPinChoice`） |
 //! | `capability.rs` | デバイス能力のキャッシュと、そこから作る選択肢まわりの表示 |
 //! | `state.rs` | `SettingsDialogState`（ドラフトの保持と操作の受け止め） |
-//! | `draft.rs` | ドラフトの反映・読み込み・初期化 |
+//! | `draft.rs` | ドラフトの反映（`commit_draft`） |
+//! | `draft_import.rs` | 読み込みと初期化でドラフトを作る（`draft_from_imported` / `draft_from_defaults`） |
 //! | `preset.rs` | プリセットの保存・読み込み・削除（描画を含まない） |
 //! | `video_mode.rs` | デバイス切り替え時に選び直すビデオの既定値 |
 //! | `device_tab.rs` | 「デバイス設定」タブ |
 //! | `screenshot_tab.rs` | 「スクリーンショット設定」タブ |
+//! | `recording_tab.rs` | 「録画」タブ |
 //! | `hotkeys_tab.rs` | 「ホットキー」タブ |
 //! | `hotkey_capture.rs` | ホットキー入力ダイアログ |
+//! | `hotkey_keys.rs` | 入力ダイアログが使うキーの対応表、割り当てさせない組み合わせ、ホットキー文字列の組み立て |
 //! | `other_tab.rs` | 「その他」タブ |
 //! | `status_tab.rs` | 「接続状態」タブ |
 //! | `update_dialog.rs` | 新しい版を知らせ、更新の進み具合を出すダイアログ |
+//! | `testing.rs` | ウィジェットのテスト（egui_kittest）の組み立て。テストを含むビルドだけ |
 
+mod audio_input;
 mod capability;
 mod device_tab;
 mod draft;
+mod draft_import;
 mod hotkey_capture;
+mod hotkey_keys;
 mod hotkeys_tab;
 mod other_tab;
 mod preset;
+mod recording_tab;
 mod screenshot_tab;
 mod state;
 mod status_tab;
+// ウィジェットのテスト（egui_kittest、#419）の組み立て。テストを含むビルドだけ
+#[cfg(test)]
+mod testing;
 mod update_dialog;
 mod video_mode;
 
@@ -43,8 +55,9 @@ mod video_mode;
 // なので、誰も使わない再輸出は `unused_imports` の警告になる。
 // `commit_draft` や `select_default_video_mode` のような項目は、使う側が
 // 子モジュールの経路（`self::draft::commit_draft`）で参照する
+pub use self::audio_input::VideoPinChoice;
 pub use self::capability::{AudioCapabilityCache, VideoCapabilityKey};
-pub use self::draft::{draft_from_defaults, draft_from_imported};
+pub use self::draft_import::{draft_from_defaults, draft_from_imported};
 pub use self::hotkey_capture::{show_hotkey_capture_dialog, HotkeyDialogEvent};
 pub use self::preset::PresetRowAction;
 pub use self::state::{resolve_action, SettingsDialogState, SettingsDialogView};
@@ -53,6 +66,7 @@ pub use self::update_dialog::{show_update_dialog, UpdateDialogEvent, UpdateDialo
 use self::device_tab::show_device_settings_tab;
 use self::hotkeys_tab::show_hotkey_settings_tab;
 use self::other_tab::show_other_tab;
+use self::recording_tab::show_recording_settings_tab;
 use self::screenshot_tab::show_screenshot_settings_tab;
 use self::status_tab::show_status_tab;
 
@@ -143,6 +157,8 @@ pub enum SettingsEvent {
     OpenHotkeyCapture(HotkeyAction),
     /// スクリーンショットの保存フォルダーをファイルダイアログで選ぶ
     PickScreenshotFolder,
+    /// 録画の保存先をファイルダイアログで選ぶ
+    PickRecordingFolder,
     /// 効果音のファイルをファイルダイアログで選ぶ
     PickSoundFile,
     /// デバイス能力のキャッシュに対する要求
@@ -238,14 +254,14 @@ const NOTICE_STROKE_FACTOR: f32 = 0.55;
 /// 注意書きと状態表示を入れる枠。
 fn notice_frame(ui: &egui::Ui, kind: NoticeKind) -> egui::Frame {
     let accent = kind.accent(ui.visuals());
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(accent.gamma_multiply(NOTICE_FILL_FACTOR))
         .stroke(egui::Stroke::new(
             1.0_f32,
             accent.gamma_multiply(NOTICE_STROKE_FACTOR),
         ))
-        .rounding(egui::Rounding::same(4.0))
-        .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(6, 3))
 }
 
 /// 種別を指定して注意書きを描く。失敗なら `NoticeKind::Error` を渡す。
@@ -259,7 +275,9 @@ fn notice_label(ui: &mut egui::Ui, kind: NoticeKind, text: impl Into<String>) {
 }
 
 /// 続行できるが想定と違うことを伝える。設定ダイアログの注意書きはほぼこれ。
-fn warning_label(ui: &mut egui::Ui, text: impl Into<String>) {
+///
+/// 設定ダイアログの外では、映像の上に出すフェイクデバイスの帯（#252）も使う。
+pub(crate) fn warning_label(ui: &mut egui::Ui, text: impl Into<String>) {
     notice_label(ui, NoticeKind::Warning, text);
 }
 
@@ -274,7 +292,7 @@ fn status_badge(ui: &mut egui::Ui, text: &str, kind: NoticeKind) {
 
 /// 設定ダイアログのタブ。
 ///
-/// 並びはデバイス設定 / スクリーンショット設定 / ホットキー / その他 / 接続状態。
+/// 並びはデバイス設定 / スクリーンショット設定 / 録画 / ホットキー / その他 / 接続状態。
 /// 「接続状態」を最後に置き、既定は「デバイス設定」のままにしてある。
 /// ダイアログを開く主な目的は設定の変更で、状態の確認は調べたいときだけ
 /// だからで、先頭に置くと毎回そこを通ることになる。
@@ -283,6 +301,8 @@ pub enum SettingsTab {
     #[default]
     Device,
     Screenshot,
+    /// 録画の保存先・ファイル名・映像の設定
+    Recording,
     /// ホットキーの一覧と割り当て。以前はスクリーンショット設定タブの中にあったが、
     /// フルスクリーン切替や音量操作などスクリーンショット以外のアクションも
     /// 増えたため、タブ名と内容を合わせて独立させた
@@ -357,7 +377,7 @@ pub fn show_settings_dialog(
     // 押せなくなる（Issue #137）。ウィンドウそのものを画面内へ収め、
     // タブの中身だけをスクロールさせることで、OK / キャンセル / 適用は
     // どんな高さでも必ず見える位置に残す
-    let screen_rect = ctx.screen_rect();
+    let screen_rect = ctx.content_rect();
     let max_size = (screen_rect.size() - egui::Vec2::splat(SETTINGS_WINDOW_SCREEN_MARGIN))
         .max(SETTINGS_WINDOW_MIN_SIZE);
     // max_size は SETTINGS_WINDOW_MIN_SIZE との component-wise max で
@@ -388,6 +408,11 @@ pub fn show_settings_dialog(
                     SettingsTab::Screenshot,
                     Text::TabScreenshot.get(),
                 );
+                ui.selectable_value(
+                    &mut selected_tab,
+                    SettingsTab::Recording,
+                    Text::TabRecording.get(),
+                );
                 ui.selectable_value(&mut selected_tab, SettingsTab::Hotkeys, Text::Hotkeys.get());
                 ui.selectable_value(&mut selected_tab, SettingsTab::Other, Text::TabOther.get());
                 ui.selectable_value(
@@ -403,11 +428,11 @@ pub fn show_settings_dialog(
             // 領域を上から順に消費するだけなので、ScrollArea を先に描くと
             // 「まだ描いていないボタン列の分」を差し引けず、ScrollArea が
             // 残り全部を使い切ってボタン列がウィンドウの外へ押し出される。
-            // `TopBottomPanel::bottom` は呼んだ時点で自分の高さぶんを
+            // `Panel::bottom` は呼んだ時点で自分の高さぶんを
             // 親 Ui の下端から確保し、以降の ScrollArea が使える高さを
             // 先に縮めてくれるので、コード上の見た目の順序とは逆に
             // 「ボタン列 → タブの中身」の順で描く
-            egui::TopBottomPanel::bottom("settings_dialog_buttons").show_inside(ui, |ui| {
+            egui::Panel::bottom("settings_dialog_buttons").show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if ui.button(Text::ButtonOk.get()).clicked() {
@@ -437,10 +462,12 @@ pub fn show_settings_dialog(
                         draft,
                         view.video_capabilities,
                         &view.audio_capabilities,
+                        view.video_pin,
                         devices,
                         &mut events,
                     ),
                     SettingsTab::Screenshot => show_screenshot_settings_tab(ui, draft, &mut events),
+                    SettingsTab::Recording => show_recording_settings_tab(ui, draft, &mut events),
                     SettingsTab::Hotkeys => {
                         show_hotkey_settings_tab(ui, draft, hotkey_errors, &mut events)
                     }
@@ -478,8 +505,8 @@ mod tests {
     use crate::hotkey::HotkeyAction;
     use crate::settings::{
         AppSettings, AudioSettings, ColorRange, ColorSpace, HotkeySettings, LanguageSetting,
-        Preset, ScreenshotDestination, ScreenshotFormat, ScreenshotSettings, UiSettings,
-        UpdateSettings, VideoBackendSetting, VideoSettings,
+        Preset, RecordingSettings, ScreenshotDestination, ScreenshotFormat, ScreenshotSettings,
+        UiSettings, UpdateSettings, VideoBackendSetting, VideoSettings,
     };
 
     use std::collections::{BTreeMap, BTreeSet};
@@ -515,6 +542,8 @@ mod tests {
                 saturation: 30,
             },
             audio: AudioSettings {
+                // 既定値（device）と異なる値にして、反映の有無を見分けられるようにする
+                input_source: crate::settings::AudioInputSource::VideoPin,
                 input_device_name: Some("Line In".to_string()),
                 output_device_name: Some("Speakers".to_string()),
                 sample_rate: Some(44100),
@@ -532,12 +561,25 @@ mod tests {
                 sound_volume: 50.0,
                 legacy_hotkey: None,
             },
+            // 録画も全項目を既定値と異なる値にしておく
+            recording: RecordingSettings {
+                folder: PathBuf::from("C:/videos"),
+                file_name_format: "clip_%Y%m%d".to_string(),
+                video_bitrate_kbps: 20_000,
+                hardware_encoder: false,
+                audio_enabled: false,
+                audio_bitrate_kbps: 96,
+                replay_enabled: true,
+                replay_seconds: 90,
+                audio_offset_ms: -40,
+            },
             ui: UiSettings {
                 volume: 80.0,
                 muted: false,
                 maintain_aspect_ratio: false,
                 last_window_size: Some((800.0, 600.0)),
                 last_window_pos: Some((10.0, 20.0)),
+                maximized: false,
                 always_on_top: true,
                 enable_drag_move: false,
                 show_stats_overlay: true,

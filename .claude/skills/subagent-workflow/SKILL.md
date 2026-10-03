@@ -58,13 +58,16 @@ git checkout -b <type>/<説明> origin/dev
 - **範囲外の発見には手を出さない。** 最終報告の「起票を提案する Issue」に 1 行で書く
 - 一時ファイルは worktree の中か `/tmp` に置き、終わったら消す。リポジトリ本体や `%AppData%` に置かない
 - **force push しない。既存のコミットを書き換えない**（amend / rebase を含む）。理由は `naming-conventions` skill の「履歴を作り直さない」
-- **アプリを実行するときは設定ファイルを退避し、終了後に戻す。** 起動しただけで上書きされる
+- **アプリを実行するときは、環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` で worktree の中の `.agent-config/` を指す。** 設定ファイルとログがそこに置かれ、`%AppData%` の設定には触らない。起動しただけで設定は書き戻されるので、`%AppData%` のまま起動すると他のエージェントと同じファイルを取り合う。**環境変数を付けずに起動しない。** `.agent-config/` は `.gitignore` に入っている。終わったら消す
 
 ```bash
-mv "$APPDATA/capturecard_viewer/config/default-config.toml" "$APPDATA/capturecard_viewer/config/default-config.toml.agent-bak"
-# 実行と確認
-mv "$APPDATA/capturecard_viewer/config/default-config.toml.agent-bak" "$APPDATA/capturecard_viewer/config/default-config.toml"
+CAPTURECARD_VIEWER_CONFIG_DIR="$(pwd -W)/.agent-config" CAPTURECARD_VIEWER_FAKE_DEVICES=2 ./target/release/capturecard_viewer.exe
 ```
+
+- 値は絶対パスにする（`pwd -W` は `C:/...` の形を返す）。相対パスは使われず、WARN を出して `%AppData%` へ倒れる。効いていればログ（`.agent-config/logs/`）の先頭近くに `CAPTURECARD_VIEWER_CONFIG_DIR が指定されているので…` の WARN が出る
+- **アプリを止めるときは起動時の PID で止める。** `./target/release/capturecard_viewer.exe & APP=$!` で起動し、`taskkill //PID "$(cat /proc/$APP/winpid)"` で止める（`$!` は Git Bash の PID なので、`/proc/<PID>/winpid` で Windows の PID に直す）。`taskkill //IM capturecard_viewer.exe` は並行する他のエージェントが確認中のプロセスまで巻き添えにする（2026-10-03 に実際に起きた）。`//F` は `on_exit` を通さないので、終了時の保存を確かめるときは付けない
+
+- **実機（キャプチャーボード）を開くのは、指示役が並行作業全体で 1 つだけ選び、依頼文に「実機を使ってよい」と書いたエージェントだけ。** それ以外は `CAPTURECARD_VIEWER_FAKE_DEVICES` に 1 以上の整数を付けて起動し（空・`0`・数字以外は効かず実機で動く）、ログの先頭近くに「フェイクデバイスで動く」の WARN が出ていることを確かめる。出ていなければ実機で動いているので、そこで止める。キャプチャーデバイスは 1 プロセスしか開けないので、並行するエージェントが同時に実機を掴むと、開けなかった側が「デバイスが無い」「接続できない」と誤って報告する。実機で確かめたことは、ログの「開いた形式と fps」と届いたフレーム数を PR 本文に写す（「動いた」だけにしない）。実機が列挙に出ない・開けないときは直さずに止め、最終報告の「未確認事項」に書く（USB や VM 側の状態で変わるため、指示役が確かめる）
 
 ## 4. コミットする
 
@@ -102,6 +105,8 @@ CodeRabbit のレビューは PR 作成から 2〜3 分後に届く。**読み�
 
 サブエージェントとして足すのは、**判断が分かれる指摘は直さずに最終報告の「判断を仰ぐ点」へ回す**こと。指示役に確認せず方針を決めない。
 
+返信したスレッドは Resolve する（`.claude/commands/cv/pr.md` の「4. PR へ返信する」）。**「判断を仰ぐ点」へ回した指摘は Resolve しない。** 指示役が裁いてから返信して Resolve する。未解決のスレッドが残っていると `dev` へマージできない（ルールセット）。
+
 既知の誤検知。出ても採用しない。
 
 | 指摘 | 採らない理由 |
@@ -125,8 +130,9 @@ git merge origin/dev
 grep -c "mod tests" src/*.rs src/app/*.rs
 ```
 
-3. verify skill の 4 段を通す
-4. push する
+3. 未解決のレビュースレッドが「判断を仰ぐ点」へ回したものだけになっていることを確認する（返信したのに Resolve していないものを残さない）
+4. verify skill の 4 段を通す
+5. push する
 
 衝突したときは**両方を残す形で解決する。** 他エージェントの変更を消さない。解決の仕方に迷ったら、消さずに残したうえで最終報告の「判断を仰ぐ点」に書く。
 
@@ -159,7 +165,7 @@ PR: #<番号> <URL>
 項目ごとの粒度。
 
 - **判断を仰ぐ点** — 方針が分かれてどちらも選べた箇所、指示役の判断が要る積み残し。PR 本文の「判断を仰ぐ点」と同じ内容を 1 行に圧縮する
-- **未確認事項** — CI では確かめられないもの。実機が要るなら `docs/MANUAL-TEST.md` のどの項目かを名指しする
+- **未確認事項** — 人の感覚（見た目・聞こえ方・操作感）か、Claude の環境に無い機器・状況が要るものだけを書く。CI・実機ログで確かめたものは書かない。実機が要るなら `docs/MANUAL-TEST.md` のどの項目かを名指しする
 - **触っていない領域** — 依頼文で指定された他エージェントの領域を、そのまま書き戻す。触っていないことの確認になる
 - **起票を提案する Issue** — 範囲外として見送った発見。1 行 1 件で、何をどうするかが分かる粒度にする
 

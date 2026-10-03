@@ -4,12 +4,16 @@
 //! 保存されたウィンドウの大きさ・位置が使えるかの判定を集めてある。
 //! いずれも `main()` が `eframe::run_native` より前に呼ぶ（`monitor_work_areas`
 //! のコメントを参照）。
+//!
+//! 例外は winit のメッセージループに差し込むフック（`redirect_misdirected_close`）で、
+//! `main()` が登録し、イベントループの中で UI スレッドから呼ばれる。
 
 use crate::i18n::Language;
 use eframe::egui;
 use image::GenericImageView;
 use log::{info, warn};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// 保存されたウィンドウサイズが使えない場合に使う大きさ
 pub(crate) const DEFAULT_WINDOW_SIZE: (f32, f32) = (1280.0, 720.0);
@@ -162,6 +166,123 @@ pub(crate) fn os_ui_language() -> Language {
     Language::English
 }
 
+/// winit が UI スレッドに 1 つ作る、イベントを受けるためだけのウィンドウのクラス名
+/// （winit 0.30 の `platform_impl::windows::event_loop`）。
+///
+/// 大きさ 0 で画面には出ないが、`WS_VISIBLE` が付いたトップレベルウィンドウなので、
+/// 「プロセスの見えているウィンドウ」を探す外のツールから本来のウィンドウと
+/// 取り違えられる。**winit を上げるときはクラス名が変わっていないか確かめること。**
+/// 変わると閉じる要求を回せなくなり、最小化中の `taskkill` で終了しなくなる（#420）
+const WINIT_EVENT_TARGET_CLASS: &str = "Winit Thread Event Target";
+
+/// 閉じる要求（`WM_CLOSE`）が届いた先のウィンドウのクラス名から、本来のウィンドウへ
+/// 回すべき取り違えかを返す。
+///
+/// winit はこのウィンドウの `WM_CLOSE` を `DefWindowProcW` へ渡すので、そのまま
+/// 通すと**閉じる要求が捨てられたうえに、このウィンドウが壊される。** 別スレッドから
+/// UI スレッドを起こす経路（`RepaintWaker` を含む）もこのウィンドウを通るため、
+/// 壊れると以降の再描画の予約が届かなくなる。
+fn is_misdirected_close(class_name: &str) -> bool {
+    class_name == WINIT_EVENT_TARGET_CLASS
+}
+
+/// 取り違えた閉じる要求の回し先にするウィンドウかを返す。
+///
+/// 回すのは、winit のイベント用のウィンドウを除いた、見えている（最小化を含む）
+/// 持ち主のいないトップレベルウィンドウ。IME が作るウィンドウは見えていないので外れる。
+fn is_close_forward_target(class_name: &str, visible: bool, owned: bool) -> bool {
+    !is_misdirected_close(class_name) && visible && !owned
+}
+
+/// winit のメッセージループに差し込むフック（`EventLoopBuilderExtWindows::with_msg_hook`）。
+/// `main()` が `NativeOptions::event_loop_builder` で登録する。
+///
+/// **最小化中の `taskkill`（`/F` なし）で終了しない不具合（#420）への対処。**
+/// `taskkill` はプロセスの見えているトップレベルウィンドウのうち 1 つへ `WM_CLOSE` を
+/// 送る。最小化すると Z 順で winit のイベント用のウィンドウが本来のウィンドウより
+/// 前へ来て、そちらが選ばれる。ここでその `WM_CLOSE` を横取りし、本来のウィンドウへ
+/// 送り直す。本来のウィンドウに届けば、最小化中でも eframe がそのまま閉じる。
+///
+/// 真を返したメッセージは winit が配らない。**`WM_CLOSE` 以外は何もせず偽を返す。**
+/// すべてのメッセージがここを通るので、先にメッセージの種類だけで落とす。
+#[cfg(windows)]
+pub(crate) fn redirect_misdirected_close(msg: *const std::ffi::c_void) -> bool {
+    use winapi::um::winuser::{MSG, WM_CLOSE};
+
+    // SAFETY: winit は `GetMessageW` で受け取った `MSG` を指すポインタを渡してくる。
+    // 呼び出しの間だけ読む
+    let Some(msg) = (unsafe { (msg as *const MSG).as_ref() }) else {
+        return false;
+    };
+    if msg.message != WM_CLOSE {
+        return false;
+    }
+    if !is_misdirected_close(&window_class_name(msg.hwnd)) {
+        return false;
+    }
+
+    let forwarded = forward_close_to_app_windows();
+    if forwarded == 0 {
+        // 回し先が無くても横取りはする。通すとイベント用のウィンドウが壊される
+        warn!("winit のイベント用のウィンドウへ届いた閉じる要求を回す先が見つからなかった");
+    } else {
+        info!(
+            "winit のイベント用のウィンドウへ届いた閉じる要求を、アプリのウィンドウ {forwarded} 個へ回した"
+        );
+    }
+    true
+}
+
+/// ウィンドウのクラス名。取れなければ空文字列
+#[cfg(windows)]
+fn window_class_name(hwnd: winapi::shared::windef::HWND) -> String {
+    use winapi::um::winuser::GetClassNameW;
+
+    // クラス名は最大 256 文字
+    let mut buf = [0u16; 257];
+    let len = unsafe { GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    if len <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..len as usize])
+}
+
+/// UI スレッドのトップレベルウィンドウのうち、回し先にするものへ `WM_CLOSE` を送る。
+/// 送った数を返す。**フックから呼ぶので、呼び出し元は UI スレッド。**
+#[cfg(windows)]
+fn forward_close_to_app_windows() -> usize {
+    use winapi::shared::minwindef::{BOOL, LPARAM, TRUE};
+    use winapi::shared::windef::HWND;
+    use winapi::um::processthreadsapi::GetCurrentThreadId;
+    use winapi::um::winuser::{
+        EnumThreadWindows, GetWindow, IsWindowVisible, PostMessageW, GW_OWNER, WM_CLOSE,
+    };
+
+    /// `EnumThreadWindows` のコールバック。`lparam` で受け取った数を、送るたびに増やす
+    unsafe extern "system" fn post_close(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let forwarded = &mut *(lparam as *mut usize);
+        let visible = IsWindowVisible(hwnd) != 0;
+        let owned = !GetWindow(hwnd, GW_OWNER).is_null();
+        if is_close_forward_target(&window_class_name(hwnd), visible, owned)
+            && PostMessageW(hwnd, WM_CLOSE, 0, 0) != 0
+        {
+            *forwarded += 1;
+        }
+        // 列挙を続ける
+        TRUE
+    }
+
+    let mut forwarded = 0usize;
+    unsafe {
+        EnumThreadWindows(
+            GetCurrentThreadId(),
+            Some(post_close),
+            &mut forwarded as *mut usize as LPARAM,
+        );
+    }
+    forwarded
+}
+
 /// LANGID から画面の言語を決める。主言語が日本語なら日本語、それ以外は英語。
 ///
 /// 下位 10 ビットが主言語（`PRIMARYLANGID`）で、上位 6 ビットの副言語（地域）は見ない。
@@ -239,9 +360,10 @@ pub(crate) fn configure_japanese_font(ctx: &egui::Context) {
                         path.display()
                     );
                     let mut fonts = egui::FontDefinitions::default();
-                    fonts
-                        .font_data
-                        .insert("japanese".to_string(), egui::FontData::from_owned(data));
+                    fonts.font_data.insert(
+                        "japanese".to_string(),
+                        Arc::new(egui::FontData::from_owned(data)),
+                    );
                     // 優先度のためにプロポーショナル・等幅フォントファミリーの先頭に挿入する。
                     // egui 既定の絵文字フォント等はそのまま残るため、Meiryo 等に無い記号は
                     // 引き続きフォールバックで描画される
@@ -310,6 +432,46 @@ pub(crate) fn load_icon() -> egui::IconData {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn is_misdirected_close_for_winit_event_target_returns_true() {
+        // 最小化中の taskkill はここへ WM_CLOSE を送ってくる（#420）
+        assert!(is_misdirected_close("Winit Thread Event Target"));
+    }
+
+    #[test]
+    fn is_misdirected_close_for_other_windows_returns_false() {
+        // 本来のウィンドウ（winit の既定のクラス名）と、IME のウィンドウ、取れなかったとき
+        for class_name in ["Window Class", "IME", "MSCTFIME UI", ""] {
+            assert!(
+                !is_misdirected_close(class_name),
+                "取り違えと判定している: {class_name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_close_forward_target_for_visible_unowned_app_window_returns_true() {
+        assert!(is_close_forward_target("Window Class", true, false));
+    }
+
+    #[test]
+    fn is_close_forward_target_never_returns_the_event_target_itself() {
+        // 回し先に自分を入れると、横取りした WM_CLOSE がまた自分に届いて回り続ける
+        assert!(!is_close_forward_target(
+            "Winit Thread Event Target",
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn is_close_forward_target_skips_hidden_or_owned_windows() {
+        // IME のウィンドウは見えていない。持ち主のいるウィンドウはダイアログなどで、
+        // 閉じるとアプリではなくそれだけが閉じる
+        assert!(!is_close_forward_target("IME", false, false));
+        assert!(!is_close_forward_target("Window Class", true, true));
+    }
 
     #[test]
     fn language_from_langid_japanese_only_for_japanese() {

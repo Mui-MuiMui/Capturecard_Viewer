@@ -10,7 +10,8 @@
 //! 止まっていた（#133）。このスレッドはウィンドウの状態に関係なく動く。
 //!
 //! そのタイマーで動く監視の中身は `super::worker_timers`、デバイスを開く・
-//! 閉じる・列挙する処理は `super::worker_connect` にある。どちらも
+//! 閉じる・列挙する処理は `super::worker_connect`、コマンドの受け口は
+//! `super::worker_commands` にある。どれも
 //! `WorkerState` へ `impl` を足す形で、状態はこのファイルが 1 つだけ持つ。
 //!
 //! 判定そのもの（途絶したか、開き直してよいか）は `super::monitor` の
@@ -21,17 +22,18 @@
 //! `VideoCapture` / `AudioCapture` という具体型を知らない。おかげでモックを
 //! 差し替えれば、実機も実時間の経過もなしに再試行と切断検出を回せる。
 
-use super::audio_control::volume_change_result;
 use super::backend::{AudioBackend, BackendShared, DeviceBackends, VideoBackend};
 use super::monitor::{DeviceNotVisible, VideoLinkAction};
+use super::monitor_audio_pin::PinWait;
 use super::retry::ConnectRetry;
 use super::worker::{
     AudioTarget, DeviceCommand, DeviceConfig, DeviceEvent, DeviceSnapshot, RetryStatus,
     SharedSnapshot, VideoTarget,
 };
-use crate::audio::{AudioCapabilities, AudioControls, AudioDirection};
+use super::worker_default_input::DefaultInput;
+use crate::audio::{AudioCapabilities, AudioControls, AudioDirection, AudioPinPresence};
 use crate::repaint::RepaintWaker;
-use log::{debug, info, trace, warn};
+use log::{debug, trace, warn};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -119,6 +121,7 @@ pub(super) fn run(
 ///
 /// **`pub(super)` にしてあるのは、デバイスを開く処理を
 /// `super::worker_connect` へ、タイマーで動く監視を `super::worker_timers`
+/// へ、コマンドの受け口を `super::worker_commands`
 /// へ分けているため。** `app` の外からは見えない。
 pub(super) struct WorkerState {
     /// 映像デバイスの入口。本番は `VideoCapture`、テストはモック
@@ -130,7 +133,7 @@ pub(super) struct WorkerState {
     /// 普段は UI スレッドが書き、出力コールバックが読むだけで、ワーカーは
     /// `AudioCapture` へ渡すためだけに触っていた。**最小化中のホットキーを
     /// 代わりに実行するために、ここでも複製を持つ**（#133）
-    audio_controls: Arc<AudioControls>,
+    pub(super) audio_controls: Arc<AudioControls>,
     pub(super) events: Sender<DeviceEvent>,
     pub(super) snapshot: SharedSnapshot,
     /// イベントを積んだときに UI スレッドを起こす窓口。
@@ -180,6 +183,8 @@ pub(super) struct WorkerState {
     /// 水位が目標から大きく外れている旨の `warn` を最後に出した時刻。
     /// 連打を防ぐための記録
     pub(super) last_resample_warn: Option<Instant>,
+    /// 音声の観測値（アンダーラン・捨てたフレーム・取りこぼし）を最後にログへ出した時刻
+    pub(super) last_audio_counters_log: Option<Instant>,
 
     /// 起動時の列挙をまだログへ出していないか。起動直後の `ApplyConfig` で立つ
     pub(super) startup_enumeration_pending: bool,
@@ -194,6 +199,15 @@ pub(super) struct WorkerState {
     /// 出し直すために持つ。接続できたら消す
     pub(super) last_video_failure: Option<String>,
     pub(super) last_audio_failure: Option<String>,
+    /// 入力が映像デバイスの音声ピンなのに使えず、音声を開かずに待っている理由（#388）。
+    /// 理由が変わったときだけ開き直しの要求を立てるために持つ
+    /// （`monitor_audio_pin::should_resync_pin_audio`）。音声を開けたら消す
+    pub(super) audio_pin_wait: Option<PinWait>,
+    /// 入力が未設定のまま起動したときの、入力の既定の決まり方（#394）。
+    /// 決めている間は音声を理由なしで待たせる（`worker_audio_connect::DefaultInput`）
+    pub(super) default_input: DefaultInput,
+    /// 列挙の時点で調べた音声ピンの有無（#409）。`DeviceSnapshot` へ写す
+    pub(super) video_audio_pins: Vec<(String, AudioPinPresence)>,
 }
 
 impl WorkerState {
@@ -225,12 +239,16 @@ impl WorkerState {
             audio_capabilities: HashMap::new(),
             last_resample_correction: None,
             last_resample_warn: None,
+            last_audio_counters_log: None,
             startup_enumeration_pending: false,
             enumeration_logged_failures: (0, 0),
             video_not_visible: None,
             audio_not_visible: None,
             last_video_failure: None,
             last_audio_failure: None,
+            audio_pin_wait: None,
+            default_input: DefaultInput::Settled,
+            video_audio_pins: Vec::new(),
         }
     }
 
@@ -274,114 +292,14 @@ impl WorkerState {
             },
             audio_resample: self.audio.resample_status(),
             audio_underruns: self.audio.underrun_count(),
+            audio_dropped_frames: self.audio.dropped_frame_count(),
+            audio_xruns: self.audio.xrun_count(),
+            video_audio_pins: self.video_audio_pins.clone(),
         };
         match self.snapshot.write() {
             Ok(mut slot) => *slot = next,
             Err(_) => warn!("デバイスの観測値を書き込めない"),
         }
-    }
-
-    fn handle(&mut self, command: DeviceCommand) {
-        match command {
-            DeviceCommand::ApplyConfig { config, initial } => self.apply_config(*config, initial),
-            DeviceCommand::ReconnectNow => self.reconnect_now(),
-            DeviceCommand::RefreshDeviceLists => self.refresh_device_lists(),
-            DeviceCommand::QueryVideoCapabilities(device, backend) => {
-                self.query_video_capabilities(device, backend)
-            }
-            DeviceCommand::QueryAudioCapabilities(direction, key) => {
-                self.query_audio_capabilities(direction, &key);
-            }
-            DeviceCommand::AdjustVolume(delta) => self.adjust_volume(delta),
-            DeviceCommand::ToggleMute => self.toggle_mute(),
-            // 呼び出し側（`run`）がループを抜けるので、ここへは来ない
-            DeviceCommand::Shutdown => {}
-        }
-    }
-
-    /// デバイスに関係する設定を受け取り、開き直しが要るものだけ要求を立てる。
-    ///
-    /// **ここではデバイスを開かない。** 実際に開くのは次の `tick`。要求を
-    /// 立てるところと開くところを分けてあるのは、`ConnectRetry` のバックオフに
-    /// 一本化するため（2 か所から開くと、同じデバイスを二重に開こうとする）。
-    fn apply_config(&mut self, mut config: DeviceConfig, initial: bool) {
-        trace!("デバイス設定を受け取った（起動直後: {}）", initial);
-
-        if initial {
-            self.resolve_default_devices(&mut config);
-            // 列挙そのものは最初の接続を試したあとの `tick` で行う。ここで
-            // 列挙すると、その分だけ最初の接続が遅れる
-            self.startup_enumeration_pending = true;
-        }
-
-        // 繋ぐ相手が変わったら「見えていない」の判定は前の相手のもの。
-        // **直前に受け取った設定と比べる。** 繋がっていない間は
-        // `last_video_target` が `None` のままなので、そちらと比べると
-        // 2 秒ごとの `apply_settings` のたびに消えてしまう
-        let previous = self.config.as_ref();
-        if previous.map(|config| &config.video) != Some(&config.video) {
-            self.video_not_visible = None;
-        }
-        if previous.map(|config| &config.audio) != Some(&config.audio) {
-            self.audio_not_visible = None;
-        }
-
-        let need_video_restart = Some(&config.video) != self.last_video_target.as_ref();
-        if config.video.0.is_some() && (need_video_restart || initial) {
-            self.video_retry.request(config.video.clone());
-        }
-
-        let need_audio_restart = Some(&config.audio) != self.last_audio_target.as_ref() || initial;
-        if need_audio_restart {
-            self.audio_retry.request(config.audio.clone());
-        }
-
-        self.config = Some(config);
-    }
-
-    /// 最小化中のホットキーで音量を変える。**UI スレッドの代役。**
-    ///
-    /// 基準にするのは `AudioControls` に入っている値で、UI スレッドが持つ
-    /// `CaptureCardViewer::volume` とは最大 0.5% ずれうる（UI 側は変化が
-    /// その幅を超えたときだけ Atomic へ書く）。ずれは復帰したときの
-    /// `adjust_volume` で UI 側の値へ揃うので、聞こえ方の差にはならない。
-    ///
-    /// 上下限とミュートの扱いは UI と同じ `volume_change_result` に任せる。
-    /// ここで独自に計算すると、経路によって上限や解除の有無が変わる
-    fn adjust_volume(&self, delta: f32) {
-        let (volume, muted) = volume_change_result(self.audio_controls.volume_percent(), delta);
-        self.audio_controls.set_volume(volume);
-        self.audio_controls.set_muted(muted);
-        info!("最小化中のホットキーで音量を {}% にした", volume as i32);
-        self.emit(DeviceEvent::VolumeAdjusted(delta));
-    }
-
-    /// 最小化中のホットキーでミュートを切り替える。**UI スレッドの代役。**
-    fn toggle_mute(&self) {
-        let muted = !self.audio_controls.muted();
-        self.audio_controls.set_muted(muted);
-        info!(
-            "最小化中のホットキーでミュートを{}にした",
-            if muted { "オン" } else { "オフ" }
-        );
-        self.emit(DeviceEvent::MuteToggled);
-    }
-
-    /// バックオフを飛ばして映像・音声とも開き直す。
-    fn reconnect_now(&mut self) {
-        info!("デバイスの再接続を要求された");
-        // 開き直したあとの途絶を、改めて検出してログに残せるようにする
-        self.last_video_link_action = VideoLinkAction::Keep;
-        // 保留していた音声のエラーも、ここで開き直すので落とす
-        self.audio_stream_error_pending = false;
-        self.last_video_target = None;
-        self.last_audio_target = None;
-        let Some(config) = self.config.clone() else {
-            // まだ設定を受け取っていない。次の ApplyConfig が要求を立てる
-            return;
-        };
-        self.video_retry.request_now(config.video);
-        self.audio_retry.request_now(config.audio);
     }
 
     /// ストリームを閉じる。スレッドを抜ける直前に呼ぶ。
@@ -467,6 +385,7 @@ pub(super) mod testing {
                 None,
                 None,
                 crate::settings::VideoBackendSetting::Auto,
+                false,
             ),
             audio: (
                 input_device.map(str::to_string),
@@ -474,6 +393,7 @@ pub(super) mod testing {
                 None,
                 None,
                 DEFAULT_BUFFER_MS,
+                crate::settings::AudioInputSource::Device,
             ),
             auto_reconnect: false,
         }
@@ -553,6 +473,7 @@ mod tests {
                     frames: VideoFrames::new(),
                     color_conversion: Arc::new(SharedColorConversion::new()),
                     audio_controls: thread_controls,
+                    audio_tap: crate::audio::AudioTap::new(),
                     repaint_waker: RepaintWaker::new(),
                 },
                 backends,
@@ -782,17 +703,56 @@ mod tests {
             initial: true,
         });
 
+        // 映像の名前は受け取ったその場で埋める。入力は最初の映像の試行のあと（#394）
         match drain(&events).into_iter().next() {
-            Some(DeviceEvent::DefaultDevicesResolved { video, input }) => {
+            Some(DeviceEvent::DefaultDevicesResolved {
+                video,
+                input,
+                input_source,
+            }) => {
                 assert_eq!(video.as_deref(), Some("モックカメラ"));
-                assert_eq!(input.as_deref(), Some("モック入力"));
+                assert_eq!(input, None);
+                assert_eq!(input_source, None);
             }
             other => panic!("埋めた名前が返らない: {:?}", other),
         }
-        // 往復を待たずに、その場の設定も書き換わっていること
         let config = state.config.as_ref().expect("設定を覚えていること");
         assert_eq!(config.video.0.as_deref(), Some("モックカメラ"));
+        assert_eq!(config.audio.0, None);
+
+        // モックの映像は音声ピンを持たないので、入力は WASAPI の列挙の先頭に決まる
+        state.tick(Instant::now());
+        let events = drain(&events);
+        let resolved: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::DefaultDevicesResolved {
+                    video,
+                    input,
+                    input_source,
+                } => Some((video.clone(), input.clone(), *input_source)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resolved,
+            vec![(
+                None,
+                Some("モック入力".to_string()),
+                Some(crate::settings::AudioInputSource::Device)
+            )]
+        );
+        // 決めるまでの間に「入力が選ばれていない」を出さない
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, DeviceEvent::AudioFailed(_))),
+            "{events:?}"
+        );
+        // 往復を待たずに、その場の設定も書き換わって音声が開いていること
+        let config = state.config.as_ref().expect("設定を覚えていること");
         assert_eq!(config.audio.0.as_deref(), Some("モック入力"));
         assert_eq!(config.audio.1, None, "出力は既定のままにすること");
+        assert!(audio.with(|state| state.running));
     }
 }

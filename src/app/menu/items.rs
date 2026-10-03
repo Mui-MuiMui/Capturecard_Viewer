@@ -9,7 +9,7 @@
 //! **同じ項目の関数を並び替えて呼ぶ**だけにしてある。項目ごとの文言・有効条件・
 //! 返すアクションを 1 か所に集め、片方だけ直す事故を起こさないため。
 
-use super::MenuView;
+use super::{MenuView, RecordingMenuState};
 use crate::i18n::{self, Text};
 use crate::settings::{MAX_VOLUME, MIN_VOLUME};
 use eframe::egui;
@@ -18,6 +18,20 @@ use eframe::egui;
 /// `Ui::min_rect` はポップアップの枠の内側なので、枠の上を押しただけで
 /// メニュー全体が閉じるのを防ぐ
 const CONTEXT_MENU_HIT_MARGIN: f32 = 8.0;
+
+/// 右クリックメニューのサブメニューを開くボタン。
+///
+/// egui 0.32 からの `ui.menu_button` は、中の項目を押すとサブメニューを閉じる
+/// （`PopupCloseBehavior::CloseOnClick`）。0.26 と同じく、閉じるのは外を押したときと
+/// 項目が `ui.close()` を呼んだときだけにする。「表示」の切り替えは続けて押すことがある
+fn submenu_button(ui: &mut egui::Ui, text: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::containers::menu::MenuButton::new(text)
+        .config(
+            egui::containers::menu::MenuConfig::new()
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+        )
+        .ui(ui, add_contents);
+}
 
 /// 右クリックメニューで起きた操作。
 ///
@@ -49,6 +63,8 @@ pub(super) enum MenuAction {
     ResetWindowSize,
     /// 「デバイス再接続」を押した
     ReconnectDevices,
+    /// 「録画を開始」「録画を停止」を押した
+    ToggleRecording,
     /// 「プリセット」から 1 つ選んだ
     ApplyPreset(String),
     /// 「詳細設定...」を押した
@@ -67,6 +83,7 @@ impl MenuAction {
         match self {
             MenuAction::ResetWindowSize
             | MenuAction::ReconnectDevices
+            | MenuAction::ToggleRecording
             | MenuAction::ApplyPreset(_)
             | MenuAction::OpenSettings
             | MenuAction::Quit => true,
@@ -101,6 +118,24 @@ fn volume_items(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction
     let mut muted = view.muted;
     if ui.checkbox(&mut muted, Text::Mute.get()).changed() {
         actions.push(MenuAction::SetMuted(muted));
+    }
+}
+
+/// 「録画を開始」/「録画を停止（00:12:34）」のボタン。
+///
+/// 映像そのものに関わる操作なので、どちらのレイアウトでもサブメニューへ入れずに
+/// 音量の下へ置く。録画を保存している間（`Finalize` を待っている間）は押せない。
+fn recording_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction>) {
+    let (label, enabled) = match view.recording {
+        RecordingMenuState::Idle => (Text::MenuStartRecording.get().to_string(), true),
+        RecordingMenuState::Recording(elapsed) => (
+            i18n::menu_stop_recording(crate::recording::format_elapsed(elapsed)),
+            true,
+        ),
+        RecordingMenuState::Finishing => (Text::MenuRecordingFinishing.get().to_string(), false),
+    };
+    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+        actions.push(MenuAction::ToggleRecording);
     }
 }
 
@@ -204,7 +239,7 @@ fn auto_reconnect_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<Men
 /// 装飾なしで小さくしすぎて端の帯を掴めなくなったときの復帰手段。
 ///
 /// 戻り値は押されたかどうか。**サブメニューの中から呼ぶ側は、`true` の
-/// ときに `ui.close_menu()` を呼ぶこと。** 呼ばないと開いた状態が egui 側に
+/// ときに `ui.close()` を呼ぶこと。** 呼ばないと開いた状態が egui 側に
 /// 残り、次に右クリックしたときにサブメニューが開いたまま出る。
 fn reset_window_size_item(
     ui: &mut egui::Ui,
@@ -262,7 +297,7 @@ fn view_submenu(
     menu_rects: &mut Vec<egui::Rect>,
     actions: &mut Vec<MenuAction>,
 ) {
-    ui.menu_button(Text::MenuViewSubmenu.get(), |ui| {
+    submenu_button(ui, Text::MenuViewSubmenu.get(), |ui| {
         // サブメニューの幅は egui の既定が 150px で、項目名が折り返す。
         // 本体と同じ幅に揃える（狭いウィンドウでは本体ごと縮んでいる）
         ui.set_max_width(width);
@@ -288,14 +323,14 @@ fn window_submenu(
     menu_rects: &mut Vec<egui::Rect>,
     actions: &mut Vec<MenuAction>,
 ) {
-    ui.menu_button(Text::MenuWindowSubmenu.get(), |ui| {
+    submenu_button(ui, Text::MenuWindowSubmenu.get(), |ui| {
         ui.set_max_width(width);
 
         drag_move_item(ui, view, actions);
         if reset_window_size_item(ui, view, actions) {
             // サブメニュー側も閉じる。本体を閉じるのは
             // `MenuAction::closes_menu` の判定が行う
-            ui.close_menu();
+            ui.close();
         }
 
         menu_rects.push(ui.min_rect().expand(CONTEXT_MENU_HIT_MARGIN));
@@ -321,7 +356,7 @@ fn preset_submenu(
         return;
     }
 
-    ui.menu_button(Text::MenuPresetSubmenu.get(), |ui| {
+    submenu_button(ui, Text::MenuPresetSubmenu.get(), |ui| {
         ui.set_max_width(width);
 
         for name in &view.preset_names {
@@ -330,7 +365,7 @@ fn preset_submenu(
             let is_active = view.active_preset.as_deref() == Some(name.as_str());
             if ui.selectable_label(is_active, name).clicked() {
                 actions.push(MenuAction::ApplyPreset(name.clone()));
-                ui.close_menu();
+                ui.close();
             }
         }
 
@@ -359,6 +394,10 @@ pub(super) fn menu_items_flat(
     actions: &mut Vec<MenuAction>,
 ) {
     volume_items(ui, view, actions);
+
+    ui.separator();
+
+    recording_item(ui, view, actions);
 
     ui.separator();
 
@@ -393,7 +432,7 @@ pub(super) fn menu_items_flat(
 /// 出ないときの復帰手段（デバイス再接続）と、装飾を消しているときに他の手段が
 /// 無い操作（フルスクリーン、終了）。** 探し回らずに押せることを優先する。
 ///
-/// サブメニューの中身を足したときは、閉じるボタンに `ui.close_menu()` を
+/// サブメニューの中身を足したときは、閉じるボタンに `ui.close()` を
 /// 忘れないこと。呼ばないと開いた状態が egui 側に残り、次に右クリックした
 /// ときにサブメニューが開いたまま出る。
 pub(super) fn menu_items_collapsed(
@@ -404,6 +443,10 @@ pub(super) fn menu_items_collapsed(
     actions: &mut Vec<MenuAction>,
 ) {
     volume_items(ui, view, actions);
+
+    ui.separator();
+
+    recording_item(ui, view, actions);
 
     ui.separator();
 
@@ -435,6 +478,9 @@ pub(super) fn menu_items_collapsed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::accesskit::Toggled;
+    use egui_kittest::kittest::{NodeT, Queryable};
+    use egui_kittest::Harness;
 
     #[test]
     fn menu_action_one_shot_items_close_the_menu() {
@@ -442,6 +488,7 @@ mod tests {
         for action in [
             MenuAction::ResetWindowSize,
             MenuAction::ReconnectDevices,
+            MenuAction::ToggleRecording,
             MenuAction::ApplyPreset("既定".to_string()),
             MenuAction::OpenSettings,
             MenuAction::Quit,
@@ -466,5 +513,146 @@ mod tests {
         ] {
             assert!(!action.closes_menu(), "閉じてはいけない操作: {:?}", action);
         }
+    }
+
+    // ---- ウィジェットのテスト（egui_kittest、#419） ----
+    //
+    // ここの描画関数は状態を持たず、起きたことを `MenuAction` で返すだけなので、
+    // `MenuView` を組み立てて直接描ける。`CaptureCardViewer` は要らない
+
+    /// 描画に渡すものと、描画が返した `MenuAction`（フレームをまたいで溜める）
+    struct MenuFixture {
+        view: MenuView,
+        actions: Vec<MenuAction>,
+    }
+
+    /// 既定の設定と同じ見た目のスナップショット。プリセットは 2 つ
+    fn sample_view() -> MenuView {
+        MenuView {
+            recording: RecordingMenuState::Idle,
+            volume: 100.0,
+            muted: false,
+            maintain_aspect_ratio: true,
+            always_on_top: false,
+            is_fullscreen: false,
+            borderless: false,
+            enable_drag_move: true,
+            show_stats_overlay: false,
+            auto_reconnect: true,
+            preset_names: vec!["配信用".to_string(), "録画用".to_string()],
+            active_preset: Some("配信用".to_string()),
+        }
+    }
+
+    /// サブメニューへ折りたたんだ右クリックメニューを描く `Harness`
+    fn collapsed_menu_harness(view: MenuView) -> Harness<'static, MenuFixture> {
+        let fixture = MenuFixture {
+            view,
+            actions: Vec::new(),
+        };
+        Harness::builder()
+            .with_size(egui::vec2(600.0, 600.0))
+            .build_ui_state(
+                |ui, fixture: &mut MenuFixture| {
+                    // 外側クリックの判定に使う矩形。描画が積むだけで、ここでは見ない
+                    let mut menu_rects = Vec::new();
+                    ui.set_max_width(240.0);
+                    menu_items_collapsed(
+                        ui,
+                        &fixture.view,
+                        240.0,
+                        &mut menu_rects,
+                        &mut fixture.actions,
+                    );
+                },
+                fixture,
+            )
+    }
+
+    #[test]
+    fn view_submenu_toggle_returns_an_action_and_keeps_the_submenu_open() {
+        let mut harness = collapsed_menu_harness(sample_view());
+        // 閉じている間は中の項目が木に無い
+        assert!(harness
+            .query_by_label(Text::MaintainAspectRatio.get())
+            .is_none());
+
+        harness.get_by_label(Text::MenuViewSubmenu.get()).click();
+        harness.run();
+        harness
+            .get_by_label(Text::MaintainAspectRatio.get())
+            .click();
+        harness.run();
+
+        assert_eq!(
+            harness.state().actions,
+            [MenuAction::SetMaintainAspectRatio(false)]
+        );
+        // 切り替え系はサブメニューを閉じない。続けて隣の項目を押せる
+        harness.get_by_label(Text::MenuAlwaysOnTop.get()).click();
+        harness.run();
+        assert_eq!(
+            harness.state().actions,
+            [
+                MenuAction::SetMaintainAspectRatio(false),
+                MenuAction::SetAlwaysOnTop(true)
+            ]
+        );
+    }
+
+    #[test]
+    fn preset_submenu_returns_the_chosen_preset_and_closes() {
+        let mut harness = collapsed_menu_harness(sample_view());
+
+        harness.get_by_label(Text::MenuPresetSubmenu.get()).click();
+        harness.run();
+        // 選択中のプリセットに印が付く
+        assert_eq!(
+            harness.get_by_label("配信用").accesskit_node().toggled(),
+            Some(Toggled::True)
+        );
+        harness.get_by_label("録画用").click();
+        harness.run();
+
+        assert_eq!(
+            harness.state().actions,
+            [MenuAction::ApplyPreset("録画用".to_string())]
+        );
+        // 選んだらサブメニューを閉じる
+        assert!(harness.query_by_label("録画用").is_none());
+    }
+
+    #[test]
+    fn preset_submenu_is_hidden_without_presets() {
+        let view = MenuView {
+            preset_names: Vec::new(),
+            active_preset: None,
+            ..sample_view()
+        };
+        let harness = collapsed_menu_harness(view);
+        assert!(harness
+            .query_by_label(Text::MenuPresetSubmenu.get())
+            .is_none());
+        // 他のサブメニューは出ている
+        assert!(harness
+            .query_by_label(Text::MenuWindowSubmenu.get())
+            .is_some());
+    }
+
+    #[test]
+    fn window_submenu_reset_is_disabled_in_fullscreen() {
+        let view = MenuView {
+            is_fullscreen: true,
+            ..sample_view()
+        };
+        let mut harness = collapsed_menu_harness(view);
+
+        harness.get_by_label(Text::MenuWindowSubmenu.get()).click();
+        harness.run();
+        let reset = harness.get_by_label(Text::MenuResetWindowSize.get());
+        assert!(reset.accesskit_node().is_disabled());
+        reset.click();
+        harness.run();
+        assert_eq!(harness.state().actions, Vec::<MenuAction>::new());
     }
 }

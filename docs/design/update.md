@@ -8,7 +8,7 @@ GitHub の Release から新しい版を見つけて知らせ、人が「更新�
 | 2 | 検知、通知ダイアログ、設定 `[update]`、「その他」タブの「更新」の欄 | 済み（PR #243） |
 | 3 | ダウンロード、照合、差し替え、再起動 | この文書の「適用」 |
 
-置き場所は `src/update/mod.rs`（問い合わせと判断の純粋関数）、`src/update/apply.rs`（ダウンロードと照合の本体）、`src/update/swap.rs`（差し替えと戻し方）、`src/update/checksum.rs`（`SHA256SUMS.txt` の読み方）、`src/update/overrides.rs`（試すための環境変数）、`src/app/update.rs`（スレッドと結果の取り込み、通知ダイアログの操作、終了時の新しい exe の起動）、`src/ui/update_dialog.rs`（通知ダイアログの描画）、`src/ui/other_tab.rs`（「更新」の欄）。
+置き場所は `src/update/mod.rs`（問い合わせと判断の純粋関数）、`src/update/apply.rs`（ダウンロードと照合の本体）、`src/update/download.rs`（資産の読み取りとキャンセル）、`src/update/assets.rs`（資産の選び方）、`src/update/swap.rs`（差し替えと戻し方）、`src/update/checksum.rs`（`SHA256SUMS.txt` の読み方）、`src/update/overrides.rs`（試すための環境変数）、`src/app/update.rs`（スレッドと結果の取り込み、通知ダイアログの操作、終了時の新しい exe の起動）、`src/ui/update_dialog.rs`（通知ダイアログの描画）、`src/ui/other_tab.rs`（「更新」の欄）。
 
 ## 検知
 
@@ -16,7 +16,7 @@ GitHub の Release から新しい版を見つけて知らせ、人が「更新�
 
 - **`User-Agent` を必ず付ける。** GitHub の API は無い要求を拒否する。`capturecard_viewer/<版>` にしてある。`Accept: application/vnd.github+json` と `X-GitHub-Api-Version` も付ける
 - 使うのは `tag_name` / `html_url` / `draft` / `prerelease` / `assets[].name` / `assets[].browser_download_url` だけ。知らない項目は読み飛ばす
-- タグ（`v1.2.0`）から先頭の `v` を外して `semver` で読み、`CARGO_PKG_VERSION` と比べる。**新しい正式版のときだけ「更新あり」。** 同じ版・古い版（ダウングレード）・`1.2.0-rc.1` のような pre-release のタグは「最新」として扱う（`update::is_newer_stable`）。`/latest` は draft と pre-release の印を付けた Release を元から除くが、印を付け忘れたものまで勧めないよう、タグの形と `draft` / `prerelease` の値でも弾く
+- タグ（`v1.2.0`）から先頭の `v` を外して `semver` で読み、`CARGO_PKG_VERSION` と比べる。**新しい正式版のときだけ「更新あり」。** 同じ版・古い版（ダウングレード）・`1.2.0-rc.1` のような pre-release のタグは「最新」として扱う（`update::is_newer_stable`）。`/latest` は draft と pre-release の印を付けた Release を元から除くが、印を付け忘れたものまで勧めないよう、タグの形と `draft` / `prerelease` の値でも弾く。印を付けずに Latest で出すと `/latest` がその rc を返し、正式版の更新まで知らせなくなるので、リリースのワークフローは `-` を含むタグに印を自動で付け、Latest にしない（`docs/RELEASE.md` の「pre-release を出す」）
 - タグが版として読めなければ失敗として扱う（`UpdateError::InvalidTag`）
 - **`html_url` はそのままブラウザへ渡さない。** `https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/tag/<タグ>` の形（タグは英数字と `.` `-` `_` だけで、`.` / `..` ではない）のときだけ使い、それ以外は最新のリリースページにする（`release_page_url`）。頭の一致だけで許すと、`.../releases/../../../他人/リポジトリ/...` をブラウザが畳んで別のリポジトリを開く
 - 失敗の理由は `UpdateError` の変種で分ける。404 は「公開されたリリースが無い」、403 / 429 は認証なしの問い合わせ回数の上限（1 時間 60 回）、タイムアウト、その他の HTTP、接続の失敗、JSON を読めない、の 7 つ。文言は `Display` から `crate::i18n` を呼んで出す（`docs/design/error-reporting.md`）
@@ -112,6 +112,7 @@ GitHub の Release から新しい版を見つけて知らせ、人が「更新�
 
 - **どちらかが無ければ `ApplyError::NoAssets`。** 1.1.0 以前の Release は zip しか無いので、ここに当たる。「この版には自動更新用のファイルがありません。リリースページから手動で更新してください」を出し、ダイアログの「リリースページを開く」に倒す
 - 資産の URL は `https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/<tag>/<資産名>` と**完全に一致する**ものしか落とさない（`UnexpectedAssetUrl`）。`release_page_url` と同じ理由で、頭の一致では `..` で別の場所を指せる。GitHub はここから別のホストへリダイレクトし、ureq がそれを辿る
+- **`https://` の URL を取るときは ureq に `https_only` を付け、`http://` へのリダイレクトを辿らない**（`https_only_for`、Issue #365）。問い合わせにも資産にも効く。付かないのはテスト用の問い合わせ先で最初から `http://` を指したときだけ
 - テスト用の問い合わせ先（`CAPTURECARD_VIEWER_UPDATE_API_URL`）を使っているときだけ、`file://` と任意の `http(s)://` を受け付ける（「試すための環境変数」）
 
 ### 手順
@@ -126,7 +127,7 @@ flowchart TD
     B --> C["exe を &lt;exe&gt;.new へ落とす<br/>落としながら SHA-256 を計算"]
     C -->|合わない / 失敗 / キャンセル| Z[".new を消す<br/>元の exe はそのまま"]
     C --> D["差し替え（swap_in）<br/>.old を消す → exe を .old へ → .new を exe へ"]
-    D -->|途中で失敗| W["元の exe を戻し .new を消す"]
+    D -->|途中で失敗| W["元の exe を戻し .new を消す<br/>戻せなければ .new を元の名前へ置く"]
     D --> E["ウィンドウを閉じる<br/>on_exit の最後に新しい exe を起動"]
 ```
 
@@ -143,11 +144,15 @@ flowchart TD
 |---|---|---|
 | 書けるかの確認、`SHA256SUMS.txt` | 触っていない | 何も落としていない |
 | exe のダウンロード・照合・キャンセル | 触っていない | `.new` を消す |
+| 差し替えの前に、元の名前に exe が無い（前回 `ReplaceKeptNothing` で終わった状態からの再試行） | `.old` にある | どの手順にも進まず、`.old` と `.new` を残して `ReplaceKeptNothing` で案内する（`may_swap`） |
 | `.old` を消せない、exe を `.old` へ改名できない | 元の名前のまま | `.new` を消す |
-| `.new` を元の名前へ改名できない | `.old` にある | **先に `.old` を元の名前へ戻し**、それから `.new` を消す |
+| `.new` を元の名前へ改名できない | `.old` にある | **先に `.old` を元の名前へ戻し**、戻せたときだけ `.new` を消す（`Replace`） |
+| 上の行で `.old` を戻せない | `.old` にある | `.new` を消さず、元の名前へ改名する（`ReplaceKeptNew`。次の起動から新しいバージョン）。それもできなければ `.old` と `.new` を残し、場所を画面で案内する（`ReplaceKeptNothing`） |
 | 新しい exe を起動できない（`on_exit`） | `.old` にある | 新しい exe を `.new` へ戻し、`.old` を元の名前へ戻す。戻せなければ新しい exe を元の名前へ置き直す（`roll_back`） |
 
-戻し方の順は純粋関数（`recovery_for`）で決め、テストで確かめている。**戻すより先に `.new` を消さない。** 戻せなかったときに、手で置ける exe が 1 つも無くなるため。どの経路でも、元の名前には元の exe か照合済みの新しい exe のどちらかが残る。
+戻し方の順は純粋関数（最初の 1 手を `recovery_for`、試した結果から次の 1 手を `next_recovery`）で決め、テストで確かめている。**`.new` を消すのは、元の名前に元の exe があるときだけ。** 戻せないまま消すと、元の名前に何も無いうえに、手で置ける照合済みの exe が 1 つ減るため（Issue #305）。`.old` を戻せなかったときは `roll_back` と同じ考え方で新しい exe を元の名前へ置く。改名の失敗が 3 回重なった場合（ウイルス対策ソフトが `.old` と `.new` を掴み続けている、など）だけは元の名前に何も残らないが、そのときも `.old` と `.new` は残し、画面の文言で `.old` の名前を戻せば元のバージョンで起動できることを案内する。
+
+その状態のまま（プロセスは動き続けている）もう一度「更新する」を押すと、最初の手順「`.old` を消す」が元の exe を消してしまう。そのため `swap_in` は先頭で元の名前に exe があるかを見て（`may_swap`）、無ければどの手順にも進まない（Issue #332）。起動時の後片付け（`remove_leftovers`）は、元の名前から起動していれば exe があるので同じ状態にはならない。案内に従わず `.old` のまま起動した場合は、一時名が `<名前>.old.old` / `<名前>.old.new` になるので、起動した `.old` 自身と隣の `.new` には触らない（テスト `remove_leftovers_when_started_from_old_keeps_itself`）。
 
 失敗の理由は、ダイアログ（理由と「リリースページを開く」「閉じる」）・トースト（`report_error(ErrorSource::Update, ..)`）・ログに出す。`NotWritable` はフォルダの詳細を画面に出さないので、ログには `{:?}` で中身ごと残す。手で直す方法は `docs/TROUBLESHOOTING.md` の「更新に失敗したとき」。
 
@@ -156,9 +161,12 @@ flowchart TD
 - 進み具合（`ApplyProgress`: 準備 → ダウンロード中（割合、大きさが分からなければ MB）→ 置き換え中）はチャネルで `update()` へ返し、`drain_update_apply_results` が取り込む。割合が 1 つ進んだとき（大きさが分からなければ 256 KiB ごと）だけ送る。届いたら `RepaintWaker` で起こす。**最小化中は起こさず、`update()` も回らないことがある**ので、最小化したまま終わった更新は元に戻したときに取り込まれ、そこで閉じて再起動する
 - **更新中もデバイスワーカーは止めない。** 映像と音声はダウンロードの間も流れる。止めるのは `on_exit` の通常の経路だけ
 - **キャンセルと差し替えの開始は取り合いにする**（`ApplyControl`。`AtomicU8` の `compare_exchange` で、先に来た方だけが通る）。スレッドは差し替えの直前に `begin_swap` し、先にキャンセルされていれば差し替えない。差し替えを始めたあとのキャンセルは通らない。`Mutex` にしないのは、改名の間ロックを握ることになるため（`GUARDRAIL.md`）
-- 「キャンセル」が通れば、結果を待たずにダイアログを閉じる（受信側を捨てる）。スレッドは読み取りの合間か差し替えの直前に気づいて `.new` を消す。通らなければ（差し替えを始めていれば）何もせず、すぐ届く結果を待つ。**キャンセルしたスレッドが終わるまで、次の更新は始めない**（`UpdateState::apply_thread` の `is_finished()`。その間「その他」タブの「更新する」は押せない）。2 本が同じ `.new` を書き、古い方が止まるときに新しい方の `.new` を消してしまうため。置き換えを始めたら（`Installing`）キャンセルは出さない
-- 読み取りの上限は、接続と応答のヘッダーまで 15 秒、本文を受け取り終えるまで 10 分。ureq には「読み取りが止まってから何秒」の上限が無く、受け取りが止まるとキャンセルに気づくのもこの上限まで遅れる。そのためキャンセルは待たずに閉じる
-- **`JoinHandle` は持つが `on_exit` で join しない**（確認のスレッドと同じ）。ダウンロードの最中に閉じたら `on_exit` でキャンセルを立てるだけで待たない。打ち切られると書きかけの `.new` が残りうるが、元の exe には触っていないので壊れず、`.new` は次の起動で消す。待つと、遅い回線で閉じるのが最大 10 分遅れる。**例外は差し替えの最中に閉じたとき**（`on_exit` のキャンセルが通らなかったとき）で、そのときだけ join する。実行中の exe を `.old` へ動かしてから `.new` を元の名前へ置くまでの間にプロセスが終わると、元の名前に exe が無くなるため。改名だけなので待つのは一瞬（CodeRabbit の指摘）
+- 「キャンセル」が通れば、結果を待たずにダイアログを閉じる（受信側を捨てる）。スレッドは読み取りの合間か差し替えの直前に気づいて `.new` を消す。**読み取りの合間は `SHA256SUMS.txt` の取得にもある**（exe と同じく 64 KiB ずつ読み、1 回ごとにキャンセルを見る。Issue #319 までは一気に読み切っていて、取得の間はキャンセルに気づけなかった）。通らなければ（差し替えを始めていれば）何もせず、すぐ届く結果を待つ。**キャンセルしたスレッドが終わるまで、次の更新は始めない**（`UpdateState::apply_thread` の `is_finished()`。その間「その他」タブの「更新する」は押せない）。2 本が同じ `.new` を書き、古い方が止まるときに新しい方の `.new` を消してしまうため。置き換えを始めたら（`Installing`）キャンセルは出さない
+- 読み取りの上限は、接続と応答のヘッダーまで 15 秒、本文を受け取り終えるまで（全体）exe は 10 分、`SHA256SUMS.txt` は 30 秒（`EXE_BODY_TIMEOUT` / `CHECKSUMS_BODY_TIMEOUT`）。**これとは別に、1 バイトも届かないまま 30 秒たったら打ち切る**（`download::ReadLimits::idle`。応答のヘッダーを待つ間にも効く）。上限の間にキャンセルされていれば、時間切れは失敗ではなくキャンセルとして返す
+- **受け取りが完全に止まっても、キャンセルには 0.2 秒ほどで気づく**（Issue #357）。ureq には「読み取りが止まってから何秒」の上限もキャンセルの口も無く、そのままでは本文の上限（exe は 10 分）まで読み取りから戻らない。そこで ureq の接続の組み立て（`download::watched_connector`）の **TCP と TLS の間に `WatchedTransport` を挟み**、ソケットの読み取りを 0.2 秒ずつ（`POLL_INTERVAL`）に区切って、合間にキャンセル（`ApplyControl` の控えの `CancelWatch`）と無通信の時間切れを見る。TLS の下に挟むのは、区切った読み取りの時間切れを TLS に見せないため（TCP の読み取りは時間切れなら何も読んでいないので、そのまま待ち直せる）。スレッドは増えない。気づけないのは TCP の接続を張る間（上限 15 秒）だけ。接続の組み立ては ureq の `DefaultConnector` から rustls と SOCKS の警告を除いた並び（CONNECT プロキシ → TCP → 監視 → native-tls）で、**ureq の `unversioned` の API を使うので、ureq を上げたら `#[ignore]` のネットワークのテスト（`cargo test fetch_text_reaches_a_release_asset_over_https -- --ignored`）を一度は通すこと**
+- 次の 2 案は採らなかった。**読み取りを別スレッドに置き、適用のスレッドはチャネルで受け取りながらキャンセルを見る案**は、止まった読み取りのスレッドが本文の上限まで残り、スレッドが増える。**接続の `TcpStream` を取り出して UI スレッドから `shutdown` する案**は、ureq 3 の `TcpTransport` がソケットを外へ出さないので TCP の接続（複数のアドレスへの試し方を含む）を自前で書き直すことになり、ソケットの控えを UI スレッドと共有するロックも要る。区切って待つ形なら ureq の接続をそのまま使え、ロックも要らず、無通信の時間切れも同じ場所で足せる
+- 本文の時間切れは、ureq が `ErrorKind::Other` の中に `ureq::Error::Timeout` を包んで返す。中身まで見て `ApplyError::Timeout`（「時間内に受け取れなかった」）にする（`is_timeout`）。種類だけ見ると「ダウンロードに失敗」になる
+- **`JoinHandle` は持つが `on_exit` で join しない**（確認のスレッドと同じ）。ダウンロードの最中に閉じたら `on_exit` でキャンセルを立てるだけで待たない。打ち切られると書きかけの `.new` が残りうるが、元の exe には触っていないので壊れず、`.new` は次の起動で消す。Issue #357 からは止まった受け取りでもキャンセルに 0.2 秒ほどで気づくが、TCP の接続を張る間（最大 15 秒）は気づけないので、待たない形のままにしてある。**例外は差し替えの最中に閉じたとき**（`on_exit` のキャンセルが通らなかったとき）で、そのときだけ join する。実行中の exe を `.old` へ動かしてから `.new` を元の名前へ置くまでの間にプロセスが終わると、元の名前に exe が無くなるため。改名だけなので待つのは一瞬（CodeRabbit の指摘）
 - `update-cleanup` も join しない。ファイルを 1 つ消すだけで、途中で打ち切られても次の起動でまた試す
 
 ### 新しい exe の起動を `on_exit` の最後に置く理由

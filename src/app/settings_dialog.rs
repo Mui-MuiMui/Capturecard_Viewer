@@ -4,8 +4,10 @@
 //! 持たせないため（`docs/ARCHITECTURE.md` の「UI は状態を持たない」）。
 //! ディスクへの書き出しそのものは `super::settings_store`。
 
+use super::monitor_audio_pin::{draft_pin_choice, DraftPinChoice};
 use super::update::CheckOrigin;
 use super::CaptureCardViewer;
+use crate::audio::PinFormat;
 use crate::i18n::{self, Text};
 use crate::overlay::OverlayContent;
 use crate::settings;
@@ -23,6 +25,38 @@ use std::time::{Duration, Instant};
 const PRESET_OSD_DURATION: Duration = Duration::from_millis(1500);
 
 impl CaptureCardViewer {
+    /// デバイスワーカーの観測値を読み直す。`update()` の先頭で 1 回だけ呼ぶ。
+    ///
+    /// 設定ダイアログを開いていれば、映像デバイスの音声を選べるかと項目名も
+    /// ドラフトの映像デバイスと観測値（`DeviceSnapshot::active_video` と、列挙の
+    /// 時点の音声ピンの有無 `video_audio_pins`）から作り直してダイアログへ渡す
+    /// （#394、#409、#425）。基準はドラフトの映像デバイスなので、「適用」の前でも
+    /// 選んだ映像デバイスの音声が一覧に出る。判定は `draft_pin_choice`。
+    /// 観測値の複製から作るだけで、デバイスには問い合わせない。ドラフトの音声の
+    /// 選択も変えない。描画はこれを `SettingsDialogView` の借用で読む。
+    pub(super) fn refresh_device_snapshot(&mut self) {
+        self.device_snapshot = self.device.snapshot();
+        if !self.show_settings {
+            return;
+        }
+        let draft_device = self
+            .settings_dialog
+            .draft()
+            .and_then(|draft| draft.video.device_name.as_deref());
+        let DraftPinChoice { device, choice } = draft_pin_choice(
+            draft_device,
+            self.device_snapshot.active_video.as_ref(),
+            &self.device_snapshot.video_audio_pins,
+        );
+        let choice = match choice {
+            Ok(format) => {
+                ui::VideoPinChoice::selectable(format.map(PinFormat::capabilities), device)
+            }
+            Err(reason) => ui::VideoPinChoice::unavailable(reason.message(), device),
+        };
+        self.settings_dialog.set_video_pin(choice);
+    }
+
     /// プリセットを実行中の設定へ適用する。
     ///
     /// 変わるのは `video` と `audio` だけ。デバイスを開き直すかどうかは
@@ -126,6 +160,7 @@ impl CaptureCardViewer {
                     self.show_hotkey_dialog = true;
                 }
                 ui::SettingsEvent::PickScreenshotFolder => self.pick_screenshot_folder(),
+                ui::SettingsEvent::PickRecordingFolder => self.pick_recording_folder(),
                 ui::SettingsEvent::PickSoundFile => self.pick_sound_file(),
                 ui::SettingsEvent::Capability(event) => self.apply_capability_event(event),
             }
@@ -182,6 +217,19 @@ impl CaptureCardViewer {
             return;
         };
         draft.screenshot.save_folder = folder;
+    }
+
+    /// 録画の保存先をファイルダイアログで選ぶ。入れるのはドラフトで、反映は「適用」「OK」。
+    fn pick_recording_folder(&mut self) {
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            debug!("録画の保存先の選択がキャンセルされた");
+            return;
+        };
+        let Some(draft) = self.settings_dialog.draft_mut() else {
+            warn!("ドラフトが無い状態で録画の保存先の選択が要求された");
+            return;
+        };
+        draft.recording.folder = folder;
     }
 
     /// スクリーンショットの効果音をファイルダイアログで選ぶ。
@@ -246,7 +294,7 @@ impl CaptureCardViewer {
     /// 「適用」の前にその場で確かめられるようにするため（Issue #204）。
     ///
     /// **適用済みの効果音は差し替えない。** 読み込みは別スレッドで
-    /// `screenshot::load_sound_data` を通して行い（`request_test_sound`）、
+    /// `screenshot_sound::load_sound_data` を通して行い（`request_test_sound`）、
     /// 撮影時に鳴る音は「適用」か「OK」まで差し替わらない。解決の仕方は撮影時と
     /// 同じで、既定値のパスは内蔵音へ倒れる。ファイルが読めなければ内蔵音で
     /// 鳴らし、理由をトーストへ出す
@@ -285,7 +333,7 @@ impl CaptureCardViewer {
         };
 
         let Some(path) = rfd::FileDialog::new()
-            .set_file_name(&settings::export_file_name(&Local::now()))
+            .set_file_name(settings::export_file_name(&Local::now()))
             .add_filter(Text::SettingsFile.get(), &["toml"])
             .save_file()
         else {

@@ -8,142 +8,48 @@
 //! **元の exe を壊す経路を作らない。** ダウンロードは exe と同じフォルダの
 //! `<exe の名前>.new` へ落とし、照合が済むまで元の exe には触らない。
 //! 差し替え（`swap_in`）が途中で失敗したら、動かした元の exe を戻して `.new` を消す。
+//! 元の exe を戻せなければ `.new` は消さず、元の名前へ置く（置けなければ残す）。
 //!
 //! 差し替えとその戻し方、exe の隣の一時名（`ExePaths`）は `swap.rs`、
-//! `SHA256SUMS.txt` の読み方と照合は `checksum.rs`。
+//! `SHA256SUMS.txt` の読み方と照合は `checksum.rs`、資産の選び方（`ApplyPlan`）は `assets.rs`、
+//! 資産の読み取り（HTTP / ファイルを開き、小分けに読みながらキャンセルを見る）は `download.rs`。
 
 pub use super::swap::{remove_leftovers, roll_back, ExePaths};
 
+use super::assets::ApplyPlan;
 use super::checksum::{checksum_matches, find_checksum, to_hex};
-use super::overrides::{file_url_to_path, strip_prefix_ignore_case};
+use super::download::{fetch_text, file_error, open_source, read_in_chunks, ReadLimits};
 use super::swap::{ensure_writable, remove_if_exists, swap_in};
-use super::{tls_config, ReleaseAsset, UpdateCheck, USER_AGENT};
+use super::UpdateCheck;
 use crate::i18n::{self, Text};
-use log::{debug, info, warn};
+use log::{info, warn};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::Write;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
-
-/// 照合に使う資産の名前（`docs/RELEASE.md` の「配布物」）。
-pub const CHECKSUMS_ASSET_NAME: &str = "SHA256SUMS.txt";
-
-/// 資産の URL として受け付ける頭。テスト用の問い合わせ先を使っていないときは、
-/// `<頭><タグ>/<資産名>` と完全に一致するものしか落とさない。
-const DOWNLOAD_URL_PREFIX: &str =
-    "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/";
 
 /// exe の大きさの上限。配布物は数十 MB なので、桁違いに大きいものは
 /// 取り違えとみなしてディスクを埋める前に止める。
 const MAX_EXE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// `SHA256SUMS.txt` の大きさの上限。数行のテキストなので十分に大きい。
-const MAX_CHECKSUMS_BYTES: u64 = 64 * 1024;
+pub(super) const MAX_CHECKSUMS_BYTES: u64 = 64 * 1024;
 
-/// 接続（TLS のハンドシェイクを含む）と、応答のヘッダーが揃うまでの上限。
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// exe の本文を受け取り終えるまでの上限（全体）。遅い回線でも数十 MB が落ちきる長さにする。
+/// 受け取りが止まったときの打ち切りとキャンセルは、これとは別に読み取りを待つ間にも
+/// 見る（`download::ReadLimits`）。
+const EXE_BODY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/// 本文を受け取り終えるまでの上限。遅い回線でも数十 MB が落ちきる長さにする。
-/// キャンセルは読み取りの合間に見るので、ここより早く止められる。
-const BODY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-
-/// 1 回に読む大きさ。キャンセルと進捗はこの単位で見る。
-const CHUNK_BYTES: usize = 64 * 1024;
+/// `SHA256SUMS.txt` の本文を受け取り終えるまでの上限。数行（上限 64 KiB）なので、
+/// 遅い回線でも数秒で届く。exe と同じ 10 分にすると、受け取りが止まったときに
+/// キャンセルしてもスレッドが 10 分残り、その間は次の更新を始められない（Issue #319）。
+const CHECKSUMS_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 大きさが分からないときに進捗を知らせる間隔。
 const PROGRESS_STEP_BYTES: u64 = 256 * 1024;
-
-/// Release に添付する exe の名前（1.2.1 から。`docs/RELEASE.md` の「配布物」）。
-/// 版を含めないので、ダウンロードした名前と、更新で維持される名前が一致する。
-pub const EXE_ASSET_NAME: &str = "capturecard_viewer.exe";
-
-/// 1.2.0 の Release に添付していた exe の名前。`tag` は Release のタグそのまま（`v1.2.0`）。
-/// `EXE_ASSET_NAME` が無い Release からも更新できるよう、こちらも探す。
-pub fn legacy_exe_asset_name(tag: &str) -> String {
-    format!("capturecard_viewer-{tag}-windows-x64.exe")
-}
-
-/// 資産をどこから取るか。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AssetSource {
-    /// HTTP で取る
-    Http(String),
-    /// ファイルをそのまま読む。テスト用の問い合わせ先の JSON に `file://` で
-    /// 書いたときだけ（`CAPTURECARD_VIEWER_UPDATE_API_URL`）
-    File(PathBuf),
-}
-
-/// 更新に使う 2 つの資産。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApplyPlan {
-    /// exe の資産名。`SHA256SUMS.txt` の行をこの名前で引く
-    pub exe_name: String,
-    /// exe の取り先
-    pub exe: AssetSource,
-    /// `SHA256SUMS.txt` の取り先
-    pub checksums: AssetSource,
-}
-
-impl ApplyPlan {
-    /// 見つかった版の資産から、何をどこから落とすかを決める。
-    ///
-    /// `allow_any_source` はテスト用の問い合わせ先を使っているとき。偽なら
-    /// 資産の URL がこのリポジトリの Release のものでなければ落とさない。
-    ///
-    /// exe は `EXE_ASSET_NAME` を探し、無ければ旧名（`legacy_exe_asset_name`）を探す。
-    /// `SHA256SUMS.txt` の行は選んだほうの名前で引く（`exe_name`）。
-    ///
-    /// **資産が無い（1.1.0 以前の Release）なら `ApplyError::NoAssets`。**
-    /// 自動では更新できないので、リリースページから手で更新してもらう。
-    pub fn from_check(check: &UpdateCheck, allow_any_source: bool) -> Result<Self, ApplyError> {
-        let find = |name: &str| check.assets.iter().find(|asset| asset.name == name);
-        let exe = find(EXE_ASSET_NAME).or_else(|| find(&legacy_exe_asset_name(&check.tag)));
-        let (Some(exe), Some(checksums)) = (exe, find(CHECKSUMS_ASSET_NAME)) else {
-            return Err(ApplyError::NoAssets);
-        };
-        Ok(Self {
-            exe: asset_source(exe, &check.tag, allow_any_source)?,
-            checksums: asset_source(checksums, &check.tag, allow_any_source)?,
-            exe_name: exe.name.clone(),
-        })
-    }
-}
-
-/// 資産の URL を、落としてよい取り先にする。
-///
-/// 通常は `https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/<タグ>/<資産名>`
-/// と完全に一致するものだけ。頭の一致で許すと `..` を含む URL で別の場所を指せる。
-/// テスト用の問い合わせ先を使っているときは `http://` / `https://` / `file://` を
-/// そのまま受け付ける（ローカルのファイルやテスト用のリポジトリを指すため）。
-fn asset_source(
-    asset: &ReleaseAsset,
-    tag: &str,
-    allow_any_source: bool,
-) -> Result<AssetSource, ApplyError> {
-    let url = asset.download_url.trim();
-    if allow_any_source {
-        if let Some(rest) = strip_prefix_ignore_case(url, "file://") {
-            if let Some(path) = file_url_to_path(rest) {
-                return Ok(AssetSource::File(path));
-            }
-        } else if strip_prefix_ignore_case(url, "https://").is_some()
-            || strip_prefix_ignore_case(url, "http://").is_some()
-        {
-            return Ok(AssetSource::Http(url.to_string()));
-        }
-        return Err(ApplyError::UnexpectedAssetUrl(url.to_string()));
-    }
-
-    let expected = format!("{DOWNLOAD_URL_PREFIX}{tag}/{}", asset.name);
-    if url == expected {
-        Ok(AssetSource::Http(expected))
-    } else {
-        Err(ApplyError::UnexpectedAssetUrl(url.to_string()))
-    }
-}
 
 /// 更新に失敗した理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,8 +78,20 @@ pub enum ApplyError {
     File(String),
     /// exe を置き換えられない。元の exe は戻してある
     Replace(String),
+    /// exe を置き換えられず、元の exe も戻せなかったので、照合済みの新しい exe を
+    /// 元の名前へ置いた。`old` は元の exe の場所
+    ReplaceKeptNew { source: String, old: String },
+    /// exe を置き換えられず、元の exe も新しい exe も元の名前へ置けなかった。
+    /// `old` は元の exe、`new` は照合済みの新しい exe の場所
+    ReplaceKeptNothing {
+        source: String,
+        old: String,
+        new: String,
+    },
     /// キャンセルされた。画面には出さない
     Cancelled,
+    /// 更新のスレッドが結果を送らずに終わった。ダウンロードの失敗とは限らないので分けてある
+    ThreadEnded,
 }
 
 impl fmt::Display for ApplyError {
@@ -191,7 +109,14 @@ impl fmt::Display for ApplyError {
             ApplyError::ChecksumMismatch => Text::UpdateChecksumMismatch.get().to_string(),
             ApplyError::File(source) => i18n::update_file_failed(source),
             ApplyError::Replace(source) => i18n::update_replace_failed(source),
+            ApplyError::ReplaceKeptNew { source, old } => {
+                i18n::update_replace_kept_new(old, source)
+            }
+            ApplyError::ReplaceKeptNothing { source, old, new } => {
+                i18n::update_replace_kept_nothing(old, new, source)
+            }
             ApplyError::Cancelled => Text::UpdateCancelled.get().to_string(),
+            ApplyError::ThreadEnded => Text::UpdateThreadEnded.get().to_string(),
         };
         f.write_str(&text)
     }
@@ -235,6 +160,8 @@ impl ApplyProgress {
 /// どの版でも自動更新できず、exe を移せば直る、という伝えるべきことだから。
 ///
 /// 失敗・キャンセルのどちらでも `.new` は消し、元の exe は元の名前のまま残す。
+/// 例外は差し替えで元の exe を戻せなかったときで、`.new` を元の名前へ置くか、
+/// 置けなければ `.old` と `.new` を残す（`ReplaceKeptNew` / `ReplaceKeptNothing`）。
 /// 成功したら、新しい exe は `paths.exe` にあり、起動は呼び出し側が行う。
 /// キャンセルは読み取りの合間に見る。差し替えの直前に `ApplyControl::begin_swap` で
 /// キャンセルと取り合い、先にキャンセルされていれば差し替えない。
@@ -250,11 +177,15 @@ pub fn run_apply(
         .map_err(|e| ApplyError::NotWritable(format!("{}: {}", paths.dir().display(), e)))?;
     let plan = &ApplyPlan::from_check(check, allow_any_source)?;
 
-    let sums = fetch_text(&plan.checksums, MAX_CHECKSUMS_BYTES)?;
+    let sums = fetch_text(
+        &plan.checksums,
+        MAX_CHECKSUMS_BYTES,
+        ReadLimits::with_body(CHECKSUMS_BODY_TIMEOUT),
+        cancel,
+    )?;
     let expected = find_checksum(&sums, &plan.exe_name)
         .ok_or(ApplyError::ChecksumMissing)?
         .to_string();
-    check_cancelled(cancel)?;
 
     let result = download_and_verify(plan, paths, &expected, cancel, progress);
     if result.is_err() {
@@ -277,7 +208,8 @@ fn download_and_verify(
     cancel: &ApplyControl,
     progress: &mut dyn FnMut(ApplyProgress),
 ) -> Result<(), ApplyError> {
-    let (mut reader, total) = open_source(&plan.exe)?;
+    let (mut reader, total) =
+        open_source(&plan.exe, ReadLimits::with_body(EXE_BODY_TIMEOUT), cancel)?;
     if total.is_some_and(|total| total > MAX_EXE_BYTES) {
         return Err(ApplyError::TooLarge);
     }
@@ -290,29 +222,25 @@ fn download_and_verify(
 
     let mut file = File::create(&paths.new).map_err(|e| file_error(&paths.new, e))?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; CHUNK_BYTES];
-    let mut downloaded: u64 = 0;
     let mut reported: Option<ApplyProgress> = None;
-    loop {
-        check_cancelled(cancel)?;
-        let read = reader.read(&mut buffer).map_err(read_error(&plan.exe))?;
-        if read == 0 {
-            break;
-        }
-        downloaded += read as u64;
-        if downloaded > MAX_EXE_BYTES {
-            return Err(ApplyError::TooLarge);
-        }
-        hasher.update(&buffer[..read]);
-        file.write_all(&buffer[..read])
-            .map_err(|e| file_error(&paths.new, e))?;
+    let downloaded = read_in_chunks(
+        &mut reader,
+        &plan.exe,
+        MAX_EXE_BYTES,
+        cancel,
+        |chunk, downloaded| {
+            hasher.update(chunk);
+            file.write_all(chunk)
+                .map_err(|e| file_error(&paths.new, e))?;
 
-        let now = ApplyProgress::Downloading { downloaded, total };
-        if should_report(reported, now) {
-            progress(now);
-            reported = Some(now);
-        }
-    }
+            let now = ApplyProgress::Downloading { downloaded, total };
+            if should_report(reported, now) {
+                progress(now);
+                reported = Some(now);
+            }
+            Ok(())
+        },
+    )?;
     // 改名する前にディスクへ書き切る。途中で電源が落ちても、
     // 照合を通った中身が元の名前に来るようにする
     file.sync_all().map_err(|e| file_error(&paths.new, e))?;
@@ -349,14 +277,6 @@ fn should_report(last: Option<ApplyProgress>, now: ApplyProgress) -> bool {
     }
 }
 
-fn check_cancelled(control: &ApplyControl) -> Result<(), ApplyError> {
-    if control.is_cancelled() {
-        Err(ApplyError::Cancelled)
-    } else {
-        Ok(())
-    }
-}
-
 /// 更新のスレッドと UI スレッドで共有する、キャンセルと差し替えの取り合い。
 ///
 /// キャンセルと差し替えの開始は、どちらか先に来た方だけが通る（`compare_exchange`）。
@@ -366,10 +286,22 @@ fn check_cancelled(control: &ApplyControl) -> Result<(), ApplyError> {
 /// 1 つも無くなるため。ダウンロードの最中はキャンセルが通るので、待たない。
 ///
 /// `Mutex` にしないのは、差し替え（ファイルの改名）の間ロックを握ることになるため
-/// （`GUARDRAIL.md`）。
+/// （`GUARDRAIL.md`）。状態を `Arc` に入れているのは、ureq の接続（`'static` を求める）
+/// へキャンセルを見るだけの控え（`CancelWatch`）を渡すため。
 #[derive(Debug, Default)]
 pub struct ApplyControl {
-    state: AtomicU8,
+    state: Arc<AtomicU8>,
+}
+
+/// キャンセルされたかを見るだけの控え。読み取りを待つ間の ureq の接続が持つ
+/// （`download::WatchedTransport`）。
+#[derive(Debug, Clone)]
+pub(super) struct CancelWatch(Arc<AtomicU8>);
+
+impl CancelWatch {
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire) == CONTROL_CANCELLED
+    }
 }
 
 const CONTROL_RUNNING: u8 = 0;
@@ -391,8 +323,12 @@ impl ApplyControl {
         }
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub(super) fn is_cancelled(&self) -> bool {
         self.state.load(Ordering::Acquire) == CONTROL_CANCELLED
+    }
+
+    pub(super) fn watch(&self) -> CancelWatch {
+        CancelWatch(Arc::clone(&self.state))
     }
 
     /// 差し替えを始める。先にキャンセルされていれば `false`。
@@ -408,76 +344,15 @@ impl ApplyControl {
     }
 }
 
-/// 資産を読み始める。大きさが分かればそれも返す。
-fn open_source(source: &AssetSource) -> Result<(Box<dyn Read>, Option<u64>), ApplyError> {
-    match source {
-        AssetSource::File(path) => {
-            let file = File::open(path).map_err(|e| file_error(path, e))?;
-            let len = file.metadata().ok().map(|m| m.len());
-            Ok((Box::new(file), len))
-        }
-        AssetSource::Http(url) => {
-            let config = ureq::Agent::config_builder()
-                .timeout_connect(Some(CONNECT_TIMEOUT))
-                .timeout_recv_response(Some(CONNECT_TIMEOUT))
-                .timeout_recv_body(Some(BODY_TIMEOUT))
-                .tls_config(tls_config())
-                .user_agent(USER_AGENT)
-                .build();
-            let agent = ureq::Agent::new_with_config(config);
-            debug!("更新の資産を取る: {}", url);
-            // GitHub の資産の URL は別のホストへのリダイレクトを返す。ureq が辿る
-            let response = agent.get(url).call().map_err(download_error_from)?;
-            let body = response.into_body();
-            let len = body.content_length();
-            Ok((Box::new(body.into_reader()), len))
-        }
-    }
-}
-
-/// 小さなテキストの資産（`SHA256SUMS.txt`）を読む。
-fn fetch_text(source: &AssetSource, limit: u64) -> Result<String, ApplyError> {
-    let (reader, total) = open_source(source)?;
-    if total.is_some_and(|total| total > limit) {
-        return Err(ApplyError::TooLarge);
-    }
-    let mut bytes = Vec::new();
-    // 上限より 1 バイトだけ多く読み、読めてしまったら大きすぎる
-    reader
-        .take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(read_error(source))?;
-    if bytes.len() as u64 > limit {
-        return Err(ApplyError::TooLarge);
-    }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
-fn download_error_from(error: ureq::Error) -> ApplyError {
-    match error {
-        ureq::Error::StatusCode(code) => ApplyError::HttpStatus(code),
-        ureq::Error::Timeout(_) => ApplyError::Timeout,
-        other => ApplyError::Network(other.to_string()),
-    }
-}
-
-fn read_error(source: &AssetSource) -> impl Fn(io::Error) -> ApplyError + '_ {
-    move |error| match source {
-        AssetSource::File(path) => file_error(path, error),
-        AssetSource::Http(_) if error.kind() == io::ErrorKind::TimedOut => ApplyError::Timeout,
-        AssetSource::Http(_) => ApplyError::Network(error.to_string()),
-    }
-}
-
-fn file_error(path: &Path, error: io::Error) -> ApplyError {
-    ApplyError::File(format!("{}: {}", path.display(), error))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::update::assets::{legacy_exe_asset_name, CHECKSUMS_ASSET_NAME, EXE_ASSET_NAME};
+    use crate::update::download::slow_http_server;
+    use crate::update::ReleaseAsset;
     use semver::Version;
     use std::fs;
+    use std::path::Path;
 
     fn check_with_assets(tag: &str, assets: &[(&str, &str)]) -> UpdateCheck {
         UpdateCheck {
@@ -495,180 +370,8 @@ mod tests {
         }
     }
 
-    const EXE_URL: &str =
-        "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.1/capturecard_viewer.exe";
-    const SUMS_URL: &str =
-        "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.1/SHA256SUMS.txt";
-    const LEGACY_EXE_URL: &str = "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.0/capturecard_viewer-v1.2.0-windows-x64.exe";
-    const LEGACY_SUMS_URL: &str =
-        "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.0/SHA256SUMS.txt";
-
     // "hello" の SHA-256
     const HELLO_SHA256: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
-
-    // ---- 資産の選び方 ----
-
-    #[test]
-    fn exe_asset_names_follow_the_release_naming() {
-        assert_eq!(EXE_ASSET_NAME, "capturecard_viewer.exe");
-        assert_eq!(
-            legacy_exe_asset_name("v1.2.0"),
-            "capturecard_viewer-v1.2.0-windows-x64.exe"
-        );
-    }
-
-    #[test]
-    fn apply_plan_from_check_picks_exe_and_checksums() {
-        let check = check_with_assets(
-            "v1.2.1",
-            &[
-                ("capturecard_viewer.exe", EXE_URL),
-                ("SHA256SUMS.txt", SUMS_URL),
-            ],
-        );
-
-        let plan = ApplyPlan::from_check(&check, false).expect("資産は揃っている");
-
-        assert_eq!(plan.exe_name, "capturecard_viewer.exe");
-        assert_eq!(plan.exe, AssetSource::Http(EXE_URL.to_string()));
-        assert_eq!(plan.checksums, AssetSource::Http(SUMS_URL.to_string()));
-    }
-
-    #[test]
-    fn apply_plan_from_check_falls_back_to_the_legacy_exe_name() {
-        // 1.2.0 の Release は版付きの名前
-        let check = check_with_assets(
-            "v1.2.0",
-            &[
-                ("capturecard_viewer-v1.2.0-windows-x64.exe", LEGACY_EXE_URL),
-                ("SHA256SUMS.txt", LEGACY_SUMS_URL),
-            ],
-        );
-
-        let plan = ApplyPlan::from_check(&check, false).expect("旧名の資産でも揃っている");
-
-        assert_eq!(plan.exe_name, "capturecard_viewer-v1.2.0-windows-x64.exe");
-        assert_eq!(plan.exe, AssetSource::Http(LEGACY_EXE_URL.to_string()));
-        assert_eq!(
-            plan.checksums,
-            AssetSource::Http(LEGACY_SUMS_URL.to_string())
-        );
-    }
-
-    #[test]
-    fn apply_plan_from_check_prefers_the_plain_exe_name() {
-        let legacy_url = "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.1/capturecard_viewer-v1.2.1-windows-x64.exe";
-        let check = check_with_assets(
-            "v1.2.1",
-            &[
-                ("capturecard_viewer-v1.2.1-windows-x64.exe", legacy_url),
-                ("capturecard_viewer.exe", EXE_URL),
-                ("SHA256SUMS.txt", SUMS_URL),
-            ],
-        );
-
-        let plan = ApplyPlan::from_check(&check, false).expect("資産は揃っている");
-
-        assert_eq!(plan.exe_name, "capturecard_viewer.exe");
-        assert_eq!(plan.exe, AssetSource::Http(EXE_URL.to_string()));
-    }
-
-    #[test]
-    fn apply_plan_from_check_without_assets_is_no_assets() {
-        // 1.1.0 以前の Release は zip だけ
-        let zip_only = check_with_assets(
-            "v1.1.0",
-            &[(
-                "capturecard_viewer-v1.1.0-windows-x64.zip",
-                "https://x.invalid/zip",
-            )],
-        );
-        let exe_only = check_with_assets("v1.2.1", &[("capturecard_viewer.exe", EXE_URL)]);
-        let legacy_exe_only = check_with_assets(
-            "v1.2.0",
-            &[("capturecard_viewer-v1.2.0-windows-x64.exe", LEGACY_EXE_URL)],
-        );
-        let sums_only = check_with_assets("v1.2.1", &[("SHA256SUMS.txt", SUMS_URL)]);
-        // 旧名はタグと版が合うものだけを探す
-        let other_tag = check_with_assets(
-            "v1.2.1",
-            &[
-                ("capturecard_viewer-v1.2.0-windows-x64.exe", LEGACY_EXE_URL),
-                ("SHA256SUMS.txt", SUMS_URL),
-            ],
-        );
-
-        for check in [zip_only, exe_only, legacy_exe_only, sums_only, other_tag] {
-            assert_eq!(
-                ApplyPlan::from_check(&check, false),
-                Err(ApplyError::NoAssets)
-            );
-        }
-    }
-
-    #[test]
-    fn apply_plan_from_check_rejects_foreign_urls() {
-        for exe_url in [
-            "https://example.invalid/capturecard_viewer.exe",
-            "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.1/../../../../attacker/x/releases/download/v1.2.1/capturecard_viewer.exe",
-            "https://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.0/capturecard_viewer.exe",
-            "http://github.com/Mui-MuiMui/Capturecard_Viewer/releases/download/v1.2.1/capturecard_viewer.exe",
-            "file:///C:/work/capturecard_viewer.exe",
-        ] {
-            let check = check_with_assets(
-                "v1.2.1",
-                &[
-                    ("capturecard_viewer.exe", exe_url),
-                    ("SHA256SUMS.txt", SUMS_URL),
-                ],
-            );
-            assert!(
-                matches!(
-                    ApplyPlan::from_check(&check, false),
-                    Err(ApplyError::UnexpectedAssetUrl(_))
-                ),
-                "{exe_url} は弾かれなければならない"
-            );
-        }
-    }
-
-    #[test]
-    fn apply_plan_from_check_with_test_source_accepts_local_files() {
-        let check = check_with_assets(
-            "v9.9.9",
-            &[
-                ("capturecard_viewer.exe", "file:///C:/work/new.exe"),
-                ("SHA256SUMS.txt", "http://127.0.0.1:8000/SHA256SUMS.txt"),
-            ],
-        );
-
-        let plan = ApplyPlan::from_check(&check, true).expect("テスト用の取り先は受け付ける");
-
-        assert_eq!(
-            plan.exe,
-            AssetSource::File(PathBuf::from("C:/work/new.exe"))
-        );
-        assert_eq!(
-            plan.checksums,
-            AssetSource::Http("http://127.0.0.1:8000/SHA256SUMS.txt".to_string())
-        );
-    }
-
-    #[test]
-    fn apply_plan_from_check_with_test_source_rejects_unknown_schemes() {
-        let check = check_with_assets(
-            "v9.9.9",
-            &[
-                ("capturecard_viewer.exe", "ftp://x.invalid/a.exe"),
-                ("SHA256SUMS.txt", "file://"),
-            ],
-        );
-
-        assert!(matches!(
-            ApplyPlan::from_check(&check, true),
-            Err(ApplyError::UnexpectedAssetUrl(_))
-        ));
-    }
 
     // ---- 進捗 ----
 
@@ -891,6 +594,64 @@ mod tests {
         assert_eq!(writable, Err(ApplyError::NoAssets));
     }
 
+    // ---- 受け取り中のキャンセル（ローカルの HTTP サーバー） ----
+
+    /// exe を `exe_url`、`SHA256SUMS.txt` を `sums_url` から取る `run_apply` を 200ms 後に
+    /// キャンセルし、結果と `.new` が残っているかを返す。キャンセルから 10 秒で
+    /// 戻らなければ失敗とする（戻ればスレッドが終わり、`is_applying` が偽になる）。
+    fn cancel_run_apply_after_200ms(
+        exe_url: &str,
+        sums_url: &str,
+    ) -> (Result<(), ApplyError>, bool) {
+        use std::sync::{mpsc, Arc};
+
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let paths = dummy_paths(dir.path());
+        let check = check_with_assets(
+            "v9.9.9",
+            &[(EXE_ASSET_NAME, exe_url), (CHECKSUMS_ASSET_NAME, sums_url)],
+        );
+        let control = Arc::new(ApplyControl::default());
+        let (tx, rx) = mpsc::channel();
+        let worker_control = Arc::clone(&control);
+        std::thread::spawn(move || {
+            let result = run_apply(&check, true, &paths, &worker_control, &mut |_| {});
+            let _ = tx.send((result, paths.new.exists()));
+            drop(dir);
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(control.cancel());
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("キャンセルしてから 10 秒以内に戻らなければならない")
+    }
+
+    #[test]
+    fn run_apply_cancel_while_checksums_trickle_in_returns_promptly() {
+        // 本文が少しずつしか届かなくても、読み取りの合間にキャンセルへ気づく
+        let url = slow_http_server(Some(Duration::from_millis(20)));
+
+        let (result, _) =
+            cancel_run_apply_after_200ms("http://127.0.0.1:9/capturecard_viewer.exe", &url);
+
+        assert_eq!(result, Err(ApplyError::Cancelled));
+    }
+
+    #[test]
+    fn run_apply_cancel_while_the_exe_is_stalled_returns_promptly() {
+        // exe の受け取りが完全に止まっても（1 バイトも届かない）、本文の上限（10 分）を
+        // 待たずにキャンセルへ気づき、`.new` を消す（Issue #357）
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let sums = dir.path().join(CHECKSUMS_ASSET_NAME);
+        fs::write(&sums, format!("{HELLO_SHA256}  capturecard_viewer.exe\n")).unwrap();
+        let exe_url = slow_http_server(None);
+
+        let (result, new_left) =
+            cancel_run_apply_after_200ms(&exe_url, &format!("file:///{}", sums.display()));
+
+        assert_eq!(result, Err(ApplyError::Cancelled));
+        assert!(!new_left);
+    }
+
     // ---- キャンセルと差し替えの取り合い ----
 
     #[test]
@@ -924,5 +685,19 @@ mod tests {
                 .to_string()),
             "The download returned HTTP 404"
         );
+    }
+
+    // #315: スレッドが結果を返さずに終わったことを「ダウンロードできない」に分類せず、
+    // 言語も混ぜない
+    #[test]
+    fn thread_ended_display_is_its_own_localized_message() {
+        let japanese = i18n::with_language(i18n::Language::Japanese, || {
+            ApplyError::ThreadEnded.to_string()
+        });
+        assert_eq!(japanese, "更新のスレッドが結果を返さずに終わった");
+        let english = i18n::with_language(i18n::Language::English, || {
+            ApplyError::ThreadEnded.to_string()
+        });
+        assert_eq!(english, "The update thread ended without a result");
     }
 }

@@ -3,7 +3,7 @@
 //! どの設定を扱えるか（`sample_format_priority`）は `stream` が組み立てられる
 //! サンプル型と一致させる必要があるため、選ぶ側のここに置いてある。
 
-use cpal::{SampleFormat, SampleRate, SupportedStreamConfig, SupportedStreamConfigRange};
+use cpal::{SampleFormat, SupportedStreamConfig, SupportedStreamConfigRange};
 use log::{debug, info, warn};
 
 use super::capabilities::{
@@ -16,6 +16,9 @@ use super::AudioDirection;
 ///
 /// `build_input_stream_with` / `build_output_stream_with` で扱える型と一致させること。
 /// ここに無いフォーマットを選ぶと、設定としては選べてもストリームを組み立てられない。
+///
+/// cpal 0.18 の WASAPI は I24 / F64 / I64 / U8 も列挙するが、共有モードのミックス
+/// フォーマットは通常 F32 なので F32 が選べる。扱う型は 0.15 のころから増やしていない。
 pub(super) fn sample_format_priority(format: SampleFormat) -> Option<u8> {
     match format {
         // リングバッファと同じ表現なので変換が要らない
@@ -48,8 +51,8 @@ pub(super) fn select_best_config(
         .iter()
         .filter_map(|range| {
             let priority = sample_format_priority(range.sample_format())?;
-            let min_rate = range.min_sample_rate().0;
-            let max_rate = range.max_sample_rate().0;
+            let min_rate = range.min_sample_rate();
+            let max_rate = range.max_sample_rate();
             // 壊れた列挙で clamp が panic するのを避ける
             if min_rate > max_rate {
                 return None;
@@ -61,7 +64,7 @@ pub(super) fn select_best_config(
                 rate.abs_diff(desired_sample_rate),
                 priority,
             );
-            Some((key, range.try_with_sample_rate(SampleRate(rate))?))
+            Some((key, range.try_with_sample_rate(rate)?))
         })
         .min_by_key(|(key, _)| *key)
         .map(|(_, config)| config)
@@ -69,10 +72,13 @@ pub(super) fn select_best_config(
 
 /// 入力と出力の両方が対応する設定を選ぶ。
 ///
-/// 揃えられればリングバッファのサンプルをそのまま流せる。WASAPI は共有モードで
-/// ミックスフォーマットしか通さないことが多く、入力 48kHz・出力 44.1kHz のように
-/// 揃えられない組み合わせは珍しくない。その場合は `None` を返し、呼び出し側が
-/// それぞれの最寄りを選ぶ。
+/// 揃えられればリングバッファのサンプルをそのまま流せる。揃えられない組み合わせでは
+/// `None` を返し、呼び出し側がそれぞれの最寄りを選ぶ。
+///
+/// cpal 0.18 の WASAPI は、出力をレート変換付き（`AUTOCONVERTPCM`）で開くので、
+/// 出力デバイスはミックスフォーマットと違うレートも対応設定として返す。レートは
+/// ほぼ入力に揃い、揃わないのはチャンネル数が違う場合（入力がモノラルなど）に
+/// なった（`docs/design/audio.md` の「cpal 0.18 で変わったこと」）。
 ///
 /// 共通の候補を出してから `select_best_config` へ同じ値を渡し、**両方が本当に
 /// その値で開けるかを最後に確かめる。** レートとチャンネル数を別々に共通化して
@@ -104,7 +110,7 @@ pub(super) fn select_aligned_configs(
 
     info!(
         "入出力を同じ設定に揃えた: {}Hz {}ch",
-        input_config.sample_rate().0,
+        input_config.sample_rate(),
         input_config.channels()
     );
     Some((input_config, output_config))
@@ -133,7 +139,7 @@ pub(super) fn choose_passthrough_configs(
     let aligned = select_aligned_configs(
         input_ranges,
         output_ranges,
-        desired_sample_rate.unwrap_or_else(|| input_default.sample_rate().0),
+        desired_sample_rate.unwrap_or_else(|| input_default.sample_rate()),
         desired_channels.unwrap_or_else(|| input_default.channels()),
     );
     if let Some(pair) = aligned {
@@ -142,13 +148,13 @@ pub(super) fn choose_passthrough_configs(
 
     let input_config = select_best_config(
         input_ranges,
-        desired_sample_rate.unwrap_or_else(|| input_default.sample_rate().0),
+        desired_sample_rate.unwrap_or_else(|| input_default.sample_rate()),
         desired_channels.unwrap_or_else(|| input_default.channels()),
     )
     .unwrap_or(input_default);
     let output_config = select_best_config(
         output_ranges,
-        desired_sample_rate.unwrap_or_else(|| output_default.sample_rate().0),
+        desired_sample_rate.unwrap_or_else(|| output_default.sample_rate()),
         desired_channels.unwrap_or_else(|| output_default.channels()),
     )
     .unwrap_or(output_default);
@@ -157,9 +163,9 @@ pub(super) fn choose_passthrough_configs(
     {
         warn!(
             "入出力で共通の設定が無いため別々の設定で開く（線形補間とミックスで変換する）- 入力: {}Hz {}ch、出力: {}Hz {}ch",
-            input_config.sample_rate().0,
+            input_config.sample_rate(),
             input_config.channels(),
-            output_config.sample_rate().0,
+            output_config.sample_rate(),
             output_config.channels()
         );
     }
@@ -222,7 +228,7 @@ mod tests {
 
         let selected = select_best_config(&configs, 48000, 2).expect("選べるはず");
 
-        assert_eq!(selected.sample_rate(), SampleRate(48000));
+        assert_eq!(selected.sample_rate(), 48000);
         assert_eq!(selected.channels(), 2);
     }
 
@@ -236,7 +242,7 @@ mod tests {
 
         let selected = select_best_config(&configs, 44100, 2).expect("選べるはず");
 
-        assert_eq!(selected.sample_rate(), SampleRate(48000));
+        assert_eq!(selected.sample_rate(), 48000);
     }
 
     #[test]
@@ -249,7 +255,7 @@ mod tests {
 
         let selected = select_best_config(&configs, 40000, 2).expect("選べるはず");
 
-        assert_eq!(selected.sample_rate(), SampleRate(32000));
+        assert_eq!(selected.sample_rate(), 32000);
     }
 
     #[test]
@@ -264,7 +270,7 @@ mod tests {
         let selected = select_best_config(&configs, 48000, 1).expect("選べるはず");
 
         assert_eq!(selected.channels(), 1);
-        assert_eq!(selected.sample_rate(), SampleRate(44100));
+        assert_eq!(selected.sample_rate(), 44100);
     }
 
     #[test]
@@ -290,7 +296,7 @@ mod tests {
         let selected = select_best_config(&configs, 48000, 2).expect("選べるはず");
 
         assert_eq!(selected.sample_format(), SampleFormat::I16);
-        assert_eq!(selected.sample_rate(), SampleRate(44100));
+        assert_eq!(selected.sample_rate(), 44100);
     }
 
     #[test]
@@ -312,13 +318,13 @@ mod tests {
         let configs = [config_range(2, 8000, 96000, SampleFormat::F32)];
 
         let inside = select_best_config(&configs, 44100, 2).expect("選べるはず");
-        assert_eq!(inside.sample_rate(), SampleRate(44100));
+        assert_eq!(inside.sample_rate(), 44100);
 
         let above = select_best_config(&configs, 192000, 2).expect("選べるはず");
-        assert_eq!(above.sample_rate(), SampleRate(96000));
+        assert_eq!(above.sample_rate(), 96000);
 
         let below = select_best_config(&configs, 5512, 2).expect("選べるはず");
-        assert_eq!(below.sample_rate(), SampleRate(8000));
+        assert_eq!(below.sample_rate(), 8000);
     }
 
     #[test]
@@ -347,8 +353,8 @@ mod tests {
             select_aligned_configs(&input, &output, 44100, 2).expect("揃えられるはず");
 
         // 44100 は出力が対応しないので、共通の 48000 へ寄る
-        assert_eq!(in_config.sample_rate(), SampleRate(48000));
-        assert_eq!(out_config.sample_rate(), SampleRate(48000));
+        assert_eq!(in_config.sample_rate(), 48000);
+        assert_eq!(out_config.sample_rate(), 48000);
         assert_eq!(in_config.channels(), 2);
         assert_eq!(out_config.channels(), 2);
     }
@@ -399,14 +405,14 @@ mod tests {
 
         let selected = select_best_config(&configs, 48000, 2).expect("選べるはず");
 
-        assert_eq!(selected.sample_rate(), SampleRate(44100));
+        assert_eq!(selected.sample_rate(), 44100);
     }
 
     /// テスト用の既定設定。`default_input_config()` が返す形を模す
     fn default_config(channels: u16, rate: u32) -> SupportedStreamConfig {
         SupportedStreamConfig::new(
             channels,
-            SampleRate(rate),
+            rate,
             cpal::SupportedBufferSize::Unknown,
             SampleFormat::F32,
         )
@@ -428,9 +434,9 @@ mod tests {
             None,
         );
 
-        assert_eq!(in_config.sample_rate(), SampleRate(48000));
+        assert_eq!(in_config.sample_rate(), 48000);
         assert_eq!(in_config.channels(), 2);
-        assert_eq!(out_config.sample_rate(), SampleRate(44100));
+        assert_eq!(out_config.sample_rate(), 44100);
         assert_eq!(out_config.channels(), 1);
     }
 
@@ -446,9 +452,9 @@ mod tests {
             Some(1),
         );
 
-        assert_eq!(in_config.sample_rate(), SampleRate(48000));
+        assert_eq!(in_config.sample_rate(), 48000);
         assert_eq!(in_config.channels(), 2);
-        assert_eq!(out_config.sample_rate(), SampleRate(44100));
+        assert_eq!(out_config.sample_rate(), 44100);
         assert_eq!(out_config.channels(), 2);
     }
 }

@@ -14,7 +14,9 @@
 //! | `capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の問い合わせ |
 //! | `color.rs` | 係数表とその選択、映像調整の畳み込み、設定の共有 |
 //! | `convert.rs` | YUY2 → RGB24 の画素変換と、DirectShow の RGB24 / MJPEG の展開 |
+//! | `yuv420.rs` | 4:2:0 の YUV（NV12 / I420 / YV12）→ RGB24 の画素変換 |
 //! | `frame_buffer.rs` | `FrameBuffer` と世代番号、観測値（`FrameStats`） |
+//! | `tap.rs` | 録画へ映像を回す差し込み口（`VideoTap`）。録画中だけ、画面へ置いたのと同じ `Arc` をリングへ積む |
 //!
 //! ここに置いてあるのは、どのファイルからも使う `VideoError` と
 //! ログの書式を揃えるための `elapsed_ms` だけ。
@@ -34,18 +36,21 @@ mod directshow;
 mod fake;
 pub(crate) mod frame_buffer;
 mod frame_sink;
+mod tap;
 mod test_pattern;
 mod yuv420;
 
 pub use capabilities::{DeviceCapabilities, VideoMode};
 pub use capture::{ActiveVideo, VideoCapture, VideoLinkState};
+pub use color::is_hd_resolution;
 pub use color::{SharedColorConversion, VideoAdjustments};
 pub use directshow::{
     display_name as directshow_display_name, friendly_name as directshow_friendly_name,
     DirectShowCapture,
 };
 pub use fake::{FakeVideoCapture, FakeVideoOptions};
-pub use frame_buffer::{FrameStats, VideoFrame, VideoFrames};
+pub use frame_buffer::{frame_len_status, FrameLenStatus, FrameStats, VideoFrame, VideoFrames};
+pub use tap::{VideoTap, VideoTapConsumer, VIDEO_TAP_CAPACITY};
 
 use std::fmt;
 use std::time::Instant;

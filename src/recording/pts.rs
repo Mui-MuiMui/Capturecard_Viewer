@@ -1,0 +1,656 @@
+//! 映像と音声の PTS（表示時刻）の付け方。MF の時間の単位は 100ns。
+//!
+//! 基準は録画を始めた時刻 `t0`（録画スレッドがリングを差し込んだ時点）。
+//!
+//! - 映像: **PTS = フレームを受け取った時刻 − `t0`**。受け取った時刻は `FrameSink` が
+//!   持っている値で、変換時間の揺れを含まない
+//! - 音声: **PTS = 書いた出力フレーム数 ÷ 48000**。途切れたときだけ、受け取った時刻から
+//!   無音を足すか先頭を削って揃える（下の「音声（②）」）
+//!
+//! どちらも判定と計算だけの純粋関数で、状態を持つのは `PtsClock`（映像）と
+//! `super::audio::AudioTrack`（音声）。`docs/design/recording.md` の「PTS」。
+
+use std::time::{Duration, Instant};
+
+/// MF の時間の単位（100ns）で 1 秒
+pub(super) const UNITS_PER_SECOND: i64 = 10_000_000;
+
+/// 映像の PTS を付ける。1 回の録画につき 1 つ。
+#[derive(Debug, Clone)]
+pub(super) struct PtsClock {
+    t0: Instant,
+    /// 直前に付けた PTS。単調増加を保つために持つ
+    last: Option<i64>,
+    /// 1 枚ぶんの長さ（公称 fps から）
+    sample_duration: i64,
+}
+
+impl PtsClock {
+    /// `nominal_fps` は 0 なら 1 として扱う（割り算を避けるだけで、実際には来ない）。
+    pub(super) fn new(t0: Instant, nominal_fps: u32) -> Self {
+        Self {
+            t0,
+            last: None,
+            sample_duration: UNITS_PER_SECOND / i64::from(nominal_fps.max(1)),
+        }
+    }
+
+    /// `received_at` が `t0` 以降か（PTS を付けられるか）。時計は進めない。
+    pub(super) fn accepts(&self, received_at: Instant) -> bool {
+        received_at >= self.t0
+    }
+
+    /// `received_at` に受け取ったフレームの PTS。`t0` より前なら `None`（捨てる）。
+    ///
+    /// 直前以下の値になったら直前 + 1 にする。MP4 のサンプルは時刻が増えていく
+    /// 決まりで、同じ時刻に 2 枚届いた（時計の分解能より短い間隔）ときに備える。
+    pub(super) fn pts_for(&mut self, received_at: Instant) -> Option<i64> {
+        let elapsed = received_at.checked_duration_since(self.t0)?;
+        let mut pts = units_from(elapsed);
+        if let Some(last) = self.last {
+            if pts <= last {
+                pts = last + 1;
+            }
+        }
+        self.last = Some(pts);
+        Some(pts)
+    }
+
+    /// 1 枚ぶんの長さ。MP4 のサンプルの長さは次のサンプルの時刻との差で決まるので、
+    /// 実際の間隔が揺れても表示の時間はずれない。
+    pub(super) fn sample_duration(&self) -> i64 {
+        self.sample_duration
+    }
+
+    /// 書いた映像の長さ。最後の PTS に 1 枚ぶんを足したもの。1 枚も無ければ 0。
+    pub(super) fn duration(&self) -> Duration {
+        match self.last {
+            Some(last) => duration_from(last + self.sample_duration),
+            None => Duration::ZERO,
+        }
+    }
+}
+
+// ---- 音声（②） ----
+//
+// **音声の PTS = 書いた出力フレーム数 ÷ 48000。** 起点は t0（PTS 0）に固定し、
+// サンプルの並びが途切れたとき（録画の開始、開き直し、リングの溢れ、音声が
+// 来なくなって無音で埋めたあと）だけ、次のサンプルを受け取った時刻と
+// 「次に書く位置」を比べて、無音を足すか先頭を削って揃える。PTS だけを飛ばすと、
+// AAC のフレーム列は連続したまま時刻だけが食い違うため（`docs/design/recording.md`）。
+// 途切れずに続く間は付け直さないので、入力デバイスの時計と PC の時計の差
+// （ドリフト）は付け直しでは直らない。録画用の変換器のレート比で直す（下の
+// 「ドリフトの補正」、#288）。停止時には `DriftSpan` の値（入力デバイスの時計のずれ）も残す。
+
+/// 録画の音声のレート。Microsoft の AAC エンコーダが受け取る 16bit PCM の
+/// 44.1kHz / 48kHz のうち 48kHz に決め打ちする
+pub(super) const AUDIO_SAMPLE_RATE: u32 = 48_000;
+/// 録画の音声のチャンネル数
+pub(super) const AUDIO_CHANNELS: u16 = 2;
+
+/// 付け直すときに、これより小さいずれは直さない（100ns 単位で 15ms）。
+///
+/// 「最後に積んだ時刻」と「累計」は同時に読めないので、入力コールバックの周期
+/// （WASAPI の共有モードで 10ms 前後）ぶんの誤差がある。その範囲で無音を足したり
+/// 削ったりすると、揃えるどころか途切れを増やすだけになる。
+pub(super) const ALIGN_TOLERANCE: i64 = 150_000;
+
+/// 最後に積んでからこれだけ経っても次が来なければ、音声が来ていないとみなして
+/// 無音で埋める（100ns 単位で 200ms）。埋めるのもこの長さだけ手前まで。
+/// まだ届いていないだけのサンプルと重ねないため。
+pub(super) const AUDIO_STALE: i64 = 2_000_000;
+
+/// 48kHz の出力フレーム数を 100ns 単位の時間にする。
+pub(super) fn audio_units(frames: u64) -> i64 {
+    let units = u128::from(frames) * UNITS_PER_SECOND as u128 / u128::from(AUDIO_SAMPLE_RATE);
+    i64::try_from(units).unwrap_or(i64::MAX)
+}
+
+/// 100ns 単位の長さに、`rate` で何フレーム入るか（切り捨て）。0 以下なら 0。
+pub(super) fn frames_in(units: i64, rate: u32) -> u64 {
+    if units <= 0 {
+        return 0;
+    }
+    let frames = units as u128 * u128::from(rate) / UNITS_PER_SECOND as u128;
+    u64::try_from(frames).unwrap_or(u64::MAX)
+}
+
+/// 入力コールバックが書いた「最後に積んだ時刻」と「累計のサンプル数」。
+/// リングの中のサンプルをいつ受け取ったかを逆算するのに使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TapTiming {
+    /// 最後に積んだ時刻（t0 からの 100ns。t0 より前なら負）
+    pub(super) last_push: i64,
+    /// 累計のサンプル数（チャンネルをまたいだ個数）
+    pub(super) samples_total: u64,
+    pub(super) sample_rate: u32,
+    pub(super) channels: u16,
+}
+
+impl TapTiming {
+    /// 累計で `index` 番目のサンプルを受け取った時刻（t0 からの 100ns）。
+    /// 最後に積んだ時刻 −（累計 − `index`）÷ チャンネル数 ÷ レート。
+    pub(super) fn time_of(&self, index: u64) -> i64 {
+        let behind = self.samples_total.saturating_sub(index);
+        let per_second = u128::from(self.sample_rate.max(1)) * u128::from(self.channels.max(1));
+        let units = u128::from(behind) * UNITS_PER_SECOND as u128 / per_second;
+        self.last_push
+            .saturating_sub(i64::try_from(units).unwrap_or(i64::MAX))
+    }
+}
+
+/// 途切れたあと、次のサンプルをどう揃えるか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Alignment {
+    /// ずれは許す範囲。そのまま続ける
+    Keep,
+    /// 次のサンプルが「次に書く位置」より後に届いた。出力（48kHz）でこのフレーム数の無音を先に書く
+    InsertSilence { frames: u64 },
+    /// 次のサンプルが「次に書く位置」より前に届いた（もう無音で埋めた区間に重なる）。
+    /// 入力の先頭からこのフレーム数を捨てる
+    Trim { input_frames: u64 },
+}
+
+/// 揃え方を決める。`expected` は次に書く位置（書いた出力フレーム数から、t0 からの
+/// 100ns）、`actual` は次のサンプルを受け取った時刻（同じ基準）、`input_rate` は入力のレート。
+pub(super) fn align(expected: i64, actual: i64, input_rate: u32) -> Alignment {
+    let diff = actual.saturating_sub(expected);
+    if diff.abs() < ALIGN_TOLERANCE {
+        Alignment::Keep
+    } else if diff > 0 {
+        Alignment::InsertSilence {
+            frames: frames_in(diff, AUDIO_SAMPLE_RATE),
+        }
+    } else {
+        Alignment::Trim {
+            input_frames: frames_in(-diff, input_rate),
+        }
+    }
+}
+
+/// 音声が来ていないとみなして無音で埋めるなら、埋める先（t0 からの 100ns）。
+///
+/// 入力の形が分からない（まだ 1 度も開いていない）、まだ 1 度も積んでいない、または
+/// 最後に積んでから `AUDIO_STALE` 以上経っていれば `now − AUDIO_STALE` まで埋める。
+/// 音声トラックの長さを映像と揃えるため（音声デバイスが無い・開けていない間）。
+/// 来ているなら `None`。
+pub(super) fn silence_until(now: i64, last_push: Option<i64>, format_known: bool) -> Option<i64> {
+    let stale = match (format_known, last_push) {
+        (true, Some(last)) => now.saturating_sub(last) >= AUDIO_STALE,
+        _ => true,
+    };
+    stale.then(|| now.saturating_sub(AUDIO_STALE))
+}
+
+// ---- 映像と音声のずれの補正（#404） ----
+//
+// 設定 `[recording] audio_offset_ms` を、**音声のサンプルを受け取った時刻に足す。**
+// 揃え直し（`align`）・無音で埋める先（`silence_until`）・ドリフトの補正（`DriftCorrector`）は
+// すべて足したあとの時刻で見るので、音声の時刻の並び全体がそのぶん動く。正なら録画の先頭に
+// 無音が入り（音声が遅れる）、負なら録画の先頭の音声をそのぶん削る（音声が早まる）。
+// ドリフトの補正は揃え直した直後の窓を基準に「動き」だけを見るので、固定のずれは補正に入らない
+// （`docs/design/recording.md` の「映像と音声のずれの補正（#404）」）。
+
+/// 音声のサンプルを受け取った時刻（t0 からの 100ns）に、映像と音声のずれの補正
+/// `offset_ms`（ms、正なら音声を遅らせる）を足した、録画の音声の時刻。
+pub(super) fn offset_audio_time(received: i64, offset_ms: i32) -> i64 {
+    received.saturating_add(i64::from(offset_ms) * (UNITS_PER_SECOND / 1_000))
+}
+
+/// ドリフトの測定。途切れずに続いた区間の、PC の時計での経過と、入力のサンプル数 ÷ レート。
+///
+/// 映像の PTS は PC の時計で測った到着時刻、音声の PTS はサンプル数から作るので、
+/// 2 つの差がそのまま録画の中の音と映像のずれになる。区間は付け直すたびに始め直す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DriftSpan {
+    start: TapTiming,
+    end: TapTiming,
+}
+
+impl DriftSpan {
+    pub(super) fn new(timing: TapTiming) -> Self {
+        Self {
+            start: timing,
+            end: timing,
+        }
+    }
+
+    /// 区間の終わりを進める。
+    pub(super) fn update(&mut self, timing: TapTiming) {
+        self.end = timing;
+    }
+
+    /// `(PC の時計での経過, サンプル数 ÷ レート)`。どちらも 100ns 単位。
+    /// 後者が前者より短ければ入力デバイスの時計が遅く、サンプル数で数える音声の PTS が実際の時刻より
+    /// 小さくなっていくので、録画の音声は映像より先行していく（#398 の実測で確かめた向き）。
+    pub(super) fn measure(&self) -> (i64, i64) {
+        let by_clock = self.end.last_push.saturating_sub(self.start.last_push);
+        let samples = self
+            .end
+            .samples_total
+            .saturating_sub(self.start.samples_total);
+        let per_second =
+            u128::from(self.start.sample_rate.max(1)) * u128::from(self.start.channels.max(1));
+        let by_samples = u128::from(samples) * UNITS_PER_SECOND as u128 / per_second;
+        (by_clock, i64::try_from(by_samples).unwrap_or(i64::MAX))
+    }
+}
+
+// ---- ドリフトの補正（#288） ----
+//
+// 音声の PTS（書いた出力フレーム数 ÷ 48000）は入力デバイスの時計で進み、映像の PTS は
+// PC の時計で進む。**録画用の変換器のレート比をわずかに動かし、出力フレームの数を
+// PC の時計に従わせる。** 測るのは「次に書く位置（出力フレーム数から）− そのサンプルを
+// 受け取った時刻（PC の時計）」（ずれ）で、揃え直した直後の窓の平均を基準に、そこから
+// 動いた分を戻す向きに補正する。レート比を直接推定しないのは、1 点ずつの時刻に入力
+// コールバックの周期（10ms）ぶんの粒度があり、600 秒でも ±17ppm 前後の幅が残るため
+// （`docs/design/recording.md` の「ドリフト」）。ずれそのものを数秒の平均で見れば粒度は
+// 均され、補正が効いた結果もそのまま測れる。時計のずれでは説明できないほど飛んだ
+// （入力デバイスがサンプルを落とした）ときは、レート比ではなく揃え直しで戻す。
+
+/// ずれを平均する窓の長さ（PC の時計で 5 秒、100ns）。補正係数は窓を閉じるたびに決める
+pub(super) const DRIFT_WINDOW: i64 = 50_000_000;
+/// 基準からの動きがこれ未満なら補正しない（1ms）。窓の平均にも残る揺らぎで補正を動かさないため
+const DRIFT_DEAD_ZONE: i64 = 10_000;
+/// 基準からの動きがこれ以上で補正が頭打ちになる（10ms）
+const DRIFT_SATURATION: i64 = 100_000;
+/// 補正係数の最大のずれ（±0.1%）。水晶のずれは通常 100ppm 以下なので 10 倍の余裕がある。
+/// パススルーの補正（`decide_resample_correction`）と同じ上限
+const DRIFT_MAX_CORRECTION: f64 = 0.001;
+/// 基準からの動きがこれ以上なら、レート比では直さずに揃え直す（30ms）。
+///
+/// 時計のずれは 1 つの窓（5 秒）で 0.1% でも 5ms しか動かさず、補正が効いていればそこまで
+/// 溜まらない。これを超えるのは、入力デバイスがサンプルを落とした（GC551 の数十〜200ms の
+/// 止まり。200ms 未満なら「来ていない」とはみなさないので揃え直しが起きない）ときで、
+/// 0.1% で戻すと 30ms に 30 秒かかる。揃え直し（`align`）は 15ms 未満を直さないので、
+/// その 2 倍にして、揃え直した直後にまた揃え直す行き来を作らない
+const DRIFT_REALIGN: i64 = 300_000;
+
+/// 窓を閉じたときに決めたこと。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum DriftDecision {
+    /// この補正係数を変換器へ渡す
+    Correct(f64),
+    /// ずれが飛んだ。補正係数を 1.0 に戻し、次のサンプルで揃え直す（無音を足すか先頭を削る）
+    Realign,
+}
+
+/// 基準からのずれの動き（100ns）から、録画用の変換器のレート比に掛ける補正係数を決める。
+///
+/// 正（音声の書く位置が受け取った時刻より先へ進んだ = 入力デバイスの時計が PC より速い）なら
+/// 1.0 より大きくして出力フレームを減らし、負なら 1.0 より小さくして増やす。比例制御で、
+/// 前回の値は見ない（`decide_resample_correction` と同じ形）。
+///
+/// - 動きが `DRIFT_DEAD_ZONE` 未満なら `1.0`
+/// - `DRIFT_SATURATION` 以上は `DRIFT_MAX_CORRECTION` に頭打ち
+pub(super) fn decide_drift_correction(error: i64) -> f64 {
+    if error.unsigned_abs() < DRIFT_DEAD_ZONE.unsigned_abs() {
+        return 1.0;
+    }
+    let clamped = error.clamp(-DRIFT_SATURATION, DRIFT_SATURATION);
+    1.0 + clamped as f64 / DRIFT_SATURATION as f64 * DRIFT_MAX_CORRECTION
+}
+
+/// ずれの窓と基準。揃え直すたびに作り直す（揃え直しで位置が飛ぶので、前の基準は使えない）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct DriftCorrector {
+    /// 窓の始まり（t0 からの 100ns）。窓が空なら `None`
+    window_start: Option<i64>,
+    sum: i128,
+    count: u64,
+    /// 揃え直した直後の窓の平均。**最初の窓は基準を測るだけで補正しない**（録画の開始直後と
+    /// 揃え直しの直後は動かさない）
+    baseline: Option<i64>,
+    /// 直近に閉じた窓の、基準からの動き。停止時のログに「補正しても残ったずれ」として出す
+    last_error: Option<i64>,
+}
+
+impl DriftCorrector {
+    /// `at`（t0 からの 100ns）に測ったずれ `offset` を足す。窓を閉じて決めたら返す。
+    pub(super) fn observe(&mut self, at: i64, offset: i64) -> Option<DriftDecision> {
+        let start = *self.window_start.get_or_insert(at);
+        self.sum += i128::from(offset);
+        self.count += 1;
+        if at.saturating_sub(start) < DRIFT_WINDOW {
+            return None;
+        }
+        let mean = i64::try_from(self.sum / i128::from(self.count)).unwrap_or(0);
+        self.window_start = None;
+        self.sum = 0;
+        self.count = 0;
+        let Some(baseline) = self.baseline else {
+            self.baseline = Some(mean);
+            return None;
+        };
+        let error = mean.saturating_sub(baseline);
+        self.last_error = Some(error);
+        if error.unsigned_abs() >= DRIFT_REALIGN.unsigned_abs() {
+            return Some(DriftDecision::Realign);
+        }
+        Some(DriftDecision::Correct(decide_drift_correction(error)))
+    }
+
+    /// 直近に閉じた窓の、基準からの動き（100ns）。まだ無ければ `None`。
+    pub(super) fn last_error(&self) -> Option<i64> {
+        self.last_error
+    }
+}
+
+/// `Instant` を t0 からの 100ns にする。t0 より前なら負。
+pub(super) fn units_since(t0: Instant, at: Instant) -> i64 {
+    match at.checked_duration_since(t0) {
+        Some(after) => units_from(after),
+        None => -units_from(t0.duration_since(at)),
+    }
+}
+
+pub(super) fn units_from(duration: Duration) -> i64 {
+    i64::try_from(duration.as_nanos() / 100).unwrap_or(i64::MAX)
+}
+
+fn duration_from(units: i64) -> Duration {
+    Duration::from_nanos(u64::try_from(units).unwrap_or(0) * 100)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pts_clock_uses_100ns_units_from_t0() {
+        let t0 = Instant::now();
+        let mut clock = PtsClock::new(t0, 60);
+        assert_eq!(clock.pts_for(t0), Some(0));
+        assert_eq!(clock.pts_for(t0 + Duration::from_millis(16)), Some(160_000));
+        assert_eq!(clock.pts_for(t0 + Duration::from_secs(2)), Some(20_000_000));
+    }
+
+    #[test]
+    fn pts_clock_frames_before_t0_are_dropped() {
+        let t0 = Instant::now() + Duration::from_secs(1);
+        let mut clock = PtsClock::new(t0, 60);
+        assert_eq!(clock.pts_for(t0 - Duration::from_millis(1)), None);
+        // 捨てたフレームは単調増加の基準にもならない
+        assert_eq!(clock.pts_for(t0), Some(0));
+    }
+
+    #[test]
+    fn pts_clock_keeps_increasing_for_equal_or_earlier_times() {
+        let t0 = Instant::now();
+        let mut clock = PtsClock::new(t0, 30);
+        let at = t0 + Duration::from_millis(10);
+        assert_eq!(clock.pts_for(at), Some(100_000));
+        assert_eq!(clock.pts_for(at), Some(100_001));
+        assert_eq!(clock.pts_for(t0 + Duration::from_millis(5)), Some(100_002));
+        assert_eq!(clock.pts_for(t0 + Duration::from_millis(20)), Some(200_000));
+    }
+
+    #[test]
+    fn pts_clock_sample_duration_follows_the_nominal_fps() {
+        let t0 = Instant::now();
+        assert_eq!(PtsClock::new(t0, 60).sample_duration(), 166_666);
+        assert_eq!(PtsClock::new(t0, 30).sample_duration(), 333_333);
+        // 0 は 1 として扱う
+        assert_eq!(PtsClock::new(t0, 0).sample_duration(), 10_000_000);
+    }
+
+    #[test]
+    fn pts_clock_duration_adds_one_sample_to_the_last_pts() {
+        let t0 = Instant::now();
+        let mut clock = PtsClock::new(t0, 50);
+        assert_eq!(clock.duration(), Duration::ZERO);
+        clock.pts_for(t0 + Duration::from_secs(1));
+        assert_eq!(clock.duration(), Duration::from_millis(1020));
+    }
+
+    #[test]
+    fn audio_units_converts_48k_frames_to_100ns() {
+        assert_eq!(audio_units(0), 0);
+        assert_eq!(audio_units(48_000), UNITS_PER_SECOND);
+        assert_eq!(audio_units(480), 100_000);
+        // 1 フレームは 208.33.. なので切り捨てる。長さは差で取るので誤差は溜まらない
+        assert_eq!(audio_units(1), 208);
+        assert_eq!(audio_units(48_000 * 3600), 3600 * UNITS_PER_SECOND);
+    }
+
+    #[test]
+    fn frames_in_counts_whole_frames_and_ignores_negative_lengths() {
+        assert_eq!(frames_in(UNITS_PER_SECOND, 48_000), 48_000);
+        assert_eq!(frames_in(100_000, 44_100), 441);
+        assert_eq!(frames_in(0, 48_000), 0);
+        assert_eq!(frames_in(-1, 48_000), 0);
+    }
+
+    fn timing(last_push_ms: i64, samples_total: u64, rate: u32, channels: u16) -> TapTiming {
+        TapTiming {
+            last_push: last_push_ms * 10_000,
+            samples_total,
+            sample_rate: rate,
+            channels,
+        }
+    }
+
+    #[test]
+    fn tap_timing_counts_back_from_the_last_push() {
+        // 1000ms に累計 96000 サンプル（48kHz 2ch の 1 秒）まで積んだ
+        let timing = timing(1000, 96_000, 48_000, 2);
+        assert_eq!(timing.time_of(96_000), 10_000_000);
+        // 半分（0.5 秒ぶん）前のサンプルは 500ms に届いた
+        assert_eq!(timing.time_of(48_000), 5_000_000);
+        // 先頭は 0ms
+        assert_eq!(timing.time_of(0), 0);
+        // 累計より先の番号は最後に積んだ時刻として扱う（まだ届いていない）
+        assert_eq!(timing.time_of(100_000), 10_000_000);
+    }
+
+    #[test]
+    fn tap_timing_before_t0_is_negative() {
+        // 録画を始めた直後に積まれたコールバックには、t0 より前に届いた分が混じる
+        let timing = timing(5, 960, 48_000, 1);
+        assert_eq!(timing.time_of(0), 50_000 - 200_000);
+    }
+
+    #[test]
+    fn align_keeps_small_differences() {
+        assert_eq!(align(1_000_000, 1_000_000, 48_000), Alignment::Keep);
+        assert_eq!(
+            align(1_000_000, 1_000_000 + ALIGN_TOLERANCE - 1, 48_000),
+            Alignment::Keep
+        );
+        assert_eq!(
+            align(1_000_000, 1_000_000 - ALIGN_TOLERANCE + 1, 48_000),
+            Alignment::Keep
+        );
+    }
+
+    #[test]
+    fn align_inserts_silence_when_the_sample_arrived_later() {
+        // 次に書く位置が 1 秒、次のサンプルは 1.5 秒に届いた。0.5 秒の無音を足す
+        assert_eq!(
+            align(10_000_000, 15_000_000, 44_100),
+            Alignment::InsertSilence { frames: 24_000 }
+        );
+    }
+
+    #[test]
+    fn align_trims_the_head_when_the_sample_arrived_earlier() {
+        // 無音で 1 秒まで埋めたあとに、0.8 秒に届いたサンプルが来た。入力の先頭 0.2 秒を捨てる
+        assert_eq!(
+            align(10_000_000, 8_000_000, 44_100),
+            Alignment::Trim {
+                input_frames: 8_820
+            }
+        );
+    }
+
+    #[test]
+    fn offset_audio_time_adds_milliseconds_in_100ns_units() {
+        // 正は音声を遅らせる（受け取った時刻より後ろに置く）
+        assert_eq!(offset_audio_time(5_000_000, 100), 6_000_000);
+        // 負は早める。t0 より前（負）になってもよい（揃え直しで削られる）
+        assert_eq!(offset_audio_time(1_000_000, -200), -1_000_000);
+        assert_eq!(offset_audio_time(1_000_000, 0), 1_000_000);
+        // 桁外れの時刻でも溢れて落ちない
+        assert_eq!(offset_audio_time(i64::MAX, 200), i64::MAX);
+        assert_eq!(offset_audio_time(i64::MIN, -200), i64::MIN);
+    }
+
+    #[test]
+    fn silence_until_fills_only_when_audio_is_absent_or_stale() {
+        let now = 50_000_000;
+        // 入力の形が分からない（まだ開いていない）
+        assert_eq!(silence_until(now, None, false), Some(now - AUDIO_STALE));
+        // 開いたがまだ 1 度も積んでいない
+        assert_eq!(silence_until(now, None, true), Some(now - AUDIO_STALE));
+        // 最後に積んでから 200ms 以上経った
+        assert_eq!(
+            silence_until(now, Some(now - AUDIO_STALE), true),
+            Some(now - AUDIO_STALE)
+        );
+        // 来ている
+        assert_eq!(silence_until(now, Some(now - 100_000), true), None);
+    }
+
+    #[test]
+    fn drift_span_compares_the_pc_clock_with_the_sample_count() {
+        // 10 秒（PC の時計）の間に、48kHz 2ch で 9.999 秒ぶんしか届かなかった（100ppm 遅い）
+        let mut span = DriftSpan::new(timing(1_000, 0, 48_000, 2));
+        span.update(timing(11_000, 959_904, 48_000, 2));
+        let (by_clock, by_samples) = span.measure();
+        assert_eq!(by_clock, 100_000_000);
+        assert_eq!(by_samples, 99_990_000);
+    }
+
+    #[test]
+    fn units_since_is_signed_around_t0() {
+        let t0 = Instant::now() + Duration::from_secs(1);
+        assert_eq!(units_since(t0, t0 + Duration::from_millis(3)), 30_000);
+        assert_eq!(units_since(t0, t0 - Duration::from_millis(3)), -30_000);
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "{actual} と {expected} が違う"
+        );
+    }
+
+    #[test]
+    fn decide_drift_correction_ignores_movements_inside_the_dead_zone() {
+        assert_eq!(decide_drift_correction(0), 1.0);
+        assert_eq!(decide_drift_correction(9_999), 1.0);
+        assert_eq!(decide_drift_correction(-9_999), 1.0);
+    }
+
+    #[test]
+    fn decide_drift_correction_is_proportional_from_the_dead_zone_edge() {
+        // 1ms で 0.01%（10ms で 0.1% の比例）。音声が先へ進んだら出力を減らす向き（1.0 より大きい）
+        assert_close(decide_drift_correction(10_000), 1.0001);
+        assert_close(decide_drift_correction(-10_000), 0.9999);
+        assert_close(decide_drift_correction(-50_000), 0.9995);
+    }
+
+    #[test]
+    fn decide_drift_correction_saturates_at_one_tenth_of_a_percent() {
+        assert_close(decide_drift_correction(100_000), 1.001);
+        assert_close(decide_drift_correction(10_000_000), 1.001);
+        assert_close(decide_drift_correction(-10_000_000), 0.999);
+        assert_close(decide_drift_correction(i64::MIN), 0.999);
+    }
+
+    #[test]
+    fn drift_corrector_first_window_only_sets_the_baseline() {
+        let mut corrector = DriftCorrector::default();
+        // 最初の窓（5 秒）は、どれだけずれていても補正しない
+        assert_eq!(corrector.observe(0, 300_000), None);
+        assert_eq!(corrector.observe(DRIFT_WINDOW - 1, 300_000), None);
+        assert_eq!(corrector.observe(DRIFT_WINDOW, 300_000), None);
+        assert_eq!(corrector.last_error(), None);
+    }
+
+    #[test]
+    fn drift_corrector_corrects_the_movement_from_the_baseline() {
+        let mut corrector = DriftCorrector::default();
+        corrector.observe(0, 300_000);
+        corrector.observe(DRIFT_WINDOW, 300_000);
+        // 2 つ目の窓の平均は 300_000 − 50_000。基準から 5ms 音声が遅れた（入力デバイスが遅い）
+        assert_eq!(corrector.observe(DRIFT_WINDOW + 1, 240_000), None);
+        let decision = corrector.observe(DRIFT_WINDOW * 2 + 1, 260_000);
+        assert_correction(decision, 0.9995);
+        assert_eq!(corrector.last_error(), Some(-50_000));
+        // 次の窓は空から始まる（前の窓の値を混ぜない）
+        assert_eq!(corrector.observe(DRIFT_WINDOW * 2 + 2, 300_000), None);
+        let decision = corrector.observe(DRIFT_WINDOW * 3 + 2, 300_000);
+        assert_correction(decision, 1.0);
+        assert_eq!(corrector.last_error(), Some(0));
+    }
+
+    fn assert_correction(decision: Option<DriftDecision>, expected: f64) {
+        match decision {
+            Some(DriftDecision::Correct(correction)) => assert_close(correction, expected),
+            other => panic!("補正係数ではない: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drift_corrector_realigns_when_the_offset_jumps_beyond_what_drift_explains() {
+        let mut corrector = DriftCorrector::default();
+        corrector.observe(0, 0);
+        corrector.observe(DRIFT_WINDOW, 0);
+        // 29.999ms まではレート比で直す（頭打ちの 0.1%）
+        corrector.observe(DRIFT_WINDOW + 1, -299_999);
+        let decision = corrector.observe(DRIFT_WINDOW * 2 + 1, -299_999);
+        assert_correction(decision, 0.999);
+        // 30ms 動いたら、時計のずれではなくサンプルが落ちたとみなして揃え直す。向きは問わない
+        corrector.observe(DRIFT_WINDOW * 2 + 2, -300_000);
+        assert_eq!(
+            corrector.observe(DRIFT_WINDOW * 3 + 2, -300_000),
+            Some(DriftDecision::Realign)
+        );
+        corrector.observe(DRIFT_WINDOW * 3 + 3, 300_000);
+        assert_eq!(
+            corrector.observe(DRIFT_WINDOW * 4 + 3, 300_000),
+            Some(DriftDecision::Realign)
+        );
+        assert_eq!(corrector.last_error(), Some(300_000));
+    }
+
+    /// 入力デバイスの時計が `drift`（比）ずれているとき、10ms ごとにずれを測って補正を掛け続け、
+    /// `seconds` 秒後までの基準からのずれ（100ns）の、最後の 60 秒での最大を返す。
+    /// 測るずれには、入力コールバックの周期（10ms）ぶんの粒度を模した 0〜7.5ms の揺れを足す。
+    fn simulate_drift_correction(drift: f64, seconds: i64) -> f64 {
+        let step = 100_000;
+        let mut corrector = DriftCorrector::default();
+        let mut correction = 1.0;
+        let mut offset = 0.0f64;
+        let mut worst_tail = 0.0f64;
+        for n in 0..seconds * 100 {
+            let at = n * step;
+            offset += step as f64 * ((1.0 + drift) / correction - 1.0);
+            let jitter = (n % 4) * 25_000;
+            match corrector.observe(at, offset as i64 + jitter) {
+                Some(DriftDecision::Correct(next)) => correction = next,
+                Some(DriftDecision::Realign) => panic!("時計のずれだけで揃え直した"),
+                None => {}
+            }
+            if at >= (seconds - 60) * UNITS_PER_SECOND {
+                worst_tail = worst_tail.max(offset.abs());
+            }
+        }
+        worst_tail
+    }
+
+    #[test]
+    fn drift_correction_keeps_the_offset_within_a_few_ms_over_ten_minutes() {
+        // #398 の実測（-51ppm）。補正しなければ 10 分で -30ms
+        assert!(simulate_drift_correction(-51e-6, 600) < 20_000.0);
+        // 逆向きと、大きめのずれ
+        assert!(simulate_drift_correction(100e-6, 600) < 20_000.0);
+        // 上限（0.1%）の半分のずれ。比例制御なので、補正が釣り合うまでの 5ms と、基準を測る
+        // 最初の窓の間に動いた分（約 1ms）を残して止まる
+        let worst = simulate_drift_correction(-500e-6, 600);
+        assert!(worst < 70_000.0, "{worst}");
+        // ずれが無ければ動かさない
+        assert_eq!(simulate_drift_correction(0.0, 600), 0.0);
+    }
+}

@@ -16,7 +16,7 @@ use std::sync::mpsc::Sender;
 
 /// このアプリのテキスト欄に入力中か。ホットキーを止める「入力中」の判定に使う（#206、#238）。
 ///
-/// **`Context::wants_keyboard_input()` は使わない。** あちらはテキスト欄に限らず、
+/// **`Context::egui_wants_keyboard_input()` は使わない。** あちらはテキスト欄に限らず、
 /// 何かのウィジェットにキーボードフォーカスがあるだけで真になる。Tab キーで
 /// 映像エリアやボタンへフォーカスが移ると、以後ずっと入力中と判定されて
 /// ホットキーが効かなくなっていた。
@@ -27,7 +27,7 @@ use std::sync::mpsc::Sender;
 /// `TextEdit`）のどれでも、個別に `has_focus()` を集めずに拾える。
 pub(super) fn is_typing_in_text_field(ctx: &egui::Context) -> bool {
     // memory のロックを握ったまま data を読まない（同じ Context の中のロック）
-    let focused = ctx.memory(|memory| memory.focus());
+    let focused = ctx.memory(|memory| memory.focused());
     focused.is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some())
 }
 
@@ -53,7 +53,8 @@ pub(super) fn background_hotkey_runner(commands: Sender<DeviceCommand>) -> Backg
             HotkeyAction::ToggleMute => DeviceCommand::ToggleMute,
             HotkeyAction::Screenshot
             | HotkeyAction::ToggleFullscreen
-            | HotkeyAction::ToggleAlwaysOnTop => return,
+            | HotkeyAction::ToggleAlwaysOnTop
+            | HotkeyAction::ToggleRecording => return,
         };
         if let Err(e) = commands.send(command) {
             // ワーカーが終わっているときだけ。復帰後に UI 側で実行される
@@ -96,22 +97,27 @@ impl CaptureCardViewer {
         }
     }
 
-    /// このフレームで egui へ渡るキー入力から、ホットキーに割り当てたキーの
-    /// 押下を取り除く（#217）。
+    /// egui へ渡す前の入力から、ホットキーに割り当てたキーの押下を取り除く
+    /// （#217、#418）。
     ///
     /// キーを奪わないフックにしたので、前面にいる間は割り当てたキーが egui にも
     /// 届き、Escape を割り当てると右クリックメニューも同時に閉じていた。
-    /// **描画より前に呼ぶこと。** 描画の中で `key_pressed` を見る処理
-    /// （右クリックメニューの Escape など）より後だと取り除いても間に合わない。
+    /// **`App::raw_input_hook` から呼ぶ。** egui はフレームの始まり（`begin_pass`）で
+    /// Tab / Escape / 矢印キーによるフォーカスの移動を済ませるので、`update()` の
+    /// 中で `input_mut` から取り除いても間に合わない。押下の検出と実行はこれまで
+    /// どおりフックとリスナーが受け持ち、ここは egui へ渡さないことだけを行う。
     ///
-    /// 入力中かはフレームの先頭の値で見る。リスナーへ渡している旗（`update()` の
-    /// 末尾で書く）と同じく、前のフレームの描画を終えた時点の状態になる。
-    pub(super) fn remove_hotkey_key_events(&self, ctx: &egui::Context) {
+    /// 入力中かは前のフレームの描画を終えた時点の状態で見る。リスナーへ渡している
+    /// 旗（`update()` の末尾で書く）と同じ値になる。
+    pub(super) fn remove_hotkey_key_events(
+        &self,
+        ctx: &egui::Context,
+        raw_input: &mut egui::RawInput,
+    ) {
         let typing = is_typing_in_text_field(ctx);
-        let removed = ctx.input_mut(|input| {
-            self.hotkey_manager
-                .remove_hotkey_key_events(&mut input.events, typing)
-        });
+        let removed = self
+            .hotkey_manager
+            .remove_hotkey_key_events(&mut raw_input.events, typing);
         if removed > 0 {
             trace!("ホットキーのキー入力 {removed} 件を egui へ渡さずに捨てた");
         }
@@ -140,6 +146,7 @@ impl CaptureCardViewer {
             HotkeyAction::VolumeUp => self.adjust_volume(VOLUME_SCROLL_STEP),
             HotkeyAction::VolumeDown => self.adjust_volume(-VOLUME_SCROLL_STEP),
             HotkeyAction::ToggleMute => self.toggle_mute(),
+            HotkeyAction::ToggleRecording => self.toggle_recording(),
         }
     }
 
@@ -193,10 +200,11 @@ mod tests {
     use crate::keyboard_hook::KeyboardHookError;
 
     /// 何もしない入力で 1 フレーム回す。描画の中身は `add_contents` が決める
-    fn run_frame(ctx: &egui::Context, add_contents: impl FnMut(&mut egui::Ui)) {
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, add_contents);
-        });
+    fn run_frame(ctx: &egui::Context, mut add_contents: impl FnMut(&mut egui::Ui)) {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, &mut add_contents);
+        })
+        .drop_without_applying_deltas();
     }
 
     #[test]
@@ -231,7 +239,7 @@ mod tests {
     #[test]
     fn is_typing_in_text_field_ignores_focus_on_other_widgets() {
         // Tab キーで映像エリアやボタンへフォーカスが移った状態（#238）。
-        // wants_keyboard_input() は真になるが、テキスト欄ではないので入力中ではない
+        // egui_wants_keyboard_input() は真になるが、テキスト欄ではないので入力中ではない
         let ctx = egui::Context::default();
         let mut focus_requested = false;
         for _ in 0..2 {
@@ -244,7 +252,7 @@ mod tests {
             });
         }
 
-        assert!(ctx.wants_keyboard_input());
+        assert!(ctx.egui_wants_keyboard_input());
         assert!(!is_typing_in_text_field(&ctx));
     }
 

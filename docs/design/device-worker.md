@@ -21,20 +21,24 @@ flowchart LR
     dev -.->|VideoFrames / Atomic| ui
 ```
 
-**チャネルを通さない共有が 4 つある。** どれもデバイスを開く処理を挟まないので、コマンドの列に並べる理由がない。
+**チャネルを通さない共有が 4 つある。** 数えるのは、UI スレッドか録画スレッドがワーカーを通さずにデバイスのコールバックとやり取りする共有ハンドル（UI スレッドが作って `app::backend::BackendShared` に載せてワーカーへ渡し、開き直しても引き継ぐもの）。どれもデバイスを開く処理を挟まないので、コマンドの列に並べる理由がない。`src/app/worker.rs` の冒頭と `docs/ARCHITECTURE.md` の「チャネルでの隔離」も同じ数え方をしている。
 
 | 共有するもの | 型 | 触る側 |
 |---|---|---|
-| 映像フレーム | `video::VideoFrames`（`Arc<Mutex<FrameBuffer>>`） | フレームコールバックが書き、UI スレッドが読む |
+| 映像フレーム | `video::VideoFrames`（`Arc<Mutex<FrameBuffer>>`。録画へ回す差し込み口 `video::VideoTap` を中に 1 つ持つ） | フレームコールバックが書き、UI スレッドが読む。`VideoTap` は録画スレッドが録画中だけリング（`Arc<VideoFrame>` の SPSC）を差し込み、フレームコールバックが画面へ置いたのと同じ `Arc` を積む（待たない `try_lock`、満杯なら捨てて数える）。ワーカーは触らない（`docs/design/recording.md`） |
+| 録画へ回す音声 | `audio::AudioTap`（`Arc` の中に f32 の SPSC リングの差し込み口と Atomic の観測値） | 録画スレッドが録画中だけリングを差し込み、入力コールバック（`process_input`）が f32 へ直した値を入力の形のまま積む（待たない `try_lock`、空きが足りなければそのコールバックの分を捨てて数える）。コールバックは累計のサンプル数と最後に積んだ時刻も書く。**ワーカーはストリームを開くたびに `begin_stream` で入力のレート・チャンネル数と開き直しの番号を書く**（コールバックが動き出す前）。`AudioControls` と同じく開き直しても引き継ぐ共有物で、`BackendShared` に載せて `AudioCapture` / `FakeAudioCapture` へ渡す（`docs/design/recording.md`） |
 | 色空間・レンジ・明るさ・コントラスト・彩度 | `Arc<video::SharedColorConversion>`（Atomic） | UI スレッドが書き、フレームコールバックが読む |
 | 音量・ミュート・パススルー | `Arc<audio::AudioControls>`（Atomic） | UI スレッドが書き、出力コールバックが読む |
-| 音声のリサンプル補正の水位・補正係数 | `Arc<audio::ResampleTelemetry>`（Atomic） | 出力コールバックが水位を書き、デバイスワーカーが `tick` の中で補正係数を書く。**入出力の形が揃っている（identity）ストリームでは作らない**（`AudioCapture::resample_telemetry()` が `None` を返す） |
+
+**ワーカーの内側で閉じる共有は数に入れない。** 音声のリサンプル補正の水位・補正係数（`Arc<audio::ResampleTelemetry>`、Atomic）は、`AudioCapture` がストリームを開くたびに作り、出力コールバックが水位（直近の値と観測の窓）を書き、デバイスワーカーが `tick` の中で窓を読み出して補正係数を書く。UI へは `DeviceSnapshot` の `audio_resample` に写して渡す。**入出力の形が揃っているストリームでも作る**（#308。`AudioCapture::resample_telemetry()` が `None` を返すのは音声を開いていないときだけ。理由は `docs/design/audio.md` の「クロックドリフトは揃っている組み合わせでも補正する」）。フレームが届いたことを UI へ知らせる `RepaintWaker` も `BackendShared` に載るが、値を運ばず起こすだけの窓口なので数えない。DirectShow の映像デバイスの音声ピンと `AudioCapture` をつなぐ `audio::AudioPinFeed`（#388、下の「音声ピン」）も同じくワーカーの内側で閉じる共有で、`SystemBackends::create` が 1 つ作って映像と音声のバックエンドへ複製を渡す。UI スレッドは触らないので数えない。
 
 **映像フレームを `DeviceEvent` で送らないこと。** 接続やデバイス列挙の後ろで待たされ、遅延が増える。
 
 これとは別に、「いま何に繋がっているか」もチャネルを通さず `DeviceSnapshot`（`Arc<RwLock<..>>`）で共有する。UI は `update()` の先頭で 1 回だけ複製を読み、描画も「接続状態」タブもそこから引く。**イベントを取りこぼしても表示が食い違わないよう、状態は必ずこちらを正とする。** ワーカーはイベントを送る前に観測値を書き出すので、UI 側は**イベントを取り込んでからスナップショットを読む**。逆にすると「接続に失敗した」を受け取ったフレームで失敗前の観測値を見る。
 
 **開き直しが要るかの差分判定はワーカー側が持つ。** UI は 2 秒ごとに `DeviceConfig` を丸ごと送り、ワーカーが前回接続できた対象（`last_video_target` / `last_audio_target`）と比べる。UI 側に記録を置くと、接続の成否を知っているのはワーカーなのに記録は UI、という分かれ方になる。
+
+**開く試行が失敗したら、記録は `None` に戻す（#311）。** 映像も音声も開く前に古いストリームを閉じるので、失敗した時点で開いている相手は無い。前の対象を残すと、切り替えに失敗したあとで元の設定へ戻しても差分が立たず、失敗した相手のバックオフ（最大 5 秒）を待ってから開くことになる。記録が `None` でも、失敗した相手の再適用は `ConnectRetry::request` が同じ対象として捨てるので、その相手へのバックオフは保たれる。
 
 - コマンドは受けた順に 1 つずつ処理する。**ワーカーは止まってよい。** 音声の対応設定が無ければ開く直前にその場で取りに行く（以前は届くまで接続を見送る仕組みを UI 側に持っていた）
 - ループはコマンドを待つ前に期限（`tick`）を片付ける。こうしないと、起動直後に積まれる「デバイス能力の取得」（数百 ms）の後ろで最初の接続が待たされる
@@ -52,12 +56,12 @@ eframe は最小化されたウィンドウの再描画要求を捨てるため�
 
 ## デバイスに触る入口は trait 1 枚で仕切る
 
-**ワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。** `worker_loop` / `worker_connect` / `worker_timers` はどれも `Box<dyn ..>` を持つだけで、`VideoCapture` / `AudioCapture` という具体型を知らない。実装を選ぶのは `DeviceWorker::spawn` の 1 か所（`backend::backends_from_env`。既定は `SystemBackends`、環境変数を指定したときだけフェイク）で、そこが `BackendShared`（フレーム・色変換・音量・再描画の窓口）と一緒にワーカースレッドへ送り、**組み立てはあちら側で行う**（`cpal::Stream` が `!Send` なので、作る場所は使うスレッドでなければならない）。
+**ワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。** `worker_loop` / `worker_commands` / `worker_connect` / `worker_audio_connect` / `worker_default_input` / `worker_timers` / `worker_audio_timers` はどれも `Box<dyn ..>` を持つだけで、`VideoCapture` / `AudioCapture` という具体型を知らない。実装を選ぶのは `DeviceWorker::spawn` の 1 か所（`backend::backends_from_env`。既定は `SystemBackends`、環境変数を指定したときだけフェイク）で、そこが `BackendShared`（フレーム・色変換・音量・録画の音声の差し込み口・再描画の窓口）と一緒にワーカースレッドへ送り、**組み立てはあちら側で行う**（`cpal::Stream` が `!Send` なので、作る場所は使うスレッドでなければならない）。
 
 ```mermaid
 flowchart LR
     spawn["DeviceWorker::spawn<br/>（UI スレッド）"]
-    loop["worker_loop / worker_connect<br/>worker_timers"]
+    loop["worker_loop / worker_commands / worker_connect / worker_audio_connect<br/>worker_default_input / worker_timers / worker_audio_timers"]
     trait["VideoBackend / AudioBackend"]
     real["SystemVideo（VideoCapture + DirectShowCapture）/ AudioCapture<br/>app/backend/system.rs"]
     mock["モック（テスト専用）"]
@@ -70,7 +74,7 @@ flowchart LR
     trait -.-> fake
 ```
 
-**境界はワーカーがデバイスへ触る場所に置く。** 開く・閉じる・列挙する・能力を問い合わせる・観測値を読む、の 5 つだけで、`worker_connect` と `worker_timers` が呼ぶ操作がそのまま trait のメソッドに並ぶ。ここより上（コマンドの解釈、再試行の期限、途絶の判定）はもともと `WorkerState` と `monitor` / `retry` の側にあり、デバイスを知らない。ここより下は、nokhwa の開閉とフレームコールバックが `src/video/capture.rs`、cpal の開閉が `src/audio/capture.rs`、cpal のストリームの組み立てと入出力のコールバックが `src/audio/stream.rs` にある。**`video` / `audio` の側は trait を知らない。** `VideoCapture` / `AudioCapture` は自分の固有メソッドを持つだけで、trait に包むのは `app/backend/system.rs` の `impl VideoBackend for SystemVideo`（Media Foundation の `VideoCapture` と DirectShow の `DirectShowCapture` を束ねたもの）/ `impl AudioBackend for AudioCapture` の役目（フェイクは `app/backend/fake.rs`）。
+**境界はワーカーがデバイスへ触る場所に置く。** 開く・閉じる・列挙する・能力を問い合わせる・観測値を読む、の 5 つだけで、`worker_connect` / `worker_audio_connect` と `worker_timers` / `worker_audio_timers` が呼ぶ操作がそのまま trait のメソッドに並ぶ。ここより上（コマンドの解釈、再試行の期限、途絶の判定）はもともと `WorkerState` と `monitor` / `retry` の側にあり、デバイスを知らない。ここより下は、nokhwa の開閉とフレームコールバックが `src/video/capture.rs`、cpal の開閉が `src/audio/capture.rs`、cpal のストリームの組み立てと入出力のコールバックが `src/audio/stream.rs`（入力）/ `src/audio/stream_output.rs`（出力）にある。**`video` / `audio` の側は trait を知らない。** `VideoCapture` / `AudioCapture` は自分の固有メソッドを持つだけで、trait に包むのは `app/backend/system.rs` の `impl VideoBackend for SystemVideo`（Media Foundation の `VideoCapture` と DirectShow の `DirectShowCapture` を束ねたもの）/ `impl AudioBackend for AudioCapture` の役目（フェイクは `app/backend/fake.rs`）。
 
 **フレームコールバックと cpal のコールバックの経路には挟まない。** 映像フレームは `VideoFrames`、音量とミュートは `AudioControls` の共有ハンドル越しに今までどおり流れる。あの 2 つのコールバックはロックもアロケーションもしない決まりで（`docs/design/video-pipeline.md` / `docs/design/audio.md`）、動的ディスパッチを足す場所ではない。trait 化したのは開閉と問い合わせだけなので、1 回の接続につき数回しか通らない。
 
@@ -83,15 +87,15 @@ flowchart LR
 | 実装 | 開くたびに作り直すもの | 開き直しても引き継ぐもの |
 |---|---|---|
 | `VideoCapture`（`src/video/capture.rs`） | `camera`（`CallbackCamera`）、`active` | `frames`、`color_conversion`、`repaint_waker` |
-| `DirectShowCapture`（`src/video/directshow/mod.rs`） | `graph`（`CaptureGraph`。フィルターグラフとレンダラー）、`active` | `frames`、`color_conversion`、`repaint_waker`、COM の初期化 |
-| `AudioCapture`（`src/audio/capture.rs`） | `input_stream` / `output_stream`、`active`、`resample_telemetry`、`stream_error`、`underruns` | `host`、`controls` |
+| `DirectShowCapture`（`src/video/directshow/mod.rs`） | `graph`（`CaptureGraph`。フィルターグラフと映像・音声のレンダラー）、`active`、`AudioPinFeed` に配るグラフの番号 | `frames`、`color_conversion`、`repaint_waker`、`pin_feed`、COM の初期化 |
+| `AudioCapture`（`src/audio/capture.rs`） | `input_stream`（入力が音声ピンなら無し）/ `output_stream`、`active`、`resample_telemetry`、`counters`（`StreamCounters`。エラーの旗 `error`・アンダーラン `underruns`・捨てたフレーム `dropped_frames`（#350）・取りこぼし `xruns`（#377）の数え手）、音声ピンの差し込み先（開くたびに `AudioPinFeed` へ差し込み、閉じるたびに抜く） | `host`、`controls`、`tap`、`pin_feed` |
 
-ハンドル型にするとは、左の列を別の型へ出して `start_*` の戻り値にし、閉じるのをその値の drop に任せる形のこと。#102 でこの形を採らなかった理由は「`src/video.rs`（当時 2,451 行）の中身を動かさないと切り出せない」だった。#197 で `src/video/` / `src/audio/` に分けたあとは、左の列はどちらも `capture.rs` 1 ファイルに収まっている。切り出しは `capture.rs` と `backend.rs` とワーカーの中で済むので、この理由はもう当たらない。
+ハンドル型にするとは、左の列を別の型へ出して `start_*` の戻り値にし、閉じるのをその値の drop に任せる形のこと。#102 でこの形を採らなかった理由は「`src/video.rs`（当時 2,451 行）の中身を動かさないと切り出せない」だった。#197 で `src/video/` / `src/audio/` に分けたあとは、左の列はどちらも `capture.rs` 1 ファイルに収まっている。切り出しは `capture.rs` と `backend/` とワーカーの中で済むので、この理由はもう当たらない。
 
 **それでも、今はハンドル型にしない。** 理由は 2 つある。
 
 - **#142 のフェイクが作りやすくならない。** フェイクが開いたストリームとして持つのは「テストパターンや正弦波を吐くスレッド」と「開いた内容」くらいで、`VideoCapture` が `CallbackCamera` を抱えるのと同じ形で自分の中に持てる。フェイクを書くうえで引っかかるのは、次の項に書く可視性のほうで、ハンドルの有無とは関係がない
-- **ワーカー側の書き換えが得より大きい。** `WorkerState` がバックエンドと `Option<ハンドル>` を映像・音声それぞれ別に持つことになり、`worker_loop` / `worker_connect` / `worker_timers` で観測値を読む箇所（`link_state` / `active` / `resample_*` / `underrun_count` / `take_stream_error`）がすべて `Option` 越しになる。モックもハンドル側と二重になる。得られるのは主に、`AudioCapture` の「開き直すたびにエラーの旗とアンダーランの数え手を新しい `Arc` へ差し替える」決まりを型で強制できることだが、この差し替えは `start_passthrough` と `stop_capture` の 2 か所に閉じていて、手で守れている
+- **ワーカー側の書き換えが得より大きい。** `WorkerState` がバックエンドと `Option<ハンドル>` を映像・音声それぞれ別に持つことになり、`worker_loop` / `worker_connect` / `worker_audio_connect` / `worker_timers` / `worker_audio_timers` で観測値を読む箇所（`link_state` / `active` / `resample_*` / `underrun_count` / `take_stream_error`）がすべて `Option` 越しになる。モックもハンドル側と二重になる。得られるのは主に、`AudioCapture` の「開き直すたびにエラーの旗とアンダーランの数え手を新しい `Arc` へ差し替える」決まりを型で強制できることだが、この差し替えは `start_passthrough` と `stop_capture` の 2 か所に閉じていて、手で守れている
 
 見直すのは、**新しいストリームを開いてから古いものを閉じたい**（切り替え時の暗転を縮める）ときか、フェイクの実装で旗の差し替えを同じように書き写すことになり、取り違えが心配になったとき。前者は「実装が同時に 1 本だけ持つ」今の形では書けないので、ハンドル型が要る。後者は #142 で現実になっていて、`FakeAudioCapture`（`src/audio/fake.rs`）が同じ差し替えを `start_passthrough` / `stop_capture` に書き写している。いまは 2 実装 × 2 か所で手で守れているが、実装がさらに増えるなら見直す。
 
@@ -102,16 +106,18 @@ flowchart LR
 | 置き場所 | 持つもの |
 |---|---|
 | `src/video/directshow/mod.rs` | `DirectShowCapture`。`VideoCapture` と同じ窓口（列挙・能力・開く・閉じる・観測）と、表示名の「(DirectShow)」の付け外し |
-| `src/video/directshow/devices.rs` | 列挙（`ICreateDevEnum` の `CLSID_VideoInputDeviceCategory`、表示名は `IPropertyBag` の `FriendlyName`）、対応形式（`IAMStreamConfig::GetStreamCaps`）、開く形式の選び方（`choose_candidate`、純粋関数） |
+| `src/video/directshow/devices.rs` | 列挙（`ICreateDevEnum` の `CLSID_VideoInputDeviceCategory`、表示名は `IPropertyBag` の `FriendlyName`）、対応形式（`IAMStreamConfig::GetStreamCaps`）。開く形式の選び方（`choose_candidate`、純粋関数）は `stream_select.rs` |
 | `src/video/directshow/graph.rs` | `CaptureGraph`。`IGraphBuilder` / `ICaptureGraphBuilder2` の組み立て、`SetFormat`、`RenderStream`、`Run`、`Stop` と破棄。グラフのイベント（`IMediaEventEx`）を待たずに読み、デバイスの喪失を拾う（`poll_device_lost`） |
-| `src/video/directshow/filter.rs` | サンプルを受ける自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`、`windows` クレートの `#[implement]`） |
-| `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放、COM の初期化（`ComApartment`） |
-| `src/app/backend/system.rs` | `SystemVideo`。Media Foundation と DirectShow を 1 つの `VideoBackend` に束ねる |
+| `src/video/directshow/filter.rs` | サンプルを受ける自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`、`windows` クレートの `#[implement]`）。媒体を問わず、受け取る形式の判定と渡し先だけを映像（`video_stream.rs`）と音声（`audio_pin.rs`）で分ける |
+| `src/video/directshow/video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
+| `src/video/directshow/audio_pin.rs` | 音声ピン（#388）。有無の記録、10ms の塊の提案と接続、`Run` が通らないときに外してやり直す、受け取った PCM を `AudioPinFeed` へ渡す |
+| `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
+| `src/app/backend/system.rs` | `SystemVideo`。Media Foundation と DirectShow を 1 つの `VideoBackend` に束ねる。経路の判定（`route_for` / `attempt_with_fallback` / `merge_video_devices`）は `system_route.rs` |
 
 #### 一覧と名前
 
 - **一覧は Media Foundation を優先する。** DirectShow の列挙には Media Foundation に出るデバイス（WDM のキャプチャーボードや Web カメラ）も並ぶので、表示名が Media Foundation の一覧と同じものは捨て、DirectShow にしか無いものだけを「(DirectShow)」を添えて足す（`merge_video_devices`）。同じデバイスを 2 経路で並べても選び間違えるだけで、実績があるのは Media Foundation のほう
-- **どちらで開くかは、名前の印と設定の「映像の開き方」（`video.backend`、#237）で決まる**（`route_for`）。設定に保存されるのも「(DirectShow)」付きの名前。**この印は翻訳しない。** 設定に残る識別子なので、画面の言語を切り替えると別のデバイス扱いになってしまう
+- **どちらで開くかは、名前の印と設定の「映像の開き方」（`video.backend`、#237）で決まる**（`route_for`）。ただし自動で Media Foundation が開けないときは DirectShow でも試す（#387、下の「映像の開き方」）。自動で音声の入力が映像デバイスの音声（`input_source = "video_pin"`）なら最初から DirectShow で開き、DirectShow の一覧に無いときだけ Media Foundation で開く（#425。`docs/design/directshow-audio.md` の (5)。能力の問い合わせはこの指定を見ない）。設定に保存されるのも「(DirectShow)」付きの名前。**この印は翻訳しない。** 設定に残る識別子なので、画面の言語を切り替えると別のデバイス扱いになってしまう
 
 #### 映像の開き方（#237）
 
@@ -119,14 +125,14 @@ flowchart LR
 
 | `video.backend` | 経路 | 経路へ渡す名前 |
 |---|---|---|
-| `auto`（既定） | 名前に「(DirectShow)」があれば DirectShow、無ければ Media Foundation（#143 のまま） | そのまま |
+| `auto`（既定） | 名前に「(DirectShow)」があれば DirectShow、無ければ Media Foundation（#143 のまま）。Media Foundation で「見つかったが開けない」ときは同じ試行の中で DirectShow でも試す（#387、`docs/design/reconnect.md` の「両方に出るが Media Foundation では開けないデバイス」） | そのまま |
 | `direct_show` | DirectShow | そのまま。`DirectShowCapture` は印の有無を問わず `FriendlyName` で探す |
 | `media_foundation` | Media Foundation | 「(DirectShow)」を外した名前 |
 
 - **一覧（`merge_video_devices`）は変えない。** 開き方ごとに一覧を作り分けると、設定に残る名前が開き方によって変わり、開き方を戻したときに別のデバイス扱いになる。そのかわり、選んだ経路の一覧に無いデバイスは「見つからない」になる。設定ダイアログでは「自動」以外のときに注意書きを出す
 - デバイスが未指定（`None`）なら開き方によらず Media Foundation の先頭を開く。DirectShow の経路は名前が無いと開けない
 - **開き方は `VideoTarget` に含めてある。** 同じデバイスでも経路が変われば開き直しが要るので、`DeviceConfig` の差分判定に載せ、「適用」で映像だけが開き直る。trait には `start_capture` の引数として渡し、経路が 1 つしか無いフェイクとモックは見ない
-- **能力の問い合わせ（`capabilities`）も開き方を受け取り、開くときと同じ `route_for` で経路を決める**（#249）。DirectShow で開く設定なら、設定ダイアログの解像度・フォーマット・fps の選択肢も DirectShow 側の対応形式（`GetStreamCaps`）になる。以前は名前だけで経路を決めていたため、両方に出るデバイスを DirectShow で開くと選択肢は Media Foundation 側のもので、選んだ形式が DirectShow に無ければ `choose_candidate` が近いものへ寄せていた。コマンド（`QueryVideoCapabilities`）とイベント（`VideoCapabilities`）はデバイス名と開き方の組を運び、UI の能力キャッシュはその組をキーにする（`docs/design/settings-dialog.md` の「能力キャッシュのキー」）。フェイクとモックは経路が 1 つなので開き方を見ない
+- **能力の問い合わせ（`capabilities`）も開き方を受け取り、開くときと同じ `route_for` で経路を決める**（#249）。DirectShow で開く設定なら、設定ダイアログの解像度・フォーマット・fps の選択肢も DirectShow 側の対応形式（`GetStreamCaps`）になる。以前は名前だけで経路を決めていたため、両方に出るデバイスを DirectShow で開くと選択肢は Media Foundation 側のもので、選んだ形式が DirectShow に無ければ `choose_candidate` が近いものへ寄せていた。コマンド（`QueryVideoCapabilities`）とイベント（`VideoCapabilities`）はデバイス名と開き方の組を運び、UI の能力キャッシュはその組をキーにする（`docs/design/settings-dialog.md` の「能力キャッシュのキー」）。フェイクとモックは経路が 1 つなので開き方を見ない。DirectShow の能力にはドライバーが返すいまの解像度も添える（`FormatCapability::current_resolution`、#391。`docs/design/video-pipeline.md` の「DirectShow で開く解像度」）
 - 実際に開いた経路は `ActiveVideo::api`（`CaptureApi`）に持たせ、「接続状態」タブの映像の欄に「開き方」として出す
 - **プリセットに含める**（`video` の中にあるので `Preset::apply_to` と `matches_preset` の両方に自然に入る）。開き方はデバイスと一体の設定で、キャプチャーボードの使い分けというプリセットの用途に合う（`docs/design/presets.md`）
 - 名前の照合は表示名（`FriendlyName`）で行う。同じ名前のデバイスが 2 台あれば先に列挙されたほうを開く（Media Foundation の経路と同じ）
@@ -134,7 +140,7 @@ flowchart LR
 #### スレッドと COM
 
 - **グラフの生成・開始・停止・破棄はすべてデバイスワーカースレッドで行う。** `DirectShowCapture` はワーカーの中で `SystemBackends::create` が作り、COM のオブジェクト（`IMoniker` / `IGraphBuilder` / フィルター）はワーカーから出ない
-- **COM はワーカースレッドで 1 回、STA で初期化する**（`DirectShowCapture::new` の `ComApartment::enter`）。同じスレッドで nokhwa と cpal がどちらも STA で初期化しており、ここだけ MTA にすると後から初期化する側が `RPC_E_CHANGED_MODE` で失敗する（nokhwa はそれを起動の失敗として扱う）。`DirectShowCapture` が落ちるとき（ワーカーの終了時）に、グラフを手放してから初期化を戻す
+- **COM はワーカースレッドで 1 回、STA で初期化する**（`DirectShowCapture::new` の `ComApartment::enter`。`ComApartment` は `src/com.rs`）。同じスレッドで nokhwa と cpal がどちらも STA で初期化しており、ここだけ MTA にすると後から初期化する側が `RPC_E_CHANGED_MODE` で失敗する（nokhwa はそれを起動の失敗として扱う）。`DirectShowCapture` が落ちるとき（ワーカーの終了時）に、グラフを手放してから初期化を戻す
 - グラフが動くと、上流のフィルター（キャプチャーのフィルター。間に変換フィルターが入ればそれ）が**自分のストリーミングスレッドから**レンダラーの `IMemInputPin::Receive` を呼ぶ。nokhwa のフレームコールバックスレッドにあたり、`docs/design/threads.md` の一覧にも載せてある。**ここではロックもアロケーションもしない。** `FrameSink` は `Mutex` で包まず、ストリーミングスレッドだけが触る前提の「待たない旗」（`StreamSlot`）で守る。接続し直しの最中に重なったら、そのサンプルを捨てて待たない
 - 基準時計は外す（`IMediaFilter::SetSyncSource(NULL)`）。付けたままだと途中に入った変換フィルターがタイムスタンプまで待つことがあり、その分だけ遅れる
 - 閉じるときは `IMediaControl::Stop`（上流のストリーミングスレッドが止まるまで戻らない）→ 各フィルターを `RemoveFilter`（ピンの接続が切れ、フィルター・ピン・グラフの参照の循環がほどける）→ 手放す、の順
@@ -161,9 +167,21 @@ flowchart LR
 
 開く形式の選び方（`choose_candidate`）は、指定された形式がデバイスにあればその形式の中から、解像度が一致するもの → 画素数が近いもの → 形式が未指定なら YUY2・NV12・I420・YV12・MJPEG・RGB24 の順 → fps が近いもの。解像度が未指定なら Media Foundation の経路と同じく 1280x720 60fps を求め、fps は 15〜120 へ丸める。**Media Foundation の経路と違い、MJPEG / RGB24 を選べばその形式で開く**（`docs/design/video-pipeline.md` の「UI にあるが動作していない設定がある」）。
 
-#### DirectShow では確かめていないもの
+#### 音声ピン（#388）
 
-手元で確かめたのは OBS の仮想カメラ（YUY2 / NV12 / I420 を出す。#143 の時点で受け取れたのは YUY2 だけ）だけ。**NV12 / I420 / YV12 の受け口（#228）は実機では未確認（OBS の仮想カメラは YV12 を出さない）。DirectShow 専用の実機のキャプチャーボード、MJPEG / RGB24 を出すデバイス、途中で形式が変わるデバイス、変換フィルターが間に入る組み合わせは試していない。** 抜き差しの検出は、グラフのイベント（`EC_DEVICE_LOST` など、#229）とフレームの途絶（3 秒）の 2 本立て（`docs/design/reconnect.md` の「切断の検出と再接続」）。イベントがどの機器で実際に届くかは確かめていない（OBS の仮想カメラの停止で確かめる手順は `docs/MANUAL-TEST.md` の「DirectShow のデバイス（#143）」）。
+WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の音は、映像フィルターが映像ピンと並べて持つ**音声ピン**から取る。設計の全体は `docs/design/directshow-audio.md`。ここにはワーカーとバックエンドの側の要点だけを置く。
+
+- **繋ぐのは `[audio] input_source = "video_pin"` のときだけ。** `VideoTarget` の 6 つ目（音声ピンを繋ぐか）として `CaptureRequest::connect_audio_pin` で渡す。繋がないときも音声ピンの有無は `FindPin` で調べ、`ActiveVideo::audio_pin`（`AudioPinState`）に残す。入力の種類を切り替えると映像も 1 度開き直す
+- グラフには**レンダラーを 2 つ入れる**（映像用と音声用。同じ型の別のインスタンス）。音声ピンの `Receive` は `AudioPinFeed::push` で `process_input_iter` を呼び、リングより後ろは WASAPI の入力と同じ経路を通る
+- **どこで失敗しても映像は止めない。** 繋げなければ音声のレンダラーを外して `AudioPinState::Failed` を残す。繋いだせいで `Run` が通らなければ、音声のレンダラーを外して 1 度だけやり直す
+- `AudioPinFeed` はグラフごとに番号を配る（`begin_graph`）。`Receive` は自分のグラフの番号と差し込み先の番号が合うときだけ積むので、映像を開き直したあとに古いグラフが積むことはない
+- ワーカーは**音声ピンが使えないとき開かずに待つ**（`hold_audio_for_pin`。#304 の `hold_audio_without_input` と同じ形）。**映像を開き直したら音声も開き直す。** 要求を立てるのは `tick` の監視（`worker_audio_timers::monitor_audio_pin`。判定は `monitor_audio_pin.rs` の純粋関数）で、映像の音声ピンの番号と音声が差し込んでいる番号を比べる。理由は `docs/design/reconnect.md` の「映像の開き直しに合わせて音声も開き直す（音声ピン）」
+- trait に「音声ピンを問い合わせる」メソッドは足さない。観測値の 1 項目（`ActiveVideo::audio_pin` / `ActiveAudio::input_route`）にしてあり、モックはそれを返すだけで「待つ / 開く / 映像の開き直しで開き直す」を CI に載せている（`worker_audio_connect.rs` のテスト）。フェイクの音声ピン（`CAPTURECARD_VIEWER_FAKE_SCENARIO=audio-pin`、#394）は映像のフェイクが正弦波を `AudioPinFeed` へ流し、設定からワーカー、音声ピンで開くまでを通しで CI に載せている（`app/backend/fake.rs` のテスト）
+- 入力が未設定のまま起動したら、入力は最初の映像の試行のあとに決める（`worker_default_input.rs`、#394）。映像に音声ピンがあれば「映像デバイスの音声」、無ければ WASAPI の列挙の先頭。**ワーカーは UI から来た映像の接続対象（音声ピンを繋ぐか）を書き換えない。** `video_pin` に決めたら UI が書き戻した設定を待って映像を開き直す（初回だけ 1 度開き直る）。決めるまでと書き戻しが届くまでは音声を理由なしで待たせる
+
+#### DirectShow で確かめたもの・確かめていないもの
+
+確かめたのは OBS の仮想カメラ（YUY2 / NV12 / I420 を出す。#143 の時点で受け取れたのは YUY2 だけ）と、実機の AVerMedia GC551（2026-10-01）。GC551 は Media Foundation では開けず、開き方が自動なら DirectShow へ倒して 1280x720 / 1920x1080 の YUY2 60fps で開く（#387、`docs/design/reconnect.md`）。入力と違う解像度では警告画面を送ってくるので、開く解像度を入力に合わせる（#391、`docs/design/video-pipeline.md`）。同じフィルターの音声ピンから 48kHz 2ch 16bit の PCM を受け取り、鳴らすことと録画に入ることも確かめた（#393、`docs/design/directshow-audio.md`）。**NV12 / I420 / YV12 の受け口（#228）は実機では未確認（OBS の仮想カメラは YV12 を出さず、GC551 は YUY2 で開く）。MJPEG / RGB24 を出すデバイス、途中で形式が変わるデバイス、変換フィルターが間に入る組み合わせは試していない。** 抜き差しの検出は、グラフのイベント（`EC_DEVICE_LOST` など、#229）とフレームの途絶（3 秒）の 2 本立て（`docs/design/reconnect.md` の「切断の検出と再接続」）。イベントがどの機器で実際に届くかは確かめていない（OBS の仮想カメラの停止で確かめる手順は `docs/MANUAL-TEST.md` の「DirectShow のデバイス（#143）」）。
 
 ### フェイクデバイス（#142）
 
@@ -173,13 +191,13 @@ flowchart LR
 |---|---|
 | `src/video/fake.rs` | `FakeVideoCapture`。デバイスとしての振る舞い（名乗る名前、対応形式、シナリオ）と生成スレッド |
 | `src/video/test_pattern.rs` | テストパターンの描画（カラーバー、ベタ塗り、フレーム番号の焼き込み）。純粋関数 |
-| `src/audio/fake.rs` | `FakeAudioCapture`。正弦波を出す入力と、書き込みを捨てる出力のスレッド |
+| `src/audio/fake.rs` / `src/audio/fake_stream.rs` | `FakeAudioCapture`。正弦波を出す入力と、書き込みを捨てる出力のスレッド（スレッドの本体は `fake_stream.rs`） |
 | `src/app/backend/fake.rs` | `FakeBackends`（`DeviceBackends`）、上の 2 つを trait に包む impl、環境変数の解釈 |
 
 **フェイクを `src/video/` / `src/audio/` の中に置いたのは、共有の窓口がそこにしか無いため。** `app::backend` に直接書くと届かない。
 
 - **映像フレームを `FrameBuffer` へ積む口:** `VideoFrames::buffer()` / `FrameBuffer::push_back` は `pub(super)` で、`src/video/` の外からは積めない。さらに実機と同じ変換を通した RGB を確かめるには、nokhwa のクロージャに書かれていたフレームコールバックの本体（YUY2 → RGB、`push_back`、`RepaintWaker::wake`）を共有する必要があった。これを「幅・高さ・バイト列」を受ける `FrameSink`（`src/video/frame_sink.rs`）へ出し、nokhwa のコールバックとフェイクの生成スレッドの両方がそこを通る
-- **`AudioControls` の読み方:** フィールドが `pub(super)` で、出力コールバックと同じ判定は `src/audio/stream.rs` にしか無い。cpal のクロージャの本体を `process_input` / `process_output` へ出し、フェイクの入出力スレッドも同じものを呼ぶ。開く設定の選び方も `choose_passthrough_configs`（`src/audio/stream_config.rs`）へ出して共有した。**音量・ミュート・パススルー、クロックドリフト補正の水位（`ResampleTelemetry`）、アンダーランの数え方は本物と同じ経路で動く**
+- **`AudioControls` の読み方:** フィールドが `pub(super)` で、出力コールバックと同じ判定は `src/audio/stream_output.rs` にしか無い。cpal のクロージャの本体を `process_input` / `process_output` へ出し、フェイクの入出力スレッドも同じものを呼ぶ。開く設定の選び方も `choose_passthrough_configs`（`src/audio/stream_config.rs`）へ出して共有した。**音量・ミュート・パススルー、クロックドリフト補正の水位（`ResampleTelemetry`）、アンダーランの数え方は本物と同じ経路で動く**
 - **実装を選ぶ場所:** `DeviceWorker::spawn` が `backend::backends_from_env()` を呼ぶ 1 か所だけ。ワーカーの側は何も変えていない
 
 #### 名乗るデバイスと流すもの
@@ -189,8 +207,8 @@ flowchart LR
 | Fake Camera 1, 3, … | 75% のカラーバー 8 本（白・黄・シアン・緑・マゼンタ・赤・青・黒）。YUY2 |
 | Fake Camera 2, 4, … | ベタ塗り。2 番が青、4 番が赤、6 番が緑、8 番が黄。YUY2 |
 | Fake Audio Input 1, 2, … | 48kHz 2ch の正弦波。1 番が 440Hz、2 番が 880Hz、… |
-| Fake Audio Output 1 | 48kHz 2ch。入力と形が揃うので変換しない |
-| Fake Audio Output 2 | 44.1kHz 1ch。入力と揃わないので変換し、ドリフト補正の対象になる |
+| Fake Audio Output 1 | 48kHz 2ch。入力と形が揃うので変換しない（ドリフト補正は掛かる） |
+| Fake Audio Output 2 | 44.1kHz 1ch。入力と揃わないので変換する（ドリフト補正も掛かる） |
 
 - 映像の台数と音声の入力の台数が `CAPTURECARD_VIEWER_FAKE_DEVICES` の値（1〜8。超えたら 8）。出力は常に 2 台。0・空・数字でない値はフェイクを使わない（打ち間違えでフェイクになるより、実機のまま起動するほうが害が小さい）
 - 映像の対応形式は YUY2 の 1920x1080 / 1280x720 / 640x480 × 60 / 30fps。一覧に無い解像度は画素数が最も近いものへ、fps は実機と同じく 15〜120 へ丸める。解像度が未指定なら実機と同じ 1280x720 60fps
@@ -204,6 +222,7 @@ flowchart LR
 | 書式 | 起きること |
 |---|---|
 | `disconnect:<秒>` | 映像を開いてから `<秒>` 経つとフレームを止める（ストリームは開いたまま、信号だけが途絶える）。**開き直すたびに数え直す**ので、途絶の検出（3 秒）→ 再接続 → また `<秒>` 流れて止まる、を繰り返す。0 は受け付けない（1 枚も届かない状態は切断とみなさない決まりなので、再現にならない。`docs/design/reconnect.md`） |
+| `reopen-fail:<秒>` | `disconnect` で映像が途絶えてから `<秒>` の間は、映像の開き直し（`start_capture`）を失敗させる。USB を抜いたまま（`active_video` が無い状態が続く）を再現する。`fail` とは別に数え、期間中の失敗は `fail` の回数を減らさない。期間が過ぎて開けたら数え直しは次の途絶から。0 は受け付けない |
 | `audio-error:<秒>` | 音声を開いてから `<秒>` 経つと、ストリームのエラーの旗（本物の cpal のエラーコールバックが立てるのと同じもの）を 1 回立てる。ワーカーが `take_stream_error` で拾って開き直し、**開き直すたびに数え直す**。0 は受け付けない（開いた直後に毎回エラーになり、再接続の間隔の下限でしか音が出なくなる） |
 | `fail:<回数>` | 映像と音声のそれぞれで、最初の `<回数>` 回だけ開くのに失敗する。バックオフでの再試行を再現する |
 

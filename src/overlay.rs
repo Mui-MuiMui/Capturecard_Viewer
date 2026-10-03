@@ -90,16 +90,19 @@ impl TransientOverlay {
 
         ctx.request_repaint_after(left);
 
-        egui::Area::new("transient_overlay")
+        egui::Area::new(egui::Id::new("transient_overlay"))
+            // 常設の表示（統計・帯・録画中の印）と違い、設定ダイアログより上に出す（#284）。
+            // ダイアログの中の操作（プリセットの切り替えなど）の結果も知らせるため、
+            // 隠れると役に立たない。出るのも数秒だけ（`app/video_overlay.rs`）
             .order(egui::Order::Foreground)
             // 映像のドラッグや右クリックを吸わないようにする
             .interactable(false)
             .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -BOTTOM_OFFSET))
             .show(ctx, |ui| {
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(egui::Color32::from_black_alpha(160))
-                    .rounding(4.0)
-                    .inner_margin(egui::Margin::same(8.0))
+                    .corner_radius(4)
+                    .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| match &active.content {
                         OverlayContent::Text(text) => {
                             draw_text(ui, text);

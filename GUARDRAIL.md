@@ -10,7 +10,7 @@
 - 時間で動くデバイス処理を `update()` から駆動しない（理由: `docs/design/device-worker.md`）
 - `update()` の中でデバイスを開く・閉じる・列挙する・能力を問い合わせる処理を書かない（理由: `docs/design/device-worker.md`、`docs/ARCHITECTURE.md`）
 - `AudioCapture` はワーカースレッドの中で作る（理由: `docs/design/device-worker.md`）
-- ワーカー（`worker_loop` / `worker_connect` / `worker_timers`）から `VideoCapture` / `AudioCapture` を名指しで呼ばない。`app::backend` の trait を通す。コールバックの経路には trait を挟まない（理由: `docs/design/device-worker.md`）
+- ワーカー（`worker_loop` / `worker_commands` / `worker_connect` / `worker_audio_connect` / `worker_default_input` / `worker_timers` / `worker_audio_timers`）から `VideoCapture` / `AudioCapture` を名指しで呼ばない。`app::backend` の trait を通す。コールバックの経路には trait を挟まない（理由: `docs/design/device-worker.md`）
 - デバイスに触る使い捨てのスレッドを新しく作らない（理由: `docs/design/threads.md`）
 - 新しく `Arc<Mutex<..>>` を足す前に「ワーカーへのコマンドで済まないか」を考える。要る場合もロックを握ったまま重い処理（デバイスの開き直し、画像のエンコード、ファイル I/O）をしない（理由: `docs/design/threads.md`）
 - cpal のコールバックスレッドから再接続を始めない。エラーの旗はストリームを開き直すたびに新しい `Arc` へ差し替える（理由: `docs/design/threads.md`）
@@ -19,8 +19,15 @@
 - スクリーンショットの保存スレッドの `JoinHandle` を捨てない。`on_exit` で join する（理由: `docs/design/threads.md`）
 - クリップボードへのコピーを UI スレッドへ移さない。`arboard::Clipboard` は使うスレッドごとに作る（理由: `docs/design/threads.md`）
 - 保存スレッドから直接 `error!` を出さない（理由: `docs/design/threads.md`）
+- 録画スレッドから直接 `error!` を出さない。失敗は `RecordingEvent` で UI スレッドへ返す（理由: `docs/design/threads.md`、`docs/design/recording.md`）
+- 録画スレッドはリング（`VideoTap`）の `Arc<VideoFrame>` を持ったまま `WriteSample` しない。NV12 へ直したらすぐ手放す（理由: `docs/design/recording.md`）
+- `on_exit` では録画をデバイスワーカーより先に止め、`Finalize` を待つ（理由: `docs/design/recording.md`）
+- 録画スレッドを自分から抜けさせない。止めると決めるのは窓口（`Recorder`）だけ（理由: `docs/design/recording.md` の「持ち主と寿命」）
 - UI スレッドから `supported_input_configs()` / `supported_output_configs()` を呼ばない（理由: `docs/design/audio.md`）
 - フレームコールバックと cpal のコールバックでロックもアロケーションもしない。`SharedColorConversion` に項目を足すときも `Mutex` にしない（理由: `docs/design/video-pipeline.md`、`docs/design/audio.md`）
+- 音声ピンのレンダラーの `Receive` でロックもアロケーションもしない。受け取れないときも失敗を返さず、捨てて `Ok` を返す（理由: `docs/design/directshow-audio.md`）
+- 音声ピンを繋ぐのは `[audio] input_source = "video_pin"` のときだけにする（理由: `docs/design/directshow-audio.md`）
+- 映像の開き直しに合わせた音声の開き直しを、音声のストリームエラーの経路で起こさない（理由: `docs/design/directshow-audio.md`）
 - 接続を待つために `thread::sleep` を使わない（理由: `docs/design/reconnect.md`）
 - 音声が開けないとき Windows の既定デバイスへフォールバックしない（理由: `docs/design/reconnect.md`）
 - 切断の監視の中でデバイスを開かない。`ConnectRetry` へ要求を積むところまでにする（理由: `docs/design/reconnect.md`）
@@ -65,7 +72,7 @@
 - `println!` / `eprintln!` を新たに足さない（例外は `#[cfg(test)]` の中）（理由: `docs/design/logging.md`）
 - `catch_unwind` を使わない（理由: `docs/design/logging.md`）
 - 失敗はログだけで終わらせず `report_error(ErrorSource::_, 理由)` を呼ぶ。接続に成功したら `errors.clear(..)` を呼ぶ（理由: `docs/design/error-reporting.md`）
-- `video/` / `audio/` / `screenshot.rs` / `hotkey/` / `settings.rs` の公開 API は `String` ではなく自分のエラー enum を返す（理由: `docs/design/error-reporting.md`）
+- `video/` / `audio/` / `recording/` / `screenshot.rs` / `hotkey/` / `settings/` の公開 API は `String` ではなく自分のエラー enum を返す（理由: `docs/design/error-reporting.md`）
 - エラー enum の文言はその型の `Display` から `crate::i18n` を呼んで出す。`status.rs` に発生源ごとの `match` を足さない（理由: `docs/design/error-reporting.md`）
 - 画面に出す文字列をリテラルで書かない。`crate::i18n` の `Text` のキーか関数を通す。ログの文言は入れない（理由: `docs/design/i18n.md`）
 - カレントディレクトリ基準でファイルを解決する処理を新たに足さない（理由: `docs/design/assets.md`）
@@ -78,7 +85,7 @@
 ## Git と Issue
 
 - `Closes` / `Fixes` などのクローズ用キーワードを使わない。Issue 番号の前に置いてよいのは `Refs` だけ（理由: `.claude/skills/naming-conventions/SKILL.md` の「`Closes` ではなく `Refs` を使う」）
-- Issue を閉じるのは人が実機で確認したとき。Claude は閉じない（理由: 同上）
+- マージ後、CI・実機ログ・ソースの確認で確かめられた Issue は Claude が閉じる。「人間確認待ち」は人の感覚か無い環境が要るものだけにする（理由: `.claude/skills/naming-conventions/SKILL.md` の「Issue を閉じる基準」）
 - 進行状況は Project の Status だけで管理する。ラベルでは表さない（理由: `CLAUDE.md` の「タスク管理」）
 - 各コミットはビルドとテストが通る状態にする。push 済みの履歴を force push で作り直さない（理由: `.claude/skills/naming-conventions/SKILL.md`）
 - 設計判断や方針は `git log` ではなく `CLAUDE.md` / `GUARDRAIL.md` / `docs/design/` に書く（理由: `.claude/skills/naming-conventions/SKILL.md`）

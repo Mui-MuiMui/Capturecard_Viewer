@@ -567,7 +567,7 @@ mod tests {
         let rgb = vec![128u8; 2 * 2 * 3];
         let mut jpeg = Vec::new();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 100)
-            .encode(&rgb, 2, 2, image::ColorType::Rgb8)
+            .encode(&rgb, 2, 2, image::ExtendedColorType::Rgb8)
             .expect("JPEG にできる");
 
         let mut out = Vec::new();
@@ -582,7 +582,7 @@ mod tests {
         let rgb = vec![0u8; 2 * 2 * 3];
         let mut jpeg = Vec::new();
         image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
-            .encode(&rgb, 2, 2, image::ColorType::Rgb8)
+            .encode(&rgb, 2, 2, image::ExtendedColorType::Rgb8)
             .expect("JPEG にできる");
         let mut out = Vec::new();
         assert!(mjpeg_to_rgb(4, 4, &jpeg, &mut out).is_err());

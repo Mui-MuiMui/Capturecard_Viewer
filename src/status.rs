@@ -54,23 +54,38 @@ pub enum ErrorSource {
     Audio,
     /// スクリーンショットの撮影と保存
     Screenshot,
+    /// スクリーンショットの効果音の読み込みと再生（Issue #356）。
+    ///
+    /// 画像の保存とは別の発生源にしてある。`Screenshot` に載せていたころは、
+    /// 画像を保存できているのに「スクリーンショットを出力できません」と出ていた。
+    /// 記録するのは `app::screenshot_sound`。出力先を開けない失敗は同じ理由が
+    /// 続く間 1 度だけ記録し（`should_report_sound_output`）、開けるようになるか
+    /// 適用した効果音を読み込めたら `ErrorCenter::clear` で取り下げる
+    ScreenshotSound,
     /// グローバルホットキーの登録。
     ///
     /// 記録するのは `CaptureCardViewer::apply_hotkey_assignments`。
     /// 登録できないものが 1 つでも残っていれば通知し、すべて登録できたら
     /// `ErrorCenter::clear` で取り下げる
     Hotkey,
-    /// 設定ダイアログの「その他」タブから行う設定ファイルの書き出しと読み込み。
+    /// 設定ファイルの読み書き。`%AppData%` の設定ファイルの保存と、
+    /// 設定ダイアログの「その他」タブから行う書き出しと読み込み。
     ///
-    /// **`%AppData%` の設定ファイルの保存はここに含めない。** そちらは
-    /// ユーザーが場所を選ぶものではなく、失敗してもログに残す扱いのまま。
-    /// ここで扱うのはユーザーが選んだファイルに対する操作だけ
+    /// 保存の失敗を記録するのは `app::settings_store`。同じ理由の失敗が
+    /// 続く間は初回だけ記録し、保存できたら `ErrorCenter::clear` で取り下げる
+    /// （Issue #317）
     Settings,
     /// 更新の確認（GitHub の Release への問い合わせ）。
     ///
     /// 起動時の確認と「その他」タブの「更新を確認」の両方。確認できたら
     /// `ErrorCenter::clear` で取り下げる
     Update,
+    /// 録画（`docs/design/recording.md` の「失敗の扱い」）。
+    ///
+    /// 録画スレッドは直接ログにもトーストにも出さず、`RecordingEvent` で返す。
+    /// 受け取った UI スレッド（`app::recording`）が記録する。録画を始められたら
+    /// `ErrorCenter::clear` で取り下げる
+    Recording,
 }
 
 impl ErrorSource {
@@ -80,9 +95,11 @@ impl ErrorSource {
             ErrorSource::Video => Text::HeadlineVideo,
             ErrorSource::Audio => Text::HeadlineAudio,
             ErrorSource::Screenshot => Text::HeadlineScreenshot,
+            ErrorSource::ScreenshotSound => Text::HeadlineScreenshotSound,
             ErrorSource::Hotkey => Text::HeadlineHotkey,
             ErrorSource::Settings => Text::HeadlineSettings,
             ErrorSource::Update => Text::HeadlineUpdate,
+            ErrorSource::Recording => Text::HeadlineRecording,
         };
         text.get()
     }
@@ -96,12 +113,14 @@ impl ErrorSource {
             ErrorSource::Hotkey => 3,
             ErrorSource::Settings => 4,
             ErrorSource::Update => 5,
+            ErrorSource::Recording => 6,
+            ErrorSource::ScreenshotSound => 7,
         }
     }
 }
 
 /// `ErrorSource` の種類数。`ErrorCenter` の配列長。
-const SOURCE_COUNT: usize = 6;
+const SOURCE_COUNT: usize = 8;
 
 /// 記録した失敗 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +248,17 @@ pub fn format_message(source: ErrorSource, message: &str) -> String {
     }
 }
 
+/// 「接続状態」タブに出す直近の失敗 1 件。`(整形済みの文言, 発生時刻)`。
+///
+/// トーストやプレースホルダーと違い、ここでは切り詰めない。
+/// 原因を調べるための場所なので、全文が読めるほうがよい。
+pub fn recorded_error_line(source: ErrorSource, recorded: &RecordedError) -> (String, String) {
+    (
+        format_message(source, &recorded.message),
+        recorded.time_text(),
+    )
+}
+
 /// 文字数で切り詰める。切り詰めた場合は末尾に `…` を付ける。
 ///
 /// **バイト数ではなく文字数で数える。** 日本語と英語が混じるので、
@@ -250,9 +280,10 @@ pub fn truncate(text: &str, limit: usize) -> String {
 
 /// 音声のリサンプル状態を「接続状態」タブに出す行に組み立てる。
 ///
-/// `DeviceSnapshot.audio_resample` をそのまま渡す。変換が要らない
-/// （identity）、またはまだ音声を開いていない `None` のときは「変換なし」の
-/// 1 行、補正が掛かっているときは比率と水位の 2 行を返す。
+/// `DeviceSnapshot.audio_resample` をそのまま渡す。補正の共有状態が無い
+/// `None` のときは「変換なし」の 1 行、あるときは比率と水位の 2 行を返す。
+/// 音声を開いていれば入出力の形が揃っていても共有状態を作る（Issue #308）ので、
+/// 開いている間は比率と水位が出る。
 ///
 /// **目標水位が 0 のときは水位の割合を出さない。** `ResampleTelemetry` を
 /// 作った時点で 0 になることは無いはずだが、割ってしまうと `NaN` になり
@@ -290,6 +321,30 @@ pub fn format_underrun_count(count: Option<u32>) -> String {
     }
 }
 
+/// 統計 OSD の音声の行。アンダーランの行（`format_underrun_count`）に、入力が
+/// 映像デバイスの音声ピンなら「（映像デバイスの音声）」を添える（#394、#409）。経路が違うと
+/// アンダーランの出方も変わりうるので、OSD だけを見て比べるときに取り違えないため。
+/// 詳しい経路は「接続状態」タブに出す
+pub fn format_osd_audio_line(underruns: Option<u32>, via_audio_pin: bool) -> String {
+    let line = format_underrun_count(underruns);
+    if via_audio_pin {
+        i18n::via_audio_pin(&line)
+    } else {
+        line
+    }
+}
+
+/// 「接続状態」タブへ出す、入力がリングバッファの満杯で捨てたフレーム数の行。
+///
+/// `DeviceSnapshot.audio_dropped_frames` をそのまま渡す。音声を開いていない
+/// （`None`）ときは `format_underrun_count` と同じく「-」を出す（Issue #350）。
+pub fn format_dropped_frame_count(count: Option<u32>) -> String {
+    match count {
+        Some(count) => i18n::dropped_frame_count(count),
+        None => Text::DroppedFramesUnknown.get().to_string(),
+    }
+}
+
 /// 映像か音声、片方の接続状態。設定ダイアログの「接続状態」タブへ渡す。
 ///
 /// **デバイスワーカーが書き出した観測値（`DeviceSnapshot`）から作る。**
@@ -315,6 +370,11 @@ pub struct ConnectionStatus {
     pub fake_devices: bool,
     pub video: LinkStatus,
     pub audio: LinkStatus,
+    /// スクリーンショットの効果音の直近の失敗。`(整形済みの文言, 発生時刻)`。
+    ///
+    /// 繋ぎっぱなしのデバイスではないので接続中・未接続の見出しは持たない。
+    /// 失敗が無ければ `None` で、タブにも枠を出さない（Issue #356）
+    pub screenshot_sound_error: Option<(String, String)>,
 }
 
 /// フェイクデバイスで動いているときに出す知らせ。実機なら `None`。
@@ -546,6 +606,57 @@ mod tests {
     }
 
     #[test]
+    fn format_message_for_screenshot_sound_does_not_say_the_screenshot_failed() {
+        // 画像は保存できているので、効果音の失敗に画像の定型文を付けない（Issue #356）
+        let message = format_message(ErrorSource::ScreenshotSound, "NoDevice");
+        assert_eq!(message, "効果音を再生できません: NoDevice");
+        assert!(!message.contains(ErrorSource::Screenshot.headline()));
+    }
+
+    #[test]
+    fn error_center_clearing_screenshot_keeps_the_screenshot_sound_error() {
+        // 画像の保存に成功しても、効果音の失敗は「接続状態」タブに残る
+        let mut center = ErrorCenter::default();
+        let now = Instant::now();
+        center.record(ErrorSource::ScreenshotSound, "NoDevice".into(), now, wall());
+        center.record(ErrorSource::Screenshot, "denied".into(), now, wall());
+
+        center.clear(ErrorSource::Screenshot);
+
+        assert!(center.latest(ErrorSource::Screenshot).is_none());
+        assert_eq!(
+            center
+                .latest(ErrorSource::ScreenshotSound)
+                .map(|e| e.message.as_str()),
+            Some("NoDevice")
+        );
+    }
+
+    #[test]
+    fn recorded_error_line_puts_the_headline_and_keeps_the_full_text() {
+        use chrono::TimeZone;
+        let at_wall = Local
+            .with_ymd_and_hms(2026, 10, 1, 9, 5, 7)
+            .single()
+            .expect("有効な日時");
+        let recorded = RecordedError {
+            // トーストの上限（TOAST_MESSAGE_LIMIT = 60 文字）より長い理由
+            message: "音声の出力先を開けないため、効果音が鳴らない: The audio endpoint was not found on this system (0x88890004)".to_string(),
+            at: Instant::now(),
+            at_wall,
+        };
+
+        let (message, time) = recorded_error_line(ErrorSource::ScreenshotSound, &recorded);
+
+        // 原因を調べる場所なので切り詰めない
+        assert_eq!(
+            message,
+            "効果音を再生できません: 音声の出力先を開けないため、効果音が鳴らない: The audio endpoint was not found on this system (0x88890004)"
+        );
+        assert_eq!(time, "10/01 09:05:07");
+    }
+
+    #[test]
     fn truncate_shorter_than_the_limit_is_unchanged() {
         assert_eq!(truncate("接続できません", 20), "接続できません");
     }
@@ -661,6 +772,28 @@ mod tests {
         // 音声を開いていない間に 0 と出すと、開いていて一度も途切れて
         // いない状態と読み分けられない
         assert_eq!(format_underrun_count(None), "アンダーラン: -");
+    }
+
+    #[test]
+    fn format_osd_audio_line_marks_the_audio_pin() {
+        assert_eq!(
+            format_osd_audio_line(Some(3), true),
+            "アンダーラン: 3 回（映像デバイスの音声）"
+        );
+        assert_eq!(format_osd_audio_line(Some(3), false), "アンダーラン: 3 回");
+    }
+
+    #[test]
+    fn format_dropped_frame_count_shows_the_number_or_a_dash() {
+        assert_eq!(
+            format_dropped_frame_count(Some(0)),
+            "満杯で捨てた: 0 フレーム"
+        );
+        assert_eq!(
+            format_dropped_frame_count(Some(480)),
+            "満杯で捨てた: 480 フレーム"
+        );
+        assert_eq!(format_dropped_frame_count(None), "満杯で捨てた: -");
     }
 
     #[test]

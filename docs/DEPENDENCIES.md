@@ -2,7 +2,7 @@
 
 現在の依存と、更新に向けた調査結果をまとめる。
 
-**バージョン情報は 2026-09-14 時点で crates.io を参照したもの。** 参照するときは日付を確認し、必要なら取り直すこと。
+**バージョン情報は 2026-10-01 時点のもの。** 「Cargo.lock」の列は `Cargo.lock` に載っている版、「最新」の列は同じ日に `cargo search` で crates.io を引いた版（第 1 段 #301、第 2 段 #299、第 3 段 #302 の後）。`eframe` / `egui` の行だけは第 4 段 #300 で取り直した 2026-10-03 時点のもの。参照するときは日付を確認し、必要なら取り直すこと（下の「調査の再実行」）。
 
 ## 方針
 
@@ -47,31 +47,31 @@
 
 ## 現状と最新
 
-| クレート | 現在 | 最新 | 差 | 用途 |
-|---|---|---|---|---|
-| `eframe` | 0.26 | 0.36.2 | マイナー 10 | ウィンドウとアプリの骨組み |
-| `egui` | 0.26 | 0.36.2 | マイナー 10 | UI |
-| `nokhwa` | 0.10 | 0.10.11 | パッチのみ | 映像キャプチャ |
-| `cpal` | 0.15 | 0.18.2 | マイナー 3 | 音声入出力 |
-| `confy` | 0.6 | 2.0.0 | メジャー | 設定の永続化 |
-| `image` | 0.24 | 0.25.10 | マイナー 1 | スクリーンショットの保存 |
-| `rodio` | 0.17 | 0.22.2 | マイナー 5 | 効果音の再生 |
-| `dirs` | 5.0 | 7.0.0 | メジャー 2 | デスクトップ等のパス取得 |
-| `rfd` | 0.11 | 0.17.2 | マイナー 6 | ファイル選択ダイアログ |
-| `ringbuf` | 0.3 | 0.5.2 | マイナー 2 | 音声のリングバッファ |
-| `arboard` | 3.6 | 3.6.1 | 追随 | スクリーンショットのクリップボードへのコピー |
-| `embed-resource` | 2.4 | 3.0.11 | メジャー 1 | アイコンとバージョン情報の埋め込み |
-| `serde` | 1.0 | 1.x | 追随 | 設定のシリアライズ |
-| `chrono` | 0.4 | 0.4.x | 追随 | スクリーンショットのタイムスタンプ |
-| `winapi` | 0.3 | 0.3.x | 後述 | Windows API |
-| `windows` | 0.62 | 0.62.2 | 追随 | DirectShow のバックエンド（`src/video/directshow/`） |
-| `windows-core` | 0.62 | 0.100.0 | 後述 | 同上。`#[implement]` が生成するコードの参照先 |
-| `ureq` | 3.4 | 3.4.2 | 追随 | 更新の確認で GitHub の Release API へ問い合わせる（`src/update/`） |
-| `serde_json` | 1.0 | 1.0.151 | 追随 | 同上。API の応答（JSON）を読む |
-| `semver` | 1.0 | 1.0.28 | 追随 | 同上。タグと実行中の版を比べる |
-| `sha2` | 0.11 | 0.11.0 | 追随 | 更新の適用で、ダウンロードした exe を `SHA256SUMS.txt` と照合する（`src/update/apply.rs`） |
-| `tempfile`（dev） | 3.27 | 3.27.x | 追随 | テストで一時ディレクトリに設定ファイルを書く |
-| `toml`（dev） | 1.1 | 1.1.x | 追随 | テストで設定の TOML を直接組み立てて読ませる |
+| クレート | 指定（`Cargo.toml`） | `Cargo.lock` | 最新 | 差 | 用途 |
+|---|---|---|---|---|---|
+| `eframe` | 0.36 | 0.36.2 | 0.36.2 | 追随 | ウィンドウとアプリの骨組み（第 4 段、#300）。描画は glow（下の「第 4 段 — UI」） |
+| `egui` | 0.36 | 0.36.2 | 0.36.2 | 追随 | UI（同上） |
+| `nokhwa` | 0.10 | 0.10.11 | 0.10.11 | 追随 | 映像キャプチャ |
+| `cpal` | 0.18 | 0.18.2 | 0.18.2 | 追随 | 音声入出力。`realtime` フィーチャで音声スレッドの優先度を上げる（`docs/design/audio.md` の「cpal 0.18 で変わったこと」）。`rodio` 経由の 0.17.3 も残る（下の「`cpal` 0.17 は `rodio` 経由で残る」） |
+| `toml` | 1.1 | 1.1.6+spec-1.1.0 | 1.1.6+spec-1.1.0 | 追随 | 設定ファイルの読み書き。`confy` 0.6 の代わり（第 3 段、#302） |
+| `log` | 0.4.34 | 0.4.34 | 0.4.34 | 追随 | ログのファサード。出力先の実装は `src/logging.rs` |
+| `image` | 0.25 | 0.25.10 | 0.25.10 | 追随 | スクリーンショットの保存、埋め込みアイコンの読み込み、MJPEG の展開。`eframe` もこの 0.25 を使う |
+| `rodio` | 0.22 | 0.22.2 | 0.22.2 | 追随 | 効果音の再生。フィーチャは `playback` と使う形式（MP3 / WAV / Vorbis / FLAC）だけ |
+| `dirs` | 7.0 | 7.0.0 | 7.0.0 | 追随 | デスクトップ等のパス取得、設定ファイルの置き場所（`%AppData%`） |
+| `rfd` | 0.17 | 0.17.2 | 0.17.2 | 追随 | ファイル選択ダイアログ |
+| `ringbuf` | 0.5 | 0.5.2 | 0.5.2 | 追随 | 音声のリングバッファ、録画の差し込み口（`VideoTap` / `AudioTap`） |
+| `arboard` | 3.6 | 3.6.1 | 3.6.1 | 追随 | スクリーンショットのクリップボードへのコピー |
+| `embed-resource`（build） | 3.0 | 3.0.11 | 3.0.11 | 追随 | アイコンとバージョン情報の埋め込み |
+| `serde` | 1.0 | 1.0.229 | 1.0.229 | 追随 | 設定のシリアライズ |
+| `chrono` | 0.4 | 0.4.45 | 0.4.45 | 追随 | 日時の書式（スクリーンショットと録画のファイル名、ログ） |
+| `winapi` | 0.3 | 0.3.9 | 0.3.9 | 後述 | Windows API（モニタの作業領域、キーボードフック） |
+| `windows` | 0.62 | 0.62.2 | 0.62.2 | 追随 | DirectShow のバックエンド（`src/video/directshow/`）、録画の Media Foundation（`src/recording/`）、COM の初期化（`src/com.rs`） |
+| `windows-core` | 0.62 | 0.62.2 | 0.100.0 | 後述 | 同上。`#[implement]` が生成するコードの参照先 |
+| `ureq` | 3.4 | 3.4.2 | 3.4.2 | 追随 | 更新の確認で GitHub の Release API へ問い合わせる（`src/update/`） |
+| `serde_json` | 1.0 | 1.0.151 | 1.0.151 | 追随 | 同上。API の応答（JSON）を読む |
+| `semver` | 1.0 | 1.0.28 | 1.0.28 | 追随 | 同上。タグと実行中の版を比べる |
+| `sha2` | 0.11 | 0.11.0 | 0.11.0 | 追随 | 更新の適用で、ダウンロードした exe を `SHA256SUMS.txt` と照合する（`src/update/apply.rs`） |
+| `tempfile`（dev） | 3.27 | 3.27.0 | 3.27.0 | 追随 | テストで一時ディレクトリに設定ファイルを書く |
 
 ### `arboard` は egui-winit が既に使っている
 
@@ -79,11 +79,16 @@
 スクリーンショットのクリップボード対応（Issue #116）ではそれを直接の依存へ
 引き上げ、`image-data` フィーチャを有効にしただけ。クレートそのものは増えていない。
 
-ただし **Windows では `image-data` が `image` 0.25 を要求する。** 本体が使って
-いる `image` 0.24 とは別のメジャー版なので、現在は 0.24 と 0.25 の 2 つが
-ビルドに入る（0.25 側にぶら下がるのは `png` 0.18 / `moxcms` / `pxfm` /
-`byteorder-lite`）。**「更新の順序」第 1 段の `image` 0.24 → 0.25 を済ませれば
-重複は解消する。**
+**Windows では `image-data` が `image` 0.25 を要求する。** 本体の `image` は第 1 段（#301）で
+0.25 へ上げたので、本体・`arboard`・`nokhwa` は同じ 0.25 を使う。
+
+`eframe` 0.26 が自分の依存として持っていた `image` 0.24（と `png` 0.17 の重複）は、
+第 4 段（#300）で `eframe` を 0.36 へ上げて消えた。いまは `eframe` も同じ 0.25 を使う。
+
+本体の `image` は `default-features = false` にして、使う形式（`png` / `jpeg` / `ico`）だけを
+足している。既定のフィーチャは AVIF のエンコーダ（`rav1e`）や EXR / TIFF / GIF まで引き込むが、
+スクリーンショットの保存（PNG / JPEG）、埋め込みアイコンの読み込み（ICO）、DirectShow の MJPEG の
+展開のどれにも要らない。なお 0.25 の JPEG のデコーダは `jpeg-decoder` から `zune-jpeg` に替わっている。
 
 `default-features = false` にしてあるのは、既定に含まれる Linux 向けの
 `wayland-data-control` を持ち込まないため。
@@ -121,9 +126,9 @@
 flowchart TD
     A["第 1 段: 影響が局所的<br/>image / dirs / rfd / embed-resource"]
     B["第 2 段: 音声まわり<br/>ringbuf → cpal → rodio"]
-    C["第 3 段: 設定<br/>confy"]
+    C["第 3 段: 設定<br/>confy（外した）"]
     D["第 4 段: UI<br/>eframe / egui"]
-    E["第 5 段: 映像<br/>nokhwa"]
+    E["第 5 段: 映像<br/>nokhwa（最新を使用中）"]
     F["winapi → windows-sys<br/>（任意・別軸）"]
 
     A --> B --> C --> D
@@ -135,52 +140,71 @@ flowchart TD
 
 ### 第 1 段 — 影響が局所的なもの
 
-| クレート | 見るべき点 |
-|---|---|
-| `image` 0.24 → 0.25 | エンコーダ API が変わっている。スクリーンショット保存のみに影響。**JPEG 品質の指定と PNG 対応のバックログと同時にやると二度手間にならない** |
-| `dirs` 5 → 7 | `desktop_dir()` のみ使用。関数名が変わっていなければ影響は小さい |
-| `rfd` 0.11 → 0.17 | フォルダ選択とファイル選択のみ使用。ダイアログの API |
-| `embed-resource` 2.4 → 3.0 | `build.rs` のみ。`compile()` のシグネチャを確認する |
+**済み（#301、2026-10-01）。** 1 つの PR で、コミットはクレートごとに分けた。
 
-いずれも使用箇所が少ないため、まとめて 1 つの PR にしてよい。
+| クレート | 状態 | 変えたこと |
+|---|---|---|
+| `image` 0.24 → 0.25 | 済み | `image::io::Reader` → `image::ImageReader`、エンコーダへ渡す色の型が `ExtendedColorType` に。スクリーンショットの保存（`write_with_encoder`）はそのまま使える。フィーチャを `png` / `jpeg` / `ico` に絞った。0.24 は `eframe` 0.26 経由で残っていたが、第 4 段（#300）で消えた |
+| `dirs` 5 → 7 | 済み | コードの変更なし。使っているのは `desktop_dir()` / `video_dir()` / `home_dir()` だけで、Windows では既知フォルダを引くのは変わらない |
+| `rfd` 0.11 → 0.17 | 済み | `set_file_name` が値を取るようになった。既定のフィーチャ（`xdg-portal` / `wayland`）は Linux 向けなので切った。0.11 が引き込んでいた gtk 系と `windows` 0.44 が `Cargo.lock` から消えた |
+| `embed-resource` 2.4 → 3.0 | 済み | `compile()` が失敗しても結果を返すだけになったので、`manifest_required()` で失敗をビルドの失敗にした。アイコンとバージョン情報の無い exe を作らないため |
 
 ### 第 2 段 — 音声まわり
 
-`ringbuf` → `cpal` → `rodio` の順。
+**済み（#299、2026-10-01）。** 1 つの PR で、`ringbuf` と `cpal` + `rodio` の 2 つのコミットに分けた。**`cpal` と `rodio` は別々のコミットにできない。** `rodio` 0.17 は `cpal` 0.15 に依存し、`cpal` 0.15 と 0.18 は Linux 向けの `alsa-sys` の `links` が衝突して同じ `Cargo.lock` に載らないため。
 
-- `ringbuf` 0.3 → 0.5 は `Producer` / `Consumer` の型と分割の API が変わっている。`src/audio/stream.rs` の中心部分に触れる
-- `cpal` 0.15 → 0.18 はストリーム構築とサンプル型の扱いに影響しうる
-- `rodio` 0.17 → 0.22 は `OutputStream` と `Sink` の API。効果音再生のみに影響
+| クレート | 状態 | 変えたこと |
+|---|---|---|
+| `ringbuf` 0.3 → 0.5 | 済み | `Producer` / `Consumer` がトレイトになり、分割した片側の型は `HeapProd` / `HeapCons`。`free_len` → `vacant_len`、`len` → `occupied_len`、`push` → `try_push`、`pop` → `try_pop`。`try_push` は 0.3 の `push` と同じく 1 要素ごとに公開するので、フレーム単位の扱い（#307）はそのまま。RUSTSEC-2026-0293 が解消し、`.cargo/audit.toml` の ignore を外した |
+| `cpal` 0.15 → 0.18 | 済み | `SampleRate` が `u32` の別名に、エラー型が `cpal::Error` に統一、`name()` → `description().name()`。WASAPI の出力がレート変換付きで開くようになった、ストリームが動いたままの通知（`Xrun` など）がエラーのコールバックへ届く、音声スレッドの優先度に `realtime` フィーチャが要る、の 3 点は振る舞いが変わる（`docs/design/audio.md` の「cpal 0.18 で変わったこと」） |
+| `rodio` 0.17 → 0.22 | 済み | `OutputStream` / `Sink` → `MixerDeviceSink` / `Player`。出力を開くのは `DeviceSinkBuilder::open_default_sink`（0.17 の `try_default` と同じく他の出力へ倒す）。落とすときに標準エラーへ書く既定は `log_on_drop(false)` で切った。既定のフィーチャはマイクの録音や MP4 / AAC、ディザまで引き込むので切り、0.17 の既定と同じ形式だけを足した |
 
-**音声の既知の不具合（レート設定が無視される、入出力差でピッチがずれる）を直す作業と重なる。** 更新を先にやってから修正に入るほうが、二度書き直さずに済む。
+### `cpal` 0.17 は `rodio` 経由で残る
+
+`rodio` の最新（0.22.2、2026-10-01 時点）は `cpal` 0.17 を使うので、**ビルドには `cpal` 0.17 と 0.18 が両方入る。** 本体（パススルー）が 0.18、効果音の再生だけが 0.17。別々のストリームなので干渉はしない。`windows` はどちらも 0.62 を使うので、重複は `cpal` 本体だけ。**`rodio` が `cpal` 0.18 に上がったら追随して解消する。**
+
+`rodio` の `playback` を切って効果音も本体の `cpal` 0.18 で鳴らせば 1 つにできるが、デコードした音をデバイスの形へ変換して流す部分を自前で持つことになるので採らなかった。
 
 ### 第 3 段 — 設定
 
-`confy` 0.6 → 2.0 はメジャー更新。設定ファイルの配置場所や読み書きの API が変わる可能性がある。
+**判断済み（#302、2026-10-01）。`confy` は 2.0 へ上げず、依存から外した。** 設定ファイルは `toml` 1.x で直接読み書きし、置き場所は `dirs` で決める。
 
-**既存ユーザーの設定ファイルを読めなくすると実害が出る。** 更新する場合は、旧バージョンが書いたファイルを読めることを必ず確認する。`#[serde(default)]` の対応を先に済ませておくこと。
+| 案 | 判断 | 理由 |
+|---|---|---|
+| `confy` 0.6 のまま据え置く | 採らない | 頼っていたのは読み込み（`load_path`）・一時ファイルへの書き込み（`store_path`）・既定の置き場所（`get_configuration_file_path`）の 3 つだけ。保存の置き換え（#317 / #361）は既に自前。このために `directories` / `dirs-sys` 0.4 と、`toml` 0.8 系（`toml_edit` / `winnow` 0.7 / `indexmap` など）を `toml` 1.x と二重に持っていた |
+| `confy` 2.0 へ上げる | 採らない | Windows の置き場所は同じ `%AppData%\capturecard_viewer\config` のままだが、置き場所を `etcetera` で決めるようになり、`etcetera` / `lazy_static` / `thiserror` 2 / `toml` 0.9 系が増える。使う 3 つの関数は自前で書いても数行 |
+| `confy` を外して `toml` + `std::fs` で読む | **採った** | `toml` 1.x は `embed-resource`（ビルド時）が既に使っていて、`THIRD-PARTY-LICENSES.txt` にも載っている。`dirs` も既に直接の依存。増えるクレートは無く、12 個（`confy` / `directories` / `dirs-sys` 0.4 / `toml` 0.8 / `toml_edit` 0.22 / `toml_datetime` 0.6 / `serde_spanned` 0.6 / `toml_write` / `winnow` 0.7 / `indexmap` / `hashbrown` 0.17 / `equivalent`）が消えた |
 
-更新の必要性が薄いと判断するなら、据え置きも選択肢。
+外すときに確かめたこと。
+
+- **置き場所が変わらない。** confy 0.6 は `directories` の `ProjectDirs::from("rs", "", "capturecard_viewer").config_dir()` に `default-config.toml` を足していた。Windows ではこれが `<FOLDERID_RoamingAppData>\capturecard_viewer\config`。`dirs::config_dir()` も同じ `FOLDERID_RoamingAppData` を引くので、その下に `capturecard_viewer\config\default-config.toml` を組み立てる（`src/config_path.rs` の `default_config_file_in`）。`CAPTURECARD_VIEWER_CONFIG_DIR` の扱いは変えていない
+- **1.2.x が書いた設定ファイルをそのまま読める。** テスト用の設定（`FULL_CONFIG` / `LEGACY_CONFIG`）と、プリセット・引用符を含む名前・日本語のパスを足した設定について、confy 0.6（`toml` 0.8）が書いたものを `toml` 1.x で読み、`toml` 1.x が書いたものを confy 0.6 で読んで、どちらも同じ値に戻ることを確かめた。**書き出す内容もバイト単位で同じだった**ので、新しい版が書いたファイルを古い版へ戻しても読める。BOM 付きの UTF-8 もどちらも読める
+- confy 0.6 の `load_path` はファイルが無いと既定値で作っていた。いまは既定値を返すだけで、起動時の保存（`AppSettings::save`、フォルダも作る）が作る。起動の直後にファイルができるのは同じ
+- 読めなかったときの理由は、confy では「Bad TOML data」だけだった。いまは `toml` の位置（行と列）と理由を 1 行にして返す（ログと、読み込みの失敗のトースト）
 
 ### 第 4 段 — UI
 
-`eframe` / `egui` 0.26 → 0.36 が最大の山。10 回のマイナー更新をまたぐため、破壊的変更が広範囲に及ぶ。
+**済み（#300、2026-10-03）。** `eframe` / `egui` 0.26 → 0.36 を 1 つの PR で一気に上げた。途中の版を経由しても、どの版でもビルドが通るまで直す手間が増えるだけなので段階は踏んでいない。
 
-影響が想定される箇所。
+| 変えたこと | 中身 |
+|---|---|
+| 描画のバックエンド | **glow（OpenGL）のまま。** 0.36 の `eframe` の既定は wgpu だが、wgpu / naga と DirectX 12・Vulkan のバックエンドまで引き込むわりに、映像 1 枚とダイアログの画面では得るものが無い。`default-features = false` にして `accesskit` / `default_fonts` / `glow` / `links` だけを足す。`wayland` / `x11` は Linux 向けなので切った。`links` は更新の通知と「その他」タブのリンクを開くのに要る（`webbrowser`） |
+| `App` | `update(ctx)` → `ui(ui)`。1 フレームの処理はドキュメントが `update()` と呼んでいるとおり `CaptureCardViewer::update` に残し、`App::ui` から呼ぶ。最小化中だけ呼ばれる `App::logic` は実装しない（0.26 と同じく最小化中は UI スレッドで何も回さない） |
+| パネル | `CentralPanel` / `Panel`（`TopBottomPanel` の後継）は `Context` ではなく `Ui` を受け取る。`Window` / `Area` は `Context` のまま |
+| 名前の変更 | `Context::run` → `run_ui`、`screen_rect` → `content_rect`、`style` → `global_style`、`wants_keyboard_input` → `egui_wants_keyboard_input`、`Frame::none()` → `Frame::NONE`、`Rounding` → `CornerRadius`（`u8`）、`Margin` は `i8`、`ComboBox::from_id_source` → `from_id_salt`、`SelectableLabel` → `Button::selectable`、`Slider::clamp_to_range` → `clamping`、`close_menu` → `close`、`Area::new` は `Id` を取る、`FontData` は `Arc` で渡す、`TextureOptions` に `mipmap_mode` |
+| `Sense` | 構造体から bitflags に。映像エリアはフォーカスを受けないよう `CLICK \| DRAG`（`FOCUSABLE` を立てない） |
+| ホイールの音量 | `InputState::raw_scroll_delta` が無くなった。滑らかにした値は数フレームに分かれて届くので、`Event::MouseWheel` を数える（`app::audio_control` の `wheel_scroll_y`） |
+| 右クリックメニューのサブメニュー | `ui.menu_button` は中の項目を押すと閉じるようになった（`PopupCloseBehavior::CloseOnClick`）。0.26 と同じく外を押したときだけ閉じる（`CloseOnClickOutside`） |
+| 映像の上に重ねる表示 | `Ui::new` が `UiBuilder` を取り、切り抜きを `max_rect` にするようになった。0.26 と同じく画面全体に戻す |
+| テスト | `run_ui` の `FullOutput` は、テクスチャの差分を残したまま落とすと `debug_assert` で止まる。描かないテストでは `drop_without_applying_deltas` で捨てる。生成直後の `Context` は 1 回目の終わりにウィンドウのテーマを送る（`ViewportCommand::SetTheme`）ので、何も要求していない状態まで 3 回回す |
 
-- `ViewportCommand` と `ViewportBuilder`（フルスクリーン、最前面、位置とサイズ）
-- `ComboBox` と `Frame::none()`
-- `TextureOptions` と `ColorImage`
-- `FontDefinitions` の設定方法
-- `Area` / `Window` の API
+ビルドに入るクレート（`x86_64-pc-windows-msvc`）の重複は、`image` 0.24 / `png` 0.17 / `raw-window-handle` 0.5 / `windows` 0.48 / `windows-sys` 0.48・0.59 / `thiserror` 1 / `syn` 1 が消え、`hashbrown` 0.16（`accesskit_windows` 経由）が増えた。`Cargo.lock` の全体は 554 → 493 クレート。`webbrowser` は 1.2 になり、RUSTSEC-2026-0257 の ignore を `.cargo/audit.toml` から外した。
 
-**必ず単独の PR にする。** 他の変更と混ぜるとレビューも切り分けも不可能になる。
+テンキー（#266 で見送った分）は 0.36 でも `egui::Key` に別のキーが無い。`egui-winit` が `Numpad0` を `Num0` に、`NumpadAdd` を `Plus` に読み替えるので、区別して割り当てることはできないまま。
 
-段階的に上げるか一気に上げるかは、実際に着手して破壊的変更の量を見てから判断する。egui は各リリースに移行ガイドが付いていることが多いので、まずそれを集めるところから始める。
+#### 更新して使えるようになったもの
 
-#### 更新すると使えるようになるもの
-
-`egui_kittest`（現在 0.36.2、egui とバージョンが連動）が使えるようになる。AccessKit を利用した egui 向けのテストハーネスで、**ウィジェット単位のテストを自動化できる**。
+`egui_kittest`（egui とバージョンが連動）が使えるようになった（#419 で `[dev-dependencies]` に入れた。書き方は `.claude/skills/testing-conventions/SKILL.md` の「ウィジェットのテスト」）。AccessKit を利用した egui 向けのテストハーネスで、**ウィジェット単位のテストを自動化できる**。
 
 `.claude/skills/testing-conventions/SKILL.md` で「要調査」としていた項目はこれに該当する。ただし本アプリの映像表示部分は `ui.painter().image()` による直接描画でアクセシビリティツリーに現れないため、**テストできるのは設定ダイアログやメニューなどのウィジェット部分に限られる**。映像・音声の検証には使えない。
 
@@ -188,9 +212,9 @@ flowchart TD
 
 ### 第 5 段 — 映像
 
-`nokhwa` 0.10 → 0.10.11 はパッチ更新のみ。API の互換性は保たれているはず。
+**上げるものは無い（2026-10-01 時点）。** `Cargo.toml` の指定は 0.10 のまま、`Cargo.lock` は既に crates.io の最新の 0.10.11 を使っている。以前ここに書いていた 0.10 → 0.10.11 のパッチ更新は済んでいる。
 
-ただし **Media Foundation まわりの挙動が変わる可能性があるため、実機確認が必須。** 現在「MJPEG / RGB24 を選んでも YUYV に差し替わる」という回避策が入っているが、これが必要だった理由は記録されていない。更新後に改めて検証する価値がある。
+残っているのは更新ではなく検証。現在「MJPEG / RGB24 を選んでも YUYV に差し替わる」という回避策が入っているが、これが必要だった理由は記録されていない。0.10.11 の上で要るかどうかを実機で確かめる価値がある。次のマイナー（0.11）が出たときは、**Media Foundation まわりの挙動が変わる可能性があるため実機確認を必須にする。**
 
 ### `windows` / `windows-core` は nokhwa と同じ版にそろえる
 
@@ -254,7 +278,24 @@ cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES.txt
 
 `about.toml` の `accepted` に無いライセンスの依存が入ると**生成が失敗する**。GPL / AGPL / LGPL は意図的に載せていないので、コピーレフトの依存が混ざればここで気付ける。
 
-**この仕組みがポリシー検査を兼ねているため、`cargo-deny` は導入していない。** 取得元レジストリの制限や脆弱性情報（RustSec）の検査まで欲しくなった時点で、別途検討する。
+**この仕組みがポリシー検査を兼ねているため、`cargo-deny` は導入していない。** 脆弱性情報（RustSec）は次の節の `cargo audit` で見る。取得元レジストリの制限まで欲しくなった時点で、別途検討する。
+
+### 脆弱性情報（RustSec）の検査
+
+`.github/workflows/audit.yml` が `cargo audit`（0.22.2 に固定）で `Cargo.lock` を RustSec の勧告データベースと突き合わせる。
+
+- **回るとき:** `dev` / `main` への PR と push、週 1 回（月曜 09:00 JST）の定期実行、手動（`workflow_dispatch`）。勧告は依存を変えなくても後から増えるので定期実行を入れている
+- **必須チェックではない。** ジョブ名「依存の脆弱性情報（RustSec）」はルールセットの必須チェック（`fmt / clippy / build / test`）に入れていないので、落ちても PR はマージできる。新しい勧告が出た瞬間に無関係な PR が全部止まるのを避けるため。ビルドしないので `ubuntu-latest` で回し、`ci.yml` の実行時間は増えない
+- **落ちたら:** 脆弱性の勧告が増えている。該当クレートが `x86_64-pc-windows-msvc` のビルドに入るかを `cargo tree -i <crate> --target x86_64-pc-windows-msvc` で確かめ、入るなら Issue を起票して依存を上げる。解消まで待つ場合や Windows に入らない場合は `.cargo/audit.toml` の `ignore` に**理由と Issue 番号を添えて**載せる。解消したら行ごと消す
+- **ターゲットで絞れない。** `cargo audit` は `Cargo.lock` 全体を見るため、配布物に入らないクレートも拾う。除外は `.cargo/audit.toml` の `ignore` で 1 件ずつ行う
+- **unmaintained の警告では落ちない**（`cargo audit` の既定）。2026-10-03 時点で `paste`（`nokhwa` 経由で外せない）が出ている。egui 0.26 の経由で出ていた `derivative` / `instant` / `ttf-parser` は第 4 段（#300）で消えた
+
+手元で回すときは次のとおり。
+
+```bash
+cargo install cargo-audit --locked --version 0.22.2
+cargo audit
+```
 
 生成が落ちたときに `accepted` へ機械的に足さないこと。**単一バイナリを MIT で配布できるライセンスかどうかを判断してから足す。**
 
@@ -266,14 +307,9 @@ cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES.txt
 
 ### 既知の制限 — Ubuntu フォントのライセンス
 
-`epaint` は既定フォントとして Ubuntu Light を exe に埋め込んでいる。Ubuntu Font Licence 1.0 は **Font Software の各コピーに著作権表示とライセンス本文を含めること**を条件にしているため、`THIRD-PARTY-LICENSES.txt` に本文を載せる必要がある。
+`epaint_default_fonts`（egui 0.26 までは `epaint` の中にあった）は既定フォントとして Ubuntu Light を exe に埋め込んでいる。Ubuntu Font Licence 1.0 は **Font Software の各コピーに著作権表示とライセンス本文を含めること**を条件にしているため、`THIRD-PARTY-LICENSES.txt` に両方を載せる必要がある。
 
-ところが `LicenseRef-UFL-1.0` は、SPDX の構文としては正しいユーザー定義参照（`LicenseRef-`）であるものの、SPDX License List には載っていない。載っていない以上 cargo-about が差し込める既定の本文が無く、crate 内のどのファイルが本文かも自動では決まらないため、0.9.2 は本文を出力できない。生成のたびに次の警告が出る（生成自体は成功する）。
+- **本文は自動で出る。** egui 0.36 から crate のライセンスが SPDX License List の識別子 `Ubuntu-font-1.0` になり、cargo-about が本文を差し込む。`about.toml` の `accepted` も `LicenseRef-UFL-1.0` から `Ubuntu-font-1.0` に替えた
+- **著作権表示（Copyright 2011 Canonical Ltd.）は crate のメタデータに無い。** そのため `about.hbs` の末尾に、この 1 行だけの付録を手で書いている。出典は `Ubuntu-Light.ttf` のメタデータ
 
-```
-WARN LicenseRef-UFL-1.0 has no license file for crate 'epaint 0.26.2'
-```
-
-そのため **`about.hbs` の末尾に本文を直接書いた付録**を置いている。出典は `epaint` crate の `fonts/UFL.txt` と `Ubuntu-Light.ttf` のメタデータ。ここだけ自動生成の対象外なので、**egui を更新したときは同梱フォントが変わっていないか確認すること。**
-
-本来は `about.toml` の clarify で「このファイルがこのライセンスの本文」と教えれば済むはずだが、0.9.2 では LicenseRef 向けの本文選択の条件が反転していて、別のライセンス本文が UFL の見出しで出力されてしまう。上流が直れば付録は外せる。
+egui 0.26 までは crate のライセンスが `LicenseRef-UFL-1.0` で、cargo-about 0.9.2 が本文を出せなかったため、付録に本文ごと書いていた。0.36 の同梱フォント（Ubuntu-Light / Hack / NotoEmoji）は 0.26 と同じファイルで、`UFL.txt` も改行コードしか違わない（2026-10-03 に確認）。付録は自動生成の対象外なので、**egui を更新したときは同梱フォントが変わっていないか確認すること。**

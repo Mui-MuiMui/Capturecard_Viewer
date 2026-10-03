@@ -135,7 +135,7 @@ const HD_MIN_HEIGHT: usize = 720;
 /// 取りこぼす。色空間が「自動」のときの推定（`color_matrix_for`）と、
 /// フェイクデバイスがテストパターンをどちらの色空間で符号化するか
 /// （`super::fake`）の両方がこれを使う。
-pub(super) fn is_hd_resolution(width: usize, height: usize) -> bool {
+pub fn is_hd_resolution(width: usize, height: usize) -> bool {
     width >= HD_MIN_WIDTH || height >= HD_MIN_HEIGHT
 }
 

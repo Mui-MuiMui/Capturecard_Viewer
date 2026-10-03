@@ -7,12 +7,13 @@
 use crate::audio::{self, AudioDirection, ChoiceSource};
 use crate::i18n::{self, Text};
 use crate::settings::{
-    AppSettings, ColorRange, ColorSpace, VideoBackendSetting, DEFAULT_CHANNELS,
+    AppSettings, AudioInputSource, ColorRange, ColorSpace, VideoBackendSetting, DEFAULT_CHANNELS,
     DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS, MAX_VIDEO_ADJUSTMENT, MIN_BUFFER_MS, MIN_VIDEO_ADJUSTMENT,
 };
 use eframe::egui;
 use log::debug;
 
+use super::audio_input::{show_audio_input_combo, VideoPinChoice};
 use super::capability::{
     channel_label, out_of_range_note, should_reselect_video_defaults,
     show_audio_capability_progress, show_choice_note, CapabilityState, VideoCapabilityCache,
@@ -29,7 +30,7 @@ fn video_adjustment_slider(ui: &mut egui::Ui, value: &mut i32, label: &str, hint
     ui.add(
         egui::Slider::new(value, MIN_VIDEO_ADJUSTMENT..=MAX_VIDEO_ADJUSTMENT)
             .text(label)
-            .clamp_to_range(true),
+            .clamping(egui::SliderClamping::Always),
     )
     .on_hover_text(hint);
 }
@@ -39,6 +40,7 @@ pub(super) fn show_device_settings_tab(
     settings: &mut AppSettings,
     capabilities: &VideoCapabilityCache,
     audio_capabilities: &AudioCapabilityCaches<'_>,
+    video_pin: &VideoPinChoice,
     devices: &DeviceLists<'_>,
     events: &mut Vec<SettingsEvent>,
 ) {
@@ -90,7 +92,7 @@ pub(super) fn show_device_settings_tab(
         // （`DeviceConfig` の差分判定に載っている）
         ui.horizontal(|ui| {
             ui.label(Text::VideoBackendLabel.get());
-            egui::ComboBox::from_id_source("video_backend_combo")
+            egui::ComboBox::from_id_salt("video_backend_combo")
                 .selected_text(settings.video.backend.label())
                 .show_ui(ui, |ui| {
                     for backend in VideoBackendSetting::ALL {
@@ -193,7 +195,7 @@ pub(super) fn show_device_settings_tab(
                 .clone()
                 .unwrap_or_else(|| "YUY2".to_string());
 
-            egui::ComboBox::from_id_source("format_combo")
+            egui::ComboBox::from_id_salt("format_combo")
                 .selected_text(&current_format)
                 .show_ui(ui, |ui| {
                     // キャッシュからフォーマット一覧を取得
@@ -255,7 +257,7 @@ pub(super) fn show_device_settings_tab(
             ui.label(Text::ResolutionLabel.get());
             let current_resolution = settings.video.resolution.unwrap_or((1280, 720));
 
-            egui::ComboBox::from_id_source("resolution_combo")
+            egui::ComboBox::from_id_salt("resolution_combo")
                 .selected_text(format!("{}x{}", current_resolution.0, current_resolution.1))
                 .show_ui(ui, |ui| {
                     if let Some(caps) = capabilities.ready(&selected_key) {
@@ -341,7 +343,7 @@ pub(super) fn show_device_settings_tab(
             ui.label(Text::FrameRateLabel.get());
             let current_fps = settings.video.fps.unwrap_or(30);
 
-            egui::ComboBox::from_id_source("fps_combo")
+            egui::ComboBox::from_id_salt("fps_combo")
                 .selected_text(format!("{} fps", current_fps))
                 .show_ui(ui, |ui| {
                     if let Some(caps) = capabilities.ready(&selected_key) {
@@ -385,7 +387,7 @@ pub(super) fn show_device_settings_tab(
         // 通常は解像度から推定する（自動）。推定が外れる機種のために固定できる
         ui.horizontal(|ui| {
             ui.label(Text::ColorSpaceLabel.get());
-            egui::ComboBox::from_id_source("color_space_combo")
+            egui::ComboBox::from_id_salt("color_space_combo")
                 .selected_text(settings.video.color_space.label())
                 .show_ui(ui, |ui| {
                     for space in ColorSpace::ALL {
@@ -400,7 +402,7 @@ pub(super) fn show_device_settings_tab(
         // 信号からも解像度からも判別できないため手で選ばせる
         ui.horizontal(|ui| {
             ui.label(Text::ColorRangeLabel.get());
-            egui::ComboBox::from_id_source("color_range_combo")
+            egui::ComboBox::from_id_salt("color_range_combo")
                 .selected_text(settings.video.color_range.label())
                 .show_ui(ui, |ui| {
                     for range in ColorRange::ALL {
@@ -455,31 +457,12 @@ pub(super) fn show_device_settings_tab(
         ui.strong(Text::AudioSettings.get());
         ui.add_space(5.0);
 
-        // オーディオ入力デバイス選択 - キャッシュリストを使用
-        let current_input_device = settings.audio.input_device_name.clone().unwrap_or_default();
-
-        let mut input_changed = false;
-        egui::ComboBox::new("audio_input_device_combo", Text::AudioInputDevice.get())
-            .selected_text(if current_input_device.is_empty() {
-                Text::SelectDevice.get()
-            } else {
-                &current_input_device
-            })
-            .show_ui(ui, |ui| {
-                for device_name in devices.input {
-                    if ui
-                        .selectable_value(
-                            &mut settings.audio.input_device_name,
-                            Some(device_name.clone()),
-                            device_name,
-                        )
-                        .clicked()
-                        && current_input_device != *device_name
-                    {
-                        input_changed = true;
-                    }
-                }
-            });
+        // オーディオ入力デバイス選択。先頭が「映像デバイスの音声」、その下に
+        // キャッシュした WASAPI のデバイス（#394）
+        let input_changed = show_audio_input_combo(ui, settings, devices.input, video_pin);
+        // 入力が音声ピンなら、入力の対応設定は音声ピンの形式 1 つだけ。ワーカーへは
+        // 問い合わせない（`docs/design/directshow-audio.md` の (6)）
+        let input_is_pin = settings.audio.input_source == AudioInputSource::VideoPin;
 
         // オーディオ出力デバイス選択 - キャッシュリストを使用
         let current_output_device = settings
@@ -528,7 +511,7 @@ pub(super) fn show_device_settings_tab(
         let input_key = audio::cache_key(settings.audio.input_device_name.as_deref());
         let output_key = audio::cache_key(settings.audio.output_device_name.as_deref());
 
-        if input_changed {
+        if input_changed && !input_is_pin {
             events.push(SettingsEvent::Capability(
                 CapabilityEvent::ExpectAudioDefaults(AudioDirection::Input, input_key.clone()),
             ));
@@ -540,39 +523,54 @@ pub(super) fn show_device_settings_tab(
         }
 
         // 対応設定の取得を要求する。列挙はワーカーなので UI は止まらない
-        events.push(SettingsEvent::Capability(CapabilityEvent::RequestAudio(
-            AudioDirection::Input,
-            input_key.clone(),
-        )));
+        if !input_is_pin {
+            events.push(SettingsEvent::Capability(CapabilityEvent::RequestAudio(
+                AudioDirection::Input,
+                input_key.clone(),
+            )));
+        }
         events.push(SettingsEvent::Capability(CapabilityEvent::RequestAudio(
             AudioDirection::Output,
             output_key.clone(),
         )));
 
-        show_audio_capability_progress(ui, audio_capabilities, &input_key, &output_key, events);
+        let progress_input_key = (!input_is_pin).then_some(input_key.as_str());
+        show_audio_capability_progress(
+            ui,
+            audio_capabilities,
+            progress_input_key,
+            &output_key,
+            events,
+        );
 
+        // 入力側の対応設定。音声ピンなら繋いだ形式 1 つ（映像が開いていない・
+        // 繋いでいない間は `None` で、入力側の制約にしない）
+        let input_capabilities = if input_is_pin {
+            video_pin.capabilities()
+        } else {
+            audio_capabilities.input.ready(&input_key)
+        };
         // 入出力の両方が対応する値だけを選択肢にする。取得できていない側は
         // 制約にしない（片側だけ、どちらも無ければ固定の既定一覧）
         let rates = audio::selectable_sample_rates(
-            audio_capabilities.input.ready(&input_key),
+            input_capabilities,
             audio_capabilities.output.ready(&output_key),
         );
         let channel_choices = audio::selectable_channels(
-            audio_capabilities.input.ready(&input_key),
+            input_capabilities,
             audio_capabilities.output.ready(&output_key),
         );
         // 設定に希望値が入っていないときの手掛かり。入力デバイスの既定を採る
         // （入力が音の出どころなので、そちらへ揃えるほうが変換が減る）
-        let input_defaults = audio_capabilities
-            .input
-            .ready(&input_key)
-            .map(|caps| (caps.default_sample_rate(), caps.default_channels()));
+        let input_defaults =
+            input_capabilities.map(|caps| (caps.default_sample_rate(), caps.default_channels()));
 
         // デバイスを切り替えたあとに能力が届いたら、対応する値へ寄せ直す。
         // **両方を必ず調べて、立っている目印は両方とも落とす要求を返す。**
         // 片方で早期に打ち切ると、残った目印のせいで次のフレームでも
-        // もう一度寄せ直してしまう
-        let input_awaits = audio_capabilities.input.awaits_defaults(&input_key);
+        // もう一度寄せ直してしまう。音声ピンへ切り替えたときは届くのを待たない
+        // （形式は手元にある）ので、切り替えたフレームで寄せ直す
+        let input_awaits = !input_is_pin && audio_capabilities.input.awaits_defaults(&input_key);
         let output_awaits = audio_capabilities.output.awaits_defaults(&output_key);
         if input_awaits {
             events.push(SettingsEvent::Capability(
@@ -584,7 +582,7 @@ pub(super) fn show_device_settings_tab(
                 CapabilityEvent::ClearAudioDefaults(AudioDirection::Output, output_key.clone()),
             ));
         }
-        let repick = input_awaits || output_awaits;
+        let repick = input_awaits || output_awaits || (input_changed && input_is_pin);
         if repick {
             let desired_rate = settings
                 .audio
@@ -644,7 +642,7 @@ pub(super) fn show_device_settings_tab(
         ui.horizontal(|ui| {
             ui.label(Text::SampleRateLabel.get());
             let current_rate = settings.audio.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE);
-            egui::ComboBox::from_id_source("sample_rate_combo")
+            egui::ComboBox::from_id_salt("sample_rate_combo")
                 .selected_text(format!("{} Hz", current_rate))
                 .show_ui(ui, |ui| {
                     for rate in &rates.values {
@@ -675,7 +673,7 @@ pub(super) fn show_device_settings_tab(
             // 選択肢が 1 つしか無いときは操作させない。開ける値が 1 つなのに
             // 選べると、選んだ値と実際の値が食い違う
             ui.add_enabled_ui(!single_channel_choice, |ui| {
-                egui::ComboBox::from_id_source("channels_combo")
+                egui::ComboBox::from_id_salt("channels_combo")
                     .selected_text(channel_label(current_channels))
                     .show_ui(ui, |ui| {
                         for channels in &channel_choices.values {

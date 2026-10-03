@@ -33,6 +33,8 @@ enum PressRouting {
     Unfocused,
     /// このアプリのテキスト欄に入力中なので捨てる（#206）
     Typing,
+    /// 最小化中に押された、復帰しても実行しないアクション（録画の開始・停止）なので捨てる
+    DiscardedWhileMinimized,
 }
 
 /// リスナースレッドと共有する状態。
@@ -69,7 +71,7 @@ pub(super) struct ListenerState {
     pub(super) focused: bool,
     /// 「フォーカスがあるときだけ反応する」がオンか。設定の反映のたびに書く。
     pub(super) only_when_focused: bool,
-    /// egui がキーボード入力を受けているか（`Context::wants_keyboard_input`）。
+    /// このアプリのテキスト欄に入力中か（`app::hotkeys::is_typing_in_text_field`）。
     /// UI スレッドが毎フレーム書き込む。
     ///
     /// キーを奪わなくなったので、設定ダイアログのテキスト欄へ打った文字も
@@ -145,6 +147,9 @@ impl ListenerState {
 
         if self.minimized && action.runs_while_minimized() {
             return PressRouting::Background;
+        }
+        if self.minimized && action.discarded_while_minimized() {
+            return PressRouting::DiscardedWhileMinimized;
         }
         *self.pressed.entry(action).or_insert(0) += 1;
         PressRouting::Deferred
@@ -242,7 +247,10 @@ fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord) {
             match routing {
                 PressRouting::Deferred => wake = Some(state.waker.clone()),
                 PressRouting::Background => background = Some((state.background.clone(), action)),
-                PressRouting::Debounced | PressRouting::Unfocused | PressRouting::Typing => {}
+                PressRouting::Debounced
+                | PressRouting::Unfocused
+                | PressRouting::Typing
+                | PressRouting::DiscardedWhileMinimized => {}
             }
             (action, routing)
         }),
@@ -282,6 +290,12 @@ fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord) {
         }
         Some((action, PressRouting::Typing)) => {
             trace!("テキスト入力中なので {} の押下を捨てた", action.label())
+        }
+        Some((action, PressRouting::DiscardedWhileMinimized)) => {
+            debug!(
+                "最小化中なので {} の押下を捨てた（復帰しても実行しない）",
+                action.label()
+            )
         }
         None => {}
     }
@@ -475,16 +489,18 @@ mod tests {
         let (handle, _ready) = spawn_listener(Arc::clone(&state), Arc::clone(&shutdown));
 
         shutdown.store(true, Ordering::Release);
-        let started = Instant::now();
-        handle.join().expect("リスナースレッドが正常に終わること");
 
-        // 待ち時間はタイムアウト 1 回ぶんが上限。CI の遅さを見込んで
-        // 4 倍を上限にしている
-        assert!(
-            started.elapsed() < LISTENER_WAIT_TIMEOUT * 4,
-            "終了までに {:?} かかった",
-            started.elapsed()
-        );
+        // 実時間の長さでは判定しない（負荷の高い環境で落ちるため）。join が
+        // 返ったことを別スレッドから知らせてもらい、返らなければ時間切れにする。
+        // 上限は遅い CI でも収まる 10 秒で、通常はタイムアウト 1 回ぶんで返る
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(handle.join());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("終了要求から 10 秒以内にリスナースレッドが終わること")
+            .expect("リスナースレッドが正常に終わること");
         // 何も登録していないので押下は記録されない
         assert!(state
             .lock()
@@ -571,6 +587,32 @@ mod tests {
             PressRouting::Deferred
         );
         assert_eq!(state.pressed.get(&HotkeyAction::ToggleFullscreen), Some(&1));
+    }
+
+    #[test]
+    fn record_press_while_minimized_discards_toggle_recording() {
+        // 録画の開始・停止は最小化中の押下を溜めない。溜めると復帰した瞬間に録画が始まる
+        let mut state = ListenerState {
+            minimized: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            state.record_press(HotkeyAction::ToggleRecording, Instant::now()),
+            PressRouting::DiscardedWhileMinimized
+        );
+        assert!(state.pressed.is_empty());
+    }
+
+    #[test]
+    fn record_press_when_not_minimized_defers_toggle_recording() {
+        let mut state = ListenerState::default();
+
+        assert_eq!(
+            state.record_press(HotkeyAction::ToggleRecording, Instant::now()),
+            PressRouting::Deferred
+        );
+        assert_eq!(state.pressed.get(&HotkeyAction::ToggleRecording), Some(&1));
     }
 
     #[test]

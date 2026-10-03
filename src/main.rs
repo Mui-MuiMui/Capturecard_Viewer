@@ -2,7 +2,7 @@
 // テストの中だけ println! を許す。Cargo.toml の [lints.clippy] で
 // print_stdout / print_stderr を warn にしてアプリ本体への再混入を止めているが、
 // テストバイナリの標準出力は cargo が受け取るため cargo test -- --nocapture で読める。
-// 計測結果の出力（src/video.rs）はそれを利用している。
+// 計測結果の出力（src/video/convert.rs など）はそれを利用している。
 // クレートルートに置いているのは、テスト対象のモジュール側を触らずに済ませるため
 #![cfg_attr(test, allow(clippy::print_stdout))]
 
@@ -10,14 +10,18 @@ use eframe::egui;
 
 mod app;
 mod audio;
+mod com;
+mod config_path;
 mod hotkey;
 mod i18n;
 mod keyboard_hook;
 mod logging;
 mod overlay;
 mod platform;
+mod recording;
 mod repaint;
 mod screenshot;
+mod screenshot_sound;
 mod settings;
 mod status;
 mod ui;
@@ -27,7 +31,7 @@ mod video;
 use app::CaptureCardViewer;
 use platform::{
     configure_japanese_font, is_position_visible, load_icon, monitor_work_areas,
-    window_size_or_default,
+    redirect_misdirected_close, window_size_or_default,
 };
 use settings::AppSettings;
 
@@ -39,9 +43,16 @@ fn main() -> Result<(), eframe::Error> {
     // ログファイルも開けていない）ので、戻り値はここで捨てるしかない。
     let _ = logging::init();
 
-    // 設定から保存されたウィンドウサイズと位置を読み込む。
-    // ここでは読み込み結果を使わない。既定値の書き戻しは
-    // CaptureCardViewer::default 側だけで行うため。
+    // 設定から保存されたウィンドウの装飾・サイズ・位置を読み込む。
+    // ここでは読み込み結果（LoadOutcome）を使わない。既定値の書き戻しと
+    // 自動保存の可否は CaptureCardViewer::default 側だけで決めるため。
+    //
+    // 読み込みは default でもう一度走る。読めなかったファイルの error! と退避は
+    // こちらで先に起き、退避できたときは default 側が「ファイルが無い」を読んで
+    // Loaded になる（既定値で起動し、書き戻すのは同じ）。こちらで退避できなかった
+    // ときは default 側でもう一度退避を試みる（error! はその分 2 回出る）。
+    // そこでも退避できなければ BrokenFileLeftBehind で書き戻さず、そこで退避できれば
+    // FellBackToDefaults で書き戻す。どちらも default 側の結果どおりに正しく判定される。
     let (settings, _) = AppSettings::load();
     let mut viewport_builder = egui::ViewportBuilder::default().with_icon(load_icon());
 
@@ -63,8 +74,20 @@ fn main() -> Result<(), eframe::Error> {
         }
     }
 
+    // 前回最大化して終了していたら最大化で起動する。上の大きさと位置は
+    // 最大化の前のもの（最大化中は記録しない）で、最大化を解除したときの戻り先になる。
+    // 位置を捨てたときは OS の既定の配置のモニタで最大化される
+    viewport_builder = viewport_builder.with_maximized(settings.ui.maximized);
+
     let options = eframe::NativeOptions {
         viewport: viewport_builder,
+        // winit のイベント用のウィンドウへ届いた閉じる要求を、本来のウィンドウへ
+        // 回す。最小化中の taskkill（/F なし）がそちらへ WM_CLOSE を送るため（#420、
+        // docs/design/window.md の「閉じる要求の取り違え」）
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            builder.with_msg_hook(redirect_misdirected_close);
+        })),
         ..Default::default()
     };
 
@@ -87,7 +110,7 @@ fn main() -> Result<(), eframe::Error> {
             // 言語を書き換えてしまうため（#256）。`default()` は文言を作らないので、
             // 作った直後に決めても最初の描画から設定の言語で出る
             app.apply_language();
-            Box::new(app)
+            Ok(Box::new(app))
         }),
     )
 }
