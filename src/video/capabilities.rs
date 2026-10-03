@@ -5,10 +5,7 @@
 //! ワーカースレッドから呼ぶ。**
 
 use log::{debug, warn};
-use nokhwa::pixel_format::RgbFormat;
-use nokhwa::utils::{
-    ApiBackend, CameraFormat, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
-};
+use nokhwa::utils::ApiBackend;
 use std::time::Instant;
 
 use super::{elapsed_ms, mf_format, VideoCapture, VideoError};
@@ -114,10 +111,9 @@ impl VideoCapture {
             devices.into_iter().next().ok_or(VideoError::NoDevices)?
         };
 
-        // カメラを一時的に開いて能力を取得
-        let requested_format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(
-            CameraFormat::new(Resolution::new(640, 480), FrameFormat::YUYV, 30),
-        ));
+        // カメラを一時的に開いて能力を取得。nokhwa は開くときに必ず 1 つの形式を選ぶので、
+        // 特定の形式に寄らず「一覧に出す形式のどれか」で開く（#442、`mf_format::capabilities_probe`）
+        let requested_format = mf_format::capabilities_probe();
 
         // キャプチャ中のデバイスをもう一度開く。取得そのものはデバイス
         // ワーカースレッドで走るので UI は止まらないが、ここが伸びると設定
