@@ -349,6 +349,9 @@ fn suggest_chunk_length(pin: &IPin) {
     let format = pin.cast::<IAMStreamConfig>().ok().and_then(|config| {
         log_stream_caps(&config);
         let pmt = unsafe { config.GetFormat() }.ok()?;
+        if pmt.is_null() {
+            return None;
+        }
         let format = unsafe { pin_format_of(&*pmt) };
         unsafe { delete_media_type(pmt) };
         format
