@@ -87,6 +87,13 @@ impl CaptureCardViewer {
                 .details
                 .push(i18n::link_capture_api(active.api.label()));
             video.details.push(i18n::link_video(active.summary()));
+            // 設定の形式で開けず YUY2 で開いたとき（#81）。選んだ形式が効いて
+            // いないことが「映像:」の行だけでは分からないので並べて出す
+            if let Some(requested) = &active.format_fallback {
+                video
+                    .details
+                    .push(i18n::link_video_format_fallback(requested));
+            }
             // 実際の fps はデバイスから取れない（video/capture.rs の ActiveVideo の説明を参照）
             video
                 .details
