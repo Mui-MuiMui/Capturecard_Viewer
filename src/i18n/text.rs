@@ -171,6 +171,7 @@ texts! {
     VideoBackendNotice { ja: "選んだ方法の一覧に無いデバイスには接続できません。映像が出ない場合は「自動」に戻してください。", en: "Devices that the selected method does not list cannot be connected. If no picture appears, switch back to Auto." },
     VideoCapabilityPending { ja: "対応形式を取得中...", en: "Querying supported formats..." },
     VideoCapabilityFallback { ja: "下の選択肢は既定値です。", en: "The choices below are defaults." },
+    VideoCapabilityAssumed { ja: "対応形式を取得できなかったので、既定の一覧を出しています。デバイスが対応しない組み合わせも含まれます。", en: "Could not get the supported formats, so a default list is shown. It may include combinations the device does not support." },
     FormatLabel { ja: "フォーマット:", en: "Format:" },
     ResolutionLabel { ja: "解像度:", en: "Resolution:" },
     FrameRateLabel { ja: "フレームレート:", en: "Frame rate:" },
