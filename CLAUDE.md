@@ -123,6 +123,7 @@ cargo build --release
 | `src/hotkey/mod.rs` | 外から使う経路（`crate::hotkey::...`）の `pub use` だけ |
 | `src/hotkey/action.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）と設定ファイル上の名前、溜まった押下の畳み方 |
 | `src/hotkey/parse.rs` | `HotkeyError` と、ホットキー文字列のパース |
+| `src/hotkey/egui_keys.rs` | egui のキー入力 → `KeyChord` の変換（`chord_from_egui` / `chord_from_egui_event`）と、`raw_input_hook` で egui へ渡す前にホットキーのキーを取り除く判定（`remove_hotkey_key_events`、#217、#418）。純粋関数 |
 | `src/hotkey/manager.rs` | `HotkeyManager` の本体（リスナーの起動と停止、ウィンドウ状態の受け渡し）と `BackgroundHotkeyRunner` |
 | `src/hotkey/assignments.rs` | `HotkeyAssignmentError`、アクション別の登録（差分適用・一時停止と再開・試し登録）と押下の取り出し |
 | `src/hotkey/method.rs` | 押下を受け取る方式の切り替え（`set_method`）と、キーを奪う方式（`RegisterHotKey`）の登録の反映・失敗の記録・試し登録（#207） |
