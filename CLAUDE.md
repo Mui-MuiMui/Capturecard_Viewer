@@ -56,7 +56,7 @@ cargo build --release
 | `src/app/capabilities.rs` | デバイス一覧のキャッシュと、デバイス能力・対応設定の取得要求（ワーカーへ流すところまで） |
 | `src/app/screenshot.rs` | 撮影、保存スレッドの管理、結果の取り込み |
 | `src/app/screenshot_sound.rs` | 効果音ファイルの読み込みスレッドの管理と結果の取り込み（適用・テスト再生）、効果音の再生と出力先を開けなかったときの報告 |
-| `src/app/recording.rs` | 録画の開始・停止（`toggle_recording`、右クリックメニューとホットキーが呼ぶ）、リプレイバッファの設定を録画スレッドへ渡す（`sync_replay_buffer`、`apply_settings` が呼ぶ）、録画スレッドから届いた `RecordingEvent` の取り込み（ログ・トースト・`report_error`）、終了時の停止と `Finalize` の待ち合わせ、録画中の印と統計 OSD の録画の行。フィールド（`recorder`）は `app/mod.rs` |
+| `src/app/recording.rs` | 録画の開始・停止（`toggle_recording`、右クリックメニューとホットキーが呼ぶ）とリプレイバッファの中身だけの保存（`save_replay`、#438）、リプレイバッファの設定を録画スレッドへ渡す（`sync_replay_buffer`、`apply_settings` が呼ぶ）、録画スレッドから届いた `RecordingEvent` の取り込み（ログ・トースト・`report_error`）、終了時の停止と `Finalize` の待ち合わせ、録画中の印と統計 OSD の録画の行。フィールド（`recorder`）は `app/mod.rs` |
 | `src/app/settings_dialog.rs` | 設定ダイアログの操作の受け止め、インポート / エクスポート / 初期化、プリセットの適用 |
 | `src/app/settings_store.rs` | 設定のデバウンス保存と即時保存、保存の失敗が続くときの再試行の間隔（`save_retry_delay`）とログ・トーストの間引き（`SaveFailureStreak`） |
 | `src/app/update.rs` | 更新の確認と適用のスレッドの管理と結果の取り込み（`UpdateState`）、通知ダイアログの操作、前回の更新の残りの後片付け、終了時の新しい exe の起動 |
@@ -107,6 +107,7 @@ cargo build --release
 | `src/recording/replay_config.rs` | リプレイバッファの設定 `ReplayConfig`（UI スレッドが組み立てて録画スレッドへ渡す）と、エンコーダの作り直しが要るかの判定（`same_encoders`） |
 | `src/recording/replay_recording.rs` | リプレイバッファを通す 1 回の録画 `ReplayRecording`。先頭のキーフレームからエンコードなしの Sink Writer へ書く。リングの中身は数 ms ごとに少しずつ書き（`catch_up`）、追いついたらライブのサンプルを直接書く |
 | `src/recording/replay_ring.rs` | エンコード済みのリング `EncodedRing` と、書き出すキーフレームの選び方（`replay_start`）・捨てる境界（`keep_from` / `gops_to_drop`）・PTS の付け替え（`Cut`）。判定は純粋関数 |
+| `src/recording/replay_save.rs` | リプレイバッファの中身だけを保存する操作（#438）。録画か保存かの種類（`RecordingKind`、結果のイベントを分ける）と、保存できない理由（`SaveReplayBlock`、文言は `Display` から `crate::i18n`）を決める `save_replay_block`（純粋関数） |
 | `src/recording/encoder.rs` | エンコーダ MFT `EncoderMft`（H.264 はハードウェアの非同期型 → ソフトウェアの同期型の順に試す、AAC は同期型）。非同期型は `METransformNeedInput` / `METransformHaveOutput` を待たずに取る。エンコードなしの Sink Writer へ渡すメディアタイプ（`stream_type`） |
 | `src/recording/encoder_setup.rs` | `EncoderMft` を作るときだけ使う補助。エンコーダ MFT の列挙（`enumerate`）、候補を先頭から開く（`open_first`）、H.264 / AAC の入出力の形の組み立て（`configure_video` / `configure_audio`）、ストリームの番号（`stream_ids`） |
 | `src/recording/passthrough.rs` | エンコードなしの Sink Writer `PassthroughWriter`（入力 = 出力の H.264 / AAC を MP4 へまとめるだけ） |
@@ -118,7 +119,7 @@ cargo build --release
 | `src/recording/audio.rs` | 音声トラック `AudioTrack`（録画スレッドの中だけ）。`AudioTap` のリングから取り出し、録画用の `PassthroughConverter` で 48kHz 2ch へ寄せて 16bit PCM にし、PTS を付けた塊にする。開き直し・溢れ・音声が来ない間の揃え方、ドリフトの補正（ずれを測り、録画用の変換器のレート比を動かす。飛んだら揃え直す）と、停止時のドリフトのログ |
 | `src/recording/file_name.rs` | ファイル名の書式の検め（chrono の `Item::Error`、Windows で使えない文字、末尾の空白・ピリオド、予約デバイス名）と、同じ名前があるときの `_2` `_3` … |
 | `src/recording/storage.rs` | 保存先の空き容量（`GetDiskFreeSpaceExW`）と、止める境界（500MB） |
-| `src/recording/test_support.rs` | 録画のテストの補助（`#[cfg(test)]`）。`#[ignore]` のテストが使う、フェイクの映像と音声を流して `Session` で録画する部分（`record_until_size_changes`）と、書いた MP4 を読み戻す部分 |
+| `src/recording/test_support.rs` | 録画のテストの補助（`#[cfg(test)]`）。`#[ignore]` のテストが使う、フェイクの映像と音声を流して `Session` で録画する部分（`record_until_size_changes`）、窓口（`Recorder`）にフェイクを流す部分（`start_fakes` / `poll_until` / `record_with_replay`）と、書いた MP4 を読み戻す部分（`read_mp4`） |
 | `src/hotkey/mod.rs` | 外から使う経路（`crate::hotkey::...`）の `pub use` だけ |
 | `src/hotkey/action.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）と設定ファイル上の名前、溜まった押下の畳み方 |
 | `src/hotkey/parse.rs` | `HotkeyError` と、ホットキー文字列のパース |

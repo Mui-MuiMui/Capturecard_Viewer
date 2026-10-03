@@ -64,17 +64,17 @@ pub(super) enum MenuLayout {
 /// 内訳は `items::menu_items_flat` の並びと対応させてあるので、あちらの
 /// 項目を増減したときはこちらも直すこと。
 ///
-/// 行: 音量ラベル / 音量スライダー / ミュート / 録画を開始（停止） / アスペクト比を維持 /
-/// 最前面表示 / フルスクリーン表示 / タイトルバーを隠す / 画面ドラッグ移動 /
+/// 行: 音量ラベル / 音量スライダー / ミュート / 録画を開始（停止） / リプレイを保存 /
+/// アスペクト比を維持 / 最前面表示 / フルスクリーン表示 / タイトルバーを隠す / 画面ドラッグ移動 /
 /// 情報表示 / デバイスの自動再接続 / ウィンドウサイズをリセット /
-/// デバイス再接続 / 詳細設定... / 終了 の 15 行。**プリセットが 1 つでも
+/// デバイス再接続 / 詳細設定... / 終了 の 16 行。**プリセットが 1 つでも
 /// あれば「プリセット」の行が 1 つ増える。** プリセットの有無は起動後にいつ
 /// 変わるか分からないため固定の行数には含めず、`estimate_flat_menu_height`
 /// の引数で足す。
 /// セパレータ: ミュートの下 / 録画の下 / 自動再接続の下（ウィンドウサイズをリセットの上）/
 /// デバイス再接続の下 / 詳細設定の下 の 5 本。プリセットの行はセパレータを
 /// 増やさない（デバイス再接続の直後に挟まるだけ）。
-const FLAT_MENU_ROW_COUNT: usize = 15;
+const FLAT_MENU_ROW_COUNT: usize = 16;
 const FLAT_MENU_SEPARATOR_COUNT: usize = 5;
 
 /// 平らな一覧の高さを、描画前に見積もる。
@@ -126,6 +126,15 @@ pub(super) enum RecordingMenuState {
     Finishing,
 }
 
+/// 右クリックメニューの「リプレイを保存（直近 N 秒）」の状態（#438）。`app::recording` が作る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SaveReplayMenuState {
+    /// さかのぼる長さの設定（秒）。項目名に出す
+    pub(super) seconds: u32,
+    /// 保存できない理由。あれば灰色にしてホバーに出す
+    pub(super) block: Option<crate::recording::SaveReplayBlock>,
+}
+
 /// 右クリックメニューの描画に要る状態のスナップショット。
 ///
 /// **描画へ渡すのはこれだけで、`CaptureCardViewer` も共有設定の
@@ -138,6 +147,8 @@ pub(super) enum RecordingMenuState {
 struct MenuView {
     /// 録画の項目の状態
     recording: RecordingMenuState,
+    /// 「リプレイを保存」の項目の状態
+    save_replay: SaveReplayMenuState,
     volume: f32,
     muted: bool,
     maintain_aspect_ratio: bool,
@@ -281,10 +292,15 @@ impl CaptureCardViewer {
         let mut auto_reconnect = true;
         let mut preset_names = Vec::new();
         let mut active_preset = None;
+        let mut replay_seconds = settings::RecordingSettings::default().replay_seconds;
         match self.settings.lock() {
             Ok(settings) => {
                 enable_drag_move = settings.ui.enable_drag_move;
                 auto_reconnect = settings.video.auto_reconnect;
+                replay_seconds = settings
+                    .recording
+                    .replay_seconds
+                    .clamp(settings::MIN_REPLAY_SECONDS, settings::MAX_REPLAY_SECONDS);
                 preset_names = settings
                     .presets
                     .iter()
@@ -299,6 +315,7 @@ impl CaptureCardViewer {
 
         MenuView {
             recording: self.recording_menu_state(),
+            save_replay: self.save_replay_menu_state(replay_seconds),
             volume: self.volume,
             muted: self.muted,
             maintain_aspect_ratio: self.maintain_aspect_ratio,
@@ -372,6 +389,7 @@ impl CaptureCardViewer {
             MenuAction::ResetWindowSize => self.reset_window_size(ctx),
             MenuAction::ReconnectDevices => self.reconnect_devices(),
             MenuAction::ToggleRecording => self.toggle_recording(),
+            MenuAction::SaveReplay => self.save_replay(),
             MenuAction::ApplyPreset(name) => self.apply_preset_by_name(&name),
             MenuAction::OpenSettings => self.show_settings = true,
             MenuAction::Quit => {

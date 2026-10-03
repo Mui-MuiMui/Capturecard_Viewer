@@ -24,6 +24,7 @@ use super::convert::{even_size, rgb_to_nv12, Nv12Matrix};
 use super::file_name::unique_path;
 use super::pts::{units_from, PtsClock, AUDIO_SAMPLE_RATE};
 use super::recorder::{RecordingEvent, RecordingRequest, RecordingSummary, RecordingTelemetry};
+use super::replay_save::RecordingKind;
 use super::storage::{free_bytes, is_low, megabytes, DISK_CHECK_INTERVAL};
 use super::writer::{SinkWriter, WriterError, WriterParams, WriterStage};
 use super::RecordingError;
@@ -57,18 +58,20 @@ pub(super) enum Finished {
 }
 
 impl Finished {
-    /// 閉じた結果を UI スレッドへ知らせる。
+    /// 閉じた結果を UI スレッドへ知らせる（録画）。
     pub(super) fn report(self, events: &Sender<RecordingEvent>) {
-        match self {
-            Finished::Saved(summary) => {
-                let _ = events.send(RecordingEvent::Stopped(summary));
-            }
+        self.report_as(events, RecordingKind::Recording);
+    }
+
+    /// 閉じた結果を、録画かリプレイの保存（#438）かに合ったイベントで UI スレッドへ知らせる。
+    pub(super) fn report_as(self, events: &Sender<RecordingEvent>, kind: RecordingKind) {
+        let event = match self {
+            Finished::Saved(summary) => kind.saved(summary),
             // 1 枚も届かなかった。ファイルは作っていない
-            Finished::NoFile => fail(events, RecordingError::NoVideo),
-            Finished::FinalizeFailed(error, summary) => {
-                let _ = events.send(RecordingEvent::Failed { error, summary });
-            }
-        }
+            Finished::NoFile => kind.failed(RecordingError::NoVideo, None),
+            Finished::FinalizeFailed(error, summary) => kind.failed(error, summary),
+        };
+        let _ = events.send(event);
     }
 
     /// 途中で止まったときに、閉じたファイルの内容だけを取り出す。閉じるのにも失敗したら

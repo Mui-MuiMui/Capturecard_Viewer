@@ -27,11 +27,13 @@ pub enum HotkeyAction {
     ToggleMute,
     /// 録画を始める・止める
     ToggleRecording,
+    /// リプレイバッファの中身だけを保存する（#438）
+    SaveReplay,
 }
 
 impl HotkeyAction {
     /// 設定画面と一覧の表示順。宣言順（`Ord`）と同じにしておく。
-    pub const ALL: [HotkeyAction; 8] = [
+    pub const ALL: [HotkeyAction; 9] = [
         HotkeyAction::Screenshot,
         HotkeyAction::ToggleFullscreen,
         HotkeyAction::ToggleAlwaysOnTop,
@@ -40,6 +42,7 @@ impl HotkeyAction {
         HotkeyAction::VolumeDown,
         HotkeyAction::ToggleMute,
         HotkeyAction::ToggleRecording,
+        HotkeyAction::SaveReplay,
     ];
 
     /// 設定ファイルに書かれるキー名。**変えると既存の設定を見失う。**
@@ -53,6 +56,7 @@ impl HotkeyAction {
             HotkeyAction::VolumeDown => "volume_down",
             HotkeyAction::ToggleMute => "toggle_mute",
             HotkeyAction::ToggleRecording => "toggle_recording",
+            HotkeyAction::SaveReplay => "save_replay",
         }
     }
 
@@ -72,6 +76,7 @@ impl HotkeyAction {
             HotkeyAction::VolumeDown => Text::ActionVolumeDown,
             HotkeyAction::ToggleMute => Text::ActionToggleMute,
             HotkeyAction::ToggleRecording => Text::ActionToggleRecording,
+            HotkeyAction::SaveReplay => Text::ActionSaveReplay,
         };
         text.get()
     }
@@ -94,7 +99,8 @@ impl HotkeyAction {
             HotkeyAction::Screenshot
             | HotkeyAction::ToggleFullscreen
             | HotkeyAction::ToggleAlwaysOnTop
-            | HotkeyAction::ToggleRecording => false,
+            | HotkeyAction::ToggleRecording
+            | HotkeyAction::SaveReplay => false,
         }
     }
 
@@ -105,8 +111,14 @@ impl HotkeyAction {
     /// ように保留して畳むと、最小化中に 1 回押しただけで復帰した瞬間に録画が始まり、
     /// 押した人の意図とずれる。溜めずに捨てることで、最小化中の押下は 0 回に畳まれる
     /// （`docs/design/recording.md` の「操作」）。捨てるのはリスナー（`ListenerState::record_press`）。
+    ///
+    /// **リプレイの保存（#438）も同じ扱い。** 復帰してから保存すると、押した時点ではなく
+    /// 復帰した時点から N 秒さかのぼった区間になり、意図とずれる。
     pub fn discarded_while_minimized(self) -> bool {
-        matches!(self, HotkeyAction::ToggleRecording)
+        matches!(
+            self,
+            HotkeyAction::ToggleRecording | HotkeyAction::SaveReplay
+        )
     }
 }
 
@@ -129,6 +141,9 @@ pub(super) fn folded_repeats(action: HotkeyAction, presses: u32) -> u32 {
         // ここへは来ない（`HotkeyAction::discarded_while_minimized`）ので、
         // 復帰した瞬間に録画が始まることは無い
         HotkeyAction::ToggleRecording => presses % 2,
+        // 続けて押した分は「保存中」で弾かれるだけなので 1 回にする（最小化中の押下は
+        // 録画と同じくリスナーが捨てていて、ここへは来ない）
+        HotkeyAction::SaveReplay => presses.min(1),
         // 復帰してから撮るので、何回押されていても同じ 1 枚にしかならない
         HotkeyAction::Screenshot => presses.min(1),
         // 開き直しは何回要求しても結果が同じ
@@ -219,11 +234,25 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_action_only_recording_is_discarded_while_minimized() {
+    fn hotkey_action_save_replay_is_named_for_the_settings_file() {
+        // #438。設定ファイルに書かれる名前。一度出したら変えない
+        assert_eq!(HotkeyAction::SaveReplay.as_str(), "save_replay");
+        assert_eq!(
+            HotkeyAction::from_key("save_replay"),
+            Some(HotkeyAction::SaveReplay)
+        );
+    }
+
+    #[test]
+    fn hotkey_action_only_recording_actions_are_discarded_while_minimized() {
         for action in HotkeyAction::ALL {
+            // 録画の開始・停止とリプレイの保存（#438）だけ。どちらも窓口が UI スレッドにある
             assert_eq!(
                 action.discarded_while_minimized(),
-                action == HotkeyAction::ToggleRecording,
+                matches!(
+                    action,
+                    HotkeyAction::ToggleRecording | HotkeyAction::SaveReplay
+                ),
                 "{action:?}"
             );
             // 捨てるものをその場で実行してはいけない
@@ -235,6 +264,14 @@ mod tests {
     fn folded_repeats_toggle_recording_behaves_like_a_toggle() {
         assert_eq!(folded_repeats(HotkeyAction::ToggleRecording, 1), 1);
         assert_eq!(folded_repeats(HotkeyAction::ToggleRecording, 2), 0);
+    }
+
+    #[test]
+    fn folded_repeats_save_replay_runs_once() {
+        // 2 回目以降は「保存中」で弾かれるだけなので、偶数回でも 1 回保存する
+        assert_eq!(folded_repeats(HotkeyAction::SaveReplay, 0), 0);
+        assert_eq!(folded_repeats(HotkeyAction::SaveReplay, 1), 1);
+        assert_eq!(folded_repeats(HotkeyAction::SaveReplay, 2), 1);
     }
 
     #[test]

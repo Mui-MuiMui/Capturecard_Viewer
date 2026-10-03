@@ -9,6 +9,8 @@
 //!   リプレイバッファを通さない録画の間に ON にされたら、その録画が終わってから溜め始める
 //!   （`ReplayState::Pending`）。リプレイバッファを通す録画の間にエンコーダが変わる設定や
 //!   OFF にされたら、その録画が終わってから反映する（`Worker::deferred`）
+//! - リプレイバッファの中身だけを保存する（#438）ときも `ReplayPipeline` の録画の口を使う。
+//!   保存中の設定の変更も録画中と同じく保存が終わってから反映する
 //!
 //! 録画もリプレイバッファも動いていない間（リプレイバッファを用意できずに止まっているとき）は、
 //! コマンドが来るまで待つだけで起きない。
@@ -22,6 +24,7 @@ use log::{debug, info};
 use super::recorder::{RecordingCommand, RecordingEvent, RecordingRequest, RecordingTelemetry};
 use super::replay::ReplayPipeline;
 use super::replay_config::ReplayConfig;
+use super::replay_save::{RecordingKind, SaveReplayBlock};
 use super::session::{fail, Session};
 use super::RecordingError;
 use crate::audio::AudioTap;
@@ -122,8 +125,45 @@ impl Worker {
             RecordingCommand::Start(request) => self.start(request),
             RecordingCommand::Stop => self.stop(),
             RecordingCommand::Replay(config) => self.set_replay(config),
+            RecordingCommand::SaveReplay(request) => self.save_replay(request),
             // `run` が受け取る
             RecordingCommand::Shutdown => {}
+        }
+    }
+
+    /// リプレイバッファの中身だけを保存する（#438）。窓口が判定してから送ってくるが、
+    /// ここでも同じ条件を見て、保存できなければ理由を返す（窓口の「保存中」を落とすため、
+    /// 何もしないときも必ず返事を返す）。
+    fn save_replay(&mut self, request: RecordingRequest) {
+        if let Some(error) = &self.platform_error {
+            let _ = self.events.send(RecordingEvent::ReplaySaveFailed {
+                error: error.clone(),
+                summary: None,
+            });
+            return;
+        }
+        let refusal = match &self.replay {
+            // リプレイバッファを通さない録画の最中（リプレイバッファは `Pending`）
+            _ if self.session.is_some() => Some(SaveReplayBlock::Recording),
+            ReplayState::Running(pipeline) => match pipeline.recording_kind() {
+                None => None,
+                Some(RecordingKind::Recording) => Some(SaveReplayBlock::Recording),
+                Some(RecordingKind::SaveReplay) => Some(SaveReplayBlock::Saving),
+            },
+            // OFF、またはリプレイバッファを用意できずに止まっている
+            ReplayState::Off | ReplayState::Pending(_) | ReplayState::Failed(_) => {
+                Some(SaveReplayBlock::ReplayOff)
+            }
+        };
+        match (refusal, &mut self.replay) {
+            (None, ReplayState::Running(pipeline)) => {
+                pipeline.start_recording(request, RecordingKind::SaveReplay);
+            }
+            (refusal, _) => {
+                let block = refusal.unwrap_or(SaveReplayBlock::ReplayOff);
+                debug!("リプレイを保存しない: {:?}", block);
+                let _ = self.events.send(RecordingEvent::ReplaySaveRefused(block));
+            }
         }
     }
 
@@ -139,7 +179,9 @@ impl Worker {
             return;
         }
         match &mut self.replay {
-            ReplayState::Running(pipeline) => pipeline.start_recording(request),
+            ReplayState::Running(pipeline) => {
+                pipeline.start_recording(request, RecordingKind::Recording)
+            }
             // OFF、またはリプレイバッファを用意できなかった。リプレイバッファを通さずに録る
             _ => {
                 self.session = Session::begin(

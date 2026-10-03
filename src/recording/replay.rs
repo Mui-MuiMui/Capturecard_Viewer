@@ -4,6 +4,7 @@
 //! 音声をエンコーダ MFT（`super::encoder`）で H.264 / AAC にして、エンコード済みのリング
 //! （`super::replay_ring`）に持つ。録画を始めたら、リングの「いま − N 秒」以降の最初の
 //! キーフレームからエンコードなしの Sink Writer へ書き出す（`super::replay_recording`）。
+//! リプレイバッファの中身だけを保存するとき（#438）も同じ口で書き、押した時刻で止める。
 //! 設計は `docs/design/recording.md` の「リプレイバッファへの伸ばし方（#182）」。
 //!
 //! - NV12 と PCM への変換、PTS の付け方は①②と同じもの（`convert` / `pts` / `audio`）を使う。
@@ -32,8 +33,9 @@ use super::replay_recording::{Baseline, Counters, ReplayRecording};
 use super::replay_ring::{
     keep_from, replay_cut, ring_byte_limit, should_force_keyframe, ByteTrim, EncodedRing, Track,
 };
+use super::replay_save::{RecordingKind, SaveReplayBlock};
 use super::sample_pool::{SamplePool, SAMPLE_POOL_CAPACITY};
-use super::session::{check_disk, fail, prepare_folder, MIN_AUDIO_CHUNK_FRAMES};
+use super::session::{check_disk, prepare_folder, MIN_AUDIO_CHUNK_FRAMES};
 use super::storage::{free_bytes, is_short, megabytes, replay_required_bytes};
 use super::writer::{memory_sample, WriterParams};
 use super::RecordingError;
@@ -142,11 +144,29 @@ impl ReplayPipeline {
         self.recording.is_some()
     }
 
-    /// 録画を始める。保存先を確かめ、リングに「いま − N 秒」以降のキーフレームがあれば
-    /// そこから書き出す。無ければ次のキーフレームを待つ。
-    pub(super) fn start_recording(&mut self, request: RecordingRequest) {
+    /// 書き出している最中なら、録画かリプレイの保存（#438）か。
+    pub(super) fn recording_kind(&self) -> Option<RecordingKind> {
+        self.recording.as_ref().map(ReplayRecording::kind)
+    }
+
+    /// 録画を始める（`RecordingKind::SaveReplay` ならリプレイバッファの中身だけを保存する、#438）。
+    /// 保存先を確かめ、リングに「いま − N 秒」以降のキーフレームがあればそこから書き出す。
+    /// 無ければ、録画は次のキーフレームを待ち、保存は「まだ溜まっていない」で断る。
+    pub(super) fn start_recording(&mut self, request: RecordingRequest, kind: RecordingKind) {
+        let now = Instant::now();
+        let requested_at = units_since(self.t0, now);
+        let start = self
+            .ring
+            .start_point(replay_cut(requested_at, self.retain_seconds));
+        if kind == RecordingKind::SaveReplay && start.is_none() {
+            // 保存はライブの映像を待たない。フォルダも作らずに断る
+            let _ = self
+                .events
+                .send(RecordingEvent::ReplaySaveRefused(SaveReplayBlock::Empty));
+            return;
+        }
         if let Err(error) = prepare_folder(&request.folder) {
-            fail(&self.events, error);
+            let _ = self.events.send(kind.failed(error, None));
             return;
         }
         // リングは始めてすぐまとめて書き出すので、書き切っても 500MB 残るかを先に見る（#313）
@@ -157,18 +177,20 @@ impl ReplayPipeline {
                 free_mb: free.map(megabytes).unwrap_or(0),
                 required_mb: megabytes(required),
             };
-            fail(&self.events, error);
+            let _ = self.events.send(kind.failed(error, None));
             return;
         }
-        let now = Instant::now();
-        let requested_at = units_since(self.t0, now);
         let baseline = Baseline {
             dropped: self.tap.dropped(),
             recycle_misses: self.tap.recycle_misses(),
             audio: self.audio.as_ref().map(AudioTrack::stats),
         };
         info!(
-            "録画を始めた（リプレイバッファから {} 秒さかのぼる。保存先: {}、ファイル名: {}.mp4、リングの映像 {:.1} 秒・{} KB、捨てた GOP {} 回）",
+            "{}（リプレイバッファから {} 秒さかのぼる。保存先: {}、ファイル名: {}.mp4、リングの映像 {:.1} 秒・{} KB、捨てた GOP {} 回）",
+            match kind {
+                RecordingKind::Recording => "録画を始めた",
+                RecordingKind::SaveReplay => "リプレイを保存する",
+            },
             self.retain_seconds,
             request.folder.display(),
             request.file_stem,
@@ -178,20 +200,22 @@ impl ReplayPipeline {
         );
         self.recording = Some(ReplayRecording::new(
             request,
+            kind,
             requested_at,
             self.audio.is_some(),
             baseline,
             Arc::clone(&self.telemetry),
             now,
         ));
-        let _ = self.events.send(RecordingEvent::Started);
-        if let Some(encoder) = &self.video_encoder {
-            let _ = self
-                .events
-                .send(RecordingEvent::EncoderSelected(encoder.info()));
+        if kind == RecordingKind::Recording {
+            let _ = self.events.send(RecordingEvent::Started);
+            if let Some(encoder) = &self.video_encoder {
+                let _ = self
+                    .events
+                    .send(RecordingEvent::EncoderSelected(encoder.info()));
+            }
         }
-        let cut = replay_cut(requested_at, self.retain_seconds);
-        if let Some(offset) = self.ring.start_point(cut) {
+        if let Some(offset) = start {
             self.open_recording(offset);
         }
     }
@@ -424,7 +448,8 @@ impl ReplayPipeline {
                 "いいえ"
             }
         );
-        if self.recording.is_some() {
+        // 統計 OSD に出すのは録画だけ。リプレイの保存（#438）では知らせない
+        if self.recording_kind() == Some(RecordingKind::Recording) {
             let _ = self.events.send(RecordingEvent::EncoderSelected(info));
         }
         self.video_encoder = Some(encoder);
@@ -669,7 +694,10 @@ impl ReplayPipeline {
     /// 閉じて結果を知らせる。
     fn close(&mut self, recording: ReplayRecording) {
         self.log_audio(&recording);
-        recording.finish(self.counters()).report(&self.events);
+        let kind = recording.kind();
+        recording
+            .finish(self.counters())
+            .report_as(&self.events, kind);
     }
 
     /// 途中で止める。ファイルを作っていれば閉じてから知らせる。リングは回り続ける。
@@ -678,8 +706,9 @@ impl ReplayPipeline {
             return;
         };
         self.log_audio(&recording);
+        let kind = recording.kind();
         let summary = recording.finish(self.counters()).into_summary();
-        let _ = self.events.send(RecordingEvent::Failed { error, summary });
+        let _ = self.events.send(kind.failed(error, summary));
     }
 
     /// 閉じた録画の音声をログへ残す（②と同じ 1 行。値は録画を始めてからの差）。
