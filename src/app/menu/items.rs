@@ -65,6 +65,8 @@ pub(super) enum MenuAction {
     ReconnectDevices,
     /// 「録画を開始」「録画を停止」を押した
     ToggleRecording,
+    /// 「リプレイを保存（直近 N 秒）」を押した（#438）
+    SaveReplay,
     /// 「プリセット」から 1 つ選んだ
     ApplyPreset(String),
     /// 「詳細設定...」を押した
@@ -84,6 +86,7 @@ impl MenuAction {
             MenuAction::ResetWindowSize
             | MenuAction::ReconnectDevices
             | MenuAction::ToggleRecording
+            | MenuAction::SaveReplay
             | MenuAction::ApplyPreset(_)
             | MenuAction::OpenSettings
             | MenuAction::Quit => true,
@@ -136,6 +139,24 @@ fn recording_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuActi
     };
     if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
         actions.push(MenuAction::ToggleRecording);
+    }
+}
+
+/// 「リプレイを保存（直近 N 秒）」のボタン（#438）。録画の項目のすぐ下に置く。
+///
+/// リプレイバッファが OFF・録画中・保存中・まだ溜まっていないときは灰色にし、
+/// ホバーに理由を出す。押せる条件を描画で決めず、`SaveReplayMenuState::block` に従う。
+fn save_replay_item(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction>) {
+    let state = view.save_replay;
+    let mut response = ui.add_enabled(
+        state.block.is_none(),
+        egui::Button::new(i18n::menu_save_replay(state.seconds)),
+    );
+    if let Some(block) = state.block {
+        response = response.on_disabled_hover_text(block.to_string());
+    }
+    if response.clicked() {
+        actions.push(MenuAction::SaveReplay);
     }
 }
 
@@ -398,6 +419,7 @@ pub(super) fn menu_items_flat(
     ui.separator();
 
     recording_item(ui, view, actions);
+    save_replay_item(ui, view, actions);
 
     ui.separator();
 
@@ -447,6 +469,7 @@ pub(super) fn menu_items_collapsed(
     ui.separator();
 
     recording_item(ui, view, actions);
+    save_replay_item(ui, view, actions);
 
     ui.separator();
 
@@ -482,6 +505,9 @@ mod tests {
     use egui_kittest::kittest::{NodeT, Queryable};
     use egui_kittest::Harness;
 
+    use super::super::SaveReplayMenuState;
+    use crate::recording::SaveReplayBlock;
+
     #[test]
     fn menu_action_one_shot_items_close_the_menu() {
         // 結果がメニューの外に出る操作は、押したらメニューを閉じる
@@ -489,6 +515,7 @@ mod tests {
             MenuAction::ResetWindowSize,
             MenuAction::ReconnectDevices,
             MenuAction::ToggleRecording,
+            MenuAction::SaveReplay,
             MenuAction::ApplyPreset("既定".to_string()),
             MenuAction::OpenSettings,
             MenuAction::Quit,
@@ -530,6 +557,10 @@ mod tests {
     fn sample_view() -> MenuView {
         MenuView {
             recording: RecordingMenuState::Idle,
+            save_replay: SaveReplayMenuState {
+                seconds: 30,
+                block: None,
+            },
             volume: 100.0,
             muted: false,
             maintain_aspect_ratio: true,
@@ -654,5 +685,55 @@ mod tests {
         reset.click();
         harness.run();
         assert_eq!(harness.state().actions, Vec::<MenuAction>::new());
+    }
+
+    // #438: 「リプレイを保存（直近 N 秒）」は録画の項目の下に直接出て、押すと SaveReplay を返す
+    #[test]
+    fn save_replay_item_returns_save_replay_when_available() {
+        let view = MenuView {
+            save_replay: SaveReplayMenuState {
+                seconds: 45,
+                block: None,
+            },
+            ..sample_view()
+        };
+        let mut harness = collapsed_menu_harness(view);
+
+        let label = i18n::menu_save_replay(45);
+        let item = harness.get_by_label(&label);
+        assert!(!item.accesskit_node().is_disabled());
+        item.click();
+        harness.run();
+        assert_eq!(harness.state().actions, [MenuAction::SaveReplay]);
+    }
+
+    #[test]
+    fn save_replay_item_is_disabled_while_saving_is_blocked() {
+        for block in [
+            SaveReplayBlock::ReplayOff,
+            SaveReplayBlock::Recording,
+            SaveReplayBlock::Saving,
+            SaveReplayBlock::Empty,
+        ] {
+            let view = MenuView {
+                save_replay: SaveReplayMenuState {
+                    seconds: 30,
+                    block: Some(block),
+                },
+                ..sample_view()
+            };
+            let mut harness = collapsed_menu_harness(view);
+
+            let label = i18n::menu_save_replay(30);
+            let item = harness.get_by_label(&label);
+            assert!(item.accesskit_node().is_disabled(), "{block:?}");
+            item.click();
+            harness.run();
+            assert_eq!(
+                harness.state().actions,
+                Vec::<MenuAction>::new(),
+                "{block:?}"
+            );
+        }
     }
 }

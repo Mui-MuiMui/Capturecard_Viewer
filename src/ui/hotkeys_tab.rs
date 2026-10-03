@@ -491,6 +491,11 @@ mod tests {
         };
         assert!(!shows_warning(&harness), "既定（オフ）では出さない");
 
+        // タブの下の段にあり、一覧の行が増えると画面の外へ出るので、先に見える所まで送る
+        harness
+            .get_by_label(Text::HotkeyUseRegisterHotKey.get())
+            .scroll_to_me();
+        harness.run();
         harness
             .get_by_label(Text::HotkeyUseRegisterHotKey.get())
             .click();

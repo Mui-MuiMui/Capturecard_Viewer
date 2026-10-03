@@ -1,5 +1,5 @@
-//! 録画の開始・停止と、録画スレッドから届いた結果の取り込み。リプレイバッファの設定の反映。
-//! 録画中の印と統計 OSD の行。
+//! 録画の開始・停止と、録画スレッドから届いた結果の取り込み。リプレイバッファの設定の反映と、
+//! リプレイバッファの中身だけの保存（#438、`save_replay`）。録画中の印と統計 OSD の行。
 //!
 //! 録画スレッドそのものは `crate::recording` にある。ここは UI スレッドの側で、
 //! 右クリックメニューとホットキーから同じ `toggle_recording` を呼ぶ
@@ -9,14 +9,14 @@
 //! 受け取り、ログと `report_error(ErrorSource::Recording, ..)` を出す
 //! （`docs/design/recording.md` の「失敗の扱い」）。
 
-use super::menu::RecordingMenuState;
+use super::menu::{RecordingMenuState, SaveReplayMenuState};
 use super::video_overlay::show_video_overlay;
 use super::CaptureCardViewer;
 use crate::i18n;
 use crate::overlay::OverlayContent;
 use crate::recording::{
     format_elapsed, resolve_file_stem, RecordingAudioStats, RecordingEvent, RecordingRequest,
-    RecordingSummary, ReplayConfig, ReplayRingStats,
+    RecordingSummary, ReplayConfig, ReplayRingStats, SaveReplayBlock,
 };
 use crate::settings::RecordingSettings;
 use crate::status::ErrorSource;
@@ -40,7 +40,11 @@ impl CaptureCardViewer {
     /// 前の録画の `Finalize` を待っている間は何もしない。差し込み口（`VideoTap`）は
     /// 1 つしか無く、同時に 2 本は録れない。
     pub(super) fn toggle_recording(&mut self) {
-        if !self.recorder.is_recording() {
+        if self.recorder.is_saving_replay() {
+            // リプレイの保存（#438）と同じ口を使うので、保存が終わるまで始めない（数秒で終わる）
+            info!("リプレイを保存している最中なので、録画を始めない");
+            self.show_recording_toast(SaveReplayBlock::Saving.to_string());
+        } else if !self.recorder.is_recording() {
             self.start_recording();
         } else if self.recorder.is_stopping() {
             debug!("前の録画を保存している最中なので、録画を始めない");
@@ -53,11 +57,42 @@ impl CaptureCardViewer {
     /// 設定から録画の要求を組み立て、録画スレッドへ渡す。リプレイバッファが ON なら、
     /// 録画スレッドがリングからさかのぼって書き出す。
     fn start_recording(&mut self) {
+        let Some(request) = self.recording_request() else {
+            return;
+        };
+        if let Err(reason) = self.recorder.start(request) {
+            error!("録画を始められない: {}", reason);
+            self.report_error(ErrorSource::Recording, reason.to_string());
+        }
+    }
+
+    /// リプレイバッファの中身だけを保存する（#438）。録画は始めない。右クリックメニューと
+    /// ホットキーが呼ぶ。保存できないとき（OFF・録画中・保存中・まだ溜まっていない）は
+    /// トーストで理由を出して何もしない。
+    pub(super) fn save_replay(&mut self) {
+        if let Some(block) = self.recorder.save_replay_block() {
+            info!("リプレイを保存しない: {:?}", block);
+            self.show_recording_toast(block.to_string());
+            return;
+        }
+        let Some(request) = self.recording_request() else {
+            return;
+        };
+        info!("リプレイの保存を頼んだ");
+        if let Err(reason) = self.recorder.save_replay(request) {
+            error!("リプレイを保存できない: {}", reason);
+            self.report_error(ErrorSource::Recording, i18n::replay_save_failed(reason));
+        }
+    }
+
+    /// 設定から録画の要求を組み立てる。録画の開始とリプレイの保存（#438）で同じものを使う
+    /// （保存先・ファイル名の書式・同じ名前があるときの連番を揃えるため）。
+    fn recording_request(&self) -> Option<RecordingRequest> {
         let settings = match self.settings.lock() {
             Ok(settings) => settings.recording.clone(),
             Err(_) => {
-                warn!("録画の開始で settings のロックを取得できない");
-                return;
+                warn!("録画の要求を組み立てるときに settings のロックを取得できない");
+                return None;
             }
         };
         let (file_stem, format_error) =
@@ -68,7 +103,7 @@ impl CaptureCardViewer {
                 settings.file_name_format, reason
             );
         }
-        let request = RecordingRequest {
+        Some(RecordingRequest {
             folder: settings.folder.clone(),
             file_stem,
             video_bitrate_kbps: settings.clamped_bitrate_kbps(),
@@ -78,11 +113,16 @@ impl CaptureCardViewer {
             // 音声を録らない設定なら None（映像だけの MP4）
             audio_bitrate_kbps: settings.audio_bitrate_for_recording(),
             audio_offset_ms: settings.clamped_audio_offset_ms(),
-        };
-        if let Err(reason) = self.recorder.start(request) {
-            error!("録画を始められない: {}", reason);
-            self.report_error(ErrorSource::Recording, reason.to_string());
-        }
+        })
+    }
+
+    /// 録画とリプレイの保存の知らせをトーストで出す（保存したファイル名、保存できない理由）。
+    fn show_recording_toast(&mut self, text: String) {
+        self.transient_overlay.show(
+            OverlayContent::Text(text),
+            SAVED_TOAST_DURATION,
+            Instant::now(),
+        );
     }
 
     /// 映像の公称 fps。デバイスへ要求した fps。映像が無ければ `None`。
@@ -133,16 +173,31 @@ impl CaptureCardViewer {
                 RecordingEvent::EncoderSelected(_) => {}
                 RecordingEvent::Stopped(summary) => {
                     log_summary("録画を保存した", &summary, self.recorder.replay_ring());
-                    let name = summary
-                        .path
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    self.transient_overlay.show(
-                        OverlayContent::Text(i18n::recording_saved(name)),
-                        SAVED_TOAST_DURATION,
-                        Instant::now(),
+                    self.show_recording_toast(i18n::recording_saved(file_name(&summary)));
+                }
+                RecordingEvent::ReplaySaved(summary) => {
+                    log_summary("リプレイを保存した", &summary, self.recorder.replay_ring());
+                    self.errors.clear(ErrorSource::Recording);
+                    self.show_recording_toast(i18n::replay_saved(file_name(&summary)));
+                }
+                RecordingEvent::ReplaySaveFailed { error, summary } => {
+                    error!(
+                        "リプレイを保存できなかった、または途中で止まった: {}",
+                        error
                     );
+                    if let Some(summary) = &summary {
+                        log_summary(
+                            "止まるまでのリプレイは保存した",
+                            summary,
+                            self.recorder.replay_ring(),
+                        );
+                    }
+                    self.report_error(ErrorSource::Recording, i18n::replay_save_failed(error));
+                }
+                // 失敗ではなく「いまは保存できない」。窓口の判定をすり抜けたときだけ届く
+                RecordingEvent::ReplaySaveRefused(block) => {
+                    info!("録画スレッドがリプレイを保存しなかった: {:?}", block);
+                    self.show_recording_toast(block.to_string());
                 }
                 RecordingEvent::Failed { error, summary } => {
                     error!("録画を始められなかった、または途中で止まった: {}", error);
@@ -187,7 +242,19 @@ impl CaptureCardViewer {
                 RecordingEvent::ReplayFailed(reason) => {
                     error!("リプレイバッファを続けられなかった: {}", reason);
                 }
-                RecordingEvent::Started | RecordingEvent::EncoderSelected(_) => {}
+                // 保存中に終了したときは、録画スレッドが書き切ってから閉じている
+                RecordingEvent::ReplaySaved(summary) => {
+                    log_summary("リプレイを保存した", &summary, None);
+                }
+                RecordingEvent::ReplaySaveFailed { error, summary } => {
+                    error!("終了時にリプレイを保存できなかった: {}", error);
+                    if let Some(summary) = &summary {
+                        log_summary("止まるまでのリプレイは保存した", summary, None);
+                    }
+                }
+                RecordingEvent::Started
+                | RecordingEvent::EncoderSelected(_)
+                | RecordingEvent::ReplaySaveRefused(_) => {}
             }
         }
     }
@@ -200,6 +267,15 @@ impl CaptureCardViewer {
             RecordingMenuState::Finishing
         } else {
             RecordingMenuState::Recording(self.recorder.elapsed())
+        }
+    }
+
+    /// 右クリックメニューに出す「リプレイを保存（直近 N 秒）」の項目の状態（#438）。
+    /// `seconds` はさかのぼる長さの設定（OFF でも設定の値を出す）。
+    pub(super) fn save_replay_menu_state(&self, seconds: u32) -> SaveReplayMenuState {
+        SaveReplayMenuState {
+            seconds,
+            block: self.recorder.save_replay_block(),
         }
     }
 
@@ -272,6 +348,15 @@ impl CaptureCardViewer {
             },
         );
     }
+}
+
+/// 保存したファイルの名前（拡張子まで）。トーストに出す。
+fn file_name(summary: &RecordingSummary) -> String {
+    summary
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// 統計 OSD の録画の 1 行目に添える、さかのぼった長さ。リプレイバッファを通していなければ空。
