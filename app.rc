@@ -26,7 +26,7 @@ BEGIN
             VALUE "FileDescription", "Capturecard Viewer"
             VALUE "FileVersion", CV_VERSION_STR
             VALUE "InternalName", "capturecard_viewer"
-            VALUE "LegalCopyright", "Copyright (C) 2025 Mui"
+            VALUE "LegalCopyright", "Copyright (C) 2025-2026 Mui"
             VALUE "OriginalFilename", "capturecard_viewer.exe"
             VALUE "ProductName", "Capturecard Viewer"
             VALUE "ProductVersion", CV_VERSION_STR
