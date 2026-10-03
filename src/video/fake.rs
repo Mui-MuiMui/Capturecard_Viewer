@@ -281,6 +281,7 @@ impl FakeVideoCapture {
             resolution: Some(mode.resolution()),
             // 実機は nokhwa の列挙名（`YUYV`）が入るので揃える
             format: Some("YUYV".to_string()),
+            format_fallback: None,
             requested_fps: mode.fps,
             audio_pin,
         });

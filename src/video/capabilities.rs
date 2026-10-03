@@ -11,7 +11,7 @@ use nokhwa::utils::{
 };
 use std::time::Instant;
 
-use super::{elapsed_ms, VideoCapture, VideoError};
+use super::{elapsed_ms, mf_format, VideoCapture, VideoError};
 
 /// デバイスを開ける映像モード 1 件。解像度とフレームレートの組み合わせ。
 ///
@@ -46,7 +46,7 @@ impl VideoMode {
 }
 
 /// 1 つのビデオフォーマットが対応する能力。
-/// フォーマット名は "YUY2" / "MJPEG" / "RGB24"。
+/// フォーマット名は "YUY2" / "NV12" / "MJPEG" / "RGB24"（Media Foundation は `mf_format::MF_FORMATS`、DirectShow は I420 / YV12 も）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatCapability {
     /// フォーマット名
@@ -138,14 +138,10 @@ impl VideoCapture {
 
         let mut result: DeviceCapabilities = Vec::new();
 
-        // 各フォーマットで対応解像度・FPSを取得
-        let formats = vec![
-            ("YUY2", FrameFormat::YUYV),
-            ("MJPEG", FrameFormat::MJPEG),
-            ("RGB24", FrameFormat::RAWRGB),
-        ];
-
-        for (format_name, frame_format) in formats {
+        // 各フォーマットで対応解像度・FPSを取得。開くとき（`capture.rs`）と同じ表を引き、
+        // 一覧に出る形式と開ける形式を揃える（#81）。以前は RGB24 を RAWRGB で引いて
+        // いたので、Media Foundation の RGB24（nokhwa では RAWBGR）が一覧に出なかった
+        for (format_name, frame_format) in mf_format::MF_FORMATS {
             match camera.compatible_list_by_resolution(frame_format) {
                 Ok(resolution_map) => {
                     let mut modes: Vec<VideoMode> = Vec::new();

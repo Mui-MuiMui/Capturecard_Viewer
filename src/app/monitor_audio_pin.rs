@@ -245,6 +245,7 @@ mod tests {
             api,
             resolution: Some((1920, 1080)),
             format: Some("YUY2".to_string()),
+            format_fallback: None,
             requested_fps: 60,
             audio_pin,
         }

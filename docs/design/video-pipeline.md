@@ -16,19 +16,19 @@
 - リングの容量は 3 と小さい。リングの `Arc` が `FrameSink` の Vec の回収を妨げるので、録画スレッドは取り出したらすぐ NV12 へ直して手放す。回収に失敗した回数は録画中だけ数え、止めたときにログへ出す
 - 詳しくは `docs/design/recording.md` の「コールバックから渡す経路」
 
-フレームコールバックの本体（YUY2→RGB 変換、`FrameBuffer` への格納、`RepaintWaker` で UI を起こす）は `video/frame_sink.rs` の `FrameSink` にある。nokhwa のコールバックは `Buffer` から幅・高さ・バイト列を取り出して渡すだけで、フェイクの映像デバイス（`video/fake.rs`）と DirectShow のデバイス（`video/directshow/`、自前のレンダラーの `Receive`）も同じ `FrameSink` を通る。DirectShow の経路だけは YUY2 以外の形式も受ける（`docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」）。
+フレームコールバックの本体（YUY2→RGB 変換、`FrameBuffer` への格納、`RepaintWaker` で UI を起こす）は `video/frame_sink.rs` の `FrameSink` にある。nokhwa のコールバックは `Buffer` から幅・高さ・バイト列を取り出し、形式ごとの受け口へ振り分けて渡すだけ（`video/mf_format.rs` の `sink_route`）。フェイクの映像デバイス（`video/fake.rs`）と DirectShow のデバイス（`video/directshow/`、自前のレンダラーの `Receive`）も同じ `FrameSink` を通る（`docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」）。
 
 ### `FrameSink` が受け取れる形式
 
-| 形式 | 受け口 | 変換（`video/convert.rs`、4:2:0 は `video/yuv420.rs`） | 係数表（色空間・レンジ・映像調整） | 届く経路 | DirectShow のサブタイプ |
-|---|---|---|---|---|---|
-| YUY2 | `push_yuy2` | `yuy2_to_rgb_naive` | 効く | Media Foundation・DirectShow・フェイク | `MEDIASUBTYPE_YUY2` / `MEDIASUBTYPE_YUYV` |
-| NV12 | `push_yuv420` | `yuv420_to_rgb` | 効く | DirectShow | `MEDIASUBTYPE_NV12` |
-| I420 | `push_yuv420` | `yuv420_to_rgb` | 効く | DirectShow | `MEDIASUBTYPE_I420` / `MEDIASUBTYPE_IYUV` |
-| YV12 | `push_yuv420` | `yuv420_to_rgb` | 効く | DirectShow | `MEDIASUBTYPE_YV12` |
-| MJPEG | `push_mjpeg` | `mjpeg_to_rgb` | 効かない（デコーダ任せ） | DirectShow | `MEDIASUBTYPE_MJPG` |
-| RGB24 | `push_bgr24` | `bgr24_to_rgb` | 効かない（RGB のまま） | DirectShow | `MEDIASUBTYPE_RGB24` |
-| そのほか | `push_decoded` | nokhwa のデコーダ | 効かない（デコーダ任せ） | Media Foundation | — |
+| 形式 | 受け口 | 変換（`video/convert.rs`、4:2:0 は `video/yuv420.rs`） | 係数表（色空間・レンジ・映像調整） | 届く経路 | Media Foundation のサブタイプ（nokhwa の `FrameFormat`） | DirectShow のサブタイプ |
+|---|---|---|---|---|---|---|
+| YUY2 | `push_yuy2` | `yuy2_to_rgb_naive` | 効く | Media Foundation・DirectShow・フェイク | `MFVideoFormat_YUY2`（`YUYV`） | `MEDIASUBTYPE_YUY2` / `MEDIASUBTYPE_YUYV` |
+| NV12 | `push_yuv420` | `yuv420_to_rgb` | 効く | Media Foundation・DirectShow | `MFVideoFormat_NV12`（`NV12`） | `MEDIASUBTYPE_NV12` |
+| I420 | `push_yuv420` | `yuv420_to_rgb` | 効く | DirectShow | — | `MEDIASUBTYPE_I420` / `MEDIASUBTYPE_IYUV` |
+| YV12 | `push_yuv420` | `yuv420_to_rgb` | 効く | DirectShow | — | `MEDIASUBTYPE_YV12` |
+| MJPEG | `push_mjpeg` | `mjpeg_to_rgb` | 効かない（デコーダ任せ） | Media Foundation・DirectShow | `MFVideoFormat_MJPG`（`MJPEG`） | `MEDIASUBTYPE_MJPG` |
+| RGB24 | `push_bgr24` | `bgr24_to_rgb` | 効かない（RGB のまま） | Media Foundation・DirectShow | `MFVideoFormat_RGB24`（`RAWBGR`） | `MEDIASUBTYPE_RGB24` |
+| そのほか | `push_decoded` | nokhwa のデコーダ | 効かない（デコーダ任せ） | Media Foundation（幅が奇数の YUY2、GRAY） | `MFVideoFormat_L8`（`GRAY`） | — |
 
 - **NV12 / I420 / YV12 は YUY2 と同じ係数表と同じ 1 画素の式を通る。** 同じ Y・Cb・Cr なら YUY2 と同じ RGB になる（`yuv420.rs` のテストでカラーバーを突き合わせている）。違うのは色差の置き場所だけで、4:2:0 なので縦横 2x2 画素が 1 組の色差を共有する。統計でも高速パスとして数える
 - 幅か高さが奇数なら、色差は切り上げた大きさを持つものとして読む（右端の列・下端の行は 1 画素で 1 組）。YUY2 の奇数幅は最後の 1 画素を黒で残すが、4:2:0 は全画素を変換する
@@ -110,10 +110,20 @@ eframe は **`update()` の中で要求された再描画しか予約しない�
 - Area のように前のフレームの大きさを覚えられないので、中身を 1 回目は描かずに測り、2 回目で寄せた位置へ描く
 - **トースト（`overlay.rs` の `TransientOverlay`）と右クリックメニューは `Order::Foreground` のまま。** トーストはダイアログの中の操作（プリセットの切り替えなど）の結果も知らせるので、下に隠れると役に立たない。出るのも数秒だけ
 
+## Media Foundation で開く形式（#81）
+
+**設定画面で選んだ形式を、そのまま nokhwa に要求して開く。** 1.3.0 までは MJPEG / RGB24 を選んでも YUYV を要求しており、一覧に出るのに効かなかった。
+
+- **一覧に出す形式と要求する形式は 1 つの表で対応させる**（`video/mf_format.rs` の `MF_FORMATS`）。能力の取得（`capabilities.rs`）と開くとき（`capture.rs`）が同じ表を引く。並びは YUY2・NV12・MJPEG・RGB24（係数表の効く形式が先）
+- **RGB24 は nokhwa の `RAWBGR`。** nokhwa-bindings-windows 0.4.6 は `MFVideoFormat_RGB24` を `RAWBGR` に対応させる（`guid_to_frameformat`）。以前は能力の取得を `RAWRGB` で引いていたので、一覧が空の `Ok` になり RGB24 が選択肢に出なかった（`Err` ではないので既定値にも倒れない）
+- **要求した形式で開けなかったときだけ YUY2 で開き直す**（`mf_format::fallback_for`）。nokhwa は要求した形式がデバイスに無いと `Camera::new` で「Failed to fulfill requested format」を返す。`open_stream` の失敗も同じ扱い。YUY2 で失敗したときは形式ではなくデバイス側の問題なので開き直さない。開き直したことは `warn` と「接続状態」タブ（`ActiveVideo::format_fallback`）に出す。表に無い名前（DirectShow でだけ選べる I420 / YV12 が、Media Foundation のデバイスへ切り替えたあとに残っている場合）も YUY2 で開き、同じように出す
+- **フレームは形式ごとの受け口へ渡す**（`mf_format::sink_route`）。DirectShow の経路のために既にある受け口を使い、新しい変換は足していない。MJPEG を nokhwa のデコーダ（mozjpeg）に通さないのは DirectShow と同じ理由（`docs/design/device-worker.md`、壊れたフレームで panic → `abort`）
+- **Media Foundation の RGB24 は上の行から並んだものとして読む**（`mf_format::MF_RGB24_BOTTOM_UP`）。向きは `MF_MT_DEFAULT_STRIDE` の符号で決まるが、nokhwa はこれを読まず外にも出さない。nokhwa 自身のデコーダも上からとして読む。**実機で確かめていない**ので、上下が逆さまに出たらここを変える（`docs/MANUAL-TEST.md`）。行の長さは DirectShow と同じく 4 バイト境界に揃えたものとして読み、足りなければ捨てる
+- 解像度が未指定のときは、選んだ形式で 1280x720 60fps を要求する（以前は形式を見ず YUYV）
+- **実機では確かめていない。** 手元の GC551 は Media Foundation で開けず（`docs/design/reconnect.md`）、Live Gamer EXTREME 3 は MJPEG / RGB24 を 0 件で返す（Issue #81 のコメント）。NV12 を出すデバイスで、選んだ形式が「接続状態」タブに出て映ることを人が確かめる（`docs/MANUAL-TEST.md`）
+
 ## UI にあるが動作していない設定がある
 
-以下は設定画面から変更できるが実装が追いついていない。README の記述もこれらを前提に書かれているため、修正時は README も合わせて更新すること。
-
-- ビデオフォーマットの MJPEG / RGB24（Media Foundation の経路では内部で YUYV に強制される。DirectShow の経路〈「(DirectShow)」のデバイス〉では選んだ形式で開く）
+いまは無い。ビデオフォーマットの MJPEG / RGB24 が Media Foundation の経路で YUYV に強制されていたのは #81 で直した（上の「Media Foundation で開く形式（#81）」）。設定画面に効かない項目を足したときは、ここと README に書くこと。
 
 オーディオのサンプリングレート／チャンネル数は `select_best_config` でストリームに反映され、**選択肢も入出力デバイスの対応設定から生成している**（`audio::selectable_sample_rates` / `selectable_channels`）。デバイスの能力を取得できなかった場合だけ固定の既定一覧へ倒すので、そのときは対応しない値も選べる。

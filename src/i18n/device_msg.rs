@@ -373,6 +373,14 @@ pub fn link_requested_fps(fps: u32) -> String {
     }
 }
 
+/// 設定の形式で開けず YUY2 で開いたことを伝える行（#81）。Media Foundation の経路だけ
+pub fn link_video_format_fallback(requested: &str) -> String {
+    match language() {
+        Language::Japanese => format!("形式: {requested} では開けないので YUY2 で開いた"),
+        Language::English => format!("Format: could not open as {requested}, opened as YUY2"),
+    }
+}
+
 pub fn link_audio_input(device: impl Display, summary: impl Display) -> String {
     match language() {
         Language::Japanese => format!("入力: {device}（{summary}）"),
@@ -519,6 +527,18 @@ mod tests {
         assert_eq!(
             link_audio_input_video_pin("AVerMedia GC551 Video Capture (DirectShow)", "48000Hz 2ch"),
             "入力: 映像デバイスの音声（AVerMedia GC551 Video Capture、48000Hz 2ch）"
+        );
+    }
+
+    #[test]
+    fn link_video_format_fallback_names_the_requested_format() {
+        assert_eq!(
+            link_video_format_fallback("MJPEG"),
+            "形式: MJPEG では開けないので YUY2 で開いた"
+        );
+        assert_eq!(
+            with_language(Language::English, || link_video_format_fallback("NV12")),
+            "Format: could not open as NV12, opened as YUY2"
         );
     }
 

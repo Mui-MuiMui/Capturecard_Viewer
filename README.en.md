@@ -272,7 +272,7 @@ They are meant for per-device quirks that remain after the color space and range
 The adjustments are folded into the YUY2 -> RGB coefficients, so **the CPU cost barely changes**. The per-pixel work is exactly the same as with no adjustment; what is added is a handful of coefficient multiplications once per frame (no measurable difference at 1080p). Like the color space and range, they take effect on the next frame and the device is not reopened.
 
 > **The color space, color range and picture adjustments can all be inactive.**
-> They work by swapping the coefficients used when this app converts YUY2 frames itself. If the device delivers something other than YUY2 (MJPEG, for example), the conversion is left to the decoder and none of these settings apply. When that happens the log contains a line about falling back to the decoder.
+> They work by swapping the coefficients used when this app converts YUV frames itself (YUY2 and NV12, plus I420 and YV12 for "(DirectShow)" devices). If the device delivers something else (MJPEG or RGB24, for example), the frames are decoded or used as RGB as they are, and none of these settings apply. No log line is written for MJPEG or RGB24; only frames that this app has no dedicated conversion for (such as GRAY, or YUY2 with an odd width) leave a line about falling back to the decoder.
 
 **Audio**
 
@@ -327,11 +327,11 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 - The accepted formats are YUY2, NV12, I420, YV12, MJPEG and RGB24. A device that only outputs other formats, such as UYVY, shows no video.
 - Colour space, colour range and brightness / contrast / saturation only take effect with YUY2, NV12, I420 and YV12 (not with MJPEG or RGB24).
 
-**Settings that are not yet implemented**
+**Video format**
 
-Some options can be changed in the settings window but have no effect yet. These are tracked as known issues.
-
-- Selecting MJPEG or RGB24 as the video format for a device without "(DirectShow)" in its name (YUY2 is always used internally). DirectShow devices are opened in the selected format.
+- The device is opened in the format selected in the settings window. Only the formats the device offers are listed; for a device without "(DirectShow)" in its name these are the ones it supports out of YUY2, NV12, MJPEG and RGB24.
+- If a device cannot deliver 1080p60 in YUY2 because of bandwidth, selecting MJPEG may help. Colour space, colour range and the picture adjustments do not apply to MJPEG or RGB24.
+- If a device without "(DirectShow)" in its name cannot be opened in the selected format, it is reopened in YUY2, and Settings → Connection status shows a line such as "Format: could not open as MJPEG, opened as YUY2".
 
 ## Reporting problems
 
