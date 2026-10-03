@@ -90,7 +90,8 @@ impl VideoPinChoice {
 /// 映像デバイスの音声の項目名を決める（#409、#425）。
 ///
 /// 設定（ドラフト）の映像デバイス名、無ければ `app` が渡した名前（開いている映像）を、
-/// 「(DirectShow)」の印を外して出す。ドラフトを先にするのは、映像デバイスを選び
+/// 「(DirectShow)」の印を外し、接頭辞「[映像デバイスと連動]」（`Text::AudioInputVideoPinLinked`）
+/// を付けて出す。ドラフトを先にするのは、映像デバイスを選び
 /// 直したフレームから項目名を合わせるため（`app` の判定は次のフレームで追いつく）。
 /// どちらも無い（空の）ときは従来の文言（`Text::AudioInputVideoPin`）。
 fn video_pin_label(configured_device: Option<&str>, device: Option<&str>) -> String {
@@ -99,7 +100,7 @@ fn video_pin_label(configured_device: Option<&str>, device: Option<&str>) -> Str
         .flatten()
         .map(|name| directshow_friendly_name(name).unwrap_or(name).trim())
         .find(|name| !name.is_empty())
-        .map(str::to_string)
+        .map(|name| format!("{} {name}", Text::AudioInputVideoPinLinked.get()))
         .unwrap_or_else(|| Text::AudioInputVideoPin.get().to_string())
 }
 
@@ -185,6 +186,11 @@ mod tests {
     use eframe::egui::accesskit::Role;
     use egui_kittest::kittest::{NodeT, Queryable};
 
+    /// 映像デバイスの音声の項目名（接頭辞付き）
+    fn linked(name: &str) -> String {
+        format!("{} {name}", Text::AudioInputVideoPinLinked.get())
+    }
+
     #[test]
     fn selected_text_follows_the_input_source() {
         let mut settings = AppSettings::default();
@@ -196,7 +202,7 @@ mod tests {
         settings.video.device_name = Some("AVerMedia GC551 Video Capture (DirectShow)".to_string());
         assert_eq!(
             selected_text(&settings, &pin),
-            "AVerMedia GC551 Video Capture"
+            linked("AVerMedia GC551 Video Capture")
         );
         settings.audio.input_source = AudioInputSource::Device;
         settings.audio.input_device_name = None;
@@ -208,16 +214,22 @@ mod tests {
         // ドラフトの映像デバイス名が先（#425）。「(DirectShow)」の印は外す
         assert_eq!(
             video_pin_label(Some("GC551 (DirectShow)"), Some("開いている別のデバイス")),
-            "GC551"
+            linked("GC551")
         );
         // ドラフトに無ければ app が渡した名前（開いている映像）
-        assert_eq!(video_pin_label(None, Some("USB Video")), "USB Video");
+        assert_eq!(
+            video_pin_label(None, Some("USB Video")),
+            linked("USB Video")
+        );
         assert_eq!(
             video_pin_label(None, Some("USB Video (DirectShow)")),
-            "USB Video"
+            linked("USB Video")
         );
         // 空の名前は飛ばす
-        assert_eq!(video_pin_label(Some(""), Some("USB Video")), "USB Video");
+        assert_eq!(
+            video_pin_label(Some(""), Some("USB Video")),
+            linked("USB Video")
+        );
         // どちらも無ければ従来の文言
         assert_eq!(video_pin_label(None, None), Text::AudioInputVideoPin.get());
         assert_eq!(
@@ -290,11 +302,11 @@ mod tests {
         // 先頭は映像デバイスの名前（「(DirectShow)」の印は外す）、その下に WASAPI
         assert_eq!(
             open_input_combo(&mut harness),
-            ["GC551", "ライン入力", "マイク"]
+            [linked("GC551").as_str(), "ライン入力", "マイク"]
         );
 
         harness.state_mut().events.clear();
-        harness.get_by_label("GC551").click();
+        harness.get_by_label(&linked("GC551")).click();
         harness.run();
 
         let fixture = harness.state();
@@ -367,10 +379,10 @@ mod tests {
         // はじめは開いている USB Video。音声ピンが無いので選べない
         assert_eq!(
             open_input_combo(&mut harness),
-            ["USB Video", "ライン入力", "マイク"]
+            [linked("USB Video").as_str(), "ライン入力", "マイク"]
         );
         assert!(harness
-            .get_by_label("USB Video")
+            .get_by_label(&linked("USB Video"))
             .accesskit_node()
             .is_disabled());
         harness.key_press(egui::Key::Escape);
@@ -396,13 +408,16 @@ mod tests {
         // 一覧の先頭が GC551 になり、選べる。開いて見ただけでも選択は変わらない
         assert_eq!(
             open_input_combo(&mut harness),
-            ["GC551", "ライン入力", "マイク"]
+            [linked("GC551").as_str(), "ライン入力", "マイク"]
         );
-        assert!(!harness.get_by_label("GC551").accesskit_node().is_disabled());
+        assert!(!harness
+            .get_by_label(&linked("GC551"))
+            .accesskit_node()
+            .is_disabled());
         unchanged(&harness);
 
         // 選んだときに初めて変わる
-        harness.get_by_label("GC551").click();
+        harness.get_by_label(&linked("GC551")).click();
         harness.run();
         let audio = &harness.state().draft().audio;
         assert_eq!(audio.input_source, AudioInputSource::VideoPin);
@@ -453,15 +468,15 @@ mod tests {
 
         assert_eq!(
             open_input_combo(&mut harness),
-            ["USB Video", "ライン入力", "マイク"]
+            [linked("USB Video").as_str(), "ライン入力", "マイク"]
         );
         assert!(harness
-            .get_by_label("USB Video")
+            .get_by_label(&linked("USB Video"))
             .accesskit_node()
             .is_disabled());
 
         // 押しても選ばれない
-        harness.get_by_label("USB Video").click();
+        harness.get_by_label(&linked("USB Video")).click();
         harness.run();
         assert_eq!(
             harness.state().draft().audio.input_source,
@@ -488,7 +503,7 @@ mod tests {
                 .accesskit_node()
                 .value()
                 .as_deref(),
-            Some("USB Video")
+            Some(linked("USB Video").as_str())
         );
         assert!(shows_reason(&harness));
     }
