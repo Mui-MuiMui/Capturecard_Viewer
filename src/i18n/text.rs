@@ -192,6 +192,8 @@ texts! {
     // 名前を項目名にし、これは名前が無いときだけ出す（#409）。設定に残るのは `video_pin` で、
     // これは表示だけの文言なので翻訳してよい（docs/design/directshow-audio.md の (5)）
     AudioInputVideoPin { ja: "映像デバイスの音声", en: "Video device audio" },
+    // 項目名の接頭辞。後ろに半角空白と映像デバイス名が付く
+    AudioInputVideoPinLinked { ja: "[映像デバイスと連動]", en: "[Linked to video device]" },
     AudioInputVideoPinHint { ja: "この映像デバイスが受け取っている音声（HDMI などの音声）をそのまま使います", en: "Uses the audio that this video device receives (such as HDMI audio)" },
     AudioOutputDevice { ja: "オーディオ出力デバイス", en: "Audio output device" },
     DefaultDevice { ja: "デフォルト", en: "Default" },
