@@ -1,7 +1,7 @@
 use super::{BackgroundHotkeyRunner, HotkeyAction};
 use crate::keyboard_hook::{KeyChord, KeyboardHookError};
 use crate::repaint::RepaintWaker;
-use log::{debug, trace, warn};
+use log::{debug, log, warn, Level};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -212,12 +212,35 @@ fn decide_trigger(since_last_trigger: Option<Duration>, debounce: Duration) -> T
     }
 }
 
+/// 押下がどちらの方式から届いたか。判定は同じで、ログの出し方だけが変わる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PressSource {
+    /// 低レベルキーボードフックが観測した押下
+    Hook,
+    /// `RegisterHotKey` の `WM_HOTKEY`（#207）
+    SystemHotkey,
+}
+
+/// 押下をどう扱ったかのログを出すレベル。
+///
+/// - フックの方式は trace。割り当てたキーでも、他のアプリで打つたびに通る
+/// - キーを奪う方式は info。`WM_HOTKEY` は登録したキーを押したときにしか
+///   届かないので積もらない。管理者として実行しているアプリ越しに効かない
+///   という報告（#207）を、使う人のログから切り分けるために残す
+fn press_log_level(source: PressSource) -> Level {
+    match source {
+        PressSource::Hook => Level::Trace,
+        PressSource::SystemHotkey => Level::Info,
+    }
+}
+
 /// 観測した押下 1 回ぶんを処理する。リスナースレッドから呼ばれる。
 ///
 /// **この間は次のキー入力のフックが待たされる**（他のアプリの入力も
 /// 待たされる）。ロックは照合と記録のあいだだけ握り、UI スレッドを起こす
 /// ことと最小化中の実行はロックを手放してから行う。
-pub(super) fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord) {
+pub(super) fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord, source: PressSource) {
+    let level = press_log_level(source);
     // **照合と押下の記録を同じロックの中で行う。**
     // ロックを手放してから記録すると、その隙に解除処理が
     // 「組み合わせを消す → 押下を落とす」を終えてしまい、
@@ -261,31 +284,46 @@ pub(super) fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord) {
         runner.run(action);
     }
 
-    // 割り当てていないキー（他のアプリへ打っている文字）は何も出さない。
-    // 全てのキー入力がここを通るので、trace でも積もりすぎる
     match outcome {
         Some((action, PressRouting::Deferred)) => {
-            trace!("{} の押下を記録した", action.label())
+            log!(level, "{} の押下を記録した", action.label())
         }
         Some((action, PressRouting::Background)) => {
-            trace!("{} を最小化中のまま実行した", action.label())
+            log!(level, "{} を最小化中のまま実行した", action.label())
         }
-        Some((action, PressRouting::Debounced)) => trace!(
+        Some((action, PressRouting::Debounced)) => log!(
+            level,
             "デバウンスにより {} の押下を捨てた（{}ms 以内）",
             action.label(),
             HOTKEY_DEBOUNCE.as_millis()
         ),
         Some((action, PressRouting::Unfocused)) => {
-            trace!("フォーカスが無いので {} の押下を捨てた", action.label())
+            log!(
+                level,
+                "フォーカスが無いので {} の押下を捨てた",
+                action.label()
+            )
         }
         Some((action, PressRouting::Typing)) => {
-            trace!("テキスト入力中なので {} の押下を捨てた", action.label())
+            log!(
+                level,
+                "テキスト入力中なので {} の押下を捨てた",
+                action.label()
+            )
         }
         Some((action, PressRouting::DiscardedWhileMinimized)) => {
-            debug!(
+            // フックの方式でも debug で出す（trace より上）
+            log!(
+                level.min(Level::Debug),
                 "最小化中なので {} の押下を捨てた（復帰しても実行しない）",
                 action.label()
             )
+        }
+        // 割り当てていないキー（他のアプリへ打っている文字）は、フックの方式では
+        // 何も出さない。全てのキー入力がここを通るので、trace でも積もりすぎる。
+        // キーを奪う方式で照合の表に無いのは、登録を外す前に届いた押下だけ
+        None if source == PressSource::SystemHotkey => {
+            log!(level, "照合の表に無い WM_HOTKEY の押下を捨てた")
         }
         None => {}
     }
@@ -677,5 +715,40 @@ mod tests {
             state.record_press(HotkeyAction::Screenshot, now),
             PressRouting::Deferred
         );
+    }
+
+    // ---- ログのレベル ----
+
+    #[test]
+    fn press_log_level_keeps_hook_presses_out_of_the_default_log() {
+        // フックの押下は既定のレベル（info）のログに出さない。他のアプリで
+        // 打つたびに通るため
+        assert!(press_log_level(PressSource::Hook) > Level::Info);
+    }
+
+    #[test]
+    fn press_log_level_puts_wm_hotkey_in_the_default_log() {
+        // キーを奪う方式の押下は既定のレベルで残す。使う人のログから
+        // 「届いたか」「何の理由で捨てたか」を読めるように（#207）
+        assert_eq!(press_log_level(PressSource::SystemHotkey), Level::Info);
+    }
+
+    #[test]
+    fn handle_key_down_from_wm_hotkey_records_like_the_hook() {
+        // 方式でログのレベルが変わるだけで、照合と記録は同じ
+        for source in [PressSource::Hook, PressSource::SystemHotkey] {
+            let state = Mutex::new(ListenerState {
+                registered: registered_chords(),
+                ..Default::default()
+            });
+
+            handle_key_down(&state, F5, source);
+
+            assert_eq!(
+                state.lock().expect("ロックが毒されていないこと").pressed,
+                BTreeMap::from([(HotkeyAction::Screenshot, 1)]),
+                "{source:?}"
+            );
+        }
     }
 }

@@ -12,10 +12,10 @@
 //! UI スレッドからの要求（`SyncRequest`）としてリスナーへ渡し、リスナーが
 //! 自分のスレッドで行う。
 
-use super::listener::{handle_key_down, ListenerState};
+use super::listener::{handle_key_down, ListenerState, PressSource};
 use crate::keyboard_hook::{self, KeyChord, KeyboardHook, KeyboardHookError, ListenerMessage};
 use crate::system_hotkey::SystemHotkey;
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
@@ -336,15 +336,21 @@ fn run_listener(
 
         let registered = &*registrations;
         let pumped = keyboard_hook::pump_messages(LISTENER_WAIT_TIMEOUT, |message| match message {
-            ListenerMessage::KeyDown(chord) => handle_key_down(state, chord),
+            ListenerMessage::KeyDown(chord) => handle_key_down(state, chord, PressSource::Hook),
             // 照合から先はフックの方式と同じ経路を通す。フォーカスや入力中の
             // 判定、デバウンス、最小化中の扱いが方式で変わらないように。
-            // 外したあとに届いた WM_HOTKEY は捨てる
-            ListenerMessage::Hotkey(id) => {
-                if let Some(chord) = registered.chord_for(id) {
-                    handle_key_down(state, chord);
+            // 外したあとに届いた WM_HOTKEY は捨てる。
+            //
+            // 受け取ったことは info で残す（#207 の切り分け用）。この方式では
+            // フックを外してあるので、ここでファイルへ書いても他のアプリの
+            // 入力は待たされない
+            ListenerMessage::Hotkey(id) => match registered.chord_for(id) {
+                Some(chord) => {
+                    info!("WM_HOTKEY を受け取った（id={}）", id);
+                    handle_key_down(state, chord, PressSource::SystemHotkey);
                 }
-            }
+                None => info!("登録を外した番号の WM_HOTKEY を捨てた（id={}）", id),
+            },
         });
 
         if !pumped {
