@@ -1,13 +1,16 @@
 //! 録画のテストの補助（`#[cfg(test)]` のときだけ組み込む）。
 //!
-//! `#[ignore]` のテストが使う、フェイクの映像と音声を流して `Session` で録画する
-//! 部分と、書いた MP4 を読み戻す部分。
+//! `#[ignore]` のテストが使う、フェイクの映像と音声を流して `Session` や窓口（`Recorder`）で
+//! 録画する部分と、書いた MP4 を読み戻す部分。
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use super::recorder::{RecordingEvent, RecordingRequest, RecordingTelemetry};
+use super::recorder::{
+    Recorder, RecordingEvent, RecordingRequest, RecordingSummary, RecordingTelemetry,
+};
+use super::replay_config::ReplayConfig;
 use super::session::Session;
 use super::RecordingError;
 use crate::audio::AudioTap;
@@ -58,7 +61,6 @@ pub(super) fn record_until_size_changes(audio_device: bool) -> (i64, i64) {
     use crate::com::{ComApartment, ComModel, MfPlatform};
     use crate::repaint::RepaintWaker;
     use crate::video::{FakeVideoCapture, FakeVideoOptions, SharedColorConversion, VideoFrames};
-    use std::time::Duration;
 
     let _com = ComApartment::enter(ComModel::MultiThreaded).expect("COM を初期化できる");
     let _mf = MfPlatform::start().expect("MF を起こせる");
@@ -184,7 +186,6 @@ pub(super) fn record_from_video_pin(
         directshow_display_name, DirectShowCapture, SharedColorConversion, VideoFrames,
     };
     use std::sync::mpsc;
-    use std::time::Duration;
 
     let frames = VideoFrames::new();
     let audio_tap = AudioTap::new();
@@ -351,4 +352,210 @@ pub(super) fn record_from_video_pin(
         fps_with_pin,
         counters,
     }
+}
+
+// ---- 窓口（`Recorder`）にフェイクを流すテストの補助 ----
+
+/// フェイクの映像（720p60 のカラーバーにフレーム番号を焼き込んだもの）と音声（正弦波）を流す。
+pub(super) fn start_fakes(
+    frames: &crate::video::VideoFrames,
+    audio_tap: &AudioTap,
+) -> (
+    crate::video::FakeVideoCapture,
+    crate::audio::FakeAudioCapture,
+) {
+    use crate::audio::{AudioControls, FakeAudioCapture, FakeAudioOptions, PassthroughRequest};
+    use crate::repaint::RepaintWaker;
+    use crate::video::{FakeVideoCapture, FakeVideoOptions, SharedColorConversion};
+    let mut video = FakeVideoCapture::new(
+        frames.clone(),
+        Arc::new(SharedColorConversion::new()),
+        RepaintWaker::new(),
+        FakeVideoOptions {
+            device_count: 1,
+            disconnect_after: None,
+            failures_before_success: 0,
+        },
+    );
+    video
+        .start_capture(
+            Some("Fake Camera 1"),
+            Some((1280, 720)),
+            Some("YUY2"),
+            Some(60),
+        )
+        .expect("フェイクの映像を開ける");
+    let mut audio = FakeAudioCapture::new(
+        Arc::new(AudioControls::default()),
+        audio_tap.clone(),
+        FakeAudioOptions {
+            input_count: 1,
+            failures_before_success: 0,
+            stream_error_after: None,
+        },
+    );
+    audio
+        .start_passthrough(&PassthroughRequest {
+            input: crate::audio::PassthroughInput::Device(Some("Fake Audio Input 1")),
+            output_device_name: Some("Fake Audio Output 1"),
+            sample_rate: None,
+            channels: None,
+            input_capabilities: None,
+            output_capabilities: None,
+            buffer_ms: 50,
+        })
+        .expect("フェイクの音声を開ける");
+    (video, audio)
+}
+
+/// 届いたイベントを集めながら `duration` だけ待つ。
+pub(super) fn poll_for(recorder: &mut Recorder, duration: Duration) -> Vec<RecordingEvent> {
+    let until = Instant::now() + duration;
+    let mut events = Vec::new();
+    while Instant::now() < until {
+        events.extend(std::iter::from_fn(|| recorder.try_recv()));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    events
+}
+
+/// テストで使うリプレイバッファの設定（ソフトウェアのエンコーダ、4000kbps、音声 160kbps）。
+pub(super) fn replay_config(seconds: u32) -> ReplayConfig {
+    ReplayConfig {
+        seconds,
+        video_bitrate_kbps: 4000,
+        hardware_encoder: false,
+        audio_bitrate_kbps: Some(160),
+        nominal_fps: Some(60),
+        audio_offset_ms: 0,
+    }
+}
+
+/// テストで使う録画の要求。設定は `replay_config` と揃える。
+pub(super) fn recording_request(folder: &Path, file_stem: &str) -> RecordingRequest {
+    RecordingRequest {
+        folder: folder.to_path_buf(),
+        file_stem: file_stem.to_string(),
+        video_bitrate_kbps: 4000,
+        hardware_encoder: false,
+        nominal_fps: Some(60),
+        audio_bitrate_kbps: Some(160),
+        audio_offset_ms: 0,
+    }
+}
+
+/// 書いた MP4 を読み戻した結果。
+pub(super) struct Mp4Info {
+    /// 長さ（`MF_PD_DURATION`、100ns）
+    pub(super) duration: i64,
+    /// 先頭の映像のサンプルの時刻（100ns）
+    pub(super) first_video_time: i64,
+    /// 音声トラックがあるか
+    pub(super) has_audio: bool,
+}
+
+/// 書いた MP4 を Source Reader で読み戻す。COM（MTA）と MF はここで起こす。
+pub(super) fn read_mp4(path: &Path) -> Mp4Info {
+    use crate::com::{ComApartment, ComModel, MfPlatform};
+    use windows::core::HSTRING;
+    use windows::Win32::Media::MediaFoundation::{
+        MFCreateSourceReaderFromURL, MF_PD_DURATION, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+        MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
+    };
+
+    let _com = ComApartment::enter(ComModel::MultiThreaded).expect("COM を初期化できる");
+    let _mf = MfPlatform::start().expect("MF を起こせる");
+    let reader = unsafe { MFCreateSourceReaderFromURL(&HSTRING::from(path), None) }
+        .expect("書いた MP4 を開ける");
+    let value = unsafe {
+        reader.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
+    }
+    .expect("長さを読める");
+    let duration = unsafe { value.Anonymous.Anonymous.Anonymous.uhVal } as i64;
+    let has_audio =
+        unsafe { reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32, 0) }
+            .is_ok();
+    let (mut flags, mut time, mut sample) = (0u32, -1i64, None);
+    unsafe {
+        reader.ReadSample(
+            MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+            0,
+            None,
+            Some(&mut flags),
+            Some(&mut time),
+            Some(&mut sample),
+        )
+    }
+    .expect("読める");
+    assert!(sample.is_some(), "映像のサンプルがある");
+    Mp4Info {
+        duration,
+        first_video_time: time,
+        has_audio,
+    }
+}
+
+/// フェイクを流してリプレイバッファを `seconds` 秒で ON にし（`None` なら OFF のまま）、
+/// `wait` 待ってから `record` だけ録画して止める。保存した結果と、読み戻した長さ（100ns）を返す。
+pub(super) fn record_with_replay(
+    seconds: Option<u32>,
+    wait: Duration,
+    record: Duration,
+) -> (RecordingSummary, i64) {
+    let frames = crate::video::VideoFrames::new();
+    let audio_tap = AudioTap::new();
+    let (mut video, mut audio) = start_fakes(&frames, &audio_tap);
+    let dir = tempfile::tempdir().expect("一時ディレクトリを作れること");
+    let mut recorder = Recorder::new(frames.tap(), audio_tap);
+    recorder
+        .set_replay(seconds.map(replay_config))
+        .expect("リプレイバッファを始められる");
+    // OFF のままならスレッドは起きない（OFF のときの負荷は①②と同じ）
+    assert_eq!(recorder.has_thread(), seconds.is_some());
+    let events = poll_for(&mut recorder, wait);
+    assert!(
+        events
+            .iter()
+            .all(|e| !matches!(e, RecordingEvent::ReplayFailed(_))),
+        "{events:?}"
+    );
+
+    recorder
+        .start(recording_request(dir.path(), "replay"))
+        .expect("録画を始められる");
+    poll_for(&mut recorder, record);
+    let lead = recorder.replay_lead();
+    assert_eq!(lead.is_some(), seconds.is_some());
+    recorder.request_stop();
+    let events = poll_for(&mut recorder, Duration::from_secs(3));
+    let summary = events
+        .iter()
+        .find_map(|event| match event {
+            RecordingEvent::Stopped(summary) => Some(summary.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("保存できた: {events:?}"));
+    // 統計 OSD の値は ms で丸めてある
+    assert_eq!(
+        summary.replay_lead.map(|lead| lead.as_millis()),
+        lead.map(|lead| lead.as_millis())
+    );
+    // リプレイバッファが ON のままなら、止めてもスレッドは動き続ける。OFF なら止まる
+    poll_for(&mut recorder, Duration::from_millis(200));
+    assert_eq!(recorder.has_thread(), seconds.is_some());
+    recorder.shutdown();
+    video.stop_capture();
+    audio.stop_capture();
+
+    let mp4 = read_mp4(&summary.path);
+    assert!(mp4.has_audio);
+    // リングからの書き出しは先頭のキーフレームを 0 にする。①②の経路は録画の開始から
+    // 最初のフレームが届くまでの分（1 枚ぶん程度）だけ後ろから始まる
+    let limit = if seconds.is_some() { 10_000 } else { 1_000_000 };
+    assert!(
+        mp4.first_video_time.abs() < limit,
+        "先頭の時刻 {}",
+        mp4.first_video_time
+    );
+    (summary, mp4.duration)
 }
