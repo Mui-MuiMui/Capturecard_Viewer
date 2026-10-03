@@ -404,9 +404,12 @@ fn preset_submenu(
 /// **「プリセット」だけは折りたたみの有無に関わらずサブメニューのまま
 /// 出す。** プリセットは固定の切り替えではなく可変長の一覧なので、平らな
 /// 一覧に展開すると項目数がプリセットの数だけ増減し、高さの見積もり
-/// （`estimate_flat_menu_height` は固定の行数を前提にしている）と
-/// 食い違う。そのため `menu_rects` を受け取る（`preset_submenu` が開く
-/// サブメニューの矩形を外側クリックの判定に含めるため）。
+/// （`estimate_flat_menu_height`）が読めなくなる。そのため `menu_rects` を
+/// 受け取る（`preset_submenu` が開くサブメニューの矩形を外側クリックの判定に
+/// 含めるため）。
+///
+/// **並びは `FLAT_MENU` の表が持つ。** 高さの見積もりも同じ表から行数を数える
+/// ので、項目を足すときは表へ足すだけでよい（#448）。
 pub(super) fn menu_items_flat(
     ui: &mut egui::Ui,
     view: &MenuView,
@@ -414,38 +417,93 @@ pub(super) fn menu_items_flat(
     menu_rects: &mut Vec<egui::Rect>,
     actions: &mut Vec<MenuAction>,
 ) {
-    volume_items(ui, view, actions);
-
-    ui.separator();
-
-    recording_item(ui, view, actions);
-    save_replay_item(ui, view, actions);
-
-    ui.separator();
-
-    aspect_ratio_item(ui, view, actions);
-    always_on_top_item(ui, view, actions);
-    fullscreen_item(ui, view, actions);
-    borderless_item(ui, view, actions);
-    drag_move_item(ui, view, actions);
-    stats_overlay_item(ui, view, actions);
-    auto_reconnect_item(ui, view, actions);
-
-    ui.separator();
-
-    reset_window_size_item(ui, view, actions);
-    reconnect_item(ui, actions);
-
-    // プリセットは映像と音声の取り込み方の切替なので、
-    // 「デバイス再接続」のすぐそばに置く（collapsed 側と同じ理由）
-    preset_submenu(ui, view, width, menu_rects, actions);
-
-    ui.separator();
-    settings_item(ui, actions);
-
-    ui.separator();
-    quit_item(ui, actions);
+    for entry in FLAT_MENU {
+        match entry {
+            FlatEntry::Volume => volume_items(ui, view, actions),
+            FlatEntry::Recording => recording_item(ui, view, actions),
+            FlatEntry::SaveReplay => save_replay_item(ui, view, actions),
+            FlatEntry::AspectRatio => aspect_ratio_item(ui, view, actions),
+            FlatEntry::AlwaysOnTop => always_on_top_item(ui, view, actions),
+            FlatEntry::Fullscreen => fullscreen_item(ui, view, actions),
+            FlatEntry::Borderless => borderless_item(ui, view, actions),
+            FlatEntry::DragMove => drag_move_item(ui, view, actions),
+            FlatEntry::StatsOverlay => stats_overlay_item(ui, view, actions),
+            FlatEntry::AutoReconnect => auto_reconnect_item(ui, view, actions),
+            FlatEntry::ResetWindowSize => {
+                reset_window_size_item(ui, view, actions);
+            }
+            FlatEntry::Reconnect => reconnect_item(ui, actions),
+            FlatEntry::Presets => preset_submenu(ui, view, width, menu_rects, actions),
+            FlatEntry::Settings => settings_item(ui, actions),
+            FlatEntry::Quit => quit_item(ui, actions),
+            FlatEntry::Separator => {
+                ui.separator();
+            }
+        }
+    }
 }
+
+/// 平らな一覧の 1 項目（またはセパレータ）。`FLAT_MENU` の並びで描く。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FlatEntry {
+    /// 音量ラベル・音量スライダー・ミュートの 3 行（`volume_items`）
+    Volume,
+    Recording,
+    SaveReplay,
+    AspectRatio,
+    AlwaysOnTop,
+    Fullscreen,
+    Borderless,
+    DragMove,
+    StatsOverlay,
+    AutoReconnect,
+    ResetWindowSize,
+    Reconnect,
+    /// 「プリセット」のサブメニューを開く行。プリセットが無ければ出ない
+    Presets,
+    Settings,
+    Quit,
+    Separator,
+}
+
+impl FlatEntry {
+    /// この項目が描く行の数。セパレータは 0 行（高さは別に数える）
+    pub(super) fn rows(self, has_presets: bool) -> usize {
+        match self {
+            FlatEntry::Volume => 3,
+            FlatEntry::Presets => usize::from(has_presets),
+            FlatEntry::Separator => 0,
+            _ => 1,
+        }
+    }
+}
+
+/// 平らな一覧の並び。**項目順は PR #146 より前と同じ。**
+///
+/// プリセットは映像と音声の取り込み方の切替なので、「デバイス再接続」の
+/// すぐそばに置く（collapsed 側と同じ理由）。
+pub(super) const FLAT_MENU: &[FlatEntry] = &[
+    FlatEntry::Volume,
+    FlatEntry::Separator,
+    FlatEntry::Recording,
+    FlatEntry::SaveReplay,
+    FlatEntry::Separator,
+    FlatEntry::AspectRatio,
+    FlatEntry::AlwaysOnTop,
+    FlatEntry::Fullscreen,
+    FlatEntry::Borderless,
+    FlatEntry::DragMove,
+    FlatEntry::StatsOverlay,
+    FlatEntry::AutoReconnect,
+    FlatEntry::Separator,
+    FlatEntry::ResetWindowSize,
+    FlatEntry::Reconnect,
+    FlatEntry::Presets,
+    FlatEntry::Separator,
+    FlatEntry::Settings,
+    FlatEntry::Separator,
+    FlatEntry::Quit,
+];
 
 /// 右クリックメニューの項目を、サブメニューへ折りたたんで描く。
 ///

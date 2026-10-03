@@ -124,6 +124,9 @@ pub struct CaptureCardViewer {
     // メニューを開いた瞬間に決めて、開いている間は変えない（詳細は
     // `open_context_menu` のコメント）
     context_menu_layout: MenuLayout,
+    // 右クリックメニューを開いた直後か。立っていれば次の描画で大きさを測り直す
+    // （`menu::draw_context_menu` の sizing_pass、#448）
+    context_menu_needs_sizing: bool,
     is_fullscreen: bool,
     maintain_aspect_ratio: bool,
     // 映像に統計を重ねて表示するか。設定の ui.show_stats_overlay と対応する
@@ -292,6 +295,7 @@ impl Default for CaptureCardViewer {
             // メニューが閉じている間は使われない。開くときに必ず
             // open_context_menu が上書きする
             context_menu_layout: MenuLayout::Collapsed,
+            context_menu_needs_sizing: false,
             is_fullscreen: false,
             maintain_aspect_ratio: true,
             show_stats_overlay,
