@@ -15,6 +15,7 @@
 //! （`docs/design/hotkeys.md` の「キーを奪う方式」）。
 
 use crate::keyboard_hook::{KeyChord, Modifiers};
+use log::{debug, info};
 
 // `RegisterHotKey` の修飾キーの値。判定を純粋関数にしてテストから呼べるよう、
 // ここに持つ（windows クレートの型は Windows のときだけ使える）
@@ -45,6 +46,20 @@ fn register_modifiers(modifiers: Modifiers) -> u32 {
     flags
 }
 
+/// ログに出す登録の中身。`RegisterHotKey` へ実際に渡した値をそのまま並べる。
+///
+/// 管理者として実行しているアプリ越しに効かないという報告（#207）を
+/// ログから切り分けるため、修飾キーは `MOD_*` を合わせた値、キーは仮想キー
+/// コードで出す。`WM_HOTKEY` の受信のログにも同じ番号（`id`）が出る。
+fn describe_registration(id: i32, chord: KeyChord) -> String {
+    format!(
+        "id={} 修飾キー=0x{:04X} 仮想キー=0x{:02X}",
+        id,
+        register_modifiers(chord.modifiers),
+        chord.vk
+    )
+}
+
 /// 登録中のホットキー 1 つ。落とすと登録を外す。
 ///
 /// **登録したスレッドで落とすこと。** 中身は番号だけなので型の上では
@@ -57,9 +72,26 @@ pub(crate) struct SystemHotkey {
 impl SystemHotkey {
     /// 呼んだスレッドに `chord` を登録する。`id` はスレッドの中で重ならない
     /// 番号（0x0000〜0xBFFF）。失敗したときは OS のエラー文を返す。
+    ///
+    /// 登録できたら渡した値を info でログに出す（#207 の切り分け用）。
+    /// できなかったときは debug に留める。登録できないキーは 2 秒ごとに
+    /// 試し直すので、info では積もる。理由は呼び出し側が
+    /// `HotkeyError::RegisterFailed` として、変わったときだけ error で出す
     pub(crate) fn register(id: i32, chord: KeyChord) -> Result<Self, String> {
-        imp::register(id, register_modifiers(chord.modifiers), chord.vk)?;
-        Ok(Self { id })
+        let description = describe_registration(id, chord);
+        match imp::register(id, register_modifiers(chord.modifiers), chord.vk) {
+            Ok(()) => {
+                info!("RegisterHotKey で登録した（{}）", description);
+                Ok(Self { id })
+            }
+            Err(e) => {
+                debug!(
+                    "RegisterHotKey で登録できなかった（{}）: {}",
+                    description, e
+                );
+                Err(e)
+            }
+        }
     }
 
     /// 登録の番号。`WM_HOTKEY` の `WPARAM` と同じ値。
@@ -71,6 +103,7 @@ impl SystemHotkey {
 impl Drop for SystemHotkey {
     fn drop(&mut self) {
         imp::unregister(self.id);
+        info!("UnregisterHotKey で外した（id={}）", self.id);
     }
 }
 
@@ -123,6 +156,29 @@ mod tests {
                 Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT | Modifiers::SUPER
             ),
             MOD_NOREPEAT | MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN
+        );
+    }
+
+    #[test]
+    fn describe_registration_shows_the_values_passed_to_register_hotkey() {
+        // 修飾キーなしの F5。MOD_NOREPEAT（0x4000）だけが付く
+        let f5 = KeyChord {
+            modifiers: Modifiers::empty(),
+            vk: 0x74,
+        };
+        assert_eq!(
+            describe_registration(1, f5),
+            "id=1 修飾キー=0x4000 仮想キー=0x74"
+        );
+
+        // Ctrl+Shift+S。MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT
+        let ctrl_shift_s = KeyChord {
+            modifiers: Modifiers::CONTROL | Modifiers::SHIFT,
+            vk: 0x53,
+        };
+        assert_eq!(
+            describe_registration(12, ctrl_shift_s),
+            "id=12 修飾キー=0x4006 仮想キー=0x53"
         );
     }
 }
