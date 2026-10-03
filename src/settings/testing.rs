@@ -53,10 +53,6 @@ borderless = true
 [hotkeys]
 screenshot = "Ctrl+S"
 toggle_fullscreen = "F11"
-
-[hotkey_settings]
-only_when_focused = true
-use_register_hotkey = true
 "#;
 
 // ホットキーをアクション別にする前の版が書いた設定ファイル。

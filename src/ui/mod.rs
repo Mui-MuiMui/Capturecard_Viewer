@@ -594,7 +594,6 @@ mod tests {
             // 既定値（false）と異なる値にして、反映の有無を見分けられるようにする
             hotkey_settings: HotkeySettings {
                 only_when_focused: true,
-                use_register_hotkey: true,
             },
             // 既定値（確認する・知らせる・飛ばさない）と全て異なる値にする
             update: UpdateSettings {

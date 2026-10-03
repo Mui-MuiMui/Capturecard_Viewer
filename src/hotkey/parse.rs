@@ -27,9 +27,6 @@ pub enum HotkeyError {
     DuplicateAssignment { other: HotkeyAction },
     /// 押下を観測するキーボードフックを使えない
     HookUnavailable(KeyboardHookError),
-    /// キーを奪う方式で `RegisterHotKey` が失敗した。OS のエラー文を持つ。
-    /// 他のアプリが同じキーを登録済みのときなど（#207）
-    RegisterFailed(String),
 }
 
 impl fmt::Display for HotkeyError {
@@ -42,7 +39,6 @@ impl fmt::Display for HotkeyError {
                 i18n::hotkey_duplicate_assignment(other.label())
             }
             HotkeyError::HookUnavailable(source) => i18n::hotkey_hook_unavailable(source),
-            HotkeyError::RegisterFailed(source) => i18n::hotkey_register_failed(source),
         };
         f.write_str(&text)
     }
@@ -370,7 +366,6 @@ mod tests {
                 other: HotkeyAction::Screenshot,
             },
             HotkeyError::HookUnavailable(KeyboardHookError::Unsupported),
-            HotkeyError::RegisterFailed("failed".to_string()),
         ];
 
         for error in all {

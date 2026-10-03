@@ -1,6 +1,5 @@
 use super::action::folded_repeats;
 use super::egui_keys::{chord_from_egui_event, remove_hotkey_key_events};
-use super::listener_thread::HotkeyMethod;
 use super::parse::parse_hotkey;
 use super::{HotkeyAction, HotkeyError, HotkeyManager};
 use crate::keyboard_hook::KeyChord;
@@ -63,10 +62,6 @@ impl HotkeyManager {
             }
             self.register(*action, hotkey);
         }
-
-        // キーを奪う方式なら、表へ載せたものを RegisterHotKey でも登録する。
-        // 登録できなかったものはここで表から外し、失敗として記録する
-        self.sync_system_hotkeys();
     }
 
     /// 保留している押下を取り出す。
@@ -161,9 +156,6 @@ impl HotkeyManager {
         for action in actions {
             self.unregister(action);
         }
-        // キーを奪う方式では RegisterHotKey の登録も外す。残すと押したキーが
-        // ダイアログへ届かない
-        self.sync_system_hotkeys();
         info!("ホットキー入力ダイアログのためホットキーを一時解除した");
     }
 
@@ -183,20 +175,18 @@ impl HotkeyManager {
     /// 候補のホットキーを登録できるか確かめる。
     ///
     /// ホットキー入力ダイアログでキーが確定したときに使う。見るのは
-    /// 「解釈できるか」と「いまの方式で押下を受け取れるか」で、照合の表には
-    /// 何も載せない。実際に使い続けるための登録は、この呼び出しのあとに行う
-    /// `resume` が行う。
+    /// 「解釈できるか」と「キーボードフックを使えているか」の 2 つだけで、
+    /// ここでは何も登録しない。実際に使い続けるための登録は、この呼び出しの
+    /// あとに行う `resume` が行う。
     ///
-    /// **フックの方式では他のアプリとの競合は起きない。** キーを奪わずに
-    /// 観測するだけなので、他のアプリが同じキーを使っていても両方が反応する
-    /// （#202）。キーを奪う方式では、他のアプリが登録済みだと失敗するので、
-    /// `RegisterHotKey` で試しに登録して外す（`probe_system_hotkey`、#207）。
+    /// **他のアプリとの競合は起きない。** キーを奪わずに観測するだけなので、
+    /// 他のアプリが同じキーを使っていても両方が反応する（#202）。
     pub fn try_register(&self, hotkey_str: &str) -> Result<(), HotkeyError> {
-        let chord = parse_hotkey(hotkey_str)?;
-        if let Some(e) = &self.hook_error {
-            return Err(HotkeyError::HookUnavailable(e.clone()));
+        parse_hotkey(hotkey_str)?;
+        match &self.hook_error {
+            Some(e) => Err(HotkeyError::HookUnavailable(e.clone())),
+            None => Ok(()),
         }
-        self.probe_system_hotkey(chord)
     }
 
     /// 1 つのアクションにホットキーを登録する。失敗は `errors` に記録する。
@@ -240,14 +230,8 @@ impl HotkeyManager {
 
         self.registered
             .insert(action, (hotkey_str.to_string(), hotkey));
-        self.system_dirty = true;
-        // キーを奪う方式では、まだ登録できるか分からない。ログは登録できたときに
-        // `sync_system_hotkeys` が出す（登録できないキーは 2 秒ごとにここを通るので、
-        // ここで出すと積もる）
-        if self.method == HotkeyMethod::Hook {
-            self.errors.remove(&action);
-            info!("{} に {} を割り当てた", action.label(), hotkey_str);
-        }
+        self.errors.remove(&action);
+        info!("{} に {} を割り当てた", action.label(), hotkey_str);
     }
 
     /// 1 つのアクションの登録を解除する。登録していなければ何もしない。
@@ -255,8 +239,6 @@ impl HotkeyManager {
         let Some((hotkey_str, hotkey)) = self.registered.remove(&action) else {
             return;
         };
-        // RegisterHotKey の登録を外すのは、続く `sync_system_hotkeys` がまとめて行う
-        self.system_dirty = true;
 
         // 照合に使う組み合わせを消す。**同じロックの中で保留中の押下も落とす。**
         // 別々のロックで行うと、クリアした直後のフレームで 1 回だけ実行される
@@ -301,7 +283,7 @@ impl HotkeyManager {
     }
 
     /// その組み合わせを既に使っているアクション。
-    pub(super) fn action_for_chord(&self, chord: KeyChord) -> Option<HotkeyAction> {
+    fn action_for_chord(&self, chord: KeyChord) -> Option<HotkeyAction> {
         self.registered
             .iter()
             .find(|(_, (_, hotkey))| *hotkey == chord)
@@ -312,7 +294,7 @@ impl HotkeyManager {
     ///
     /// 登録に失敗したアクションは 2 秒ごとの再適用で試し直すため、毎回
     /// ログへ書くと同じ行が延々と積もる。
-    pub(super) fn record_error(&mut self, action: HotkeyAction, hotkey: &str, reason: HotkeyError) {
+    fn record_error(&mut self, action: HotkeyAction, hotkey: &str, reason: HotkeyError) {
         let error = HotkeyAssignmentError {
             hotkey: hotkey.to_string(),
             reason,
