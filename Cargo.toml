@@ -95,8 +95,6 @@ windows = { version = "0.62", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Ole",
     "Win32_System_Variant",
-    # キーを奪う方式のホットキー（RegisterHotKey、src/system_hotkey.rs、#207）
-    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 # winit のメッセージループにフックを差し込む（`EventLoopBuilderExtWindows::with_msg_hook`、
 # src/platform.rs の redirect_misdirected_close、#420）。eframe が同じ版を既に使っているので、

@@ -72,15 +72,8 @@ pub struct HotkeySettings {
     //
     // 既定はオフ。他のアプリを操作している間も、最小化している間も
     // 反応する（#133）。オンにすると、他のアプリで同じキーを使っていても
-    // こちらは動かない（#202）。フックの方式ならキーは奪わず、他のアプリにも届く
+    // こちらは動かない（#202）。どちらの場合もキーは奪わず、他のアプリにも届く
     pub only_when_focused: bool,
-    // キーを奪う方式（RegisterHotKey）で押下を受け取るか（#207）。
-    //
-    // 既定はオフ（低レベルキーボードフックでキーを奪わない）。オンにすると、
-    // 管理者として実行しているアプリが前面にあっても効く。その代わり割り当てた
-    // キーは他のアプリに届かず、他のアプリが同じキーを登録済みなら登録できない
-    // （`docs/design/hotkeys.md` の「キーを奪う方式」）
-    pub use_register_hotkey: bool,
 }
 
 impl AppSettings {
@@ -196,54 +189,18 @@ mod tests {
             toml::from_str(LEGACY_CONFIG).expect("旧版の設定を読めなければならない");
 
         assert!(!settings.hotkey_settings.only_when_focused);
-        // キーを奪う方式もオフ（キーを奪わないフックのまま）
-        assert!(!settings.hotkey_settings.use_register_hotkey);
-    }
-
-    #[test]
-    fn full_config_reads_hotkey_settings() {
-        let settings: AppSettings =
-            toml::from_str(FULL_CONFIG).expect("テスト用の設定を読めること");
-
-        assert!(settings.hotkey_settings.only_when_focused);
-        assert!(settings.hotkey_settings.use_register_hotkey);
-    }
-
-    #[test]
-    fn missing_use_register_hotkey_keeps_the_hook() {
-        // この項目より前の版が書いた設定ファイル。同じセクションの他の項目は残る
-        let config = without_key(FULL_CONFIG, "use_register_hotkey");
-
-        let settings: AppSettings = toml::from_str(&config).expect("項目が欠けていても読めること");
-
-        assert!(!settings.hotkey_settings.use_register_hotkey);
-        assert!(settings.hotkey_settings.only_when_focused);
-    }
-
-    #[test]
-    fn full_config_hotkey_settings_survive_a_roundtrip() {
-        let original: AppSettings =
-            toml::from_str(FULL_CONFIG).expect("テスト用の設定を読めること");
-
-        let serialized = toml::to_string(&original).expect("設定を書き出せなければならない");
-        let restored: AppSettings =
-            toml::from_str(&serialized).expect("書き出した設定を読み直せなければならない");
-
-        assert_eq!(restored.hotkey_settings, original.hotkey_settings);
     }
 
     #[test]
     fn hotkey_settings_survive_a_save_and_load_roundtrip() {
         let mut original = AppSettings::default();
         original.hotkey_settings.only_when_focused = true;
-        original.hotkey_settings.use_register_hotkey = true;
 
         let serialized = toml::to_string(&original).expect("設定を書き出せなければならない");
         let restored: AppSettings =
             toml::from_str(&serialized).expect("書き出した設定を読み直せなければならない");
 
         assert!(restored.hotkey_settings.only_when_focused);
-        assert!(restored.hotkey_settings.use_register_hotkey);
         // [hotkeys] は値が文字列である前提で読んでいる。真偽値を混ぜると
         // 旧版では [hotkeys] ごと読めなくなるので、別のセクションに書く
         assert!(
@@ -262,12 +219,8 @@ mod tests {
 
         let serialized = toml::to_string(&settings).expect("設定を書き出せなければならない");
 
-        // 行頭で見る。`use_register_hotkey = false` のように名前の末尾が
-        // hotkey の項目まで拾わないように
         assert!(
-            !serialized
-                .lines()
-                .any(|line| line.trim_start().starts_with("hotkey =")),
+            !serialized.contains("hotkey = "),
             "screenshot.hotkey が書き戻されている: {}",
             serialized
         );

@@ -1,10 +1,20 @@
 use super::{BackgroundHotkeyRunner, HotkeyAction};
-use crate::keyboard_hook::{KeyChord, KeyboardHookError};
+use crate::keyboard_hook::{KeyChord, KeyboardHook, KeyboardHookError};
 use crate::repaint::RepaintWaker;
-use log::{debug, log, warn, Level};
+use log::{debug, error, trace, warn};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+/// リスナースレッドがキー入力を待つ時間。
+///
+/// タイムアウトするたびに終了要求を確認するため、終了を要求してから
+/// スレッドが実際に止まるまで最大でこの時間かかる。待つのはウィンドウを
+/// 閉じたあとなので、画面上は見えない。キー入力があればタイムアウトを
+/// 待たずに起きるので、押下の反応はこの長さに左右されない。
+const LISTENER_WAIT_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// 同じアクションの連続実行を無視する時間。
 /// キーリピートで何枚も撮れてしまうのを防ぐ。
@@ -212,35 +222,12 @@ fn decide_trigger(since_last_trigger: Option<Duration>, debounce: Duration) -> T
     }
 }
 
-/// 押下がどちらの方式から届いたか。判定は同じで、ログの出し方だけが変わる。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PressSource {
-    /// 低レベルキーボードフックが観測した押下
-    Hook,
-    /// `RegisterHotKey` の `WM_HOTKEY`（#207）
-    SystemHotkey,
-}
-
-/// 押下をどう扱ったかのログを出すレベル。
-///
-/// - フックの方式は trace。割り当てたキーでも、他のアプリで打つたびに通る
-/// - キーを奪う方式は info。`WM_HOTKEY` は登録したキーを押したときにしか
-///   届かないので積もらない。管理者として実行しているアプリ越しに効かない
-///   という報告（#207）を、使う人のログから切り分けるために残す
-fn press_log_level(source: PressSource) -> Level {
-    match source {
-        PressSource::Hook => Level::Trace,
-        PressSource::SystemHotkey => Level::Info,
-    }
-}
-
 /// 観測した押下 1 回ぶんを処理する。リスナースレッドから呼ばれる。
 ///
 /// **この間は次のキー入力のフックが待たされる**（他のアプリの入力も
 /// 待たされる）。ロックは照合と記録のあいだだけ握り、UI スレッドを起こす
 /// ことと最小化中の実行はロックを手放してから行う。
-pub(super) fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord, source: PressSource) {
-    let level = press_log_level(source);
+fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord) {
     // **照合と押下の記録を同じロックの中で行う。**
     // ロックを手放してから記録すると、その隙に解除処理が
     // 「組み合わせを消す → 押下を落とす」を終えてしまい、
@@ -284,49 +271,102 @@ pub(super) fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord, sou
         runner.run(action);
     }
 
+    // 割り当てていないキー（他のアプリへ打っている文字）は何も出さない。
+    // 全てのキー入力がここを通るので、trace でも積もりすぎる
     match outcome {
         Some((action, PressRouting::Deferred)) => {
-            log!(level, "{} の押下を記録した", action.label())
+            trace!("{} の押下を記録した", action.label())
         }
         Some((action, PressRouting::Background)) => {
-            log!(level, "{} を最小化中のまま実行した", action.label())
+            trace!("{} を最小化中のまま実行した", action.label())
         }
-        Some((action, PressRouting::Debounced)) => log!(
-            level,
+        Some((action, PressRouting::Debounced)) => trace!(
             "デバウンスにより {} の押下を捨てた（{}ms 以内）",
             action.label(),
             HOTKEY_DEBOUNCE.as_millis()
         ),
         Some((action, PressRouting::Unfocused)) => {
-            log!(
-                level,
-                "フォーカスが無いので {} の押下を捨てた",
-                action.label()
-            )
+            trace!("フォーカスが無いので {} の押下を捨てた", action.label())
         }
         Some((action, PressRouting::Typing)) => {
-            log!(
-                level,
-                "テキスト入力中なので {} の押下を捨てた",
-                action.label()
-            )
+            trace!("テキスト入力中なので {} の押下を捨てた", action.label())
         }
         Some((action, PressRouting::DiscardedWhileMinimized)) => {
-            // フックの方式でも debug で出す（trace より上）
-            log!(
-                level.min(Level::Debug),
+            debug!(
                 "最小化中なので {} の押下を捨てた（復帰しても実行しない）",
                 action.label()
             )
         }
-        // 割り当てていないキー（他のアプリへ打っている文字）は、フックの方式では
-        // 何も出さない。全てのキー入力がここを通るので、trace でも積もりすぎる。
-        // キーを奪う方式で照合の表に無いのは、登録を外す前に届いた押下だけ
-        None if source == PressSource::SystemHotkey => {
-            log!(level, "照合の表に無い WM_HOTKEY の押下を捨てた")
-        }
         None => {}
     }
+}
+
+/// キー入力を観測するスレッドを 1 本起動する。
+///
+/// 低レベルキーボードフックはこのスレッドに登録し、このスレッドの
+/// メッセージループの中で呼ばれる。**リスナーはアプリ全体で 1 本だけにする。**
+/// 何本も作ると 1 回のキー入力が全てのフックを順に通り、他のアプリの入力を
+/// そのぶん遅らせる。
+///
+/// フックを登録できたかどうかを待ってから返す。登録できなかったときは
+/// スレッドはすぐに終わり、理由を返す。
+pub(super) fn spawn_listener(
+    state: Arc<Mutex<ListenerState>>,
+    shutdown: Arc<AtomicBool>,
+) -> (JoinHandle<()>, Result<(), KeyboardHookError>) {
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let handle = std::thread::spawn(move || {
+        debug!("ホットキーのリスナースレッドを開始した");
+
+        let hook = match KeyboardHook::install() {
+            Ok(hook) => {
+                // 受け手（spawn_listener）は結果を受け取るまで待っているので、
+                // 送れないことはない
+                let _ = ready_tx.send(Ok(()));
+                hook
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+                debug!("キーボードフックを登録できないのでリスナースレッドを終える");
+                return;
+            }
+        };
+
+        while !shutdown.load(Ordering::Acquire) {
+            let pumped = hook.pump(LISTENER_WAIT_TIMEOUT, |chord| {
+                handle_key_down(&state, chord)
+            });
+            if !pumped {
+                // 待てないまま回り続けると CPU を使い切るので抜ける。
+                // 以降ホットキーは効かなくなるが、他のアプリの入力は妨げない
+                let source = std::io::Error::last_os_error().to_string();
+                error!(
+                    "ホットキーのリスナーがキー入力を待てないので終了する: {}",
+                    source
+                );
+                // UI スレッドの apply が拾い、HookUnavailable として画面に出す
+                match state.lock() {
+                    Ok(mut state) => {
+                        state.listener_failure = Some(KeyboardHookError::WaitFailed(source))
+                    }
+                    Err(_) => {
+                        warn!("ホットキーの共有状態のロックを取得できないので停止を伝えられない")
+                    }
+                }
+                break;
+            }
+        }
+
+        // ここでフックを外す
+        drop(hook);
+        debug!("ホットキーのリスナースレッドを終了した");
+    });
+
+    // スレッドが結果を送る前に終わった場合（起動直後のパニック）だけ受け取れない
+    let ready = ready_rx
+        .recv()
+        .unwrap_or(Err(KeyboardHookError::ListenerStopped));
+    (handle, ready)
 }
 
 #[cfg(test)]
@@ -436,6 +476,37 @@ mod tests {
             decide_trigger(Some(Duration::ZERO), Duration::from_millis(200)),
             TriggerDecision::Debounced
         );
+    }
+
+    #[test]
+    fn spawn_listener_stops_after_shutdown_request() {
+        // 終了要求を待ちのタイムアウトで拾えること。拾えないと
+        // join が返らず、アプリが終了できなくなる
+        let state = Arc::new(Mutex::new(ListenerState::default()));
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        // フックを登録できない環境でも、スレッドが終わることは確かめられる
+        let (handle, _ready) = spawn_listener(Arc::clone(&state), Arc::clone(&shutdown));
+
+        shutdown.store(true, Ordering::Release);
+
+        // 実時間の長さでは判定しない（負荷の高い環境で落ちるため）。join が
+        // 返ったことを別スレッドから知らせてもらい、返らなければ時間切れにする。
+        // 上限は遅い CI でも収まる 10 秒で、通常はタイムアウト 1 回ぶんで返る
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(handle.join());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("終了要求から 10 秒以内にリスナースレッドが終わること")
+            .expect("リスナースレッドが正常に終わること");
+        // 何も登録していないので押下は記録されない
+        assert!(state
+            .lock()
+            .expect("ロックが毒されていないこと")
+            .pressed
+            .is_empty());
     }
 
     // ---- 押下の記録（デバウンスと最小化中の振り分け） ----
@@ -715,40 +786,5 @@ mod tests {
             state.record_press(HotkeyAction::Screenshot, now),
             PressRouting::Deferred
         );
-    }
-
-    // ---- ログのレベル ----
-
-    #[test]
-    fn press_log_level_keeps_hook_presses_out_of_the_default_log() {
-        // フックの押下は既定のレベル（info）のログに出さない。他のアプリで
-        // 打つたびに通るため
-        assert!(press_log_level(PressSource::Hook) > Level::Info);
-    }
-
-    #[test]
-    fn press_log_level_puts_wm_hotkey_in_the_default_log() {
-        // キーを奪う方式の押下は既定のレベルで残す。使う人のログから
-        // 「届いたか」「何の理由で捨てたか」を読めるように（#207）
-        assert_eq!(press_log_level(PressSource::SystemHotkey), Level::Info);
-    }
-
-    #[test]
-    fn handle_key_down_from_wm_hotkey_records_like_the_hook() {
-        // 方式でログのレベルが変わるだけで、照合と記録は同じ
-        for source in [PressSource::Hook, PressSource::SystemHotkey] {
-            let state = Mutex::new(ListenerState {
-                registered: registered_chords(),
-                ..Default::default()
-            });
-
-            handle_key_down(&state, F5, source);
-
-            assert_eq!(
-                state.lock().expect("ロックが毒されていないこと").pressed,
-                BTreeMap::from([(HotkeyAction::Screenshot, 1)]),
-                "{source:?}"
-            );
-        }
     }
 }

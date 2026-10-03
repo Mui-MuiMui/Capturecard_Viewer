@@ -24,7 +24,6 @@ mod screenshot;
 mod screenshot_sound;
 mod settings;
 mod status;
-mod system_hotkey;
 mod ui;
 mod update;
 mod video;

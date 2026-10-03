@@ -9,13 +9,8 @@
 //! 呼ばれる。**ここが遅れると他のアプリの入力まで遅れる**ため、コールバックの
 //! 中ではロックもアロケーションもしない。行うのは「押下か」「修飾キーか」
 //! 「キーリピートか」の判定と、自分のスレッドへのメッセージの投函だけで、
-//! アクションとの照合はメッセージを受け取った側（`pump_messages` を
+//! アクションとの照合はメッセージを受け取った側（`KeyboardHook::pump` を
 //! 呼んだリスナー）が行う。
-//!
-//! リスナーのメッセージループ（`pump_messages`）もここに置く。フックの
-//! コールバックが投函した押下のほか、キーを奪う方式（`crate::system_hotkey`、
-//! #207）の `WM_HOTKEY` と、UI スレッドがリスナーを起こすためのメッセージも
-//! 同じループで受け取る。
 
 use std::fmt;
 use std::ops::{BitOr, BitOrAssign};
@@ -38,12 +33,6 @@ impl Modifiers {
 
     pub(crate) const fn empty() -> Self {
         Self(0)
-    }
-
-    /// `other` のビットを全て含むか。
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub(crate) const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
     }
 
     /// メッセージの `LPARAM` へ載せるための値。
@@ -163,60 +152,33 @@ fn modifiers_from_state(control: bool, alt: bool, shift: bool, win: bool) -> Mod
     modifiers
 }
 
-/// リスナーのメッセージループが受け取ったもの。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ListenerMessage {
-    /// 低レベルキーボードフックが観測した押下
-    KeyDown(KeyChord),
-    /// `RegisterHotKey` で登録したホットキーの押下（`WM_HOTKEY`）。値は登録の番号
-    #[cfg_attr(not(windows), allow(dead_code))]
-    Hotkey(i32),
-}
-
 /// 登録中の低レベルキーボードフック。
 ///
 /// **登録したスレッドでしか使えない。** フックのコールバックは登録した
-/// スレッドがメッセージを取り出すとき（`pump_messages`）に、そのスレッドの
-/// 上で呼ばれる。中身が生のハンドルなので `Send` ではなく、別のスレッドへは
-/// 渡せない。落とすとフックを外す。
+/// スレッドがメッセージを取り出すときに、そのスレッドの上で呼ばれる。
+/// 中身が生のハンドルなので `Send` ではなく、別のスレッドへは渡せない。
+/// 落とすとフックを外す。
 pub(crate) struct KeyboardHook {
-    _inner: imp::Hook,
+    inner: imp::Hook,
 }
 
 impl KeyboardHook {
     /// 呼んだスレッドにフックを登録する。
     pub(crate) fn install() -> Result<Self, KeyboardHookError> {
-        imp::Hook::install().map(|inner| Self { _inner: inner })
+        imp::Hook::install().map(|inner| Self { inner })
     }
-}
 
-/// 呼んだスレッドのメッセージキューを作り、スレッドの番号を返す。
-///
-/// **リスナースレッドの最初に呼ぶ。** キューが無いうちに投函されたメッセージ
-/// （フックが観測した押下や `wake_listener`）は届かない。
-pub(crate) fn prepare_message_queue() -> u32 {
-    imp::prepare_message_queue()
-}
-
-/// 最大 `timeout` だけメッセージを待ち、届いていたものを処理する。
-///
-/// フックのコールバックはこの中で呼ばれる。観測した押下と `WM_HOTKEY` は
-/// `on_message` へ 1 回ずつ渡す。**`on_message` の間は次のキー入力の
-/// コールバックが待たされる**（他のアプリの入力も待たされる）ので、
-/// ロックを長く握ったりブロックしたりしないこと。`wake_listener` が投函した
-/// メッセージは待ちを終わらせるだけで、`on_message` へは渡さない。
-///
-/// 待てなかった（OS の呼び出しが失敗した）ときは `false` を返す。
-pub(crate) fn pump_messages(timeout: Duration, on_message: impl FnMut(ListenerMessage)) -> bool {
-    imp::pump_messages(timeout, on_message)
-}
-
-/// `pump_messages` で待っているスレッドを起こす。
-///
-/// UI スレッドがリスナーへ要求を積んだあとに呼ぶ。届かなくても、リスナーは
-/// 待ちのタイムアウトで要求に気づく（遅れるだけ）。
-pub(crate) fn wake_listener(thread_id: u32) {
-    imp::wake_listener(thread_id)
+    /// 最大 `timeout` だけメッセージを待ち、届いていたものを処理する。
+    ///
+    /// フックのコールバックはこの中で呼ばれる。観測した押下は
+    /// `on_key_down` へ 1 回ずつ渡す。**`on_key_down` の間は次のキー入力の
+    /// コールバックが待たされる**（他のアプリの入力も待たされる）ので、
+    /// ロックを長く握ったりブロックしたりしないこと。
+    ///
+    /// 待てなかった（OS の呼び出しが失敗した）ときは `false` を返す。
+    pub(crate) fn pump(&self, timeout: Duration, on_key_down: impl FnMut(KeyChord)) -> bool {
+        self.inner.pump(timeout, on_key_down)
+    }
 }
 
 /// winit が登録したキーボードの Raw Input を、このプロセスから外す（#238）。
@@ -243,7 +205,7 @@ pub(crate) fn stop_raw_keyboard_input() -> std::io::Result<()> {
 mod imp {
     use super::{
         is_key_down_message, is_modifier_key, modifiers_from_state, KeyChord, KeyboardHookError,
-        ListenerMessage, Modifiers,
+        Modifiers,
     };
     use std::time::Duration;
     use winapi::ctypes::c_int;
@@ -255,72 +217,12 @@ mod imp {
     use winapi::um::winuser::{
         CallNextHookEx, GetAsyncKeyState, MsgWaitForMultipleObjects, PeekMessageW,
         PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HC_ACTION, KBDLLHOOKSTRUCT,
-        MSG, PM_NOREMOVE, PM_REMOVE, QS_ALLINPUT, WH_KEYBOARD_LL, WM_APP, WM_HOTKEY,
+        MSG, PM_NOREMOVE, PM_REMOVE, QS_ALLINPUT, WH_KEYBOARD_LL, WM_APP,
     };
 
     /// フックが自分のスレッドへ投函する「押下を観測した」メッセージ。
     /// `WPARAM` に仮想キーコード、`LPARAM` に `Modifiers` のビットを載せる。
     const WM_KEY_OBSERVED: UINT = WM_APP + 0x0202;
-
-    /// UI スレッドがリスナーへ要求を積んだことを知らせるメッセージ。中身は無い。
-    const WM_LISTENER_WAKE: UINT = WM_APP + 0x0203;
-
-    pub(super) fn prepare_message_queue() -> u32 {
-        // SAFETY: 呼んだスレッドのキューを読むだけ（無ければ作られる）
-        unsafe {
-            let mut msg: MSG = std::mem::zeroed();
-            PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
-            GetCurrentThreadId()
-        }
-    }
-
-    pub(super) fn wake_listener(thread_id: u32) {
-        // SAFETY: 中身の無いメッセージを投函するだけ。失敗（スレッドが
-        // 終わっている、キューが一杯）しても、待ちのタイムアウトで気づく
-        unsafe {
-            PostThreadMessageW(thread_id, WM_LISTENER_WAKE, 0, 0);
-        }
-    }
-
-    pub(super) fn pump_messages(
-        timeout: Duration,
-        mut on_message: impl FnMut(ListenerMessage),
-    ) -> bool {
-        // INFINITE（u32::MAX）にならないよう 1 つ手前で止める
-        let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
-        // SAFETY: ハンドルを渡さない待機と、このスレッドのキューの読み出しだけ
-        unsafe {
-            // QS_ALLINPUT には送られたメッセージ（QS_SENDMESSAGE）も含まれる。
-            // フックの呼び出しはそれとして届くので、キー入力があれば
-            // タイムアウトを待たずに起きる。WM_HOTKEY と WM_LISTENER_WAKE は
-            // 投函されたメッセージ（QS_POSTMESSAGE / QS_HOTKEY）として起こす
-            let woke = MsgWaitForMultipleObjects(0, std::ptr::null(), FALSE, millis, QS_ALLINPUT);
-            if woke == WAIT_FAILED {
-                return false;
-            }
-
-            // フックのコールバックは PeekMessageW の中で呼ばれ、そこで
-            // 投函された分も同じループで取り出す。全部取り出してから
-            // 待ちに戻らないと、残った分で次の待ちが起きなくなる
-            let mut msg: MSG = std::mem::zeroed();
-            while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
-                if !msg.hwnd.is_null() {
-                    continue;
-                }
-                match msg.message {
-                    WM_KEY_OBSERVED => on_message(ListenerMessage::KeyDown(KeyChord {
-                        modifiers: Modifiers::from_bits(msg.lParam as u8),
-                        vk: msg.wParam as u32,
-                    })),
-                    // ウィンドウを渡さずに RegisterHotKey したので、登録した
-                    // スレッド（ここ）のキューへ hwnd が null で届く
-                    WM_HOTKEY => on_message(ListenerMessage::Hotkey(msg.wParam as i32)),
-                    _ => {}
-                }
-            }
-        }
-        true
-    }
 
     /// いま押されているか。`GetAsyncKeyState` の最上位ビットを見る。
     ///
@@ -399,12 +301,13 @@ mod imp {
 
     impl Hook {
         pub(super) fn install() -> Result<Self, KeyboardHookError> {
-            // 先にこのスレッドのメッセージキューを作っておく。フックが
-            // 投函する先が無いと、最初の押下を取りこぼしうる。リスナーは
-            // 起動時に作っているので、ここは念のため
-            prepare_message_queue();
-            // SAFETY: 呼んだスレッドにフックを登録するだけ
+            // SAFETY: どれも呼んだスレッドのメッセージキューとフックを扱うだけ
             unsafe {
+                // 先にこのスレッドのメッセージキューを作っておく。フックが
+                // 投函する先が無いと、最初の押下を取りこぼしうる
+                let mut msg: MSG = std::mem::zeroed();
+                PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
+
                 let module = GetModuleHandleW(std::ptr::null());
                 let handle =
                     SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), module, 0);
@@ -415,6 +318,40 @@ mod imp {
                 }
                 Ok(Self { handle })
             }
+        }
+
+        pub(super) fn pump(
+            &self,
+            timeout: Duration,
+            mut on_key_down: impl FnMut(KeyChord),
+        ) -> bool {
+            // INFINITE（u32::MAX）にならないよう 1 つ手前で止める
+            let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
+            // SAFETY: ハンドルを渡さない待機と、このスレッドのキューの読み出しだけ
+            unsafe {
+                // QS_ALLINPUT には送られたメッセージ（QS_SENDMESSAGE）も含まれる。
+                // フックの呼び出しはそれとして届くので、キー入力があれば
+                // タイムアウトを待たずに起きる
+                let woke =
+                    MsgWaitForMultipleObjects(0, std::ptr::null(), FALSE, millis, QS_ALLINPUT);
+                if woke == WAIT_FAILED {
+                    return false;
+                }
+
+                // フックのコールバックは PeekMessageW の中で呼ばれ、そこで
+                // 投函された分も同じループで取り出す。全部取り出してから
+                // 待ちに戻らないと、残った分で次の待ちが起きなくなる
+                let mut msg: MSG = std::mem::zeroed();
+                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    if msg.hwnd.is_null() && msg.message == WM_KEY_OBSERVED {
+                        on_key_down(KeyChord {
+                            modifiers: Modifiers::from_bits(msg.lParam as u8),
+                            vk: msg.wParam as u32,
+                        });
+                    }
+                }
+            }
+            true
         }
     }
 
@@ -430,7 +367,7 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    use super::{KeyboardHookError, ListenerMessage};
+    use super::{KeyChord, KeyboardHookError};
     use std::time::Duration;
 
     /// Windows 以外には Raw Input が無い。何もしない
@@ -438,26 +375,16 @@ mod imp {
         Ok(())
     }
 
-    pub(super) fn prepare_message_queue() -> u32 {
-        0
-    }
-
-    /// Windows 以外ではメッセージを待てない。リスナーは待てないものとして終わる
-    pub(super) fn pump_messages(
-        _timeout: Duration,
-        _on_message: impl FnMut(ListenerMessage),
-    ) -> bool {
-        false
-    }
-
-    pub(super) fn wake_listener(_thread_id: u32) {}
-
-    /// Windows 以外では作れない。
+    /// Windows 以外では作れない。値が存在しないので `pump` は呼ばれない。
     pub(super) enum Hook {}
 
     impl Hook {
         pub(super) fn install() -> Result<Self, KeyboardHookError> {
             Err(KeyboardHookError::Unsupported)
+        }
+
+        pub(super) fn pump(&self, _timeout: Duration, _on_key_down: impl FnMut(KeyChord)) -> bool {
+            match *self {}
         }
     }
 }
