@@ -181,10 +181,13 @@ mod tests {
         let original = AppSettings::default();
         let draft = sample_settings();
         assert!(draft.hotkey_settings.only_when_focused);
+        assert!(draft.hotkey_settings.use_register_hotkey);
 
         commit_draft(&mut shared, &draft, &original);
 
         assert!(shared.hotkey_settings.only_when_focused);
+        // キーを奪う方式の切り替えも同じセクションなので一緒に反映される
+        assert!(shared.hotkey_settings.use_register_hotkey);
     }
 
     #[test]

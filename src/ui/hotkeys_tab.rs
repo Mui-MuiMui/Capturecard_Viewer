@@ -5,7 +5,7 @@
 
 use crate::hotkey::{HotkeyAction, HotkeyAssignmentError};
 use crate::i18n::{self, Text};
-use crate::settings::AppSettings;
+use crate::settings::{AppSettings, HotkeySettings};
 use crate::status::ErrorSource;
 use eframe::egui;
 use log::debug;
@@ -46,7 +46,35 @@ fn show_hotkey_behavior(ui: &mut egui::Ui, settings: &mut AppSettings) {
             Text::HotkeyOnlyWhenFocused.get(),
         );
         ui.small(Text::HotkeyOnlyWhenFocusedHint.get());
+
+        // キーを奪う方式（#207）。既定のフックは管理者として実行しているアプリが
+        // 前面にある間は入力が届かないので、その場合だけの逃げ道として置く
+        ui.add_space(8.0);
+        ui.checkbox(
+            &mut settings.hotkey_settings.use_register_hotkey,
+            Text::HotkeyUseRegisterHotKey.get(),
+        );
+        ui.small(Text::HotkeyUseRegisterHotKeyHint.get());
+        for warning in register_hotkey_warnings(&settings.hotkey_settings) {
+            ui.add_space(5.0);
+            warning_label(ui, warning.get());
+        }
     });
+}
+
+/// キーを奪う方式を選んでいるときに出す注意書き。選んでいなければ空。
+///
+/// 方式の違い（他のアプリに届かない、他のアプリが登録済みだと失敗する）は
+/// オンにしたときだけ出す。オフの間は既定のフックで、どちらも起きないため。
+fn register_hotkey_warnings(settings: &HotkeySettings) -> Vec<Text> {
+    if !settings.use_register_hotkey {
+        return Vec::new();
+    }
+    let mut warnings = vec![Text::HotkeyRegisterHotKeyWarning];
+    if settings.only_when_focused {
+        warnings.push(Text::HotkeyRegisterHotKeyUnfocusedWarning);
+    }
+    warnings
 }
 
 /// アクションごとのホットキー割り当ての一覧を描く。
@@ -329,6 +357,48 @@ mod tests {
         assert!(!has_bare_navigation_key(&BTreeMap::new()));
     }
 
+    // ---- キーを奪う方式の注意書き（#207） ----
+
+    #[test]
+    fn register_hotkey_warnings_are_empty_with_the_hook() {
+        // 既定のフックではキーを奪わないので、注意することが無い
+        for only_when_focused in [false, true] {
+            let settings = HotkeySettings {
+                only_when_focused,
+                use_register_hotkey: false,
+            };
+            assert!(register_hotkey_warnings(&settings).is_empty());
+        }
+    }
+
+    #[test]
+    fn register_hotkey_warnings_explain_the_trade_off() {
+        let settings = HotkeySettings {
+            only_when_focused: false,
+            use_register_hotkey: true,
+        };
+        assert_eq!(
+            register_hotkey_warnings(&settings),
+            vec![Text::HotkeyRegisterHotKeyWarning]
+        );
+    }
+
+    #[test]
+    fn register_hotkey_warnings_mention_keys_taken_while_unfocused() {
+        // 反応しない間もキーは奪われたまま、という組み合わせ特有の注意
+        let settings = HotkeySettings {
+            only_when_focused: true,
+            use_register_hotkey: true,
+        };
+        assert_eq!(
+            register_hotkey_warnings(&settings),
+            vec![
+                Text::HotkeyRegisterHotKeyWarning,
+                Text::HotkeyRegisterHotKeyUnfocusedWarning
+            ]
+        );
+    }
+
     // ---- ウィジェットのテスト（egui_kittest、#419） ----
 
     /// 一覧の `action` の行にある、`label` のボタン。行は `HotkeyAction::ALL` の順に並ぶ
@@ -400,5 +470,33 @@ mod tests {
             Some("F5")
         );
         assert!(!shows_warning(&harness));
+    }
+
+    #[test]
+    fn hotkeys_tab_register_hotkey_checkbox_writes_the_draft_and_warns() {
+        let mut harness = dialog_harness(DialogFixture::new(
+            &AppSettings::default(),
+            SettingsTab::Hotkeys,
+            VideoPinChoice::default(),
+            &[],
+        ));
+        let warning = Text::HotkeyRegisterHotKeyWarning.get();
+        let shows_warning = |harness: &egui_kittest::Harness<'_, DialogFixture>| {
+            harness
+                .query_by(|node| {
+                    node.role() == Role::Label
+                        && node.value().is_some_and(|value| value.contains(warning))
+                })
+                .is_some()
+        };
+        assert!(!shows_warning(&harness), "既定（オフ）では出さない");
+
+        harness
+            .get_by_label(Text::HotkeyUseRegisterHotKey.get())
+            .click();
+        harness.run();
+
+        assert!(harness.state().draft().hotkey_settings.use_register_hotkey);
+        assert!(shows_warning(&harness));
     }
 }

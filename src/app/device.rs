@@ -11,6 +11,7 @@
 use super::worker::{DeviceCommand, DeviceConfig, DeviceEvent, VideoTarget};
 use super::CaptureCardViewer;
 use crate::audio::AudioDirection;
+use crate::hotkey::HotkeyMethod;
 use crate::settings::{AppSettings, AudioInputSource, VideoSettings};
 use crate::status::ErrorSource;
 use crate::ui;
@@ -279,7 +280,14 @@ impl CaptureCardViewer {
             //
             // 差分は `HotkeyManager::apply` が取る。無条件に登録し直すと、
             // 2 秒ごとに unregister → register が走ってその瞬間のキー入力を
-            // 取りこぼす
+            // 取りこぼす。
+            //
+            // 方式（キーを奪うか、#207）は割り当てより先に渡す。切り替えると
+            // 登録済みのものが外れ、続く apply が新しい方式で登録し直す。
+            // 同じ方式なら何もしない
+            self.hotkey_manager.set_method(HotkeyMethod::from_setting(
+                settings.hotkey_settings.use_register_hotkey,
+            ));
             self.apply_hotkey_assignments(&settings.hotkeys);
             // フォーカスがあるときだけ反応するか。値を書くだけなので毎回渡す
             self.hotkey_manager

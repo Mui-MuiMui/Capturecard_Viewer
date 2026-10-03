@@ -117,6 +117,18 @@ pub fn hotkey_hook_unavailable(source: impl Display) -> String {
     }
 }
 
+/// キーを奪う方式（RegisterHotKey）で登録できなかった。`source` は OS のエラー文。
+pub fn hotkey_register_failed(source: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "キーを奪う方式で登録できません。他のアプリが同じキーを使っている可能性があります: {source}"
+        ),
+        Language::English => format!(
+            "Cannot register the key in exclusive mode. Another app may already use it: {source}"
+        ),
+    }
+}
+
 pub fn keyboard_hook_install_failed(source: impl Display) -> String {
     match language() {
         Language::Japanese => format!("キーボードフックを登録できません: {source}"),
