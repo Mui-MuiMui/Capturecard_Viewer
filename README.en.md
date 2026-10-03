@@ -270,7 +270,7 @@ They are meant for per-device quirks that remain after the color space and range
 The adjustments are folded into the YUY2 -> RGB coefficients, so **the CPU cost barely changes**. The per-pixel work is exactly the same as with no adjustment; what is added is a handful of coefficient multiplications once per frame (no measurable difference at 1080p). Like the color space and range, they take effect on the next frame and the device is not reopened.
 
 > **The color space, color range and picture adjustments can all be inactive.**
-> They work by swapping the coefficients used when this app converts YUV frames itself (YUY2 and NV12, plus I420 and YV12 for "(DirectShow)" devices). If the device delivers something else (MJPEG or RGB24, for example), the frames are decoded or used as RGB as they are, and none of these settings apply. When that happens the log contains a line about falling back to the decoder.
+> They work by swapping the coefficients used when this app converts YUV frames itself (YUY2 and NV12, plus I420 and YV12 for "(DirectShow)" devices). If the device delivers something else (MJPEG or RGB24, for example), the frames are decoded or used as RGB as they are, and none of these settings apply. No log line is written for MJPEG or RGB24; only frames that this app has no dedicated conversion for (such as GRAY, or YUY2 with an odd width) leave a line about falling back to the decoder.
 
 **Audio**
 
