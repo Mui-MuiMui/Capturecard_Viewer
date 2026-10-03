@@ -24,8 +24,6 @@ All changes since 1.2.1. Config files from 1.2.x load as they are (new settings 
 - **Sturdier auto-update and dependency updates**: "Cancel" works immediately even when a download stalls, redirects to anything other than `https://` are not followed, a failed swap no longer loses the exe, and a pre-release no longer hides the stable release from the update check. Updated to eframe / egui 0.36, cpal 0.18 and more (the settings window looks slightly different)
 - **Fixes**: config files are saved through a temporary file and are harder to corrupt, audio passthrough latency and drift correction, the window could not be closed while minimized, the maximized state was not restored, the message shown when there is no video was off-screen, and many more
 
-<details><summary>詳細 / Details</summary>
-
 ### 追加
 
 - 映像と音声の録画（H.264 + AAC の MP4）。右クリックメニューの「録画を開始 / 停止」とホットキー「録画の開始・停止」で操作し、録画中は映像の右上に赤い丸と経過時間が出る。音声は音声入力の音を AAC（48kHz 2ch）で入れ、音量・ミュート・パススルーの設定は録画に効かない。設定画面に「録画」タブ（保存先・ファイル名・ビットレート・ハードウェアエンコーダ・音声の有無と音声のビットレート）を追加。情報表示をオンにすると、録画中は経過時間・書いた枚数・捨てた枚数・エンコーダと、音声の状態（揃えるために足した無音・削った長さ・リングの溢れ）の行が出る
@@ -86,8 +84,6 @@ All changes since 1.2.1. Config files from 1.2.x load as they are (new settings 
 - 画面の部品のライブラリ（egui / eframe）を 0.26 から 0.36 へ更新した。設定画面や右クリックメニューのボタン・余白などの見た目が少し変わる
 - 依存ライブラリを更新した（ringbuf 0.5 で RustSec の勧告 RUSTSEC-2026-0293 を解消、image 0.25、rfd 0.17、rodio 0.22 ほか）。設定ファイルの読み書きは confy を外して toml で直接行う（場所と書式は 1.2.x と同じで、1.2.x へ戻しても読める）
 - Release: `v1.4.0-rc.1` のように `-` の付くタグは pre-release として出し、Latest にしない。pre-release が最新の Release として返り、正式版の更新が知らされなくなるのを防ぐ
-
-</details>
 
 ## [1.2.1] - 2026-09-28
 
