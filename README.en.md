@@ -96,7 +96,7 @@ The settings window → **Hotkeys tab** lets you assign a key to each of the fol
 - Changes take effect when you press Apply or OK.
 - A hotkey does exactly what the mouse does: changing the volume shows the volume bar at the bottom, toggling fullscreen shows the indicator at the top-left.
 - Assigning the same key to more than one action shows a warning. If you apply it anyway, only the action higher in the list stays active.
-- **The keys you press still reach other applications.** Hotkeys do not take keys away, so if another application uses the same key, both react. However, **while this application is in front, an assigned key is not passed on to this application's own controls** (assigning Escape does not close the right-click menu). Only while you are typing in a text field of the settings window does the text input win, and hotkeys do not react.
+- **The keys you press still reach other applications.** Hotkeys do not take keys away, so if another application uses the same key, both react. However, **while this application is in front, an assigned key is not passed on to this application's own controls** (assigning Escape does not close the right-click menu, and assigning Tab does not move the focus in the settings window). Only while you are typing in a text field of the settings window does the text input win, and hotkeys do not react.
 - By default, hotkeys also work while you use other applications or while this application is minimized. Turn on "Only when this app has focus" in the Hotkeys tab to make them work only while this application is in front.
 - Only the screenshot action has a key by default. Hotkeys react even while you use other applications, so common keys are not assigned for you.
 
@@ -219,7 +219,8 @@ Saves the video on screen as H.264 and the sound from the audio input as AAC in 
 - **File name**: `Recording_YYYY-MM-DD_HH-MM-SS.mp4` (the format is configurable; `_2`, `_3`, ... is appended when the name is taken)
 - **Bitrate**: 8000 kbps (1000-50000 kbps)
 - **Encoder**: the GPU hardware encoder (Intel / NVIDIA / AMD) when available, otherwise the Windows software encoder. The encoder in use is shown in the stats overlay
-- **Audio**: AAC (48 kHz, stereo) at 160 kbps (96 / 128 / 160 / 192 kbps, or off). **Volume, mute, and passthrough do not affect the recording** (turning down what you hear still records the input as is). While no audio device is available, silence is recorded
+- **Audio**: AAC (48 kHz, stereo) at 160 kbps (96 / 128 / 160 / 192 kbps, or off). **Volume, mute, and passthrough do not affect the recording** (turning down what you hear still records the input as is). While no audio device is available, silence is recorded. In long recordings, drift correction keeps the audio from drifting away from the video (it follows the PC clock and also recovers from brief audio dropouts from the capture card)
+- **A/V offset**: shifts the recorded audio by -200 to +200 ms (0 by default; positive values delay the audio, negative values advance it). If the recorded audio sounds late relative to the video, use a negative value. With a negative value the audio at the start of the recording is trimmed by that amount; with a positive value that much silence is added at the start. It also applies to the replay buffer (changing it discards and refills the buffer), and a change made while recording takes effect from the next recording
 - **Replay buffer**: when turned on in the Recording tab, starting a recording also puts **the video and audio from just before** (30 seconds by default, 5 seconds to 5 minutes) at the beginning of the file, so you can still keep a moment you would otherwise have missed. While on, the encoder runs even when not recording and keeps the latest footage in memory (longer lengths use more memory; about 300 MB for 5 minutes at 8000 kbps video, growing with the bitrate). The starting point is aligned to a keyframe every 2 seconds, so the included footage can be up to 2 seconds shorter than the length. Buffering starts when you turn it on (or, if you turn it on during a recording, when that recording ends) and starts over when you change the bitrate, encoder, or audio settings. While recording, the recording line of the stats overlay shows how far back it went. It is off by default, and while off it adds no load when not recording
 
 The recording looks exactly like the preview, including the color space, color range, and brightness / contrast / saturation adjustments. If the video size (resolution) changes while recording, the file so far is closed and recording stops. Recording also stops before the disk fills up, when less than 500 MB is left. Both show the reason at the bottom of the window. If the USB connection drops briefly and comes back at the same resolution, recording continues into the same file.
@@ -233,6 +234,8 @@ Settings are saved in the following directory:
 > %AppData%\capturecard_viewer
 
 Deleting it will recreate the settings with default values on the next launch. Reset settings... in the **Other** tab does the same thing, except that the window position and size are kept.
+
+The window position, size and maximized state are also saved. If you quit while the window is maximized, the next launch starts maximized, and un-maximizing returns the window to the position and size it had before it was maximized.
 
 ## Recommended settings
 
@@ -286,6 +289,8 @@ The sample rate and channel options only list values that **both the input and t
 
 What was actually opened is shown under Settings → Connection status.
 
+**Video device audio**: even with capture cards that expose no Windows audio input (such as the AVerMedia GC551), you can play the audio the video device receives (such as HDMI audio). The first item of "Audio input device" on the Devices tab is the video device's name prefixed with "[Linked to video device]" (for example "[Linked to video device] AVerMedia GC551 Video Capture"); pick it to use this. On first launch without a config file, it is selected automatically when the video device can deliver audio. When the video device is known not to deliver audio, the item is greyed out and hovering over it shows the reason. The video device's audio is only available when the video is opened with DirectShow; if the video was opened with Media Foundation, the audio is not opened and the Connection status tab and a notification tell you to set "Open video with" to "DirectShow" on the Devices tab. Right after you pick it, the video reopens once. The sample rate and channel count follow the format the video device delivers (48000 Hz stereo for the GC551), and this audio is also recorded. The audio line of the stats overlay shows "(video device audio)".
+
 ## Known issues
 
 Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for a fuller list along with workarounds.
@@ -315,6 +320,7 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 **DirectShow devices**
 
 - Devices whose name ends with "(DirectShow)" are ones that Media Foundation does not list (the OBS Virtual Camera, older capture cards and so on). A device that appears in both Media Foundation and DirectShow is listed only once, as the Media Foundation device.
+- With "Open video with" set to "Auto" (the default), a device that appears in both but cannot be opened with Media Foundation is reopened with DirectShow (such as the AVerMedia GC551). When opening with DirectShow on first launch (no config file), or when the configured resolution is not offered by the card, the resolution the card reports (usually the input signal's resolution) is used (on first launch it is also saved to the settings; an unavailable configured resolution is left as is), which avoids warning screens such as "Signal Out of Range". The Connection status tab shows which one was actually used.
 - To open such a device with DirectShow instead, set "Open video with" on the Devices tab of the settings window to "DirectShow" (the default is "Auto"). The Connection status tab shows which one was actually used. A device that the selected method does not list cannot be connected, so switch back to "Auto" if no picture appears.
 - The accepted formats are YUY2, NV12, I420, YV12, MJPEG and RGB24. A device that only outputs other formats, such as UYVY, shows no video.
 - Colour space, colour range and brightness / contrast / saturation only take effect with YUY2, NV12, I420 and YV12 (not with MJPEG or RGB24).
