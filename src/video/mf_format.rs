@@ -19,7 +19,7 @@
 //! 判定はどれも純粋関数。フェイクには Media Foundation の形式が無いので、
 //! 実際に開く経路はテストで通せない。
 
-use nokhwa::utils::FrameFormat;
+use nokhwa::utils::{FrameFormat, RequestedFormat, RequestedFormatType};
 
 use super::yuv420::Yuv420Layout;
 
@@ -39,6 +39,35 @@ pub(super) const MF_FORMATS: [(&str, FrameFormat); 4] = [
 
 /// 形式が未指定のとき、または要求した形式で開けなかったときに使う形式
 pub(super) const FALLBACK_FORMAT: FrameFormat = FrameFormat::YUYV;
+
+/// `MF_FORMATS` の `FrameFormat` だけを同じ並びで抜き出したもの。
+/// 能力の一覧を読むために仮に開くとき、受け付ける形式として nokhwa へ渡す
+static PROBE_FORMATS: [FrameFormat; MF_FORMATS.len()] = probe_formats();
+
+const fn probe_formats() -> [FrameFormat; MF_FORMATS.len()] {
+    let mut formats = [FALLBACK_FORMAT; MF_FORMATS.len()];
+    let mut i = 0;
+    while i < MF_FORMATS.len() {
+        formats[i] = MF_FORMATS[i].1;
+        i += 1;
+    }
+    formats
+}
+
+/// 能力の一覧を読むために仮に開くときの要求（#442）。
+///
+/// nokhwa 0.10 の Media Foundation の経路は、開くときに必ず `fulfill` で 1 つの形式を
+/// 選んで `set_format` する。選べなければ一覧（`compatible_list_by_resolution`）を読む
+/// 前に失敗する。以前は 640x480 YUY2 30fps の `Closest` を渡していたので、YUY2 を
+/// 出さないデバイスや 640x480 の無いデバイスでは一覧そのものが取れなかった
+/// （`Closest` は fps を探すときに、選んだ解像度ではなく要求した 640x480 で絞る）。
+///
+/// `None` はデバイスが並べた順で、受け付ける形式に当たる最初のものを選ぶ。どの解像度・
+/// fps でもよく、`MF_FORMATS` のどれか 1 つでも出すデバイスなら開ける。どれも出さない
+/// デバイスは、開けても一覧に出す形式が無いので結果は変わらない
+pub(super) fn capabilities_probe() -> RequestedFormat<'static> {
+    RequestedFormat::with_formats(RequestedFormatType::None, &PROBE_FORMATS)
+}
 
 /// 設定画面の形式名から、要求する `FrameFormat` を引く。表に無ければ `None`
 pub(super) fn frame_format_for(name: &str) -> Option<FrameFormat> {
@@ -142,6 +171,8 @@ pub(super) const MF_RGB24_BOTTOM_UP: bool = false;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nokhwa::pixel_format::RgbFormat;
+    use nokhwa::utils::{CameraFormat, Resolution};
 
     #[test]
     fn frame_format_for_maps_every_listed_name() {
@@ -218,6 +249,71 @@ mod tests {
     fn fallback_for_yuy2_does_not_retry() {
         // 形式ではなくデバイス側の問題なので、同じ形式で開き直しても変わらない
         assert_eq!(fallback_for(FrameFormat::YUYV), None);
+    }
+
+    fn mf(width: u32, height: u32, format: FrameFormat, fps: u32) -> CameraFormat {
+        CameraFormat::new(Resolution::new(width, height), format, fps)
+    }
+
+    // 以前の能力取得が仮に開くときに渡していた要求
+    fn old_probe() -> RequestedFormat<'static> {
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(mf(
+            640,
+            480,
+            FrameFormat::YUYV,
+            30,
+        )))
+    }
+
+    #[test]
+    fn capabilities_probe_accepts_exactly_the_listed_formats() {
+        // 一覧に出す形式と、仮に開くときに受け付ける形式を揃える
+        for (_, format) in MF_FORMATS {
+            let only = [mf(1920, 1080, format, 60)];
+            assert_eq!(capabilities_probe().fulfill(&only), Some(only[0]));
+        }
+        assert_eq!(
+            capabilities_probe().fulfill(&[mf(640, 480, FrameFormat::GRAY, 30)]),
+            None
+        );
+    }
+
+    #[test]
+    fn capabilities_probe_opens_a_device_without_yuy2() {
+        // MJPEG だけを出すデバイス。以前の要求では選べず、一覧を読む前に失敗していた
+        let formats = [
+            mf(1920, 1080, FrameFormat::MJPEG, 60),
+            mf(1280, 720, FrameFormat::MJPEG, 60),
+        ];
+        assert_eq!(old_probe().fulfill(&formats), None);
+        assert_eq!(capabilities_probe().fulfill(&formats), Some(formats[0]));
+    }
+
+    #[test]
+    fn capabilities_probe_opens_a_yuy2_device_without_640x480() {
+        // YUY2 は出すが 640x480 が無いデバイス。`Closest` は fps を 640x480 で探すので選べなかった
+        let formats = [
+            mf(1920, 1080, FrameFormat::YUYV, 60),
+            mf(1280, 720, FrameFormat::YUYV, 60),
+        ];
+        assert_eq!(old_probe().fulfill(&formats), None);
+        assert_eq!(capabilities_probe().fulfill(&formats), Some(formats[0]));
+    }
+
+    #[test]
+    fn capabilities_probe_takes_the_first_listed_format_in_device_order() {
+        // 表に無い形式は飛ばし、デバイスが並べた順で最初に当たるものを選ぶ
+        let formats = [
+            mf(640, 480, FrameFormat::GRAY, 30),
+            mf(1280, 720, FrameFormat::NV12, 30),
+            mf(1920, 1080, FrameFormat::YUYV, 60),
+        ];
+        assert_eq!(capabilities_probe().fulfill(&formats), Some(formats[1]));
+    }
+
+    #[test]
+    fn capabilities_probe_fails_only_when_nothing_is_listed() {
+        assert_eq!(capabilities_probe().fulfill(&[]), None);
     }
 
     #[test]
