@@ -4,6 +4,26 @@
 
 ## [未リリース]
 
+## [1.3.0] - 2026-10-03
+
+1.2.1 以降の変更をまとめたバージョン。設定ファイルは 1.2.x のまま読める（新しい項目は既定値で始まる）。**1.2.1 からはアプリ内の「更新する」でこのバージョンへ更新できる**（1.2.0 からは手動で。リリースページから `capturecard_viewer.exe` をダウンロードして置き換える）。
+
+- **DirectShow の実機対応**: AVerMedia GC551 などベンダーのドライバーで動くキャプチャーボードが映るようにした。「映像の開き方」が「自動」なら、Media Foundation で開けないときに DirectShow で開き直す。DirectShow で開くとき、初回と設定の解像度がボードに無いときは入力信号の解像度で開く（「Signal Out of Range」などの警告画面を防ぐ）。fps の選択肢には実際に届く fps を出す
+- **「[映像デバイスと連動]」の音声入力**: Windows の音声入力に音が出ないボードでも、映像デバイスが受け取っている音声（HDMI の音声など）を映像デバイスの音声ピンから取って鳴らせる。「オーディオ入力デバイス」の先頭の項目で選ぶ。設定ファイルが無い初回の起動では、使えれば自動で選ばれる。録画にも入る
+- **録画**: 映像と音声を H.264 / AAC の MP4 に録る（右クリックメニュー・ホットキー・設定画面の「録画」タブ）。録画を始めた直前の分（既定 30 秒、最大 5 分）も先頭に入れるリプレイバッファ、長く録っても音声が映像からずれていかないドリフト補正、映像と音声のずれを -200〜+200ms で補正する設定
+- **自動更新の堅牢化と依存の更新**: ダウンロードが止まっても「キャンセル」がすぐ効く、`https://` 以外へのリダイレクトを辿らない、差し替えに失敗しても exe を失わない、pre-release の Release が正式版の通知を妨げない。eframe / egui 0.36、cpal 0.18 ほかへ更新した（設定画面の見た目が少し変わる）
+- **修正**: 設定ファイルの保存を一時ファイル経由の置き換えにして壊れにくくした、音声パススルーの遅延とドリフト補正、最小化中に閉じられない、最大化の状態が次回に戻らない、映像が出ないときの文言が見えない、ほか多数
+
+<hr>
+
+All changes since 1.2.1. Config files from 1.2.x load as they are (new settings start at their defaults). **From 1.2.1, use "Update" inside the app to update to this version** (from 1.2.0, update manually: download `capturecard_viewer.exe` from the releases page and replace the exe).
+
+- **DirectShow on real hardware**: capture cards that run on vendor drivers, such as the AVerMedia GC551, now show a picture. With "Open video with" set to Auto, a device that Media Foundation cannot open is reopened with DirectShow. When opening with DirectShow on first launch, or when the configured resolution is not offered by the card, the input signal's resolution is used (avoiding warning screens such as "Signal Out of Range"). The fps choices list the fps actually delivered
+- **"[Linked to video device]" audio input**: even with cards that expose no Windows audio input, the audio the video device receives (such as HDMI audio) can be played from the video device's audio pin. Pick the first item of "Audio input device". On first launch without a config file it is selected automatically when available. It is also recorded
+- **Recording**: records video and audio to MP4 (H.264 / AAC) from the right-click menu, a hotkey, or the new Recording tab in Settings. A replay buffer puts the footage from just before you start (30 seconds by default, up to 5 minutes) at the beginning of the file, drift correction keeps the audio from drifting away from the video in long recordings, and an A/V offset setting shifts the recorded audio by -200 to +200 ms
+- **Sturdier auto-update and dependency updates**: "Cancel" works immediately even when a download stalls, redirects to anything other than `https://` are not followed, a failed swap no longer loses the exe, and a pre-release no longer hides the stable release from the update check. Updated to eframe / egui 0.36, cpal 0.18 and more (the settings window looks slightly different)
+- **Fixes**: config files are saved through a temporary file and are harder to corrupt, audio passthrough latency and drift correction, the window could not be closed while minimized, the maximized state was not restored, the message shown when there is no video was off-screen, and many more
+
 ### 追加
 
 - 映像と音声の録画（H.264 + AAC の MP4）。右クリックメニューの「録画を開始 / 停止」とホットキー「録画の開始・停止」で操作し、録画中は映像の右上に赤い丸と経過時間が出る。音声は音声入力の音を AAC（48kHz 2ch）で入れ、音量・ミュート・パススルーの設定は録画に効かない。設定画面に「録画」タブ（保存先・ファイル名・ビットレート・ハードウェアエンコーダ・音声の有無と音声のビットレート）を追加。情報表示をオンにすると、録画中は経過時間・書いた枚数・捨てた枚数・エンコーダと、音声の状態（揃えるために足した無音・削った長さ・リングの溢れ）の行が出る
@@ -11,11 +31,12 @@
 - 録画の映像と音声のずれの補正。「録画」タブの音声の欄で、録画の音声を -200〜+200ms ずらせる（既定 0。正で音声を遅らせ、負で早める。負では録画の先頭の音声がその分削られる）。リプレイバッファにも効く
 - ホットキーに Tab、Backspace、Insert、Delete、Home、End、PageUp、PageDown、矢印キーを割り当てられるようにした。Tab や矢印キーを修飾キーなしで割り当てると、組み合わせをすすめる注意書きが出る
 - 開発者向け: 環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` にフォルダの絶対パスを指定すると、設定ファイルとログをそのフォルダに置く。`%AppData%` の設定に触らずに試せる。ログの先頭に使っている設定ファイルのパスが出る
-- 設定画面の「接続状態」タブの音声の欄に、音声入力がバッファの満杯で捨てたフレーム数（「満杯で捨てた: N フレーム」）を出すようにした。音飛びの原因がアンダーラン（出力の不足）か入力の溢れかを見分けられる
-- 設定画面の「接続状態」タブの音声の欄に、WASAPI が知らせた音声入力の取りこぼしの回数（「入力の取りこぼし: N 回」）を出すようにした
+- 設定画面の「接続状態」タブの音声の欄に、音声入力がバッファの満杯で捨てたフレーム数（「満杯で捨てた: N フレーム」）と、WASAPI が知らせた音声入力の取りこぼしの回数（「入力の取りこぼし: N 回」）を出すようにした。音飛びの原因がアンダーラン（出力の不足）か入力の溢れかを見分けられる
 - 開発者向け: フェイクデバイスのシナリオ（`CAPTURECARD_VIEWER_FAKE_SCENARIO`）に `reopen-fail:<秒>` を追加。`disconnect:<秒>` で途絶えたあと、指定秒数は開き直しに失敗し続け、USB を抜いたままの状態を再現できる
 - 映像デバイスが受け取っている音声（WASAPI に出ない機種の HDMI の音など）を鳴らせる。設定画面のデバイス設定タブで、オーディオ入力デバイスの先頭にある「[映像デバイスと連動] 映像デバイスの名前」の項目を選ぶ（映像デバイスから音声を受け取れないと分かっているときは灰色になり、ポインターを重ねると理由が出る）。項目は設定画面で選んでいる映像デバイスのもので、映像デバイスを選び直すと「適用」の前でも入れ替わる（音声の選択は自分で項目を選ぶまで変わらない）。この項目を選ぶと、映像の開き方が「自動」なら映像も音声を受け取れる開き方で開く。設定ファイルが無い初回の起動では、映像デバイスから音声を受け取れれば自動でこれが選ばれる。録画にもこの音が入り、情報表示の音声の行に「（映像デバイスの音声）」が付く
-- 開発者向け: フェイクデバイスのシナリオ（`CAPTURECARD_VIEWER_FAKE_SCENARIO`）に `audio-pin` を追加。フェイクの映像デバイスが音声ピンを持ち、オーディオ入力デバイスの先頭の項目（フェイクの映像デバイスの名前）で正弦波が鳴る
+- 開発者向け: フェイクデバイスのシナリオ（`CAPTURECARD_VIEWER_FAKE_SCENARIO`）に `audio-pin` を追加。フェイクの映像デバイスが音声ピンを持ち、オーディオ入力デバイスの先頭の項目（「[映像デバイスと連動]」とフェイクの映像デバイスの名前）で正弦波が鳴る
+- 開発者向け: 実機テスト用の映像源（テストパターンの動画）を作る `scripts/make-testpattern.sh`
+- `docs/design/recording.md` — 録画とリプレイバッファの設計
 - `docs/design/directshow-audio.md` — DirectShow の映像デバイスの音声ピンから音声を取り込む設計（WASAPI に音声が出ない機種向け）
 
 ### 修正
@@ -41,9 +62,8 @@
 - 設定画面を開いたまま「適用」を 2 回押すと、その間にホイールや右クリックメニューで変えた音量・アスペクト比の維持・自動再接続（と更新の通知で飛ばしたバージョン）が 1 回目の適用の値へ巻き戻ることがあった。逆に、設定画面で開いたときの値へ戻して適用しても反映されないことがあった
 - デバイスの自動再接続を切っているときに音声デバイスが止まっても、通知が出ず「接続状態」タブが接続中のままだった。止まった音声を閉じ、通知と「接続状態」タブで知らせるようにした。あわせて、音声が一度エラーになったあと設定の変更などで正常に開き直せていても、数秒後にもう一度開き直して音が途切れることがあったのを直した
 - 録画: 解像度の変化や空き容量不足で録画が途中で止まったファイルは、音声が映像より短くなっていた（音声デバイスが無いときは 0.2 秒ほど）。止めたときと同じく、音声を映像の終わりまで揃えてから閉じるようにした。大きさの変わったフレーム（書かずに捨てる）は映像の長さに数えず、音声もそこまでは揃えない
-- 自動更新: `SHA256SUMS.txt` の受け取りが途中で止まると、「キャンセル」を押しても最大 10 分間は次の「更新する」を押せなかった。受け取りの合間にキャンセルへ気づき、止まっていても 30 秒で打ち切るようにした。受け取りの時間切れが「ダウンロードに失敗」ではなく時間切れとして出るようにした
+- 自動更新: exe や `SHA256SUMS.txt` の受け取りが止まると、「キャンセル」を押しても最大 10 分間は次の「更新する」を押せなかった。止まっていてもすぐキャンセルへ気づき、1 バイトも届かないまま 30 秒たったら時間切れで打ち切るようにした。受け取りの時間切れが「ダウンロードに失敗」ではなく時間切れとして出るようにした
 - 自動更新: 差し替えに続けて失敗し、元の名前に exe が無く `.old` / `.new` だけが残った状態でもう一度「更新する」を押すと、元の exe（`.old`）を消してしまっていた。元の名前に exe が無いときは差し替えに進まず、`.old` の名前を戻せば起動できることを案内するようにした
-- 自動更新: exe の受け取りが完全に止まると、「キャンセル」を押しても最大 10 分間は次の「更新する」を押せなかった。止まっていてもすぐキャンセルへ気づき、1 バイトも届かないまま 30 秒たったら時間切れで打ち切るようにした
 - デバイスの切り替えに失敗したあとで元のデバイスへ戻すと、すぐには開き直さず、失敗したデバイスの再試行の間隔（最大 5 秒）を待ってから開いていた。映像と音声の両方。戻したらすぐ開くようにした
 - 設定ファイルの保存中に強制終了や電源断が起きると、ファイルが空になり、次の起動で全ての設定（プリセット・ホットキー・デバイス名）が黙って既定値に戻ることがあった。保存を一時ファイル経由の置き換えにし、空のファイルは `.bak` へ退避してから既定値で起動するようにした。保存に失敗し続けるときは、画面下部に 1 度だけ知らせ、再試行の間隔を最大 1 分まで伸ばす（以前は 2 秒ごとにログへエラーを書き続けていた）
 - 幅が奇数の解像度など、Media Foundation の経路で YUY2 の高速パスを使えずデコーダで RGB にするフレームの長さが解像度と合わないと、アプリが落ちることがあった。長いフレームは切り詰め、短いフレームは捨てて前の映像を出し続けるようにした
@@ -62,6 +82,8 @@
 - 映像を表示している間の CPU 使用率を下げた。フレームごとに数 MB のメモリを確保し直していたのを、前のフレームのものを使い回すようにした（画面へのテクスチャの取り込み、キャプチャの受け口、リプレイバッファのエンコーダの出力）
 - 録画中とリプレイバッファが ON の間の、カーネル側の CPU 使用率を下げた。エンコーダへ渡す映像のメモリをフレームごとに確保し直していたのを、エンコーダが手放したものを使い回すようにした
 - 画面の部品のライブラリ（egui / eframe）を 0.26 から 0.36 へ更新した。設定画面や右クリックメニューのボタン・余白などの見た目が少し変わる
+- 依存ライブラリを更新した（ringbuf 0.5 で RustSec の勧告 RUSTSEC-2026-0293 を解消、image 0.25、rfd 0.17、rodio 0.22 ほか）。設定ファイルの読み書きは confy を外して toml で直接行う（場所と書式は 1.2.x と同じで、1.2.x へ戻しても読める）
+- Release: `v1.4.0-rc.1` のように `-` の付くタグは pre-release として出し、Latest にしない。pre-release が最新の Release として返り、正式版の更新が知らされなくなるのを防ぐ
 
 ## [1.2.1] - 2026-09-28
 
