@@ -299,7 +299,7 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 
 **Hotkeys**
 
-- While an application running as administrator is in front, hotkeys may not react (a Windows restriction).
+- While an application running as administrator is in front, hotkeys may not react (a Windows restriction). Turning on "Use exclusive mode (RegisterHotKey)" under Settings → Hotkeys makes them work, but the assigned keys then no longer reach other apps, and keys another app has already registered cannot be used.
 
 **Device connection at startup**
 

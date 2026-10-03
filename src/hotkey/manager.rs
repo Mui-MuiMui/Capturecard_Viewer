@@ -1,12 +1,11 @@
-use super::listener::{spawn_listener, ListenerState};
+use super::listener::ListenerState;
+use super::listener_thread::{HotkeyMethod, Listener};
 use super::{HotkeyAction, HotkeyAssignmentError};
 use crate::keyboard_hook::{KeyChord, KeyboardHookError};
 use crate::repaint::RepaintWaker;
 use log::{error, warn};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 
 /// 最小化中のアクションを、UI スレッドを介さずに実行するための窓口。
 ///
@@ -41,28 +40,37 @@ impl BackgroundHotkeyRunner {
 
 /// ホットキーの登録と押下の検出。
 ///
-/// **押下は低レベルキーボードフックで観測し、キーを奪わない**
-/// （`crate::keyboard_hook`、#202）。ここでの「登録」は OS へ登録することでは
-/// なく、リスナーが照合に使う表へ載せることを指す。
+/// **既定では押下を低レベルキーボードフックで観測し、キーを奪わない**
+/// （`crate::keyboard_hook`、#202）。そのときの「登録」は OS へ登録することでは
+/// なく、リスナーが照合に使う表へ載せることを指す。「キーを奪う方式」を
+/// 選んだときだけ、表へ載せたうえで `RegisterHotKey` でも登録する
+/// （`HotkeyMethod`、#207）。
 ///
 /// **UI スレッドだけが触るので `Mutex` で包まない。** リスナースレッドと
 /// 共有するのは内部の `Arc<Mutex<ListenerState>>` だけで、そこには
 /// 登録中の組み合わせと押下の記録しか入っていない。
 pub struct HotkeyManager {
-    /// フックを使えないときの理由。使えていれば `None`。
+    /// いまの方式で押下を受け取れないときの理由。受け取れていれば `None`。
     ///
-    /// リスナーの起動時に 1 度だけ決まる。使えないときは、割り当てのたびに
-    /// この理由で失敗として記録し、設定画面とトーストに出す。
+    /// フックの方式でフックを登録できないとき（起動時と方式を切り替えたとき
+    /// に決まる）と、リスナーが止まったとき（方式を問わない）に埋まる。
+    /// 使えないときは、割り当てのたびにこの理由で失敗として記録し、
+    /// 設定画面とトーストに出す。
     pub(super) hook_error: Option<KeyboardHookError>,
     /// 登録に成功しているアクション → (ホットキー文字列, キーの組み合わせ)
     pub(super) registered: BTreeMap<HotkeyAction, (String, KeyChord)>,
     /// 登録できなかったアクション → 理由
     pub(super) errors: BTreeMap<HotkeyAction, HotkeyAssignmentError>,
     pub(super) state: Arc<Mutex<ListenerState>>,
-    /// リスナースレッドへの終了要求
-    pub(super) listener_shutdown: Arc<AtomicBool>,
-    /// リスナースレッドのハンドル。`Drop` で join するために持つ
-    pub(super) listener: Option<JoinHandle<()>>,
+    /// リスナースレッドの窓口。`Drop` で止めて join する
+    pub(super) listener: Listener,
+    /// いまの方式。切り替えは `set_method`
+    pub(super) method: HotkeyMethod,
+    /// `registered` を変えたのに、まだ `RegisterHotKey` の登録へ反映していないか。
+    ///
+    /// キーを奪う方式のときだけ意味を持つ。2 秒ごとの再適用で毎回リスナーへ
+    /// 問い合わせないよう、変えたときだけ反映する（`sync_system_hotkeys`）。
+    pub(super) system_dirty: bool,
     /// ホットキー入力ダイアログのために一時解除しているか。
     ///
     /// 一時停止中は `apply` を呼んでも何もしない。2 秒ごとの再適用
@@ -75,18 +83,18 @@ impl HotkeyManager {
     /// ホットキーのリスナースレッドを起動して `HotkeyManager` を作る。
     ///
     /// この時点ではまだ何も登録していないので、リスナーは観測した押下を
-    /// すべて捨てる。登録は `apply` が行う。
+    /// すべて捨てる。登録は `apply` が行う。方式はフックで始まり、設定で
+    /// 選ばれていれば最初の `apply_settings` が `set_method` で切り替える。
     /// スレッドを止めるのは `Drop` だけなので、**アプリ全体で 1 つだけ作ること。**
     ///
     /// キーボードフックを登録できたかを待ってから返す（数 ms）。
     pub fn new() -> Self {
         let state = Arc::new(Mutex::new(ListenerState::default()));
-        let listener_shutdown = Arc::new(AtomicBool::new(false));
 
         // リスナーはここで 1 本だけ起動し、登録のたびには作り直さない。
         // フックはリスナースレッドに紐づくので、作り直すとフックも
         // 付け直しになり、その間のキー入力を取りこぼす
-        let (listener, ready) = spawn_listener(Arc::clone(&state), Arc::clone(&listener_shutdown));
+        let (listener, ready) = Listener::spawn(Arc::clone(&state));
         let hook_error = match ready {
             Ok(()) => None,
             Err(e) => {
@@ -100,8 +108,9 @@ impl HotkeyManager {
             registered: BTreeMap::new(),
             errors: BTreeMap::new(),
             state,
-            listener_shutdown,
-            listener: Some(listener),
+            listener,
+            method: HotkeyMethod::Hook,
+            system_dirty: false,
             paused: false,
         }
     }
@@ -191,19 +200,9 @@ impl Drop for HotkeyManager {
             self.unregister(action);
         }
 
-        self.listener_shutdown.store(true, Ordering::Release);
-        let Some(handle) = self.listener.take() else {
-            return;
-        };
-
-        // 終了要求は待ちのタイムアウトで拾うため、待ち時間は
-        // 最大で LISTENER_WAIT_TIMEOUT。ウィンドウを閉じたあとの待ちなので
-        // 画面上は見えない。切り離すとプロセスが終わるまでスレッドが残り、
-        // フックも外れない
-        if handle.join().is_err() {
-            // release ビルドは panic = "abort" なのでここには来ない
-            warn!("ホットキーのリスナースレッドがパニックした");
-        }
+        // RegisterHotKey の登録はリスナーが終わるときに外す。ウィンドウを
+        // 閉じたあとの待ちなので画面上は見えない
+        self.listener.stop();
     }
 }
 

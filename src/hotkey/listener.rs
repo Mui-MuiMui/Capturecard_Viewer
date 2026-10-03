@@ -1,20 +1,10 @@
 use super::{BackgroundHotkeyRunner, HotkeyAction};
-use crate::keyboard_hook::{KeyChord, KeyboardHook, KeyboardHookError};
+use crate::keyboard_hook::{KeyChord, KeyboardHookError};
 use crate::repaint::RepaintWaker;
-use log::{debug, error, trace, warn};
+use log::{debug, trace, warn};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread::JoinHandle;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
-
-/// リスナースレッドがキー入力を待つ時間。
-///
-/// タイムアウトするたびに終了要求を確認するため、終了を要求してから
-/// スレッドが実際に止まるまで最大でこの時間かかる。待つのはウィンドウを
-/// 閉じたあとなので、画面上は見えない。キー入力があればタイムアウトを
-/// 待たずに起きるので、押下の反応はこの長さに左右されない。
-const LISTENER_WAIT_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// 同じアクションの連続実行を無視する時間。
 /// キーリピートで何枚も撮れてしまうのを防ぐ。
@@ -227,7 +217,7 @@ fn decide_trigger(since_last_trigger: Option<Duration>, debounce: Duration) -> T
 /// **この間は次のキー入力のフックが待たされる**（他のアプリの入力も
 /// 待たされる）。ロックは照合と記録のあいだだけ握り、UI スレッドを起こす
 /// ことと最小化中の実行はロックを手放してから行う。
-fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord) {
+pub(super) fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord) {
     // **照合と押下の記録を同じロックの中で行う。**
     // ロックを手放してから記録すると、その隙に解除処理が
     // 「組み合わせを消す → 押下を落とす」を終えてしまい、
@@ -299,74 +289,6 @@ fn handle_key_down(state: &Mutex<ListenerState>, chord: KeyChord) {
         }
         None => {}
     }
-}
-
-/// キー入力を観測するスレッドを 1 本起動する。
-///
-/// 低レベルキーボードフックはこのスレッドに登録し、このスレッドの
-/// メッセージループの中で呼ばれる。**リスナーはアプリ全体で 1 本だけにする。**
-/// 何本も作ると 1 回のキー入力が全てのフックを順に通り、他のアプリの入力を
-/// そのぶん遅らせる。
-///
-/// フックを登録できたかどうかを待ってから返す。登録できなかったときは
-/// スレッドはすぐに終わり、理由を返す。
-pub(super) fn spawn_listener(
-    state: Arc<Mutex<ListenerState>>,
-    shutdown: Arc<AtomicBool>,
-) -> (JoinHandle<()>, Result<(), KeyboardHookError>) {
-    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-    let handle = std::thread::spawn(move || {
-        debug!("ホットキーのリスナースレッドを開始した");
-
-        let hook = match KeyboardHook::install() {
-            Ok(hook) => {
-                // 受け手（spawn_listener）は結果を受け取るまで待っているので、
-                // 送れないことはない
-                let _ = ready_tx.send(Ok(()));
-                hook
-            }
-            Err(e) => {
-                let _ = ready_tx.send(Err(e));
-                debug!("キーボードフックを登録できないのでリスナースレッドを終える");
-                return;
-            }
-        };
-
-        while !shutdown.load(Ordering::Acquire) {
-            let pumped = hook.pump(LISTENER_WAIT_TIMEOUT, |chord| {
-                handle_key_down(&state, chord)
-            });
-            if !pumped {
-                // 待てないまま回り続けると CPU を使い切るので抜ける。
-                // 以降ホットキーは効かなくなるが、他のアプリの入力は妨げない
-                let source = std::io::Error::last_os_error().to_string();
-                error!(
-                    "ホットキーのリスナーがキー入力を待てないので終了する: {}",
-                    source
-                );
-                // UI スレッドの apply が拾い、HookUnavailable として画面に出す
-                match state.lock() {
-                    Ok(mut state) => {
-                        state.listener_failure = Some(KeyboardHookError::WaitFailed(source))
-                    }
-                    Err(_) => {
-                        warn!("ホットキーの共有状態のロックを取得できないので停止を伝えられない")
-                    }
-                }
-                break;
-            }
-        }
-
-        // ここでフックを外す
-        drop(hook);
-        debug!("ホットキーのリスナースレッドを終了した");
-    });
-
-    // スレッドが結果を送る前に終わった場合（起動直後のパニック）だけ受け取れない
-    let ready = ready_rx
-        .recv()
-        .unwrap_or(Err(KeyboardHookError::ListenerStopped));
-    (handle, ready)
 }
 
 #[cfg(test)]
@@ -476,37 +398,6 @@ mod tests {
             decide_trigger(Some(Duration::ZERO), Duration::from_millis(200)),
             TriggerDecision::Debounced
         );
-    }
-
-    #[test]
-    fn spawn_listener_stops_after_shutdown_request() {
-        // 終了要求を待ちのタイムアウトで拾えること。拾えないと
-        // join が返らず、アプリが終了できなくなる
-        let state = Arc::new(Mutex::new(ListenerState::default()));
-        let shutdown = Arc::new(AtomicBool::new(false));
-
-        // フックを登録できない環境でも、スレッドが終わることは確かめられる
-        let (handle, _ready) = spawn_listener(Arc::clone(&state), Arc::clone(&shutdown));
-
-        shutdown.store(true, Ordering::Release);
-
-        // 実時間の長さでは判定しない（負荷の高い環境で落ちるため）。join が
-        // 返ったことを別スレッドから知らせてもらい、返らなければ時間切れにする。
-        // 上限は遅い CI でも収まる 10 秒で、通常はタイムアウト 1 回ぶんで返る
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = done_tx.send(handle.join());
-        });
-        done_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("終了要求から 10 秒以内にリスナースレッドが終わること")
-            .expect("リスナースレッドが正常に終わること");
-        // 何も登録していないので押下は記録されない
-        assert!(state
-            .lock()
-            .expect("ロックが毒されていないこと")
-            .pressed
-            .is_empty());
     }
 
     // ---- 押下の記録（デバウンスと最小化中の振り分け） ----
