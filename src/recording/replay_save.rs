@@ -110,7 +110,8 @@ mod tests {
     use crate::i18n::{with_language, Language};
     use crate::recording::recorder::Recorder;
     use crate::recording::test_support::{
-        poll_for, poll_until, read_mp4, recording_request, replay_config, start_fakes,
+        open_video_pin_device, poll_for, poll_until, read_mp4, recording_request, replay_config,
+        start_fakes,
     };
     use crate::video::VideoTap;
 
@@ -335,5 +336,63 @@ mod tests {
             .expect("保存先を読める")
             .count();
         assert_eq!(files, 3, "{first:?} {second:?} {recorded:?}");
+    }
+
+    #[test]
+    #[ignore = "音声ピン付きの DirectShow の実機（AVerMedia GC551）が必要。30 秒ほどかかる"]
+    fn video_pin_device_save_replay_has_video_and_audio() {
+        // 実行: cargo test -- --ignored video_pin_device_save_replay_has_video_and_audio --nocapture
+        //
+        // #438 の実機確認。GC551 を音声ピンの入力で開き、リプレイバッファを 30 秒で ON にして
+        // 20 秒待ってから、リプレイだけを保存する。MP4 に映像と音声のトラックが入ることを見る。
+        // 保存先は CAPTURECARD_VIEWER_PIN_TEST_DIR（無ければ一時フォルダ）。残したファイルは
+        // ffprobe で確かめる
+        let temp = tempfile::tempdir().expect("一時ディレクトリを作れること");
+        let folder = std::env::var("CAPTURECARD_VIEWER_PIN_TEST_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| temp.path().to_path_buf());
+        let device = open_video_pin_device("GC551", (1920, 1080));
+        let mut recorder = Recorder::new(device.frames.tap(), device.audio_tap.clone());
+        recorder
+            .set_replay(Some(crate::recording::ReplayConfig {
+                hardware_encoder: true,
+                nominal_fps: Some(device.nominal_fps),
+                video_bitrate_kbps: 8000,
+                ..replay_config(30)
+            }))
+            .expect("リプレイバッファを始められる");
+        poll_for(&mut recorder, Duration::from_secs(20));
+        recorder
+            .save_replay(recording_request(&folder, "video_pin_replay"))
+            .expect("保存を頼める");
+        let summary = poll_until(
+            &mut recorder,
+            Duration::from_secs(15),
+            |event| match event {
+                RecordingEvent::ReplaySaved(summary) => Some(summary.clone()),
+                RecordingEvent::ReplaySaveFailed { .. } | RecordingEvent::ReplaySaveRefused(_) => {
+                    panic!("リプレイを保存できなかった: {event:?}")
+                }
+                _ => None,
+            },
+        );
+        recorder.shutdown();
+        device.stop();
+
+        let mp4 = read_mp4(&summary.path);
+        println!(
+            "保存したリプレイ: {}（長さ {:.2} 秒、さかのぼり {:?}、書いた {} 枚、捨てた {} 枚、音声トラック {}）",
+            summary.path.display(),
+            mp4.duration as f64 / 1e7,
+            summary.replay_lead,
+            summary.frames_written,
+            summary.frames_dropped,
+            if mp4.has_audio { "あり" } else { "なし" }
+        );
+        assert!(mp4.has_audio, "{summary:?}");
+        assert!(
+            (150_000_000..=240_000_000).contains(&mp4.duration),
+            "{summary:?}"
+        );
     }
 }

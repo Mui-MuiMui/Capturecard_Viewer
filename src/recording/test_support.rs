@@ -354,6 +354,107 @@ pub(super) fn record_from_video_pin(
     }
 }
 
+/// 実機の音声ピン付きの映像デバイスを開いて流し続けているもの（`open_video_pin_device`）。
+/// `stop` で閉じる。
+pub(super) struct VideoPinDevice {
+    pub(super) frames: crate::video::VideoFrames,
+    pub(super) audio_tap: AudioTap,
+    /// デバイスへ要求した fps
+    pub(super) nominal_fps: u32,
+    stop: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl VideoPinDevice {
+    /// デバイスを閉じ、デバイスのスレッドが終わるまで待つ。
+    pub(super) fn stop(self) {
+        let _ = self.stop.send(());
+        self.thread.join().expect("デバイスのスレッドが終わる");
+    }
+}
+
+/// 名前に `hint` を含む DirectShow の映像デバイスを、音声ピンの入力（#388）で開いて流し始める。
+/// **実機が要る。** 出力デバイスへは鳴らさない（ミュート）。デバイスは `record_from_video_pin` と
+/// 同じく別のスレッド（デバイスワーカーの代わり）で扱う。録画は呼び出し側のスレッドで行う。
+pub(super) fn open_video_pin_device(hint: &str, resolution: (u32, u32)) -> VideoPinDevice {
+    use crate::audio::{
+        AudioCapture, AudioControls, AudioPinFeed, AudioPinState, PassthroughInput,
+        PassthroughRequest,
+    };
+    use crate::repaint::RepaintWaker;
+    use crate::video::{
+        directshow_display_name, DirectShowCapture, SharedColorConversion, VideoFrames,
+    };
+    use std::sync::mpsc;
+
+    let frames = VideoFrames::new();
+    let audio_tap = AudioTap::new();
+    let (ready_tx, ready_rx) = mpsc::channel::<u32>();
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let device_frames = frames.clone();
+    let device_tap = audio_tap.clone();
+    let hint = hint.to_string();
+    let thread = std::thread::spawn(move || {
+        let feed = AudioPinFeed::new();
+        let mut video = DirectShowCapture::new(
+            device_frames,
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::new(),
+            feed.clone(),
+        );
+        let name = video
+            .list_friendly_names()
+            .into_iter()
+            .find(|name| name.contains(&hint))
+            .expect("名前に hint を含む DirectShow のデバイスがある");
+        video
+            .start_capture(
+                &directshow_display_name(&name),
+                Some(resolution),
+                None,
+                None,
+                true,
+            )
+            .expect("音声ピン付きで開ける");
+        let active = video.active().expect("開いている");
+        println!("開いた映像: {active:?}");
+        let AudioPinState::Connected(connection) = active.audio_pin else {
+            panic!("音声ピンに繋がっていない");
+        };
+        let controls = Arc::new(AudioControls::default());
+        controls.set_muted(true);
+        let mut audio = AudioCapture::new(controls, device_tap, feed);
+        audio
+            .start_passthrough(&PassthroughRequest {
+                input: PassthroughInput::VideoPin {
+                    graph: connection.graph,
+                },
+                output_device_name: None,
+                sample_rate: None,
+                channels: None,
+                input_capabilities: None,
+                output_capabilities: None,
+                buffer_ms: 50,
+            })
+            .expect("音声ピンから開ける");
+        println!("開いた音声: {:?}", audio.active());
+        ready_tx.send(active.requested_fps).expect("知らせる");
+        let _ = stop_rx.recv();
+        audio.stop_capture();
+        video.stop_capture();
+    });
+    let nominal_fps = ready_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("デバイスを開けた");
+    VideoPinDevice {
+        frames,
+        audio_tap,
+        nominal_fps,
+        stop: stop_tx,
+        thread,
+    }
+}
+
 // ---- 窓口（`Recorder`）にフェイクを流すテストの補助 ----
 
 /// フェイクの映像（720p60 のカラーバーにフレーム番号を焼き込んだもの）と音声（正弦波）を流す。

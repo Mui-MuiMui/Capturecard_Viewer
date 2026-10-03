@@ -586,6 +586,11 @@ sequenceDiagram
 - **最小化中は録画の開始・停止と同じく実行せず、押下を溜めずに捨てる**（`runs_while_minimized` が偽、`discarded_while_minimized` が真）。窓口は UI スレッドにあるので最小化中は届かない。溜めて復帰したときに保存すると、押した時点ではなく復帰した時点から N 秒さかのぼった区間になり、意図とずれる
 - 通常のフレームで何回押されていても 1 回に畳む（`folded_repeats` は `min(1)`）。続けて押した分は「保存中」で弾かれるだけなので、畳んでも結果は同じ
 
+### 確かめたこと
+
+- `#[ignore]` のテスト（`replay_save.rs` の `recorder_save_replay_writes_only_the_buffered_footage`）で、フェイクの 720p60 と正弦波を窓口に流し、30 秒で ON にして 20 秒待ってから保存すると、約 20 秒（20.03 秒）の MP4 になり、先頭が 0 から始まり、さかのぼった長さとファイルの長さの差が 0.5 秒未満（押した時刻で止まっている）ことを Source Reader で読み戻して確かめた。続けてもう一度押すと 2 本目（20.37 秒、`_2`）ができること、保存中は録画が始まらないこと、録画中は窓口も録画スレッドも保存しない（ファイルが増えない）ことも同じテストで見ている
+- 実機の音声ピン（GC551）で映像と音声のトラックが入ることを見るテスト（`video_pin_device_save_replay_has_video_and_audio`）を置いた。実機が列挙に出ているときに `cargo test -- --ignored video_pin_device_save_replay_has_video_and_audio --nocapture` で回す
+
 ## 段階ごとにできること・実機で確かめること
 
 | 段 | できるようになること | 実機で確かめること |
