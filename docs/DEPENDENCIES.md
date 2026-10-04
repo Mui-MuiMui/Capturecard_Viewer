@@ -49,7 +49,9 @@
 
 | クレート | 指定（`Cargo.toml`） | `Cargo.lock` | 最新 | 差 | 用途 |
 |---|---|---|---|---|---|
-| `eframe` | 0.36 | 0.36.2 | 0.36.2 | 追随 | ウィンドウとアプリの骨組み（第 4 段、#300）。描画は glow（下の「第 4 段 — UI」） |
+| `eframe` | 0.36 | 0.36.2 | 0.36.2 | 追随 | ウィンドウとアプリの骨組み（第 4 段、#300）。描画は wgpu（DX12）と glow の両方を入れ、起動時に選ぶ（下の「`wgpu` は DX12 だけで入れる」） |
+| `wgpu` | 30 | 30.0.1 | 30.0.1 | 追随 | `eframe`（`egui-wgpu` 0.36）が使う wgpu に DX12 のバックエンドを足すためだけに直接の依存へ入れる。版は `egui-wgpu` と揃える |
+| `pollster` | 1.0 | 1.0.1 | 1.0.1 | 追随 | 起動前に DX12 のアダプターを確かめるときに wgpu の非同期の問い合わせを待つ（`src/renderer.rs`）。`eframe` が wgpu のために使うものと同じ |
 | `egui` | 0.36 | 0.36.2 | 0.36.2 | 追随 | UI（同上） |
 | `nokhwa` | 0.10 | 0.10.11 | 0.10.11 | 追随 | 映像キャプチャ |
 | `cpal` | 0.18 | 0.18.2 | 0.18.2 | 追随 | 音声入出力。`realtime` フィーチャで音声スレッドの優先度を上げる（`docs/design/audio.md` の「cpal 0.18 で変わったこと」）。`rodio` 経由の 0.17.3 も残る（下の「`cpal` 0.17 は `rodio` 経由で残る」） |
@@ -117,6 +119,15 @@
 `Cargo.lock` に増えたのは `sha2` と、その下の `digest` 0.11 / `block-buffer` / `crypto-common` /
 `hybrid-array` / `const-oid` / `cpufeatures` 0.3。Windows の CNG（`BCryptHash`）でも計算できるが、
 `windows` クレートのフィーチャを増やしてまで unsafe の呼び出しを書くほどの差は無いので、純 Rust の実装を使う。
+
+### `wgpu` は DX12 だけで入れる（2026-10-04）
+
+描画の present の段数を減らすため（#456 の (2)）、`eframe` の `wgpu_no_default_features` を足し、wgpu（DX12 のフリップモデル）を既定の描画にした。glow は撮り比べと、GPU の DX12 アダプターが無い環境のために残す。理由と選び方は `docs/design/video-pipeline.md` の「描画バックエンド」。
+
+- **バックエンドは DX12 だけ。** `eframe` の `wgpu` フィーチャ（`egui-wgpu/default`）は Vulkan / GLES / Metal / WebGPU と WebGL まで入れるので使わず、`wgpu_no_default_features` に直接の依存の `wgpu = { default-features = false, features = ["dx12"] }` を足す。present mode に Mailbox を確実に選べるのが DX12 だけのため
+- `Cargo.lock` に増えたのは `wgpu` / `wgpu-core` / `wgpu-hal` / `wgpu-types` / `wgpu-naga-bridge` / `wgpu-core-deps-windows-linux-android` / `egui-wgpu` / `naga` / `naga-types` / `gpu-allocator` / `presser` / `range-alloc` / `renderdoc-sys` / `codespan-reporting` / `ordered-float` / `bit-set` / `bit-vec` / `type-map` / `pollster` / `libm` / `allocator-api2` / `unicode-width` / `rustc-hash`（1.1 と 2.1）の 24 個。ライセンスはどれも MIT / Apache-2.0 の範囲で、`about.toml` の `accepted` は変えていない
+- exe は約 10.5MB → 約 14.2MB（+3.7MB）
+- 実行時に要る DirectX 12 とシェーダーのコンパイラ（FXC の `d3dcompiler_47.dll`）は Windows に入っている。DXC（`dxcompiler.dll`）は使わない
 
 ## 更新の順序
 
@@ -188,7 +199,7 @@ flowchart TD
 
 | 変えたこと | 中身 |
 |---|---|
-| 描画のバックエンド | **glow（OpenGL）のまま。** 0.36 の `eframe` の既定は wgpu だが、wgpu / naga と DirectX 12・Vulkan のバックエンドまで引き込むわりに、映像 1 枚とダイアログの画面では得るものが無い。`default-features = false` にして `accesskit` / `default_fonts` / `glow` / `links` だけを足す。`wayland` / `x11` は Linux 向けなので切った。`links` は更新の通知と「その他」タブのリンクを開くのに要る（`webbrowser`） |
+| 描画のバックエンド | **glow（OpenGL）のまま。**（その後 #456 の (2) で wgpu も入れて既定にした。上の「`wgpu` は DX12 だけで入れる」）0.36 の `eframe` の既定は wgpu だが、wgpu / naga と DirectX 12・Vulkan のバックエンドまで引き込むわりに、映像 1 枚とダイアログの画面では得るものが無い。`default-features = false` にして `accesskit` / `default_fonts` / `glow` / `links` だけを足す。`wayland` / `x11` は Linux 向けなので切った。`links` は更新の通知と「その他」タブのリンクを開くのに要る（`webbrowser`） |
 | `App` | `update(ctx)` → `ui(ui)`。1 フレームの処理はドキュメントが `update()` と呼んでいるとおり `CaptureCardViewer::update` に残し、`App::ui` から呼ぶ。最小化中だけ呼ばれる `App::logic` は実装しない（0.26 と同じく最小化中は UI スレッドで何も回さない） |
 | パネル | `CentralPanel` / `Panel`（`TopBottomPanel` の後継）は `Context` ではなく `Ui` を受け取る。`Window` / `Area` は `Context` のまま |
 | 名前の変更 | `Context::run` → `run_ui`、`screen_rect` → `content_rect`、`style` → `global_style`、`wants_keyboard_input` → `egui_wants_keyboard_input`、`Frame::none()` → `Frame::NONE`、`Rounding` → `CornerRadius`（`u8`）、`Margin` は `i8`、`ComboBox::from_id_source` → `from_id_salt`、`SelectableLabel` → `Button::selectable`、`Slider::clamp_to_range` → `clamping`、`close_menu` → `close`、`Area::new` は `Id` を取る、`FontData` は `Arc` で渡す、`TextureOptions` に `mipmap_mode` |

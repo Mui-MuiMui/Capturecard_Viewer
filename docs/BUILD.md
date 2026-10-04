@@ -98,6 +98,8 @@ capturecard_viewer.exe
 
 ウィンドウアイコン（`icon.ico`）と既定の効果音（`sound/SS.mp3`）は `include_bytes!` で実行ファイルに埋め込んでいるため、隣に置く必要はない。置いてあっても構わない。
 
+描画に使う DirectX 12（`d3d12.dll` / `dxgi.dll`）とシェーダーのコンパイラ（`d3dcompiler_47.dll`）は Windows 10/11 に入っているので同梱しない。GPU の DX12 アダプターが無い環境では OpenGL（glow）で描く（`docs/design/video-pipeline.md` の「描画バックエンド」）。描画バックエンドを wgpu と glow の両方入れた（#456 の (2)）ことで、exe は約 10.5MB から約 14.2MB になった。
+
 設定画面でユーザーが選んだ効果音ファイルだけは外部のファイルを読む。設定に相対パスが保存されている場合は実行ファイルの置き場所を基準に解決し、見つからなければ埋め込みの既定音を鳴らす。
 
 ## プロファイル設定
@@ -137,6 +139,7 @@ release ビルドは `lto` と `codegen-units = 1` の影響で時間がかか�
 | `CAPTURECARD_VIEWER_FAKE_SCENARIO` | `disconnect:<秒>` / `reopen-fail:<秒>` / `fail:<回数>` / `audio-error:<秒>` / `audio-pin`（カンマ区切り。`audio-pin` だけ引数を取らない） | フェイクデバイスで映像の途絶・途絶後の開き直しの失敗・接続の失敗・音声ストリームのエラーを起こす。`audio-pin` はフェイクの映像デバイスに DirectShow の音声ピンを持たせ、「映像デバイスの音声 (DirectShow)」で正弦波（660Hz）が鳴るようにする（#394）。`CAPTURECARD_VIEWER_FAKE_DEVICES` と一緒に使う | 同上、`docs/design/directshow-audio.md` |
 | `CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` | 版（`1.0.0` / `v1.0.0`） | 更新の確認で比べる「いまの版」を差し替える。公開済みの最新より古くすれば通知ダイアログが出る | `docs/design/update.md` の「試すための環境変数」、`docs/TROUBLESHOOTING.md` の「更新の通知で、いまの版が違う…」 |
 | `CAPTURECARD_VIEWER_UPDATE_API_URL` | `http://` / `https://` の URL、または `file:///C:/path/latest.json` | 更新の確認の問い合わせ先（GitHub の Release API）を差し替える。`file://` なら Release の JSON をそのまま読む。平文の HTTP を使うのは `http://` を指したときだけで、`https://` の問い合わせとダウンロードは `http://` へのリダイレクトを辿らない | 同上 |
+| `CAPTURECARD_VIEWER_RENDERER` | `glow` / `wgpu`（大文字小文字は問わない） | 描画のバックエンドを選ぶ。未指定は wgpu（DX12）で、GPU の DX12 アダプターが無ければ glow（OpenGL）に倒れる。`wgpu` と明示したときだけ CPU で描く WARP も使う。解釈できない値は WARN を出して未指定と同じにする。撮り比べ用 | `docs/design/video-pipeline.md` の「描画バックエンド」、`docs/LATENCY.md` の「注意」 |
 
 **環境変数を新しく足したら、この表に必ず行を足すこと。**
 

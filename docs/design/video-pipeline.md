@@ -143,7 +143,73 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 - 付け方: nokhwa 0.10 はソースリーダーの属性を `nokhwa-bindings-windows` の中で組み立てていてアプリから足せないため、0.4.6 を `vendor/` に置いて `[patch.crates-io]` で差し替え、属性を 1 つ足した。環境変数で OFF にできるようにして、同じ exe で ON / OFF を撮り比べた
 - 結果: パススルーに対する遅れは ON が約 38ms、OFF も約 38ms（どちらも 9 カメラフレーム前後、読み取りの誤差 ±1 の中）。`docs/LATENCY.md` の「`MF_LOW_LATENCY` の撮り比べ」
 - 効かない理由の見立て: この属性が減らすのはソースリーダーの下にあるデコーダーや変換の MFT の溜め込みで、YUY2 を無変換で受け取る経路には溜める段が無い。取り込み側の遅れはボードと USB のドライバーにあり、アプリからは触れない
-- 残る候補は UI スレッドが 16ms のポーリングで取りに行く待ち（#459。到着で起こす形にした、上の「到着で起こす形にした理由」）と、present の経路（wgpu のフリップモデル、#456 の (2)）
+- 残る候補は UI スレッドが 16ms のポーリングで取りに行く待ち（#459。到着で起こす形にした、上の「到着で起こす形にした理由」）と、present の経路（wgpu のフリップモデル、#456 の (2)。下の「描画バックエンド」）
+
+## 描画バックエンド（#456 の (2)）
+
+**既定は wgpu の DX12 で描き、glow（OpenGL）も同じ exe に残す。** どちらで描くかは起動時に決める（`src/renderer.rs`）。
+
+### なぜ wgpu にしたか
+
+#455 / #459 の計測で、パススルーに対する約 35ms のうちアプリ内（到着→テクスチャ更新）は約 5ms で、残り約 30ms は取り込み側と present・モニターの側にあると分かった。present の側でアプリが変えられるのは描いた絵を画面へ渡す経路だけ。
+
+- glow は WGL の `SwapBuffers` で present する。ウィンドウ表示では DWM の合成を通り、ドライバーによっては合成用の面への複製（ブロック転送）が 1 段挟まる
+- wgpu の DX12 はフリップモデルの swapchain（`DXGI_SWAP_EFFECT_FLIP_DISCARD`、HWND から作る `DxgiFromHwnd`）で present する。DWM は swapchain のバッファをそのまま合成に使い、条件がそろえば合成を飛ばして直接スキャンアウトする（independent flip、下の「フルスクリーンで independent flip が効く条件」）
+- 効くかどうかは実機の撮影でしか分からない（`docs/LATENCY.md`）。NVIDIA などのドライバーには OpenGL の present を DXGI の swapchain に載せ替える設定（「Vulkan/OpenGL の現在の方法」）があり、その環境では glow との差が小さいこともありうる
+
+#300（eframe 0.36 へ上げたとき）は glow のままにした。wgpu / naga と DX12 のバックエンドを引き込むわりに、映像 1 枚とダイアログの画面では得るものが無いという理由だった。present の段数という理由が出たので wgpu を入れた。exe は 10.5MB → 14.2MB（+3.7MB）になった。
+
+### present mode と溜めるフレーム数
+
+| 設定 | 値 | 理由 |
+|---|---|---|
+| バックエンド | DX12 だけ（`wgpu` のフィーチャも `dx12` だけ） | Vulkan / GLES は入れない。present mode を確実に選べるのが DX12 だけのため（下） |
+| present mode | **Mailbox** | 待たずに渡し、次の垂直同期で最新の 1 枚だけを出す。ティアリングは起きない。Fifo は垂直同期まで待たされ、待っている間に届いたフレームの取り込みが遅れる |
+| 溜めるフレーム数（`desired_maximum_frame_latency`） | 1（最小） | DX12 では `SetMaximumFrameLatency(1)` と、swapchain のバッファ 2 枚 |
+| シェーダーのコンパイラ | FXC | Windows に入っている `d3dcompiler_47.dll`。既定の Auto は PATH 上の `dxcompiler.dll` を拾いうるので固定する |
+
+- **Immediate（垂直同期を切る）は使わない。** ティアリングによる画質の低下が大きいので、ユーザーが却下した（#456 のコメント）
+- **Mailbox が使えないときに Fifo へ倒す形にはできなかった。** eframe 0.36 は present mode を起動前の `WgpuConfiguration` で決め、起動後に変える口（`Frame::set_wgpu_surface_config`）は `Frame` が持つ `RenderState` の複製を書き換えるだけで描画側へ届かない。wgpu は対応していない present mode を指定すると落ちる（Fifo への自動の切り替えは `AutoVsync` / `AutoNoVsync` にしか無い）。そこで **Mailbox を必ず出せる DX12 だけで wgpu を使い**、出せないときは glow へ倒す。wgpu-hal の DX12 は Mailbox と Fifo を常に対応一覧に載せる。アダプターを選ぶとき（`native_adapter_selector`）にもウィンドウの surface が Mailbox を出せるかを確かめ、出せないアダプターは選ばない
+- **Mailbox は垂直同期で待たないので、描画の回数を垂直同期が抑えない。** 映像の取り込みは到着で起こす形（上の「再描画をいつ要求するか」）なので、普段は到着の回数（60fps なら毎秒 60 回）しか描かない。ただし egui が描き続けを要求する間（`ui.spinner()` を出している間、アニメーションの間）は、GPU が描ける限りの回数で回る。いまスピナーを出すのは、対応設定の取得中と更新の確認・適用中だけ
+
+### glow を残す理由と、どちらで描くかの決め方
+
+| 条件 | 描画 | ログ |
+|---|---|---|
+| 環境変数 `CAPTURECARD_VIEWER_RENDERER` が未指定・空、または解釈できない値（`opengl` など） | GPU の DX12 アダプターがあれば wgpu、無ければ glow | wgpu なら INFO（アダプター名と present mode）、glow へ倒したら WARN（理由と列挙できたアダプター）。解釈できない値は WARN |
+| `CAPTURECARD_VIEWER_RENDERER=wgpu` | DX12 のアダプターがあれば wgpu（**CPU で描く WARP も使う**）、無ければ glow | 同上 |
+| `CAPTURECARD_VIEWER_RENDERER=glow` | glow | INFO |
+
+- **glow は撮り比べのために残す。** 同じ exe で glow と wgpu を切り替えて撮る（`docs/LATENCY.md` の「注意」）。設定ファイルには入れない
+- **GPU の DX12 アダプターが無いときの逃げ道でもある。** 既定では WARP（Microsoft Basic Render Driver。画素を CPU で塗る）を選ばない。GPU の無い VM でも、VMware の OpenGL ドライバーなら glow は軽く動くため（下の表）
+- **どちらで描くかは `run_native` の前に決める。** winit のイベントループは 1 プロセスに 1 回しか作れないので、wgpu で起動に失敗してから glow で開き直すことはできない。起動の前に DX12 のインスタンスを作ってアダプターを列挙し、選んだアダプターでデバイスまで作れるかを確かめる（`probe_dx12`、手元の VM で 70〜150ms）。それでも描画の初期化に失敗したらウィンドウは出ずに終わり、ログに ERROR が残る。そのときは `CAPTURECARD_VIEWER_RENDERER=glow` で起動できる
+- どちらで描いているかは統計 OSD の「描画」の行（「描画 wgpu Dx12 Mailbox / <アダプター名>」「描画 glow (OpenGL)」。アンダーランの行の次）とログで分かる
+
+### GPU の無い VM での成立条件（2026-10-04）
+
+この開発用の VM（VMware、GPU のパススルーなし、16 コア）で、フェイクの映像 1080p60 を 30 秒ずつ流して比べた。CPU は 1 コアあたりの % で、30 秒の平均。
+
+| 描画 | アダプター | 映像 | CPU | 30 秒に取り込んだ枚数 | 到着→テクスチャ更新の平均 / 最大 |
+|---|---|---|---|---|---|
+| 既定（→ glow へ倒れる） | DX12 は WARP しか無いので選ばない。OpenGL は VMware の SVGA3D（Mesa 24.1） | 映る | 52% | 1526 | 11.2ms / 35.2ms |
+| `glow` | 同上 | 映る | 38% | 1522 | 11.0ms / 35.0ms |
+| `wgpu` | WARP（Microsoft Basic Render Driver、DX12） | 映る（毎秒 3 枚ほど） | 350% | 101 | 16.5ms / 31.7ms |
+
+- 720p60 の `wgpu`（WARP）でも CPU 528%、30 秒に 183 枚だった。WARP で映像を描くのは実用にならないので、既定では選ばない
+- 既定と `glow` の CPU の差は計測ごとのばらつきの範囲（上の「到着で起こす形にした理由」と同じく、同じ exe で 20 ポイント以上揺れる）
+- 最小化と復帰、最大化と復帰をウィンドウのメッセージで繰り返しても、`wgpu`（WARP）で落ちず、ログに ERROR も WARN も出なかった
+- **GPU のある実機での CPU と見た目はこの表から決めない。** 実機で DX12 の GPU アダプターが選ばれることと、遅れの差は人が確かめる（`docs/MANUAL-TEST.md` の「描画バックエンド」）
+
+### フルスクリーンで independent flip が効く条件
+
+DWM が合成を飛ばしてフリップモデルの swapchain を直接スキャンアウトする（independent flip）のは、おおむね次の条件がそろったとき。そろわないときは DWM の合成を通る（composed flip。それでも glow のブロック転送の段は無い）。
+
+- **ウィンドウの描画領域がモニター全体と一致している。** このアプリのフルスクリーン（`ViewportCommand::Fullscreen`、winit のボーダーレスのフルスクリーン）は装飾を外してモニター全体を覆うので満たす。装飾なし（ボーダーレス）の通常のウィンドウや最大化では、タスクバーが残るので満たさない
+- **他のウィンドウが上に重なっていない。** 音量やトーストの通知、他のアプリの OSD、常に最前面のウィンドウが重なると、その間は合成に戻る。右クリックメニューや設定ダイアログはこのアプリの中で描くので、重なりに数えない
+- swapchain の大きさがウィンドウと一致している（wgpu が大きさの変化に合わせて作り直す）。透明なウィンドウにしていない
+- GPU とドライバーがマルチプレーンオーバーレイに対応していれば、ウィンドウ表示でもオーバーレイの面へ載って合成を飛ばせることがある
+
+効いているかは PresentMon（Intel 製の計測ツール）の `PresentMode` の列で見られる（`Hardware: Independent Flip` / `Composed: Flip`）。
 
 ## 映像の上に重ねる表示の層
 
