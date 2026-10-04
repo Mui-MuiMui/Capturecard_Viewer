@@ -9,6 +9,7 @@ use crate::audio::AudioInputRoute;
 use crate::i18n;
 use crate::overlay::OverlayContent;
 use crate::status::{self, ConnectionStatus, ErrorSource, LinkStatus};
+use crate::video::format_display_latency;
 use chrono::Local;
 use std::time::{Duration, Instant};
 
@@ -87,10 +88,21 @@ impl CaptureCardViewer {
                 .details
                 .push(i18n::link_capture_api(active.api.label()));
             video.details.push(i18n::link_video(active.summary()));
+            // 設定の形式で開けず YUY2 で開いたとき（#81）。選んだ形式が効いて
+            // いないことが「映像:」の行だけでは分からないので並べて出す
+            if let Some(requested) = &active.format_fallback {
+                video
+                    .details
+                    .push(i18n::link_video_format_fallback(requested));
+            }
             // 実際の fps はデバイスから取れない（video/capture.rs の ActiveVideo の説明を参照）
             video
                 .details
                 .push(i18n::link_requested_fps(active.requested_fps));
+            // 統計 OSD と同じ行（#455）。UI スレッドが持つ集計なのでデバイスへは問い合わせない
+            video.details.push(format_display_latency(
+                self.display_latency.recent(Instant::now()),
+            ));
             // 音声ピン（#388）。Media Foundation で開いているときは出さない
             video
                 .details

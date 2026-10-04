@@ -121,7 +121,7 @@ flowchart LR
 
 #### 映像の開き方（#237）
 
-一覧は Media Foundation を優先するので、両方に出るデバイスを DirectShow で開く手段が名前の印だけでは無い。MF 側の挙動が怪しいときの切り分けや、MJPEG / RGB24 を選んだ形式で開きたいとき（`docs/design/video-pipeline.md` の「UI にあるが動作していない設定がある」）のために、設定で経路を固定できるようにしてある。
+一覧は Media Foundation を優先するので、両方に出るデバイスを DirectShow で開く手段が名前の印だけでは無い。MF 側の挙動が怪しいときの切り分けや、Media Foundation の経路が扱えない形式（I420 / YV12）で開きたいとき（`docs/design/video-pipeline.md` の「Media Foundation で開く形式（#81）」）のために、設定で経路を固定できるようにしてある。
 
 | `video.backend` | 経路 | 経路へ渡す名前 |
 |---|---|---|
@@ -165,7 +165,7 @@ flowchart LR
 
 **MJPEG の展開に nokhwa のデコーダ（mozjpeg）は使わない。** mozjpeg は壊れたデータを panic で知らせて内部で `catch_unwind` するが、release は `panic = "abort"` なので（`docs/design/logging.md`）そのままプロセスが落ちる。キャプチャーの MJPEG は途中で欠けたフレームが混ざりうるので、エラーを値で返す `image` クレートの JPEG デコーダを使い、壊れたフレームは捨てて初回だけ記録する。
 
-開く形式の選び方（`choose_candidate`）は、指定された形式がデバイスにあればその形式の中から、解像度が一致するもの → 画素数が近いもの → 形式が未指定なら YUY2・NV12・I420・YV12・MJPEG・RGB24 の順 → fps が近いもの。解像度が未指定なら Media Foundation の経路と同じく 1280x720 60fps を求め、fps は 15〜120 へ丸める。**Media Foundation の経路と違い、MJPEG / RGB24 を選べばその形式で開く**（`docs/design/video-pipeline.md` の「UI にあるが動作していない設定がある」）。
+開く形式の選び方（`choose_candidate`）は、指定された形式がデバイスにあればその形式の中から、解像度が一致するもの → 画素数が近いもの → 形式が未指定なら YUY2・NV12・I420・YV12・MJPEG・RGB24 の順 → fps が近いもの。解像度が未指定なら Media Foundation の経路と同じく 1280x720 60fps を求め、fps は 15〜120 へ丸める。Media Foundation の経路も選んだ形式を要求して開くが（#81）、扱える形式は YUY2 / NV12 / MJPEG / RGB24 だけで、開けなければ近いものではなく YUY2 へ倒す（`docs/design/video-pipeline.md` の「Media Foundation で開く形式（#81）」）。
 
 #### 音声ピン（#388）
 

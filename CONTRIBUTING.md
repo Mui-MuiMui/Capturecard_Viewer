@@ -22,6 +22,7 @@
 | [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) | 依存クレートの状況と更新方針、ライセンス一覧の生成手順 |
 | [docs/MANUAL-TEST.md](docs/MANUAL-TEST.md) | 実機での手動テストチェックリスト |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 既知の不具合と回避策。利用者向け |
+| [docs/LATENCY.md](docs/LATENCY.md) | 映像遅延の実測値（条件つき）と測り方 |
 | [GUARDRAIL.md](GUARDRAIL.md) | してはいけないこと / 必ずすること。理由は書かず参照先だけを添えた一覧 |
 | [docs/design/](docs/design/) | 設計判断の理由と経緯。ワーカースレッド、再接続、映像・音声、設定、ホットキーなどテーマ別 |
 | `CLAUDE.md` / `.claude/` | コードの構造と作業の進め方、検証・命名・テスト・リリースの各手順 |

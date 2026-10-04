@@ -404,6 +404,7 @@ pub(super) mod mock {
                     api: crate::video::capture::CaptureApi::Fake,
                     resolution: state.opened_resolution,
                     format: None,
+                    format_fallback: None,
                     requested_fps: 0,
                     audio_pin: state.audio_pin.clone(),
                 })

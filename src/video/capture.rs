@@ -6,6 +6,7 @@
 
 use log::{debug, info, warn};
 use nokhwa::pixel_format::RgbFormat;
+use nokhwa::utils::CameraInfo;
 use nokhwa::utils::{
     ApiBackend, CameraFormat, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
 };
@@ -16,6 +17,7 @@ use std::time::{Duration, Instant};
 use super::color::SharedColorConversion;
 use super::frame_buffer::VideoFrames;
 use super::frame_sink::{FirstTimeOnly, FrameSink};
+use super::mf_format::{self, SinkRoute};
 use super::{elapsed_ms, VideoError};
 use crate::audio::AudioPinState;
 use crate::i18n::{self, Text};
@@ -35,16 +37,15 @@ fn format_actual_video(resolution: Option<(u32, u32)>, format: Option<&str>) -> 
     }
 }
 
-/// nokhwa のフレームフォーマットを、設定画面と同じ語彙の表示名へ変換する。
-fn frame_format_name(format: FrameFormat) -> &'static str {
-    match format {
-        FrameFormat::YUYV => "YUY2",
-        FrameFormat::MJPEG => "MJPEG",
-        FrameFormat::NV12 => "NV12",
-        FrameFormat::GRAY => "GRAY",
-        FrameFormat::RAWRGB => "RGB24",
-        FrameFormat::RAWBGR => "BGR24",
-    }
+/// `VideoCapture::open_camera` が開いたカメラと、確定した内容。
+struct OpenedCamera {
+    camera: CallbackCamera,
+    /// 確定した解像度。取得できなければ `None`
+    resolution: Option<(u32, u32)>,
+    /// 確定した形式の表示名（`mf_format::format_name`）。取得できなければ `None`
+    format: Option<&'static str>,
+    create_ms: f32,
+    open_ms: f32,
 }
 
 /// 映像リンクの観測値。切断の判定に使う。
@@ -84,6 +85,11 @@ pub struct ActiveVideo {
     pub resolution: Option<(u32, u32)>,
     /// 確定したフレームフォーマット名。取得できなければ `None`
     pub format: Option<String>,
+    /// 設定の形式で開けず YUY2 で開いたときの、設定の形式名（#81）。
+    ///
+    /// Media Foundation の経路だけが埋める。デバイスがその形式を出さない、
+    /// 経路が扱えない名前だった、のどちらか。「接続状態」タブに出す
+    pub format_fallback: Option<String>,
     /// 要求したフレームレート
     pub requested_fps: u32,
     /// 映像デバイスの音声ピンの状態（#388）。DirectShow で開いたときだけ意味を持ち、
@@ -245,30 +251,18 @@ impl VideoCapture {
             devices.into_iter().next().ok_or(VideoError::NoDevices)?
         };
 
-        // 実際に要求したフレームレート。接続状態の表示に使う。
-        // 解像度が未指定のときに要求する 60 を初期値にしてある
-        let mut requested_fps = 60;
+        // 設定の形式を、能力の一覧と同じ表（`mf_format::MF_FORMATS`）で引いて
+        // そのまま要求する。表に無い名前（DirectShow でだけ選べる I420 など）は
+        // YUY2 で開き、そのことを「接続状態」タブにも出す（#81）
+        let request = mf_format::request_for(format);
+        if let Some(unknown) = request.unknown {
+            warn!(
+                "ビデオフォーマット {} は Media Foundation の経路で扱えないので YUY2 で開く",
+                unknown
+            );
+        }
 
-        // Windows Media Foundationでの問題を回避するフォーマット設定
-        let requested_format = if let Some((w, h)) = resolution {
-            // 設定画面では MJPEG / RGB24 も選べるが、実装が追いついておらず
-            // すべて YUYV で開いている。選んだ値と実際の値が食い違うので記録する
-            let ff = match format.unwrap_or("") {
-                "YUY2" => FrameFormat::YUYV,
-                // 未指定: デフォルトフォーマット
-                "" => FrameFormat::YUYV,
-                other @ ("MJPEG" | "RGB24") => {
-                    warn!("ビデオフォーマット {} は未実装のため YUY2 で開く", other);
-                    FrameFormat::YUYV
-                }
-                other => {
-                    warn!(
-                        "未知のビデオフォーマット {} を指定されたので YUY2 で開く",
-                        other
-                    );
-                    FrameFormat::YUYV
-                }
-            };
+        let (target, fps_value) = if let Some((w, h)) = resolution {
             let fps_value = fps.unwrap_or(60).clamp(15, 120);
             if let Some(requested) = fps.filter(|v| *v != fps_value) {
                 warn!(
@@ -276,28 +270,80 @@ impl VideoCapture {
                     requested, fps_value
                 );
             }
-            requested_fps = fps_value;
-
-            // フォールバック戦略: 安定したYUYVを使用
-            RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
-                Resolution::new(w, h),
-                ff,
-                fps_value,
-            )))
+            ((w, h), fps_value)
         } else {
-            // 高解像度優先（安定性のためYUYVを使用）
-            debug!("解像度が未指定なので 1280x720 YUYV 60fps を要求する");
-            RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
-                Resolution::new(1280, 720),
-                FrameFormat::YUYV,
-                60,
-            )))
+            debug!(
+                "解像度が未指定なので 1280x720 {} 60fps を要求する",
+                mf_format::format_name(request.format)
+            );
+            ((1280, 720), 60)
         };
 
+        // 要求した形式で開けなければ YUY2 で開き直す。YUY2 で失敗したときは
+        // 形式ではなくデバイス側の問題なので、そのまま失敗を返す
+        let mut format_fallback = request.unknown.map(str::to_string);
+        let opened = match self.open_camera(&device_info, request.format, target, fps_value) {
+            Ok(opened) => opened,
+            Err(e) => match mf_format::fallback_for(request.format) {
+                Some(fallback) => {
+                    let requested_name = mf_format::format_name(request.format);
+                    warn!(
+                        "ビデオフォーマット {} で開けなかったので {} で開き直す（デバイス: {}）: {}",
+                        requested_name,
+                        mf_format::format_name(fallback),
+                        device_info.human_name(),
+                        e
+                    );
+                    format_fallback = Some(requested_name.to_string());
+                    self.open_camera(&device_info, fallback, target, fps_value)?
+                }
+                None => return Err(e),
+            },
+        };
+
+        info!(
+            "映像ストリームを開いた（デバイス: {}、実際の設定: {}、Camera::new {:.1}ms、open_stream {:.1}ms）",
+            device_info.human_name(),
+            format_actual_video(opened.resolution, opened.format),
+            opened.create_ms,
+            opened.open_ms
+        );
+
+        self.camera = Some(opened.camera);
+        // 接続状態の表示用に、実際に開いた内容を控える
+        self.active = Some(ActiveVideo {
+            device_name: device_info.human_name().to_string(),
+            api: CaptureApi::MediaFoundation,
+            resolution: opened.resolution,
+            format: opened.format.map(str::to_string),
+            format_fallback,
+            requested_fps: fps_value,
+            // Media Foundation で開いた映像には音声ピンが無い
+            audio_pin: AudioPinState::NotApplicable,
+        });
+
+        Ok(())
+    }
+
+    /// 1 つの形式でカメラを作り、ストリームを開く。
+    ///
+    /// `start_capture` が、要求した形式と YUY2 へ代えたときの 2 回まで呼ぶ。
+    /// フレームコールバック（`FrameSink`）は呼ぶたびに作る。
+    fn open_camera(
+        &self,
+        device_info: &CameraInfo,
+        format: FrameFormat,
+        (width, height): (u32, u32),
+        fps: u32,
+    ) -> Result<OpenedCamera, VideoError> {
+        let requested_format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(
+            CameraFormat::new(Resolution::new(width, height), format, fps),
+        ));
+
         let frame_callback = {
-            // 変換して積む本体はフェイクと共有する（`super::frame_sink`）。
-            // ここに残すのは nokhwa の `Buffer` からの取り出しと、
-            // YUY2 以外をデコーダへ倒す分岐だけ
+            // 変換して積む本体はフェイク・DirectShow と共有する（`super::frame_sink`）。
+            // ここに残すのは nokhwa の `Buffer` からの取り出しと、形式ごとの受け口の
+            // 振り分け（`mf_format::sink_route`）だけ
             let mut sink = FrameSink::new(
                 &self.frames,
                 self.color_conversion.clone(),
@@ -311,17 +357,25 @@ impl VideoCapture {
                 let res = frame.resolution();
                 let width = res.width_x as usize;
                 let height = res.height_y as usize;
-                // フレームフォーマットを取得して適切な処理を行う
                 let source_format = frame.source_frame_format();
+                let src = frame.buffer();
 
-                match source_format {
-                    FrameFormat::YUYV if width.is_multiple_of(2) => {
-                        // YUY2の高速パス
-                        sink.push_yuy2(width, height, &frame.buffer_bytes(), start);
+                match mf_format::sink_route(source_format, width) {
+                    SinkRoute::Yuy2 => {
+                        sink.push_yuy2(width, height, src, start);
                     }
-
-                    _ => {
-                        // その他のフォーマットも標準デコード。
+                    SinkRoute::Yuv420(layout) => {
+                        sink.push_yuv420(layout, width, height, src, start);
+                    }
+                    SinkRoute::Mjpeg => {
+                        // DirectShow の経路と同じ展開（`convert::mjpeg_to_rgb`）
+                        sink.push_mjpeg(width, height, src, start);
+                    }
+                    SinkRoute::Bgr24 => {
+                        sink.push_bgr24(width, height, mf_format::MF_RGB24_BOTTOM_UP, src, start);
+                    }
+                    SinkRoute::Decoder => {
+                        // 受け口を持たない形式（幅が奇数の YUY2 など）は nokhwa のデコーダへ。
                         //
                         // **この経路では色空間・色レンジ・映像調整が効かない。**
                         // 係数表はデコーダの内部にあり、外から差し替えられないため。
@@ -330,7 +384,7 @@ impl VideoCapture {
                         // 採っていない。設定が効かないことをログに残す
                         if fallback_notice.take() {
                             warn!(
-                                "YUY2 の高速パスを使えないのでデコーダへフォールバックする（フォーマット: {:?}、{}x{}）。この経路では色空間・色レンジ・映像調整が反映されない。以降は記録しない",
+                                "このフォーマットの受け口が無いのでデコーダへフォールバックする（フォーマット: {:?}、{}x{}）。この経路では色空間・色レンジ・映像調整が反映されない。以降は記録しない",
                                 source_format, width, height
                             );
                         }
@@ -341,7 +395,7 @@ impl VideoCapture {
                                     height,
                                     rgb_data.into_raw(),
                                     start,
-                                    frame_format_name(source_format),
+                                    mf_format::format_name(source_format),
                                 );
                             }
                             Err(e) => {
@@ -378,12 +432,14 @@ impl VideoCapture {
         // （上位 32 ビットが分子、下位 32 ビットが分母）を `fps as u32` で
         // 読んでおり、分母しか取れていない。整数フレームレートでは常に 1 になる
         // （nokhwa-bindings-windows 0.4.6 の `format_refreshed`）。
-        // 要求した fps は直前の debug! に残してある
+        // 要求した fps は `start_capture` の debug! に残してある
         let actual_format = camera.camera_format().ok();
-        let actual_resolution = actual_format
+        let resolution = actual_format
             .as_ref()
             .map(|f| (f.resolution().width_x, f.resolution().height_y));
-        let actual_format_name = actual_format.as_ref().map(|f| format!("{:?}", f.format()));
+        let format = actual_format
+            .as_ref()
+            .map(|f| mf_format::format_name(f.format()));
 
         let open_start = Instant::now();
         camera
@@ -394,27 +450,13 @@ impl VideoCapture {
             })?;
         let open_ms = elapsed_ms(open_start);
 
-        info!(
-            "映像ストリームを開いた（デバイス: {}、実際の設定: {}、Camera::new {:.1}ms、open_stream {:.1}ms）",
-            device_info.human_name(),
-            format_actual_video(actual_resolution, actual_format_name.as_deref()),
+        Ok(OpenedCamera {
+            camera,
+            resolution,
+            format,
             create_ms,
-            open_ms
-        );
-
-        self.camera = Some(camera);
-        // 接続状態の表示用に、実際に開いた内容を控える
-        self.active = Some(ActiveVideo {
-            device_name: device_info.human_name().to_string(),
-            api: CaptureApi::MediaFoundation,
-            resolution: actual_resolution,
-            format: actual_format_name,
-            requested_fps,
-            // Media Foundation で開いた映像には音声ピンが無い
-            audio_pin: AudioPinState::NotApplicable,
-        });
-
-        Ok(())
+            open_ms,
+        })
     }
 
     /// いま開いているストリームの内容。開いていなければ `None`。

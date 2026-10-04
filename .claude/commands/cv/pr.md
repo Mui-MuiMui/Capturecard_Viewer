@@ -29,6 +29,8 @@ PR タイトルは `naming-conventions` skill の「PR タイトル」に従う�
 
 本文を `gh pr create` に渡すとき、ヒアドキュメントに `git` という語が含まれると worktree 分離の保護に引っかかることがある。その場合は本文を一時ファイルに書いて `--body-file` で渡し、作成後に削除する。
 
+コードを変える PR なら、作った直後に `gh pr comment <番号> --body "@coderabbitai review"` を投稿して CodeRabbit を手動で起動する（「fewer than 10 stars」で自動レビューが飛ばされるため）。**文書だけの PR では呼ばない。** 「Review limit reached」で待たされたときの待ち方と、追加のコミットの後に呼び直す条件は `.claude/skills/subagent-workflow/SKILL.md` の 6 節。
+
 ### 4. Issue と相互リンクする
 
 `~/.claude/skills/github-issues/SKILL.md` に従って、Issue へ PR の URL をコメントする。

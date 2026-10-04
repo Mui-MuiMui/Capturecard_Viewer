@@ -31,7 +31,7 @@ flowchart TD
 
 ## 1. バージョンを上げる
 
-バージョンの出どころは `Cargo.toml` の `version` だけ（`docs/BUILD.md` の「バージョン番号」）。**`app.rc` は触らない。** `build.rs` が `version.h` を生成して exe のバージョンリソースへ流し込む。
+バージョンの出どころは `Cargo.toml` の `version` だけ（`docs/BUILD.md` の「バージョン番号」）。**`app.rc` にバージョンの数値を書かない。** `build.rs` が `version.h` を生成して exe のバージョンリソースへ流し込む。著作権表示など数値以外の項目は通常の PR で変えてよい。
 
 [セマンティック バージョニング](https://semver.org/lang/ja/)に従って上げる。
 
@@ -75,6 +75,7 @@ release ワークフローはこの見出しを目印に本文を抜き出して
 gh pr create --base main --head dev --title "chore: 1.0.7 をリリースする"
 ```
 
+- 作成直後に `gh pr comment <番号> --body "@coderabbitai review"` を投稿して CodeRabbit を手動で起動する（「fewer than 10 stars」で自動レビューが飛ばされるため）。レビュー（要約のコメントと行コメント）が付くまで待ってから、下のマージの条件を確かめる
 - **`main` へ PR を出してよいのはこのときだけ。** 通常の PR は `dev` へ向ける（`.claude/skills/naming-conventions/SKILL.md`）
 - マージは merge commit。squash も rebase も使わない
 - CI が緑で、レビュースレッド（CodeRabbit の指摘も人のレビューも含めて全て）が解決されてからマージする。ルールセットが両方をマージの条件にしているので、未解決があるとマージできない。リリース PR で初めて出た指摘は、このリリースに含めるか別 Issue に回すかを決め、返信して Resolve する

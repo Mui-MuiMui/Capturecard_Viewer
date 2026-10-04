@@ -359,6 +359,7 @@ impl DirectShowCapture {
             api: CaptureApi::DirectShow,
             resolution: Some((graph.format.width, graph.format.height)),
             format: Some(graph.format_name().to_string()),
+            format_fallback: None,
             requested_fps: graph.requested_fps,
             audio_pin,
         };

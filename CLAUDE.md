@@ -31,7 +31,8 @@ cargo build --release
 | `src/platform.rs` | Windows 固有処理。日本語フォントの探索、埋め込みアイコンの読み込み、モニタの作業領域の列挙、保存されたウィンドウの大きさ・位置が使えるかの判定、OS の表示言語からの言語の推定、winit のイベント用のウィンドウへ届いた閉じる要求を本来のウィンドウへ回すフック（`redirect_misdirected_close`、#420） |
 | `src/com.rs` | COM（`ComApartment`、STA / MTA をモデル引数で選ぶ）と Media Foundation（`MfPlatform`）の初期化の RAII。DirectShow のバックエンドがデバイスワーカーで STA、録画スレッドが MTA で使う |
 | `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`Default`、1 フレームの処理 `update`、`eframe::App` 実装（`ui` が `update` を呼ぶ / `on_exit`） |
-| `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、統計 OSD、テクスチャの取り込み |
+| `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、テクスチャの取り込みと表示までの遅れの計測（#455）、フェイクデバイスの帯 |
+| `src/app/stats_overlay.rs` | 統計 OSD（情報表示）。出す行の組み立て（`format_stats_lines`）と描画（`show_stats_overlay`） |
 | `src/app/placeholder.rs` | 映像が出ていないときのプレースホルダー。文言の決め方（`video_placeholder_text`）と映像エリアの中央への配置（`show_video_placeholder`） |
 | `src/app/video_overlay.rs` | 映像の上に常設で重ねる表示（統計 OSD・フェイクデバイスの帯・録画中の印）を、映像の上・設定ダイアログの下の層へ寄せて描く `show_video_overlay` |
 | `src/app/menu/mod.rs` | 右クリックメニューの置き場所と閉じ方、平らな一覧／サブメニューの出し分け、描画が返した `MenuAction` の処理 |
@@ -56,7 +57,7 @@ cargo build --release
 | `src/app/capabilities.rs` | デバイス一覧のキャッシュと、デバイス能力・対応設定の取得要求（ワーカーへ流すところまで） |
 | `src/app/screenshot.rs` | 撮影、保存スレッドの管理、結果の取り込み |
 | `src/app/screenshot_sound.rs` | 効果音ファイルの読み込みスレッドの管理と結果の取り込み（適用・テスト再生）、効果音の再生と出力先を開けなかったときの報告 |
-| `src/app/recording.rs` | 録画の開始・停止（`toggle_recording`、右クリックメニューとホットキーが呼ぶ）、リプレイバッファの設定を録画スレッドへ渡す（`sync_replay_buffer`、`apply_settings` が呼ぶ）、録画スレッドから届いた `RecordingEvent` の取り込み（ログ・トースト・`report_error`）、終了時の停止と `Finalize` の待ち合わせ、録画中の印と統計 OSD の録画の行。フィールド（`recorder`）は `app/mod.rs` |
+| `src/app/recording.rs` | 録画の開始・停止（`toggle_recording`、右クリックメニューとホットキーが呼ぶ）とリプレイバッファの中身だけの保存（`save_replay`、#438）、リプレイバッファの設定を録画スレッドへ渡す（`sync_replay_buffer`、`apply_settings` が呼ぶ）、録画スレッドから届いた `RecordingEvent` の取り込み（ログ・トースト・`report_error`）、終了時の停止と `Finalize` の待ち合わせ、録画中の印と統計 OSD の録画の行。フィールド（`recorder`）は `app/mod.rs` |
 | `src/app/settings_dialog.rs` | 設定ダイアログの操作の受け止め、インポート / エクスポート / 初期化、プリセットの適用 |
 | `src/app/settings_store.rs` | 設定のデバウンス保存と即時保存、保存の失敗が続くときの再試行の間隔（`save_retry_delay`）とログ・トーストの間引き（`SaveFailureStreak`） |
 | `src/app/update.rs` | 更新の確認と適用のスレッドの管理と結果の取り込み（`UpdateState`）、通知ダイアログの操作、前回の更新の残りの後片付け、終了時の新しい exe の起動 |
@@ -64,7 +65,8 @@ cargo build --release
 | `src/app/audio_control.rs` | 音量とミュートの操作、その OSD |
 | `src/app/error_report.rs` | 失敗の記録と、トースト・「接続状態」タブへの出し方 |
 | `src/video/mod.rs` | `VideoError` とログ用の `elapsed_ms`。外から使う経路（`crate::video::...`）の `pub use` もここ |
-| `src/video/capture.rs` | nokhwa `CallbackCamera` によるキャプチャ。開く・閉じる・列挙する、フレームコールバック（nokhwa の `Buffer` から取り出して `FrameSink` へ渡す）、途絶の観測（`VideoLinkState`） |
+| `src/video/capture.rs` | nokhwa `CallbackCamera` によるキャプチャ。開く・閉じる・列挙する、フレームコールバック（nokhwa の `Buffer` から取り出して `FrameSink` へ渡す）、途絶の観測（`VideoLinkState`）。選んだ形式で開けなければ YUY2 で開き直す |
+| `src/video/mf_format.rs` | Media Foundation の経路の形式の対応表（`MF_FORMATS`、設定の形式名 ↔ nokhwa の `FrameFormat`。能力の取得と開くときが同じ表を引く、#81）と、YUY2 へ代えるか（`fallback_for`）・フレームをどの受け口へ渡すか（`sink_route`）の判定。純粋関数 |
 | `src/video/directshow/mod.rs` | DirectShow の映像デバイス `DirectShowCapture`（列挙・能力・開く・閉じる・観測）と、表示名の「(DirectShow)」の付け外し |
 | `src/video/directshow/devices.rs` | DirectShow の列挙（`ICreateDevEnum`）と対応形式（`IAMStreamConfig::GetStreamCaps`）、いまの解像度（`GetFormat`）の読み取り |
 | `src/video/directshow/stream_select.rs` | 対応形式の一覧から開く解像度と形式を選ぶ判定（`target_resolution` / `choose_candidate`）、fps の範囲と選択肢（`fps_range` / `fps_list` / `fps_choices`）、設定画面向けの並べ替え（`capabilities_from_candidates`）。純粋関数 |
@@ -81,7 +83,8 @@ cargo build --release
 | `src/video/color.rs` | YCbCr→RGB の係数表とその選び方、映像調整の畳み込み、設定の共有（`SharedColorConversion`） |
 | `src/video/convert.rs` | YUY2→RGB24 の画素変換と、DirectShow の RGB24（BGR）/ MJPEG の展開 |
 | `src/video/yuv420.rs` | 4:2:0 の YUV（NV12 / I420 / YV12）→ RGB24 の画素変換（`yuv420_to_rgb`、面の並び `Yuv420Layout`）。1 画素の式と係数表は YUY2 と同じで、違うのは色差の置き方だけ。`FrameSink` が呼ぶ |
-| `src/video/frame_buffer.rs` | `FrameBuffer`（`Arc` によるフレーム共有と世代番号）と観測値（`FrameStats`）、画素データの長さの判定（`frame_len_status`）、置き換えたフレームを `Arc` ごと使い回すか（`fill_recycled`） |
+| `src/video/frame_buffer.rs` | `FrameBuffer`（`Arc` によるフレーム共有と世代番号。新着と一緒に受け取った時刻も返す `newer_than`）と観測値（`FrameStats`）、画素データの長さの判定（`frame_len_status`）、置き換えたフレームを `Arc` ごと使い回すか（`fill_recycled`） |
+| `src/video/display_latency.rs` | 表示までの遅れ（フレームの到着 → テクスチャの更新、#455）の集計 `DisplayLatency`。直近 1 秒の平均・最大と 30 秒ごとのログの窓。UI スレッドだけが持つ |
 | `src/video/tap.rs` | 録画へ映像を回す差し込み口 `VideoTap`。録画中だけ、`FrameSink` が画面へ置いたのと同じ `Arc<VideoFrame>` を容量 3 のリングへ積む（待たない `try_lock`、満杯なら捨てて数える）。Vec の回収に失敗した回数も録画中だけ数える |
 | `src/audio/mod.rs` | 音声モジュールの入口。`ActiveAudio` / `AudioDirection` / `AudioError` と能力キャッシュのキー（`cache_key` / `device_name_from_key`）、外から使う経路（`crate::audio::...`）の `pub use` |
 | `src/audio/capabilities.rs` | デバイスの対応設定の取得（`query_capabilities`）と、設定画面に出す選択肢の組み立て（`selectable_*` / `ChoiceSource`） |
@@ -106,6 +109,7 @@ cargo build --release
 | `src/recording/replay_config.rs` | リプレイバッファの設定 `ReplayConfig`（UI スレッドが組み立てて録画スレッドへ渡す）と、エンコーダの作り直しが要るかの判定（`same_encoders`） |
 | `src/recording/replay_recording.rs` | リプレイバッファを通す 1 回の録画 `ReplayRecording`。先頭のキーフレームからエンコードなしの Sink Writer へ書く。リングの中身は数 ms ごとに少しずつ書き（`catch_up`）、追いついたらライブのサンプルを直接書く |
 | `src/recording/replay_ring.rs` | エンコード済みのリング `EncodedRing` と、書き出すキーフレームの選び方（`replay_start`）・捨てる境界（`keep_from` / `gops_to_drop`）・PTS の付け替え（`Cut`）。判定は純粋関数 |
+| `src/recording/replay_save.rs` | リプレイバッファの中身だけを保存する操作（#438）。録画か保存かの種類（`RecordingKind`、結果のイベントを分ける）と、保存できない理由（`SaveReplayBlock`、文言は `Display` から `crate::i18n`）を決める `save_replay_block`（純粋関数） |
 | `src/recording/encoder.rs` | エンコーダ MFT `EncoderMft`（H.264 はハードウェアの非同期型 → ソフトウェアの同期型の順に試す、AAC は同期型）。非同期型は `METransformNeedInput` / `METransformHaveOutput` を待たずに取る。エンコードなしの Sink Writer へ渡すメディアタイプ（`stream_type`） |
 | `src/recording/encoder_setup.rs` | `EncoderMft` を作るときだけ使う補助。エンコーダ MFT の列挙（`enumerate`）、候補を先頭から開く（`open_first`）、H.264 / AAC の入出力の形の組み立て（`configure_video` / `configure_audio`）、ストリームの番号（`stream_ids`） |
 | `src/recording/passthrough.rs` | エンコードなしの Sink Writer `PassthroughWriter`（入力 = 出力の H.264 / AAC を MP4 へまとめるだけ） |
@@ -117,10 +121,11 @@ cargo build --release
 | `src/recording/audio.rs` | 音声トラック `AudioTrack`（録画スレッドの中だけ）。`AudioTap` のリングから取り出し、録画用の `PassthroughConverter` で 48kHz 2ch へ寄せて 16bit PCM にし、PTS を付けた塊にする。開き直し・溢れ・音声が来ない間の揃え方、ドリフトの補正（ずれを測り、録画用の変換器のレート比を動かす。飛んだら揃え直す）と、停止時のドリフトのログ |
 | `src/recording/file_name.rs` | ファイル名の書式の検め（chrono の `Item::Error`、Windows で使えない文字、末尾の空白・ピリオド、予約デバイス名）と、同じ名前があるときの `_2` `_3` … |
 | `src/recording/storage.rs` | 保存先の空き容量（`GetDiskFreeSpaceExW`）と、止める境界（500MB） |
-| `src/recording/test_support.rs` | 録画のテストの補助（`#[cfg(test)]`）。`#[ignore]` のテストが使う、フェイクの映像と音声を流して `Session` で録画する部分（`record_until_size_changes`）と、書いた MP4 を読み戻す部分 |
+| `src/recording/test_support.rs` | 録画のテストの補助（`#[cfg(test)]`）。`#[ignore]` のテストが使う、フェイクの映像と音声を流して `Session` で録画する部分（`record_until_size_changes`）、窓口（`Recorder`）にフェイクを流す部分（`start_fakes` / `poll_until` / `record_with_replay`）と、書いた MP4 を読み戻す部分（`read_mp4`） |
 | `src/hotkey/mod.rs` | 外から使う経路（`crate::hotkey::...`）の `pub use` だけ |
 | `src/hotkey/action.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）と設定ファイル上の名前、溜まった押下の畳み方 |
 | `src/hotkey/parse.rs` | `HotkeyError` と、ホットキー文字列のパース |
+| `src/hotkey/egui_keys.rs` | egui のキー入力 → `KeyChord` の変換（`chord_from_egui` / `chord_from_egui_event`）と、`raw_input_hook` で egui へ渡す前にホットキーのキーを取り除く判定（`remove_hotkey_key_events`、#217、#418）。純粋関数 |
 | `src/hotkey/manager.rs` | `HotkeyManager` の本体（リスナーの起動と停止、ウィンドウ状態の受け渡し）と `BackgroundHotkeyRunner` |
 | `src/hotkey/assignments.rs` | `HotkeyAssignmentError`、アクション別の登録（差分適用・一時停止と再開・試し登録）と押下の取り出し |
 | `src/hotkey/listener.rs` | リスナースレッドと共有状態 `ListenerState`、押下の照合とデバウンス |
@@ -199,7 +204,7 @@ cargo build --release
 | `docs/design/device-worker.md` | デバイス操作をワーカースレッド 1 本へ隔離した理由、チャネルを通さない共有、開き直しの差分判定、最小化中の扱い |
 | `docs/design/threads.md` | スレッドの一覧と役割、ロック順序、ホットキーのリスナー、スクリーンショットの保存とクリップボード |
 | `docs/design/reconnect.md` | 切断の検出、バックオフでの再試行、音声のフォールバックを外した経緯、Windows の既定デバイスの追従 |
-| `docs/design/video-pipeline.md` | `FrameBuffer` と世代番号、色変換への映像調整の畳み込み、再描画の間隔と `RepaintWaker`、UI にあるが効かない設定 |
+| `docs/design/video-pipeline.md` | `FrameBuffer` と世代番号、色変換への映像調整の畳み込み、再描画の間隔と `RepaintWaker`、Media Foundation で開く形式（#81）、UI にあるが効かない設定 |
 | `docs/design/audio.md` | 入出力の形が違う場合の変換、クロックドリフト補正、対応設定の取得、ミュート |
 | `docs/design/directshow-audio.md` | DirectShow の映像デバイスの音声ピンから音声を取り込む設計（#388）。**第 1 段（設定ファイルの `input_source = "video_pin"` で鳴る・録画に入る、#393）と第 2 段（設定ダイアログの項目・初回の既定・フェイクの音声ピン、#394）を実装済み。** 受け口のフィルター、`AudioCapture` の入力の種類と `AudioPinFeed`、映像のグラフと音声の寿命、`[audio] input_source`、UI、対応設定、ドリフトと録画の PTS、段階分け |
 | `docs/design/settings.md` | `#[serde(default)]`、デバウンス保存、壊れた設定ファイルと `AutoSavePolicy` |

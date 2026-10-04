@@ -91,7 +91,7 @@ pub(super) fn hotkey_key_name(key: egui::Key) -> Option<&'static str> {
 /// egui-winit 0.26 は Windows で Ctrl+Insert をコピー、Shift+Delete を切り取り、
 /// Shift+Insert を貼り付けのイベント（`Event::Copy` / `Cut` / `Paste`）に
 /// 置き換え、`Event::Key` を作らない（他の修飾キーが一緒に押されていても同じ）。
-/// 前面でホットキーのキーを egui から取り除く判定（`hotkey::parse` の
+/// 前面でホットキーのキーを egui から取り除く判定（`hotkey::egui_keys` の
 /// `chord_from_egui_event`）はこれらを Ctrl+C / Ctrl+X / Ctrl+V として読むので、
 /// Insert / Delete を使うこの組み合わせを割り当てると、取り除く対象を読み違える。
 /// **入力ダイアログでは割り当てられないようにする**（#266）。

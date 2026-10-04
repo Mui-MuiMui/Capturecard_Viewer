@@ -539,6 +539,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_settings_ignores_the_removed_register_hotkey_key() {
+        // 「キーを奪う方式」（#207）を外す前の版が書いた設定ファイル。
+        // 外した項目が残っていても読め、同じセクションの他の項目は失われない。
+        // 次に保存したときには書き戻さない
+        let config = format!(
+            "{FULL_CONFIG}\n[hotkey_settings]\nonly_when_focused = true\nuse_register_hotkey = true\n"
+        );
+
+        let settings = parse_settings(&config).expect("外した項目が残っていても読めること");
+
+        assert!(settings.hotkey_settings.only_when_focused);
+        assert_eq!(settings.hotkey(HotkeyAction::Screenshot), Some("Ctrl+S"));
+        let written = serialize_settings(&settings).expect("書けること");
+        assert!(
+            !written.contains("use_register_hotkey"),
+            "外した項目が書き戻されている: {written}"
+        );
+    }
+
+    #[test]
     fn save_to_creates_the_missing_folder() {
         // 初回起動では設定ファイルのフォルダがまだ無い
         let dir = tempdir().expect("一時ディレクトリを作れること");

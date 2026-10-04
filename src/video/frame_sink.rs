@@ -7,8 +7,10 @@
 //! 通せなかった。「幅・高さ・バイト列」を受ける形に出してあるのはそのため
 //! （`docs/design/device-worker.md` の「フェイクデバイス（#142）の置き場所」）。
 //!
-//! **毎フレーム呼ばれるので、ロックはフレームバッファの 1 回だけ（録画中は録画の
-//! リングの待たない `try_lock` が 1 回増える）、アロケーションは置き換えたフレームを
+//! **毎フレーム呼ばれるので、ロックはフレームバッファの 1 回と、積んだあとに UI
+//! スレッドを起こす `RepaintWaker::wake` の中の 2 つ（egui の `Context` の `RwLock` と
+//! eframe の `EventLoopProxy` の `Mutex`、#459）だけ（録画中は録画のリングの待たない
+//! `try_lock` が 1 回増える）、アロケーションは置き換えたフレームを
 //! 回収できなかったときだけにする**（`docs/design/video-pipeline.md`）。回収できた
 //! フレームは画素の Vec だけでなく `Arc` ごと使い回す（`fill_recycled`）。例外は
 //! デコーダに任せる経路で、`push_decoded` はデコーダが確保した Vec を受け取り、
@@ -496,6 +498,45 @@ mod tests {
 
         assert!(!sink.push_yuy2(2, 2, &[235, 128, 235, 128], Instant::now()));
         assert!(frames.latest().is_none());
+    }
+
+    /// 何も要求していない状態の `egui::Context`。作り方の理由は `repaint.rs` のテストの
+    /// `settled_context` にある（生成直後と 1 回目の終わりに再描画を要求するので空回しする）
+    fn settled_context() -> eframe::egui::Context {
+        let ctx = eframe::egui::Context::default();
+        for _ in 0..3 {
+            ctx.run_ui(eframe::egui::RawInput::default(), |_| {})
+                .drop_without_applying_deltas();
+        }
+        assert!(!ctx.has_requested_repaint(), "前提が崩れている");
+        ctx
+    }
+
+    #[test]
+    fn frame_sink_push_wakes_the_ui_thread() {
+        // 映像の取り込みは到着で起こすことだけが駆動する（#459）。積んだのに
+        // 起こさなければ、次の update() まで最大 250ms 待たされる
+        let ctx = settled_context();
+        let waker = RepaintWaker::new();
+        waker.bind(&ctx);
+        let frames = VideoFrames::new();
+        let mut sink = FrameSink::new(&frames, Arc::new(SharedColorConversion::new()), waker);
+
+        assert!(sink.push_yuy2(2, 1, &[235, 128, 235, 128], Instant::now()));
+        assert!(ctx.has_requested_repaint(), "積んだのに起こしていない");
+    }
+
+    #[test]
+    fn frame_sink_dropped_frame_does_not_wake_the_ui_thread() {
+        // 積めなかったフレームで起こすと、新着なしの update() が増えるだけになる
+        let ctx = settled_context();
+        let waker = RepaintWaker::new();
+        waker.bind(&ctx);
+        let frames = VideoFrames::new();
+        let mut sink = FrameSink::new(&frames, Arc::new(SharedColorConversion::new()), waker);
+
+        assert!(!sink.push_yuy2(2, 2, &[235, 128, 235, 128], Instant::now()));
+        assert!(!ctx.has_requested_repaint(), "積んでいないのに起こしている");
     }
 
     #[test]

@@ -11,8 +11,10 @@ use crate::video::{DeviceCapabilities, VideoMode};
 /// 呼び出し側は設定を触らない。
 ///
 /// フォーマットは能力一覧の先頭（組み合わせを 1 つ以上持つもの）を採る。
-/// `video::get_device_capabilities` が YUY2 → MJPEG → RGB24 の順で積むため、
-/// 実質 YUY2 が優先される。
+/// Media Foundation の経路（`video::get_device_capabilities`）は `MF_FORMATS` の順
+/// （YUY2 → NV12 → MJPEG → RGB24）で、**デバイスから取れた形式だけ**を積む（#446）。
+/// そのため YUY2 を出すデバイスなら YUY2 が選ばれ、出さないデバイスでも一覧に無い
+/// 形式は選ばない。
 ///
 /// 解像度と FPS は**切り替え前の値に最も近い組み合わせ**を選ぶ。デバイスを
 /// 替えただけで 1080p60 が 640x480 まで落ちると使い物にならないため、

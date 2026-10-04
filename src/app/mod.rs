@@ -20,6 +20,7 @@ mod screenshot;
 mod screenshot_sound;
 mod settings_dialog;
 mod settings_store;
+mod stats_overlay;
 mod update;
 mod video_overlay;
 mod view;
@@ -51,7 +52,7 @@ use crate::screenshot_sound::ScreenshotManager;
 use crate::settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace};
 use crate::status::ErrorCenter;
 use crate::ui;
-use crate::video::{SharedColorConversion, VideoAdjustments, VideoFrames};
+use crate::video::{DisplayLatency, SharedColorConversion, VideoAdjustments, VideoFrames};
 use eframe::egui;
 use log::{debug, info, warn};
 use std::path::PathBuf;
@@ -124,6 +125,9 @@ pub struct CaptureCardViewer {
     // メニューを開いた瞬間に決めて、開いている間は変えない（詳細は
     // `open_context_menu` のコメント）
     context_menu_layout: MenuLayout,
+    // 右クリックメニューを開いた直後か。立っていれば次の描画で大きさを測り直す
+    // （`menu::draw_context_menu` の sizing_pass、#448）
+    context_menu_needs_sizing: bool,
     is_fullscreen: bool,
     maintain_aspect_ratio: bool,
     // 映像に統計を重ねて表示するか。設定の ui.show_stats_overlay と対応する
@@ -153,10 +157,8 @@ pub struct CaptureCardViewer {
     video_image: Option<Arc<egui::ColorImage>>,
     // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
     last_frame_generation: u64,
-    // 最後に新しいフレームをテクスチャへ取り込んだ時刻。
-    // None は起動してから 1 枚も取り込んでいないことを表す。
-    // 再描画の間隔（`repaint::next_repaint_delay`）を決めるために持つ
-    last_new_frame_at: Option<Instant>,
+    // フレームの到着からテクスチャへ取り込むまでの遅れの集計（`view.rs`、#455）
+    display_latency: DisplayLatency,
     // 最後に共有 Atomic へ入れた色変換の設定。
     // デバイスの開き直しは伴わないが、2 秒ごとの再適用で同じ値を
     // ログへ出さないよう差分で判定する
@@ -292,6 +294,7 @@ impl Default for CaptureCardViewer {
             // メニューが閉じている間は使われない。開くときに必ず
             // open_context_menu が上書きする
             context_menu_layout: MenuLayout::Collapsed,
+            context_menu_needs_sizing: false,
             is_fullscreen: false,
             maintain_aspect_ratio: true,
             show_stats_overlay,
@@ -306,7 +309,7 @@ impl Default for CaptureCardViewer {
             video_texture: None,
             video_image: None,
             last_frame_generation: 0,
-            last_new_frame_at: None,
+            display_latency: DisplayLatency::default(),
             last_color_conversion: None,
             last_video_adjustments: None,
             last_sound_file: None,
@@ -481,9 +484,11 @@ impl CaptureCardViewer {
             self.check_for_updates_on_startup();
         }
 
-        // ビデオフレームを更新。新着の時刻は末尾の再描画の予約で使う
-        if self.update_video_texture(ctx) {
-            self.last_new_frame_at = Some(Instant::now());
+        // ビデオフレームを更新。届いたフレームは `RepaintWaker` がその場で起こすので、
+        // ここへ来たときには新着があることが多い（#459）
+        if !self.update_video_texture(ctx) {
+            // 再描画の間隔の判断（#459）を確かめるため、新着なしで回った回数を数える
+            self.display_latency.note_idle_pass();
         }
 
         // 接続の再試行、フレームの途絶の検出、音声ストリームのエラーの回収、
@@ -722,11 +727,9 @@ impl CaptureCardViewer {
         // **ここは上限であって下限ではない。** もっと早く起きたい処理
         // （OSD の消滅、設定の書き出し、フレームの到着）はそれぞれ自分で
         // 予約しており、egui は同じフレームで要求された中の最短を採る
-        let condition = RepaintCondition {
-            minimized,
-            since_new_frame: self.last_new_frame_at.map(|at| at.elapsed()),
-        };
-        // 間隔を広げている間だけ、別スレッドからの通知で起こしてもらう
+        let condition = RepaintCondition { minimized };
+        // 最小化していなければ、別スレッドからの通知（映像フレームの到着を含む）で
+        // 起こしてもらう
         self.repaint_waker
             .set_enabled(should_wake_on_event(condition));
 

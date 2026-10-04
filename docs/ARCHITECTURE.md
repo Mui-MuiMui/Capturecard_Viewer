@@ -382,13 +382,13 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 | イベント駆動 | 2 秒ごとに設定を再適用するポーリング | apply_settings の 2 秒ごとの再登録 |
 | チャネルでの隔離 | UI と `device` ワーカーの間はコマンドとイベントを mpsc でやり取りする。**この境界で**チャネルを通さず共有するのは 4 つ（映像フレーム `VideoFrames`（録画へ回す `VideoTap` を含む）、色変換と映像調整 `SharedColorConversion`、音量・ミュート・パススルー `AudioControls`、録画へ回す音声 `AudioTap`）。数えるのは UI スレッドか録画スレッドがワーカーを通さずにデバイスのコールバックとやり取りする共有ハンドル（`BackendShared` に載せて渡すもの）で、`docs/design/device-worker.md` と `src/app/worker.rs` も同じ数え方。これとは別に観測値は `Arc<RwLock<DeviceSnapshot>>` に写して読む。`settings` や `screenshot_manager` のようにデバイスを跨がない共有はこの話の外 | 完了 |
 | UI をブロックしない | デバイスを開く・閉じる・列挙する処理も含めてワーカースレッドへ移した。スクリーンショットのエンコードは撮影ごとのスレッド。`update()` に残るブロッキングは `rfd` のファイルダイアログだけ | 完了 |
-| 要求どおりに開く | Media Foundation の経路では MJPEG / RGB24 を選んでも YUYV に差し替わる（差し替えたことは `warn` でログに残る）。DirectShow の経路（#143）は選んだ形式で開き、デバイスに無ければ近いものへ倒したことを `warn` で残す | MJPEG/RGB24 が YUYV で開かれる不具合 |
+| 要求どおりに開く | Media Foundation の経路も選んだ形式（YUY2 / NV12 / MJPEG / RGB24）を要求して開く（#81）。開けなければ YUY2 で開き直し、`warn` と「接続状態」タブに出す。DirectShow の経路（#143）は選んだ形式で開き、デバイスに無ければ近いものへ倒したことを `warn` で残す | 完了 |
 | 新フレームの判別 | 一定時間フレームが来ないことを検出して「映像信号がありません」を出す。`video.auto_reconnect`（既定 有効、右クリックメニューで切替）が有効なら、対象デバイスが戻ってきたときバックオフで自動再接続する。最小化中や無信号の間は再描画の頻度も落とす | 完了 |
 | 統計の公開 | 映像側は `VideoFrames::stats()` で読み出せ、右クリックの「情報表示」で OSD に出る。初回フレームの解像度・経路・変換時間はログにも出る。音声のアンダーラン回数も `DeviceSnapshot.audio_underruns` として収集し、OSD と「接続状態」タブの両方に出す | 完了 |
 | 音声設定を効かせる | サンプルレート・チャンネル数は反映され、UI の選択肢も入出力の対応設定から生成している。列挙は別スレッドで行い UI を止めない | 完了 |
 | 入出力差の吸収 | 揃えられる場合は揃え、揃えられない場合は線形補間でリサンプルし、チャンネル数はアップ／ダウンミックスする。クロックドリフトはリングバッファの水位の数秒間の平均から補正する（`ResampleTelemetry`）。**入出力の形が揃っていても補正する**（#308、`docs/design/audio.md`）。リサンプル比・バッファ水位は「接続状態」タブに出る | 完了 |
 | バッファ長の調整 | 設定ダイアログのデバイス設定タブでスライダーから調整できる（20〜200ms、既定 50ms）。出力は最初にリングがその長さまで溜まってから鳴らすので、選んだ長さがそのまま遅延になる（#308） | 完了 |
-| 音声入力の経路 | 音声入力は WASAPI だけ。WASAPI に音声が出ず、DirectShow のキャプチャーフィルターの音声ピンにだけ音声を持つ機種（AVerMedia GC551）の音は取れない。音声ピンを cpal の入力の代わりにする設計は `docs/design/directshow-audio.md`（未実装） | #388 |
+| 音声入力の経路 | WASAPI に加え、`[audio] input_source = "video_pin"` で DirectShow の映像デバイスの音声ピンを cpal の入力の代わりに使う（AVerMedia GC551 など、WASAPI に音声が出ない機種向け。設定ダイアログの「[映像デバイスと連動]」の項目で選べる）。Media Foundation の経路では使えない。設計は `docs/design/directshow-audio.md`（#388） | 完了 |
 | エラー型 | 下位モジュールの公開 API は自分のエラー enum（`VideoError` / `AudioError` / `RecordingError` / `ScreenshotError` / `HotkeyError` / `SettingsError` / `UpdateError`）を返す。文言はその型の `Display` が `crate::i18n` から引いて出す。`logging` だけはロガー初期化前の失敗で読み手がいないため `Result<_, String>` のまま | 完了 |
 | ユーザー通知 | 接続失敗・ホットキー登録失敗・スクリーンショット保存失敗はトースト（`TransientOverlay`）で数秒表示し、同じ発生源の同じ文言は間引く。映像・音声の接続先は設定ダイアログの「接続状態」タブに、ホットキーの登録失敗は理由も添えてホットキー一覧に出す | 完了 |
 | trait による抽象化 | デバイスワーカーは `app::backend` の `VideoBackend` / `AudioBackend` 越しにしかデバイスへ触らない。本番の実装は映像が `VideoCapture` と `DirectShowCapture` を束ねた `SystemVideo`、音声が `AudioCapture`、テストはモック、環境変数 `CAPTURECARD_VIEWER_FAKE_DEVICES` で起動したときはフェイク（`FakeVideoCapture` / `FakeAudioCapture`）。**コールバックの経路には挟んでいない**（映像フレームと音量は共有ハンドルを直に流れる） | 完了 |

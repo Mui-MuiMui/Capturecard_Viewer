@@ -116,6 +116,7 @@ texts! {
     ActionVolumeDown { ja: "音量を下げる", en: "Volume down" },
     ActionToggleMute { ja: "ミュート切替", en: "Toggle mute" },
     ActionToggleRecording { ja: "録画の開始・停止", en: "Start / stop recording" },
+    ActionSaveReplay { ja: "リプレイを保存", en: "Save replay" },
 
     // ---- 色空間・色レンジ（settings::ColorSpace / ColorRange の label） ----
     ColorSpaceAuto { ja: "自動（解像度から判断）", en: "Auto (based on resolution)" },
@@ -170,6 +171,7 @@ texts! {
     VideoBackendNotice { ja: "選んだ方法の一覧に無いデバイスには接続できません。映像が出ない場合は「自動」に戻してください。", en: "Devices that the selected method does not list cannot be connected. If no picture appears, switch back to Auto." },
     VideoCapabilityPending { ja: "対応形式を取得中...", en: "Querying supported formats..." },
     VideoCapabilityFallback { ja: "下の選択肢は既定値です。", en: "The choices below are defaults." },
+    VideoCapabilityAssumed { ja: "対応形式を取得できなかったので、既定の一覧を出しています。デバイスが対応しない組み合わせも含まれます。", en: "Could not get the supported formats, so a default list is shown. It may include combinations the device does not support." },
     FormatLabel { ja: "フォーマット:", en: "Format:" },
     ResolutionLabel { ja: "解像度:", en: "Resolution:" },
     FrameRateLabel { ja: "フレームレート:", en: "Frame rate:" },
@@ -326,6 +328,7 @@ texts! {
     StatsFpsPending { ja: "FPS - (フレーム間隔の計測待ち)", en: "FPS - (measuring frame interval)" },
     StatsDecodeUnknown { ja: "デコード -", en: "Decode -" },
     StatsNoFrame { ja: "映像フレームなし", en: "No video frames" },
+    StatsDisplayLatencyPending { ja: "表示までの遅れ: - (到着→テクスチャ更新)", en: "Display latency: - (arrival→texture update)" },
     DragMoveEnabledNotice { ja: "ウィンドウを動かすため、画面ドラッグ移動を有効にしました", en: "Turned on dragging the video to move the window, so the window can still be moved" },
     FullscreenOn { ja: "フルスクリーン ON", en: "Fullscreen ON" },
     FullscreenOff { ja: "フルスクリーン OFF", en: "Fullscreen OFF" },
@@ -369,6 +372,11 @@ texts! {
     RecordingNoVideo { ja: "映像が届かなかったので、ファイルを作りませんでした", en: "No video arrived, so no file was created" },
     RecordingEncoderNotFound { ja: "エンコーダが登録されていない", en: "No encoder is registered" },
     RecordingThreadStopped { ja: "録画スレッドが止まっている", en: "The recording thread has stopped" },
+    // リプレイを保存できない理由（#438、recording::SaveReplayBlock）。メニューのホバーとトーストに出す
+    SaveReplayOff { ja: "リプレイバッファが OFF です（設定の「録画」タブで ON にします）", en: "The replay buffer is off (turn it on in the Recording tab of the settings)" },
+    SaveReplayWhileRecording { ja: "録画中はリプレイを保存できません（録画のファイルに含まれます）", en: "Cannot save a replay while recording (the recording already contains it)" },
+    SaveReplaySaving { ja: "リプレイを保存しています...", en: "Saving the replay..." },
+    SaveReplayEmpty { ja: "リプレイバッファにまだ映像が溜まっていません", en: "The replay buffer has no footage yet" },
     RecordingFileNameEmpty { ja: "ファイル名の書式が空です", en: "The file name format is empty" },
     RecordingFileNameInvalidSpecifier { ja: "ファイル名の書式に使えない指定子（% で始まるもの）が含まれています", en: "The file name format contains an unknown % specifier" },
     RecordingFileNameTrailingDot { ja: "ファイル名の末尾を空白や「.」にはできません", en: "A file name cannot end with a space or a period" },
@@ -387,7 +395,7 @@ texts! {
     RecordingReplayEnabled { ja: "録画の開始時に、直前の映像と音声を含める", en: "Include the footage just before the recording starts" },
     RecordingReplaySecondsLabel { ja: "さかのぼる長さ:", en: "Length:" },
     RecordingReplayMemoryNotice { ja: "長くするほどメモリを使います（映像 8000kbps で 5 分なら約 300MB。ビットレートに比例して増えます）。", en: "Longer lengths use more memory (about 300 MB for 5 minutes at 8000 kbps video; it grows with the bitrate)." },
-    RecordingReplayHint { ja: "ON のあいだは録画していなくてもエンコーダが動き、直近の映像と音声をメモリに持ちます。録画を始めると、その分をファイルの先頭に入れます（2 秒ごとのキーフレームの位置から）。\nON にしたときから溜め始めます。映像のビットレートやエンコーダ、音声の設定を変えると、溜めた分は捨てて溜め直します。", en: "While on, the encoder runs even when not recording and keeps the latest video and audio in memory. When you start recording, that footage is placed at the beginning of the file (from a keyframe, every 2 seconds).\nBuffering starts when you turn it on. Changing the video bitrate, encoder, or audio settings discards the buffered footage and starts over." },
+    RecordingReplayHint { ja: "ON のあいだは録画していなくてもエンコーダが動き、直近の映像と音声をメモリに持ちます。録画を始めると、その分をファイルの先頭に入れます（2 秒ごとのキーフレームの位置から）。\n右クリックメニューかホットキー（「リプレイを保存」）で、録画を始めずに溜まっている分だけを保存することもできます。\nON にしたときから溜め始めます。映像のビットレートやエンコーダ、音声の設定を変えると、溜めた分は捨てて溜め直します。", en: "While on, the encoder runs even when not recording and keeps the latest video and audio in memory. When you start recording, that footage is placed at the beginning of the file (from a keyframe, every 2 seconds).\nYou can also save just the buffered footage without recording, from the right-click menu or with the Save replay hotkey.\nBuffering starts when you turn it on. Changing the video bitrate, encoder, or audio settings discards the buffered footage and starts over." },
 }
 
 #[cfg(test)]

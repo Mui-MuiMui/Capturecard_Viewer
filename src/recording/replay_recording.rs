@@ -15,6 +15,8 @@
 //! - 止めるときは、止めた時刻より前のサンプルがエンコーダから出てくるのを最大
 //!   `STOP_GRACE` だけ待ってから閉じる。エンコーダは数枚遅れて出力するので、
 //!   すぐ閉じると最後の数枚が入らない。リングの中身を書き終えるまでは閉じない
+//! - リプレイバッファの中身だけを保存するとき（#438、`RecordingKind::SaveReplay`）も同じ形で
+//!   書く。ファイルを作ったらすぐ押した時刻で止めるので、ライブの映像は続けて書かない
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -31,6 +33,7 @@ use super::passthrough::PassthroughWriter;
 use super::pts::UNITS_PER_SECOND;
 use super::recorder::{RecordingRequest, RecordingSummary, RecordingTelemetry};
 use super::replay_ring::{Cut, EncodedRing, Placement, Track, Written};
+use super::replay_save::RecordingKind;
 use super::session::{check_disk, create_error, remove_partial_file, write_error, Finished};
 use super::storage::disk_check_due;
 use super::RecordingError;
@@ -66,6 +69,8 @@ pub(super) struct Counters {
 /// リプレイバッファを通す 1 回の録画。
 pub(super) struct ReplayRecording {
     request: RecordingRequest,
+    /// 録画か、リプレイバッファの中身だけの保存（#438）か。違うのは結果のイベントだけ
+    kind: RecordingKind,
     /// 録画を始めた時刻（リプレイバッファの基準からの 100ns）
     requested_at: i64,
     cut: Option<Cut>,
@@ -92,6 +97,7 @@ pub(super) struct ReplayRecording {
 impl ReplayRecording {
     pub(super) fn new(
         request: RecordingRequest,
+        kind: RecordingKind,
         requested_at: i64,
         has_audio: bool,
         baseline: Baseline,
@@ -101,6 +107,7 @@ impl ReplayRecording {
         telemetry.begin_recording(baseline.dropped);
         Self {
             request,
+            kind,
             requested_at,
             cut: None,
             writer: None,
@@ -126,6 +133,11 @@ impl ReplayRecording {
 
     pub(super) fn baseline(&self) -> &Baseline {
         &self.baseline
+    }
+
+    /// 録画か、リプレイバッファの中身だけの保存か。
+    pub(super) fn kind(&self) -> RecordingKind {
+        self.kind
     }
 
     /// 先頭のキーフレームを決めて書き始めたか。
@@ -206,7 +218,11 @@ impl ReplayRecording {
         };
         let lead = lead_units(self.requested_at, offset);
         info!(
-            "録画のファイルを作った（リプレイバッファから）: {}（さかのぼり {:.1} 秒、リングの映像 {:.1} 秒・{} KB、音声: {}）",
+            "{}のファイルを作った（リプレイバッファから）: {}（さかのぼり {:.1} 秒、リングの映像 {:.1} 秒・{} KB、音声: {}）",
+            match self.kind {
+                RecordingKind::Recording => "録画",
+                RecordingKind::SaveReplay => "リプレイの保存",
+            },
             path.display(),
             lead as f64 / UNITS_PER_SECOND as f64,
             ring.held_units() as f64 / UNITS_PER_SECOND as f64,
@@ -218,6 +234,11 @@ impl ReplayRecording {
         self.writer = Some(writer);
         self.path = Some(path);
         self.cut = Some(Cut::new(offset));
+        if self.kind == RecordingKind::SaveReplay {
+            // リプレイの保存（#438）は押した時刻で止める。それより前のサンプルは、エンコーダの
+            // 遅れで押したあとに出てくるものも書き、後のものは書かない（`is_done` まで待つ）
+            self.request_stop(self.requested_at, Instant::now());
+        }
         self.catch_up(ring)
     }
 
