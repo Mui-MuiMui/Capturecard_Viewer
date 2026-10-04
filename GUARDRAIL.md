@@ -24,7 +24,7 @@
 - `on_exit` では録画をデバイスワーカーより先に止め、`Finalize` を待つ（理由: `docs/design/recording.md`）
 - 録画スレッドを自分から抜けさせない。止めると決めるのは窓口（`Recorder`）だけ（理由: `docs/design/recording.md` の「持ち主と寿命」）
 - UI スレッドから `supported_input_configs()` / `supported_output_configs()` を呼ばない（理由: `docs/design/audio.md`）
-- フレームコールバックと cpal のコールバックでロックもアロケーションもしない。`SharedColorConversion` に項目を足すときも `Mutex` にしない（理由: `docs/design/video-pipeline.md`、`docs/design/audio.md`）
+- フレームコールバックと cpal のコールバックでロックもアロケーションもしない。`SharedColorConversion` に項目を足すときも `Mutex` にしない。例外はフレームコールバックの `RepaintWaker::wake` の 1 回だけで、その中へ処理を足さない（理由: `docs/design/video-pipeline.md`、`docs/design/audio.md`）
 - 音声ピンのレンダラーの `Receive` でロックもアロケーションもしない。受け取れないときも失敗を返さず、捨てて `Ok` を返す（理由: `docs/design/directshow-audio.md`）
 - 音声ピンを繋ぐのは `[audio] input_source = "video_pin"` のときだけにする（理由: `docs/design/directshow-audio.md`）
 - 映像の開き直しに合わせた音声の開き直しを、音声のストリームエラーの経路で起こさない（理由: `docs/design/directshow-audio.md`）
