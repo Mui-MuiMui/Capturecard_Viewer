@@ -8,13 +8,19 @@
 //!
 //! - `next_repaint_delay` — 「次の `update()` までに最大どれだけ空けてよいか」を
 //!   決める純粋関数。`update()` の末尾で 1 回だけ呼ぶ
-//! - `RepaintWaker` — UI スレッド以外から再描画を促す窓口。映像フレームの到着を
-//!   待たせないために使う
+//! - `RepaintWaker` — UI スレッド以外から再描画を促す窓口。**映像フレームは
+//!   これで到着したその場で取り込む**（#459）
 //!
 //! egui の `request_repaint_after` は**同じフレーム内で要求された中で最も短い
 //! 間隔を採る**。そのため、`overlay.rs` の OSD や `flush_settings_if_due` の
 //! ように、もっと早く起きたい処理がそれぞれ勝手に予約してよい。ここが決めるのは
 //! あくまで上限で、他の予約を邪魔しない。
+//!
+//! **egui は要求された遅延から 1 フレームぶん（`predicted_dt`、eframe では 1/60 秒）を
+//! 引いてから予約する。** 16ms を要求すると 0ms になり、描き終えたらすぐ次の
+//! `update()` が来る。#459 までは映像が流れている間 16ms を要求して到着では起こさず、
+//! 実際には「垂直同期で止まる swap の直後に次の `update()`」の形で回っていた。
+//! 到着からの待ちがその位相で決まり、0〜1 フレーム（平均で半フレーム）待っていた。
 
 use eframe::egui;
 use log::warn;
@@ -22,30 +28,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-/// 映像が届いている間の間隔。60fps ぶん。
-///
-/// **ここは到着駆動にしない。** フレームの到着ごとに UI スレッドを起こす形も
-/// 試したが、1080p60 の実測で CPU が 66% → 85%（1 コアあたり）へ増えた。
-/// 描画が 16.7ms の到着間隔の大半を使うため、描いている最中に届いたフレームの
-/// 通知が「新着なし」の `update()` をもう 1 回呼び、1 枚につき 2 回描く形に
-/// なりやすい。映像が流れている間は 16ms のポーリングのほうが安い。
-const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(16);
-
-/// 最後のフレームからこの時間は、映像が続いている扱いで 16ms を保つ。
-///
-/// 間隔を広げた瞬間に次のフレームが届くと、`RepaintWaker` を有効にするより
-/// 先に到着してしまい、その 1 枚が `IDLE_INTERVAL` ぶん遅れて出る。60fps の
-/// 到着が 1〜2 枚飛んだだけでそうなるので、少し余裕を置いてから広げる。
-const ACTIVE_GRACE: Duration = Duration::from_millis(200);
-
-/// 映像フレームが届いていないときの間隔。
+/// 最小化していないときの間隔。映像が流れていてもいなくても同じ。
 ///
 /// ここで見ているのは「映像の途絶（3 秒）の判定」「接続の再試行の期限」
 /// 「プレースホルダーの文言」「別スレッドから届く結果の取り込み」で、
 /// どれも 250ms 遅れて気付いても困らない。
 ///
-/// この状態では `RepaintWaker` を有効にするので、映像が戻ったときは
-/// 250ms 待たずにその場で描き始める。
+/// **映像フレームはこの間隔では取り込まない。** 届いたその場で `RepaintWaker` が
+/// 起こす（#459）。映像が流れている間に 16ms のポーリングを足すと、到着とは
+/// 関係のない位相で `update()` が回り、届いたフレームを次のポーリングまで待たせる。
+/// 通知と併用すると、描いている最中に届いた通知のぶん `update()` が増える
+/// （1080p60 で CPU が 66% → 85% に増えた、`docs/design/video-pipeline.md`）。
 const IDLE_INTERVAL: Duration = Duration::from_millis(250);
 
 /// 最小化しているときの間隔。
@@ -60,7 +53,8 @@ const MINIMIZED_INTERVAL: Duration = Duration::from_secs(1);
 /// **`Duration::ZERO` にしないこと。** egui は遅延ゼロの要求を受けると
 /// `outstanding` を立てて次のフレームも続けて描く（`egui::Context` の
 /// `request_repaint_after`）。1 回の通知で `update()` が 2 回走ってしまう。
-/// 1ms 遅らせれば 1 回で済み、待たされる側の 250ms に比べれば無視できる。
+/// 1ms なら `outstanding` は立たず、`predicted_dt` を引かれて 0ms で予約されるので、
+/// 待たされることもない。
 const WAKE_DELAY: Duration = Duration::from_millis(1);
 
 /// 次の再描画までの間隔を決めるための状態。
@@ -68,16 +62,6 @@ const WAKE_DELAY: Duration = Duration::from_millis(1);
 pub struct RepaintCondition {
     /// ウィンドウが最小化されている
     pub minimized: bool,
-    /// 最後に映像フレームをテクスチャへ取り込んでからの経過時間。
-    /// `None` は起動してから 1 枚も取り込んでいないことを表す
-    pub since_new_frame: Option<Duration>,
-}
-
-impl RepaintCondition {
-    /// 映像が流れている扱いか。`update()` を 60fps で回す条件。
-    fn video_is_live(&self) -> bool {
-        matches!(self.since_new_frame, Some(elapsed) if elapsed <= ACTIVE_GRACE)
-    }
 }
 
 /// 次の `update()` までに空けてよい時間を返す。
@@ -85,28 +69,25 @@ impl RepaintCondition {
 /// 実際の再描画はこれより早く起きうる。映像フレームの到着（`RepaintWaker`）、
 /// マウスやキーの入力、OSD や設定の書き出しが個別に予約するため。
 ///
-/// 最小化を最優先で見るのは、映像が流れていても画面に出ていないため。
 /// 最小化中は `RepaintWaker` も止めるので、フレームが届いても起きない。
 pub fn next_repaint_delay(condition: RepaintCondition) -> Duration {
     if condition.minimized {
         return MINIMIZED_INTERVAL;
-    }
-    if condition.video_is_live() {
-        return ACTIVE_POLL_INTERVAL;
     }
     IDLE_INTERVAL
 }
 
 /// 別スレッドからの通知で UI スレッドを起こしてよいかを返す。
 ///
-/// **起こすのは間隔を広げているときだけ。** 16ms で回している間は、通知で
-/// 起こしても次のポーリングとほとんど変わらないうえ、描画中に届いた通知が
-/// 「新着なし」の `update()` を 1 回増やすため、かえって高く付く。
+/// **最小化していなければ、映像が流れている間も起こす**（#459）。映像フレームの
+/// 取り込みは通知だけが駆動するので、ここを止めると 250ms ごとにしか描かれない。
 ///
-/// ホットキーの通知も同じ旗で止まる。16ms で回っている間は次の `update()` が
-/// 16ms 以内に来るので、反応は変わらない。
+/// 描いている最中に届いた通知は、その `update()` が終わってから次の `update()` を
+/// 1 回呼ぶ。そのフレームを取り込む前に届いた通知なら次は「新着なし」になるが、
+/// フレームを取り込むのは `update()` の先頭近くなので、そうなるのはまれ
+/// （フェイク 1080p60 で 30 秒に 0〜4 回。16ms のポーリングの間は約 180 回あった）。
 pub fn should_wake_on_event(condition: RepaintCondition) -> bool {
-    !condition.minimized && !condition.video_is_live()
+    !condition.minimized
 }
 
 /// UI スレッド以外から再描画を促すための窓口。
@@ -175,7 +156,7 @@ impl RepaintWaker {
     /// 呼び出し側（`update()` の末尾）がフレームバッファを読んでからここへ
     /// 来るまでの間に届いたフレームは、まだ `false` なので捨てられている。
     /// 拾い直さないと、その 1 枚が `IDLE_INTERVAL` ぶん遅れて出る。
-    /// 切り替えは映像が途切れたときなどに起きるだけなので、費用は無視できる。
+    /// 切り替えは最小化から戻ったときに起きるだけなので、費用は無視できる。
     pub fn set_enabled(&self, enabled: bool) {
         let was_enabled = self.inner.enabled.swap(enabled, Ordering::Relaxed);
         if enabled && !was_enabled {
@@ -208,128 +189,89 @@ impl RepaintWaker {
 mod tests {
     use super::*;
 
-    /// 映像が届いてから `elapsed` 経った、最小化していない状態。
-    fn live(elapsed: Duration) -> RepaintCondition {
-        RepaintCondition {
-            minimized: false,
-            since_new_frame: Some(elapsed),
-        }
+    /// 最小化していない状態。
+    fn shown() -> RepaintCondition {
+        RepaintCondition { minimized: false }
+    }
+
+    /// 最小化している状態。
+    fn minimized() -> RepaintCondition {
+        RepaintCondition { minimized: true }
     }
 
     #[test]
-    fn next_repaint_delay_right_after_a_frame_keeps_sixty_fps() {
-        assert_eq!(
-            next_repaint_delay(live(Duration::ZERO)),
-            Duration::from_millis(16)
+    fn next_repaint_delay_when_shown_waits_a_quarter_second() {
+        // 映像が流れていてもいなくても同じ。映像は到着で起こす（#459）
+        assert_eq!(next_repaint_delay(shown()), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn next_repaint_delay_when_shown_does_not_poll_at_the_video_rate() {
+        // 60fps のポーリングへ戻すと、到着とは関係のない位相で update() が回り、
+        // 届いたフレームを次のポーリングまで待たせる。egui が 1 フレームぶん
+        // （1/60 秒）を引くので、2 フレームより短い間隔は実質ポーリングになる
+        assert!(
+            next_repaint_delay(shown()) > Duration::from_millis(34),
+            "映像の速さでポーリングしている: {:?}",
+            next_repaint_delay(shown())
         );
-    }
-
-    #[test]
-    fn next_repaint_delay_within_the_grace_period_keeps_sixty_fps() {
-        // 60fps の到着が数枚飛んだだけでは間隔を広げない
-        assert_eq!(
-            next_repaint_delay(live(Duration::from_millis(100))),
-            Duration::from_millis(16)
-        );
-    }
-
-    #[test]
-    fn next_repaint_delay_at_the_end_of_the_grace_period_keeps_sixty_fps() {
-        // 境界はまだ「映像が続いている」側に倒す
-        assert_eq!(
-            next_repaint_delay(live(Duration::from_millis(200))),
-            Duration::from_millis(16)
-        );
-    }
-
-    #[test]
-    fn next_repaint_delay_after_the_grace_period_widens() {
-        assert_eq!(
-            next_repaint_delay(live(Duration::from_millis(201))),
-            Duration::from_millis(250)
-        );
-    }
-
-    #[test]
-    fn next_repaint_delay_without_any_frame_yet_widens() {
-        // 入力信号が無いデバイスは開けても永久にフレームを出さない。
-        // 起動直後からここへ来る
-        let delay = next_repaint_delay(RepaintCondition {
-            minimized: false,
-            since_new_frame: None,
-        });
-        assert_eq!(delay, Duration::from_millis(250));
     }
 
     #[test]
     fn next_repaint_delay_when_minimized_waits_a_second() {
-        let delay = next_repaint_delay(RepaintCondition {
-            minimized: true,
-            since_new_frame: None,
-        });
-        assert_eq!(delay, Duration::from_secs(1));
-    }
-
-    #[test]
-    fn next_repaint_delay_when_minimized_ignores_arriving_frames() {
-        // 最小化中はフレームが流れていても描かない。映像を優先すると、
-        // 裏で 60fps の映像が来ている間ずっと 60fps で回り続ける
-        let delay = next_repaint_delay(RepaintCondition {
-            minimized: true,
-            since_new_frame: Some(Duration::ZERO),
-        });
-        assert_eq!(delay, Duration::from_secs(1));
+        assert_eq!(next_repaint_delay(minimized()), Duration::from_secs(1));
     }
 
     #[test]
     fn next_repaint_delay_is_never_longer_than_a_second() {
         // 上限を伸ばすときは、映像の途絶（3 秒）の判定が間に合うかを確かめること
-        for minimized in [false, true] {
-            for since_new_frame in [None, Some(Duration::ZERO), Some(Duration::from_secs(10))] {
-                let delay = next_repaint_delay(RepaintCondition {
-                    minimized,
-                    since_new_frame,
-                });
-                assert!(
-                    delay <= Duration::from_secs(1),
-                    "間隔が長すぎる: minimized={minimized}, since_new_frame={since_new_frame:?}, delay={delay:?}"
-                );
-            }
+        for condition in [shown(), minimized()] {
+            let delay = next_repaint_delay(condition);
+            assert!(
+                delay <= Duration::from_secs(1),
+                "間隔が長すぎる: {condition:?}, delay={delay:?}"
+            );
         }
     }
 
     #[test]
-    fn should_wake_on_event_while_video_is_live_returns_false() {
-        // 16ms で回っている間は通知で起こさない。描画中に届いた通知が
-        // 「新着なし」の update() を増やす
-        assert!(!should_wake_on_event(live(Duration::ZERO)));
-    }
-
-    #[test]
-    fn should_wake_on_event_after_the_grace_period_returns_true() {
-        assert!(should_wake_on_event(live(Duration::from_millis(201))));
-    }
-
-    #[test]
-    fn should_wake_on_event_without_any_frame_yet_returns_true() {
-        assert!(should_wake_on_event(RepaintCondition {
-            minimized: false,
-            since_new_frame: None,
-        }));
+    fn should_wake_on_event_when_shown_returns_true() {
+        // 映像フレームの取り込みは通知だけが駆動する。止めると 250ms ごとにしか描かれない
+        assert!(should_wake_on_event(shown()));
     }
 
     #[test]
     fn should_wake_on_event_when_minimized_returns_false() {
         // 最小化中は eframe が再描画要求を捨てるので、起こしても描かれない
-        for since_new_frame in [None, Some(Duration::ZERO), Some(Duration::from_secs(10))] {
-            assert!(
-                !should_wake_on_event(RepaintCondition {
-                    minimized: true,
-                    since_new_frame,
-                }),
-                "最小化中に起こそうとしている: since_new_frame={since_new_frame:?}"
-            );
-        }
+        assert!(!should_wake_on_event(minimized()));
+    }
+
+    #[test]
+    fn egui_shortens_a_requested_delay_by_one_predicted_frame() {
+        // 間隔の決め方の前提（モジュールの先頭）。egui は要求された遅延から
+        // `predicted_dt`（既定 1/60 秒）を引く。16ms の要求は 0ms になり、
+        // 「16ms ごとのポーリング」は実際には「描き終えたらすぐ次」だった。
+        // egui を上げてここが落ちたら、間隔の決め方を見直すこと
+        let ctx = settled_context();
+        let delay_for = |requested: Duration| {
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.ctx().request_repaint_after(requested);
+            });
+            let delay = output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .expect("ルートのビューポートがある")
+                .repaint_delay;
+            output.drop_without_applying_deltas();
+            delay
+        };
+        assert_eq!(delay_for(Duration::from_millis(16)), Duration::ZERO);
+        assert_eq!(delay_for(WAKE_DELAY), Duration::ZERO);
+        let idle = delay_for(Duration::from_millis(250));
+        assert!(
+            idle > Duration::from_millis(200) && idle < Duration::from_millis(250),
+            "{idle:?}"
+        );
     }
 
     #[test]
@@ -394,8 +336,8 @@ mod tests {
 
     #[test]
     fn repaint_waker_enabling_while_already_enabled_requests_nothing() {
-        // 間隔を広げている間は毎フレーム set_enabled(true) が呼ばれる。
-        // そのたびに予約すると、広げた意味が無くなる
+        // 最小化していない間は毎フレーム set_enabled(true) が呼ばれる。
+        // そのたびに予約すると、update() が止まらずに回り続ける
         let ctx = settled_context();
         let waker = RepaintWaker::new();
         waker.bind(&ctx);

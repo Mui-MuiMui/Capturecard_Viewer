@@ -137,7 +137,7 @@ pub(super) struct WorkerState {
     pub(super) events: Sender<DeviceEvent>,
     pub(super) snapshot: SharedSnapshot,
     /// イベントを積んだときに UI スレッドを起こす窓口。
-    /// 間隔を広げているときだけ効く（`repaint::should_wake_on_event`）
+    /// 最小化している間は効かない（`repaint::should_wake_on_event`）
     pub(super) repaint_waker: RepaintWaker,
 
     /// 最後に受け取った設定。まだ一度も来ていなければ `None`
@@ -270,8 +270,8 @@ impl WorkerState {
             trace!("デバイスイベントの送り先が既に無いので捨てる");
             return;
         }
-        // 再描画の間隔を広げている間は、通知しないと最大 500ms 表示が遅れる。
-        // 16ms で回っている間は `RepaintWaker` 側が無効になっているので、
+        // 映像が止まっている間の update() は 250ms ごとなので、通知しないと
+        // そのぶん表示が遅れる。最小化中は `RepaintWaker` 側が無効になっているので、
         // ここを呼んでも何も起きない
         self.repaint_waker.wake();
     }

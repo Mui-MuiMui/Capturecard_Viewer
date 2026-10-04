@@ -159,10 +159,6 @@ pub struct CaptureCardViewer {
     last_frame_generation: u64,
     // フレームの到着からテクスチャへ取り込むまでの遅れの集計（`view.rs`、#455）
     display_latency: DisplayLatency,
-    // 最後に新しいフレームをテクスチャへ取り込んだ時刻。
-    // None は起動してから 1 枚も取り込んでいないことを表す。
-    // 再描画の間隔（`repaint::next_repaint_delay`）を決めるために持つ
-    last_new_frame_at: Option<Instant>,
     // 最後に共有 Atomic へ入れた色変換の設定。
     // デバイスの開き直しは伴わないが、2 秒ごとの再適用で同じ値を
     // ログへ出さないよう差分で判定する
@@ -314,7 +310,6 @@ impl Default for CaptureCardViewer {
             video_image: None,
             last_frame_generation: 0,
             display_latency: DisplayLatency::default(),
-            last_new_frame_at: None,
             last_color_conversion: None,
             last_video_adjustments: None,
             last_sound_file: None,
@@ -489,10 +484,9 @@ impl CaptureCardViewer {
             self.check_for_updates_on_startup();
         }
 
-        // ビデオフレームを更新。新着の時刻は末尾の再描画の予約で使う
-        if self.update_video_texture(ctx) {
-            self.last_new_frame_at = Some(Instant::now());
-        } else {
+        // ビデオフレームを更新。届いたフレームは `RepaintWaker` がその場で起こすので、
+        // ここへ来たときには新着があることが多い（#459）
+        if !self.update_video_texture(ctx) {
             // 再描画の間隔の判断（#459）を確かめるため、新着なしで回った回数を数える
             self.display_latency.note_idle_pass();
         }
@@ -733,11 +727,9 @@ impl CaptureCardViewer {
         // **ここは上限であって下限ではない。** もっと早く起きたい処理
         // （OSD の消滅、設定の書き出し、フレームの到着）はそれぞれ自分で
         // 予約しており、egui は同じフレームで要求された中の最短を採る
-        let condition = RepaintCondition {
-            minimized,
-            since_new_frame: self.last_new_frame_at.map(|at| at.elapsed()),
-        };
-        // 間隔を広げている間だけ、別スレッドからの通知で起こしてもらう
+        let condition = RepaintCondition { minimized };
+        // 最小化していなければ、別スレッドからの通知（映像フレームの到着を含む）で
+        // 起こしてもらう
         self.repaint_waker
             .set_enabled(should_wake_on_event(condition));
 
