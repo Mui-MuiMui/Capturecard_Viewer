@@ -7,6 +7,7 @@
 use crate::audio::{AudioCapabilities, AudioDirection, ChoiceSource};
 use crate::i18n::{self, Text};
 use crate::settings::VideoBackendSetting;
+use crate::video::capabilities::is_assumed;
 use crate::video::DeviceCapabilities;
 use eframe::egui;
 use std::borrow::Borrow;
@@ -277,6 +278,46 @@ pub(super) fn show_choice_note(ui: &mut egui::Ui, source: ChoiceSource, label: &
     }
 }
 
+/// ビデオデバイスの能力の取得状況を描く。
+///
+/// 取得中はスピナー、失敗したら理由と「再取得」ボタン。取れたが既定の一覧
+/// （どの形式の一覧もデバイスから取れなかった、`FormatCapability::assumed`、#446）
+/// のときも、その旨と「再取得」ボタンを出す。黙って出すと、選択肢にデバイスが
+/// 対応しない組み合わせが混ざる理由がユーザーに分からない。
+pub(super) fn show_video_capability_progress(
+    ui: &mut egui::Ui,
+    capabilities: &VideoCapabilityCache,
+    key: &VideoCapabilityKey,
+    events: &mut Vec<SettingsEvent>,
+) {
+    let mut retry_requested = false;
+    match capabilities.state(key) {
+        Some(CapabilityState::Pending) => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(Text::VideoCapabilityPending.get());
+            });
+        }
+        Some(CapabilityState::Failed(reason)) => {
+            // 理由はデバイス由来の長い文字列になることがある。ボタンと横に並べると
+            // 折り返せずダイアログからはみ出すので、行を分ける
+            warning_label(ui, i18n::video_capability_failed(reason));
+            retry_requested = ui.button(Text::ButtonRetry.get()).clicked();
+            ui.label(Text::VideoCapabilityFallback.get());
+        }
+        Some(CapabilityState::Ready(caps)) if is_assumed(caps) => {
+            warning_label(ui, Text::VideoCapabilityAssumed.get());
+            retry_requested = ui.button(Text::ButtonRetry.get()).clicked();
+        }
+        _ => {}
+    }
+    if retry_requested {
+        events.push(SettingsEvent::Capability(CapabilityEvent::RetryVideo(
+            key.clone(),
+        )));
+    }
+}
+
 /// オーディオデバイスの対応設定の取得状況を描く。
 ///
 /// 取得中はスピナー、失敗したら理由と「再取得」ボタン。ビデオ側と同じ扱いで、
@@ -346,6 +387,7 @@ mod tests {
 
     use crate::video::capabilities::FormatCapability;
     use crate::video::{DeviceCapabilities, VideoMode};
+    use egui_kittest::kittest::Queryable;
 
     /// 取得できたことにする能力。中身そのものは検証の対象ではないので最小限
     fn sample_capabilities() -> DeviceCapabilities {
@@ -718,5 +760,63 @@ mod tests {
         cache.apply_result(key("Capture Device"), Err("開けません".to_string()));
 
         assert!(!cache.awaits_defaults(&key("Capture Device")));
+    }
+
+    /// 「デバイス設定」タブを開き、「Capture Device」の能力に `caps` が届いた設定ダイアログ
+    fn device_tab_with_capabilities(
+        caps: DeviceCapabilities,
+    ) -> egui_kittest::Harness<'static, crate::ui::testing::DialogFixture> {
+        use crate::settings::AppSettings;
+        use crate::ui::testing::{dialog_harness, DialogFixture};
+        use crate::ui::{SettingsTab, VideoPinChoice};
+
+        let mut draft = AppSettings::default();
+        draft.video.device_name = Some("Capture Device".to_string());
+        let mut fixture = DialogFixture::new(
+            &draft,
+            SettingsTab::Device,
+            VideoPinChoice::selectable(None, None),
+            &[],
+        )
+        .with_video_devices(&["Capture Device"]);
+        fixture
+            .state
+            .capabilities_mut()
+            .apply_result(key("Capture Device"), Ok(caps));
+        let mut harness = dialog_harness(fixture);
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn device_tab_notes_an_assumed_list_and_offers_retry() {
+        // どの形式の一覧も取れず、既定の一覧が届いた（#446）
+        let assumed = vec![FormatCapability {
+            assumed: true,
+            ..FormatCapability::new("YUY2", vec![VideoMode::new(1280, 720, 60)])
+        }];
+        let mut harness = device_tab_with_capabilities(assumed);
+
+        assert!(harness
+            .query_by_label_contains(Text::VideoCapabilityAssumed.get())
+            .is_some());
+
+        harness.get_by_label(Text::ButtonRetry.get()).click();
+        harness.run();
+        assert!(harness.state().events.iter().any(|event| matches!(
+            event,
+            SettingsEvent::Capability(CapabilityEvent::RetryVideo(retried))
+                if *retried == key("Capture Device")
+        )));
+    }
+
+    #[test]
+    fn device_tab_does_not_note_a_list_from_the_device() {
+        let harness = device_tab_with_capabilities(sample_capabilities());
+
+        assert!(harness
+            .query_by_label_contains(Text::VideoCapabilityAssumed.get())
+            .is_none());
+        assert!(harness.query_by_label(Text::ButtonRetry.get()).is_none());
     }
 }

@@ -5,7 +5,7 @@
 //! 問い合わせない（`docs/design/error-reporting.md`）。
 
 use crate::audio::{self, AudioDirection, ChoiceSource};
-use crate::i18n::{self, Text};
+use crate::i18n::Text;
 use crate::settings::{
     AppSettings, AudioInputSource, ColorRange, ColorSpace, VideoBackendSetting, DEFAULT_CHANNELS,
     DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS, MAX_VIDEO_ADJUSTMENT, MIN_BUFFER_MS, MIN_VIDEO_ADJUSTMENT,
@@ -16,8 +16,8 @@ use log::debug;
 use super::audio_input::{show_audio_input_combo, VideoPinChoice};
 use super::capability::{
     channel_label, out_of_range_note, should_reselect_video_defaults,
-    show_audio_capability_progress, show_choice_note, CapabilityState, VideoCapabilityCache,
-    VideoCapabilityKey,
+    show_audio_capability_progress, show_choice_note, show_video_capability_progress,
+    VideoCapabilityCache, VideoCapabilityKey,
 };
 use super::video_mode::select_default_video_mode;
 use super::{warning_label, AudioCapabilityCaches, CapabilityEvent, DeviceLists, SettingsEvent};
@@ -127,32 +127,9 @@ pub(super) fn show_device_settings_tab(
             selected_key.clone(),
         )));
 
-        // 取得の進行状況。失敗を黙って捨てると、選択肢が既定値のまま出る理由が
+        // 取得の進行状況。失敗や既定の一覧を黙って出すと、選択肢が実態と違う理由が
         // ユーザーに分からない
-        let mut retry_requested = false;
-        match capabilities.state(&selected_key) {
-            Some(CapabilityState::Pending) => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(Text::VideoCapabilityPending.get());
-                });
-            }
-            Some(CapabilityState::Failed(reason)) => {
-                // 理由はデバイス由来の長い文字列になることがある。ボタンと横に並べると
-                // 折り返せずダイアログからはみ出すので、行を分ける
-                warning_label(ui, i18n::video_capability_failed(reason));
-                if ui.button(Text::ButtonRetry.get()).clicked() {
-                    retry_requested = true;
-                }
-                ui.label(Text::VideoCapabilityFallback.get());
-            }
-            _ => {}
-        }
-        if retry_requested {
-            events.push(SettingsEvent::Capability(CapabilityEvent::RetryVideo(
-                selected_key.clone(),
-            )));
-        }
+        show_video_capability_progress(ui, capabilities, &selected_key, events);
 
         // 切り替えたデバイスの能力が届いたら、フォーマット・解像度・FPS を
         // まとめて選び直す。
