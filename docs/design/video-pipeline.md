@@ -136,6 +136,15 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 - 集計（`video/display_latency.rs` の `DisplayLatency`）は UI スレッドだけが持つ `CaptureCardViewer` のフィールド。直近 1 秒の平均と最大を統計 OSD と「接続状態」タブの映像の欄に出し、30 秒ごとの平均・最大・枚数を `debug` でログへ出す（音声の観測値のログと同じ間隔）。ログには、取り込む前に次のフレームで上書きされた枚数と、新着が無いまま回った `update()` の回数も並べる（再描画の間隔の判断を確かめるため、#459）。取り込みが止まって 1 秒経てば「-」に戻り、止まる前の値を出し続けない
 - 測れるのは取り込んだフレームだけ。UI スレッドが追いつかずに上書きされたフレーム（世代が飛んだもの）は遅れの数に入らない（上書きされた枚数だけをログに出す）。コマ落ちの有無はフレーム間隔の行で見る
 
+## 試して外したもの: ソースリーダーの `MF_LOW_LATENCY`（#456）
+
+**Media Foundation のソースリーダーに `MF_LOW_LATENCY = TRUE` を付けても、1080p60 YUY2 の Live Gamer EXTREME 3 では遅延が変わらなかった**ので外した（PR #461 で入れ、同日に戻した）。同じ理由でもう一度入れないこと。
+
+- 付け方: nokhwa 0.10 はソースリーダーの属性を `nokhwa-bindings-windows` の中で組み立てていてアプリから足せないため、0.4.6 を `vendor/` に置いて `[patch.crates-io]` で差し替え、属性を 1 つ足した。環境変数で OFF にできるようにして、同じ exe で ON / OFF を撮り比べた
+- 結果: パススルーに対する遅れは ON が約 38ms、OFF も約 38ms（どちらも 9 カメラフレーム前後、読み取りの誤差 ±1 の中）。`docs/LATENCY.md` の「`MF_LOW_LATENCY` の撮り比べ」
+- 効かない理由の見立て: この属性が減らすのはソースリーダーの下にあるデコーダーや変換の MFT の溜め込みで、YUY2 を無変換で受け取る経路には溜める段が無い。取り込み側の遅れはボードと USB のドライバーにあり、アプリからは触れない
+- 残る候補は UI スレッドが 16ms のポーリングで取りに行く待ち（#459）と、present の経路（wgpu のフリップモデル、#456 の (2)）
+
 ## 映像の上に重ねる表示の層
 
 映像の上に常設で出す表示（統計 OSD・フェイクデバイスの帯・録画中の印）は、**`egui::Area` ではなく映像と同じ背景の層（`LayerId::background()`）へ、映像のあとから描く**（`src/app/video_overlay.rs` の `show_video_overlay`、#284）。
@@ -152,7 +161,7 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 **設定画面で選んだ形式を、そのまま nokhwa に要求して開く。** 1.3.0 までは MJPEG / RGB24 を選んでも YUYV を要求しており、一覧に出るのに効かなかった。
 
 - **一覧に出す形式と要求する形式は 1 つの表で対応させる**（`video/mf_format.rs` の `MF_FORMATS`）。能力の取得（`capabilities.rs`）と開くとき（`capture.rs`）が同じ表を引く。並びは YUY2・NV12・MJPEG・RGB24（係数表の効く形式が先）
-- **能力の一覧は、一覧に出す形式のどれかで仮に開いてから読む**（`mf_format::capabilities_probe`、#442）。nokhwa 0.10 には開かずに一覧を読む手段が無い（`compatible_list_by_resolution` / `compatible_camera_formats` は `Camera` のメソッドで、`Camera::new` の中で `fulfill` → `set_format` まで済ませる。開かずに読める `MediaFoundationDevice` は nokhwa-bindings-windows にある。#456 で直接の依存にしたが、使うのは `wmf::set_low_latency` だけ）。そこで `RequestedFormatType::None` に `MF_FORMATS` の形式だけを受け付けさせて渡し、デバイスが並べた順で最初に当たる形式で開く。以前は 640x480 YUY2 30fps の `Closest` で開いていたので、YUY2 を出さないデバイスと 640x480 の無いデバイス（`Closest` は fps を要求した 640x480 で探す）では一覧を読む前に失敗していた
+- **能力の一覧は、一覧に出す形式のどれかで仮に開いてから読む**（`mf_format::capabilities_probe`、#442）。nokhwa 0.10 には開かずに一覧を読む手段が無い（`compatible_list_by_resolution` / `compatible_camera_formats` は `Camera` のメソッドで、`Camera::new` の中で `fulfill` → `set_format` まで済ませる。開かずに読める `MediaFoundationDevice` は nokhwa-bindings-windows にあるが直接の依存にしていない）。そこで `RequestedFormatType::None` に `MF_FORMATS` の形式だけを受け付けさせて渡し、デバイスが並べた順で最初に当たる形式で開く。以前は 640x480 YUY2 30fps の `Closest` で開いていたので、YUY2 を出さないデバイスと 640x480 の無いデバイス（`Closest` は fps を要求した 640x480 で探す）では一覧を読む前に失敗していた
 - **RGB24 は nokhwa の `RAWBGR`。** nokhwa-bindings-windows 0.4.6 は `MFVideoFormat_RGB24` を `RAWBGR` に対応させる（`guid_to_frameformat`）。以前は能力の取得を `RAWRGB` で引いていたので、一覧が空の `Ok` になり RGB24 が選択肢に出なかった（`Err` ではないので既定値にも倒れない）
 - **能力の一覧には、デバイスから取れた形式だけを並べる**（`capabilities::assemble_capabilities`、#446）。`compatible_list_by_resolution` が `Err` を返した形式も 0 件の形式も外す。以前は `Err` の形式を決め打ちの組み合わせ（YUY2 / MJPEG / RGB24）で埋めていたので、デバイスが出していない形式が選択肢に出ていた。#442 で一覧に出す形式のどれかで仮に開けるようになり、取れた分だけで実態と合う。**どの形式も取れなかったときだけ**既定の組み合わせ（YUY2 / MJPEG）を `FormatCapability::assumed` を立てて返し、設定画面は「対応形式を取得できなかったので既定の一覧」の注意書きと「再取得」を出す（`ui::capability::show_video_capability_progress`）。デバイスを切り替えたときの既定（`select_default_video_mode`）は一覧の先頭を採るので、一覧に無い形式は選ばない。設定ファイルに一覧に無い形式が書かれていても、開くときは下のとおり要求して開けなければ YUY2 で開く
 - **要求した形式で開けなかったときだけ YUY2 で開き直す**（`mf_format::fallback_for`）。nokhwa は要求した形式がデバイスに無いと `Camera::new` で「Failed to fulfill requested format」を返す。`open_stream` の失敗も同じ扱い。YUY2 で失敗したときは形式ではなくデバイス側の問題なので開き直さない。開き直したことは `warn` と「接続状態」タブ（`ActiveVideo::format_fallback`）に出す。表に無い名前（DirectShow でだけ選べる I420 / YV12 が、Media Foundation のデバイスへ切り替えたあとに残っている場合）も YUY2 で開き、同じように出す
@@ -160,21 +169,6 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 - **Media Foundation の RGB24 は上の行から並んだものとして読む**（`mf_format::MF_RGB24_BOTTOM_UP`）。向きは `MF_MT_DEFAULT_STRIDE` の符号で決まるが、nokhwa はこれを読まず外にも出さない。nokhwa 自身のデコーダも上からとして読む。**実機で確かめていない**ので、上下が逆さまに出たらここを変える（`docs/MANUAL-TEST.md`）。行の長さは DirectShow と同じく 4 バイト境界に揃えたものとして読み、足りなければ捨てる
 - 解像度が未指定のときは、選んだ形式で 1280x720 60fps を要求する（以前は形式を見ず YUYV）
 - **実機では確かめていない。** 手元の GC551 は Media Foundation で開けず（`docs/design/reconnect.md`）、Live Gamer EXTREME 3 は MJPEG / RGB24 を 0 件で返す（Issue #81 のコメント）。NV12 を出すデバイスで、選んだ形式が「接続状態」タブに出て映ることを人が確かめる（`docs/MANUAL-TEST.md`）
-
-## Media Foundation のソースリーダーの低遅延モード（#456）
-
-**Media Foundation で開くとき、ソースリーダーに `MF_LOW_LATENCY = TRUE` を付ける。** 取り込み側（ソースリーダーとその下のデバイスのソース）がフレームを溜める分を減らすため。
-
-- **きっかけは #453 の実測。** 1080p60 の Live Gamer EXTREME 3（Media Foundation、YUY2）で、パススルーに対して本アプリが約 38ms、同じ条件の RECentral 4 が約 18ms で、約 20ms（ソースの 1 フレーム強）遅かった（`docs/LATENCY.md`）。取り込み側で溜まる 1 フレームぶんが候補の 1 つで、付けるだけで試せるので最初に入れた。**効いたかは実機の撮影で、環境変数で OFF にした版と撮り比べて確かめる**（`docs/LATENCY.md` の「注意」）
-- **属性は nokhwa の中で組み立てている。** nokhwa 0.10 は `nokhwa-bindings-windows` の `MediaFoundationDevice::new` でソースリーダーの属性（`MF_READWRITE_DISABLE_CONVERTERS` だけ）を作って `MFCreateSourceReaderFromMediaSource` に渡しており、アプリから属性を足す口が無い
-- **`nokhwa-bindings-windows` 0.4.6 を `vendor/` に置き、`Cargo.toml` の `[patch.crates-io]` で差し替える。** 変えたのは `src/lib.rs` の 3 か所（import、旗 `LOW_LATENCY` と `set_low_latency`、ソースリーダーの属性に足すところ）だけで、どれにも `[capturecard_viewer]` のコメントを付けた。版を上げるときの手順は `vendor/README.md`
-  - GitHub に自分のフォークを作って git 依存にする案は採らなかった。差分がこのリポジトリの外に出てレビューで見えず、フォークの更新とアプリの PR の 2 か所を揃える手間が増える。リポジトリの中なら CI もそのままビルドできる
-  - Media Foundation の経路を自前で書く（DirectShow の経路と同じく `windows` で直接ソースリーダーを組む）案は、属性 1 つのために列挙・能力・開閉・フレームの受け取りを書き直すことになり、釣り合わない。nokhwa を外すなら別の Issue で扱う
-  - nokhwa 本体（`nokhwa` クレート）は差し替えていない。旗を立てる関数を呼ぶために、アプリから `nokhwa-bindings-windows` を直接の依存にした（nokhwa が使うのと同じ 0.4.6 なので、クレートは増えない）
-- **既定は付ける。環境変数 `CAPTURECARD_VIEWER_MF_LOW_LATENCY=0` で外せる**（`video/mf_low_latency.rs`）。効果が微妙だったときに戻せるよう、撮り比べるための切り替えとして置いた。利用者に選ばせる設定ではないので設定ファイルには入れない。`0` / `false` / `off` / `no` が OFF、`1` / `true` / `on` / `yes` と未指定が ON、解釈できない値は WARN を出して ON（打ち間違いで外れないように）
-- 環境変数を読むのは実機のバックエンドを選んだとき（`app::backend::backends_from_env`）の 1 回だけ。ワーカースレッドがデバイスを開く前に旗を立てる。どちらで動いたかはログに出る（ON は INFO、OFF は WARN）
-- 付ける対象は Media Foundation のソースリーダーだけ。DirectShow の経路（`video/directshow/`）とフェイクには関係しない
-- **実機では確かめていない。** 開けない・フレームが来ないといった副作用が出たら、まず環境変数で OFF にして同じ症状か見る
 
 ## UI にあるが動作していない設定がある
 
