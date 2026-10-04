@@ -1,16 +1,19 @@
 # 映像遅延の実測
 
-**1080p60、Live Gamer EXTREME 3、Media Foundation の条件で、パススルーの表示に対して約 38ms（33〜42ms）の遅れ。**
+**1080p60、Live Gamer EXTREME 3、Media Foundation の条件で、パススルーの表示に対して 1.3.0 は約 38ms（33〜42ms）、1.4.0（#459 を入れた版）は約 33ms（29〜42ms）の遅れ。**
 
 2026-10-04 に測った（Issue #453）。**この条件での値**であり、他のボード・解像度・開き方・モニターには当てはまらない。同じ機材で他のアプリも測ったところ、AVerMedia RECentral 4 が約 18ms、アマレコTV 3.10 が約 28ms で、**本アプリが 3 つの中で最も遅い**（「他のアプリとの比較」）。
 
 ## 結果
 
-| 項目 | 値 |
-|---|---|
-| パススルーの表示に対するアプリの表示の遅れ | 約 38ms（平均 9.2 カメラフレーム） |
-| 最小 / 最大 | 33ms / 42ms（8 / 10 カメラフレーム） |
-| 読み取りの誤差 | ±4ms（±1 カメラフレーム） |
+| 項目 | 1.3.0 | 1.4.0（#459 を入れた版） |
+|---|---|---|
+| パススルーの表示に対するアプリの表示の遅れ | 約 38ms（平均 9.2 カメラフレーム） | 約 33ms（平均 8.0 カメラフレーム、2 回の撮影の平均） |
+| 最小 / 最大 | 33ms / 42ms（8 / 10 カメラフレーム） | 29ms / 42ms（7 / 10 カメラフレーム） |
+| アプリ内の計測（到着→テクスチャ更新、下の「アプリ内の計測の読み方」） | 平均 8.1ms | 平均 5.3ms |
+| 読み取りの誤差 | ±4ms（±1 カメラフレーム） | 同じ |
+
+1.4.0 の値は、同じ日に同じ機材で 2 回撮った結果（連続区間の差の平均が 7.7 と 8.4 カメラフレーム。「描画バックエンド glow / wgpu の撮り比べ」の glow 側と、リリース前に dev で撮った 1 本）。1.3.0 との差は約 1 カメラフレーム（4ms）で読み取りの誤差と同じ大きさだが、アプリ内の計測の改善（8.1ms → 5.3ms）と向きも大きさも合っている。2 回目の撮影では信号源の再生がカクついていて（パススルー側が同じ番号を 2 回出したり 1 つ飛ばしたりしている）、2 秒おきの 40 枚の差は 1〜4 と揺れた。同じ番号が左右に現れるまでの差を取る連続区間の方法はこの影響を受けない。
 
 ## 条件
 
@@ -131,7 +134,7 @@ Media Foundation のソースリーダーに `MF_LOW_LATENCY = TRUE` を付け�
 
 差は約 2ms で読み取りの誤差（±1 カメラフレーム）の中。200Hz のモニターでは present の 1 段が 5ms なので、フリップモデルで減らせる量がこの測り方の底を割っていたとみられる。exe が 3.7MB 増え、描画バックエンドが 2 本になる保守に見合わないので採らなかった（`docs/design/video-pipeline.md` の「試して外したもの」）。
 
-**この撮り比べで、#459 を入れた版の遅れが 1.3.0 の約 38ms（9.2 カメラフレーム）から約 31〜32ms（7.3〜7.7 カメラフレーム）に下がったことも分かった。** 同じ日の実機で、アプリ内の計測は平均 5.3ms（#459 の前は 8.1ms）。
+**この撮り比べで、#459 を入れた版の遅れが 1.3.0 の約 38ms（9.2 カメラフレーム）より下がったことも分かった**（この回は 7.3〜7.7 カメラフレーム。リリース前にもう 1 本撮った結果と合わせた値は上の「結果」）。同じ日の実機で、アプリ内の計測は平均 5.3ms（#459 の前は 8.1ms）。
 
 ## 注意
 
@@ -146,4 +149,4 @@ Media Foundation のソースリーダーに `MF_LOW_LATENCY = TRUE` を付け�
 
 ## Summary (English)
 
-Measured on 2026-10-04 (Issue #453): with Capturecard Viewer 1.3.0, an AVerMedia Live Gamer EXTREME 3 opened through Media Foundation at 1920x1080 60fps (YUY2), and two identical MSI MAG 244F monitors at 200Hz, the app's picture lags the card's HDMI passthrough by about 38 ms (33 to 42 ms, reading error ±4 ms). A test video with burned-in frame numbers was played on another PC, both monitors were filmed with a smartphone at 240fps, and the frame numbers were read from stills extracted with ffmpeg (40 stills every 2 seconds, plus three continuous 48-frame bursts). The value includes capture, conversion, and drawing in the app, assumes both monitors have the same display latency (unit-to-unit differences were not evaluated), and applies only to these conditions. On the same day and setup, AVerMedia RECentral 4 lagged the passthrough by about 18 ms (13 to 21 ms) and AmaRecTV 3.10 by about 28 ms (21 to 33 ms), so Capturecard Viewer 1.3.0 was the slowest of the three. The "Display latency" line in the stats overlay and the Status tab (#455) measures a narrower span inside the app: it starts when the Media Foundation (or DirectShow) callback receives the frame, which is after the card has captured it, and ends when the UI thread updates the texture, so it does not include GPU presentation or the monitor.
+Measured on 2026-10-04 (Issue #453): with Capturecard Viewer 1.3.0, an AVerMedia Live Gamer EXTREME 3 opened through Media Foundation at 1920x1080 60fps (YUY2), and two identical MSI MAG 244F monitors at 200Hz, the app's picture lags the card's HDMI passthrough by about 38 ms (33 to 42 ms, reading error ±4 ms). A test video with burned-in frame numbers was played on another PC, both monitors were filmed with a smartphone at 240fps, and the frame numbers were read from stills extracted with ffmpeg (40 stills every 2 seconds, plus three continuous 48-frame bursts). The value includes capture, conversion, and drawing in the app, assumes both monitors have the same display latency (unit-to-unit differences were not evaluated), and applies only to these conditions. On the same day and setup, AVerMedia RECentral 4 lagged the passthrough by about 18 ms (13 to 21 ms) and AmaRecTV 3.10 by about 28 ms (21 to 33 ms), so Capturecard Viewer 1.3.0 was the slowest of the three. Version 1.4.0, which wakes the UI thread on frame arrival instead of polling every 16 ms (#459), measured about 33 ms (29 to 42 ms, average of two recordings on the same setup); the in-app measurement dropped from 8.1 ms to 5.3 ms. Adding MF_LOW_LATENCY to the Media Foundation source reader and switching the renderer from glow to wgpu (DX12 flip model) were both tried on the same day and made no measurable difference, so neither was kept. The "Display latency" line in the stats overlay and the Status tab (#455) measures a narrower span inside the app: it starts when the Media Foundation (or DirectShow) callback receives the frame, which is after the card has captured it, and ends when the UI thread updates the texture, so it does not include GPU presentation or the monitor.
