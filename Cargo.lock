@@ -583,6 +583,7 @@ dependencies = [
  "image",
  "log",
  "nokhwa",
+ "nokhwa-bindings-windows",
  "rfd",
  "ringbuf",
  "rodio",
@@ -2254,8 +2255,6 @@ dependencies = [
 [[package]]
 name = "nokhwa-bindings-windows"
 version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5be28886bad8abcec3655c1f24b965b4cb596a72b23164c910c54439ce55d2a4"
 dependencies = [
  "nokhwa-core",
  "once_cell",

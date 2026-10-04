@@ -216,6 +216,8 @@ flowchart TD
 
 残っているのは更新ではなく検証。現在「MJPEG / RGB24 を選んでも YUYV に差し替わる」という回避策が入っているが、これが必要だった理由は記録されていない。0.10.11 の上で要るかどうかを実機で確かめる価値がある。次のマイナー（0.11）が出たときは、**Media Foundation まわりの挙動が変わる可能性があるため実機確認を必須にする。**
 
+**`nokhwa-bindings-windows` は `vendor/` に置いた版へ差し替えている**（#456）。Media Foundation のソースリーダーに `MF_LOW_LATENCY` を付けるため、0.4.6 の `src/lib.rs` に数か所だけ手を入れ、`Cargo.toml` の `[patch.crates-io]` で crates.io の版と置き換えた。**`nokhwa` を上げて `nokhwa-bindings-windows` の版が変わると差し替えが外れる**（`cargo` は警告を出すだけで止まらない）。上げるときは `vendor/README.md` の手順で当て直す。理由は `docs/design/video-pipeline.md` の「Media Foundation のソースリーダーの低遅延モード（#456）」。
+
 ### `windows` / `windows-core` は nokhwa と同じ版にそろえる
 
 DirectShow のバックエンド（#143）は、`winapi` に無い DirectShow のインターフェース（`IBaseFilter` / `IPin` / `IMemInputPin` / `ICaptureGraphBuilder2` / `IAMStreamConfig` など）と、自前のレンダラーフィルターを書くための `#[implement]` マクロが要るので `windows` を使う。**`nokhwa-bindings-windows` が `windows` 0.62 を既に使っているので、クレートは増えない**（増えるのは `Win32_Graphics_Gdi` / `Win32_System_Com_StructuredStorage` / `Win32_System_Ole` / `Win32_System_Variant` のフィーチャの分だけ）。`THIRD-PARTY-LICENSES.txt` も変わらない。

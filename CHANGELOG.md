@@ -13,6 +13,7 @@
 ### 変更
 
 - exe のプロパティの Copyright の年を 2025-2026 にした
+- 「(DirectShow)」の付かないデバイス（Media Foundation で開くもの）で、取り込み側の低遅延モードを使い、映像の遅延を減らすようにした。環境変数 `CAPTURECARD_VIEWER_MF_LOW_LATENCY=0` で以前の動作に戻せる（#456）
 
 ### 修正
 

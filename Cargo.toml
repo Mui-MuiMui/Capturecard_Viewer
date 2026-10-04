@@ -103,6 +103,11 @@ winit = { version = "0.30", default-features = false }
 # 自前のレンダラーフィルターを `#[implement]` で書く。マクロが生成するコードは
 # `windows_core` を直接参照するので、`windows` とは別に依存へ入れる
 windows-core = "0.62"
+# nokhwa の Media Foundation の経路。nokhwa が使うものを直接参照するのは、vendor/ に
+# 置いた版で足した `wmf::set_low_latency`（ソースリーダーに MF_LOW_LATENCY を付けるか、
+# #456）を呼ぶため。版は nokhwa 0.10.11 が使うものと同じで、クレートは増えない。
+# 中身は下の [patch.crates-io] で vendor/nokhwa-bindings-windows に差し替わる
+nokhwa-bindings-windows = "0.4.6"
 
 [[bin]]
 name = "capturecard_viewer"
@@ -117,3 +122,10 @@ panic = "abort"
 
 [profile.dev]
 opt-level = 1
+
+# nokhwa の Media Foundation の経路（nokhwa-bindings-windows）を、リポジトリ内に
+# 置いた版へ差し替える。ソースリーダーに MF_LOW_LATENCY を付けるため（#456）。
+# アップストリームの 0.4.6 からの差分と理由は vendor/README.md と
+# docs/design/video-pipeline.md の「Media Foundation のソースリーダーの低遅延モード」
+[patch.crates-io]
+nokhwa-bindings-windows = { path = "vendor/nokhwa-bindings-windows" }
