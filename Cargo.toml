@@ -16,11 +16,19 @@ print_stdout = "warn"
 print_stderr = "warn"
 
 [dependencies]
-# 描画は 0.26 までの既定と同じ OpenGL（glow）にする。0.36 の既定は wgpu だが、
-# wgpu / naga と DirectX 12・Vulkan のバックエンドまで引き込むわりに、この画面
-# （映像 1 枚とダイアログ）では得るものが無い。wayland / x11 は Linux 向けなので切る。
+# 描画は wgpu（DX12 のフリップモデル）と glow（OpenGL）の両方を入れ、起動時に選ぶ
+# （src/renderer.rs、#456 の (2)）。既定は wgpu で、present の段数を減らすため。
+# glow は環境変数での撮り比べと、DX12 のアダプターが取れない環境への逃げ道に残す。
+# wgpu は `wgpu_no_default_features` で入れ、バックエンドは下の `wgpu` の
+# フィーチャで DX12 だけにする（Vulkan / GLES / Metal / WebGPU は入れない）。
+# wayland / x11 は Linux 向けなので切る。
 # links は更新の通知と「その他」タブのリンクを開くのに要る（webbrowser）
-eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "links"] }
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu_no_default_features", "links"] }
+# eframe（egui-wgpu）が使う wgpu に DX12 のバックエンドを足す。版は egui-wgpu 0.36 と揃える
+wgpu = { version = "30", default-features = false, features = ["dx12"] }
+# 起動前に DX12 のアダプターを確かめるとき、wgpu の非同期の問い合わせを待つ
+# （src/renderer.rs）。eframe が wgpu のために使うものと同じで、それ以上は増えない
+pollster = "1.0"
 egui = "0.36"
 nokhwa = { version = "0.10", features = ["input-msmf", "output-threaded", "decoding"] }
 # realtime は音声のスレッドを MMCSS（Pro Audio）で優先させる。0.15 は常に

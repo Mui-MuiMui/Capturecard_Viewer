@@ -159,6 +159,9 @@ pub struct CaptureCardViewer {
     last_frame_generation: u64,
     // フレームの到着からテクスチャへ取り込むまでの遅れの集計（`view.rs`、#455）
     display_latency: DisplayLatency,
+    // どの描画バックエンドで描いているか（`renderer::RendererChoice::label`）。統計 OSD に出す。
+    // 起動経路（`main.rs`）が作った直後に入れる。テストで作ったものは `None` で、行を出さない
+    renderer_label: Option<String>,
     // 最後に共有 Atomic へ入れた色変換の設定。
     // デバイスの開き直しは伴わないが、2 秒ごとの再適用で同じ値を
     // ログへ出さないよう差分で判定する
@@ -310,6 +313,7 @@ impl Default for CaptureCardViewer {
             video_image: None,
             last_frame_generation: 0,
             display_latency: DisplayLatency::default(),
+            renderer_label: None,
             last_color_conversion: None,
             last_video_adjustments: None,
             last_sound_file: None,

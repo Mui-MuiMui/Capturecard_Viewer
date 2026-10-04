@@ -326,6 +326,15 @@ pub fn stats_display_latency(average_ms: f32, max_ms: f32) -> String {
     }
 }
 
+/// 描画のバックエンド（#456 の (2)）。`label` は `renderer::RendererChoice::label` の技術名
+/// （`wgpu Dx12 Mailbox / <アダプター名>` や `glow (OpenGL)`）で、訳さない
+pub fn stats_renderer(label: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("描画 {label}"),
+        Language::English => format!("Renderer {label}"),
+    }
+}
+
 // ---- 音量とミュート（app/audio_control.rs / app/menu/items.rs） ----
 
 /// 音量の表示。右クリックメニューと OSD で同じ文言を使う。
