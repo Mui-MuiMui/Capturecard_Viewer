@@ -103,9 +103,18 @@ pub fn parse_renderer(value: Option<&str>) -> RendererRequest {
     }
 }
 
+/// アダプターを見分ける値（PCI のベンダー ID とデバイス ID）。起動前の確認で
+/// デバイスまで作れたアダプターを、eframe が選ぶときにもう一度見つけるのに使う
+type AdapterId = (u32, u32);
+
+fn adapter_id(info: &wgpu::AdapterInfo) -> AdapterId {
+    (info.vendor, info.device)
+}
+
 /// アダプターの候補。種類と、ウィンドウへ `PRESENT_MODE` で出せるか。
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
+    id: AdapterId,
     device_type: wgpu::DeviceType,
     presentable: bool,
 }
@@ -128,17 +137,36 @@ fn adapter_rank(candidate: Candidate, allow_software: bool) -> Option<u8> {
     }
 }
 
-/// 候補から使うアダプターの位置を選ぶ。同じ順位なら先に列挙されたもの。
-/// 選べるものが無ければ `None`
-fn pick_adapter(candidates: &[Candidate], allow_software: bool) -> Option<usize> {
-    candidates
+/// 選べる候補の位置を、試す順（優先順位、同じ順位なら列挙の順）に並べる
+fn ranked_adapters(candidates: &[Candidate], allow_software: bool) -> Vec<usize> {
+    let mut ranked: Vec<(u8, usize)> = candidates
         .iter()
         .enumerate()
         .filter_map(|(index, &candidate)| {
             adapter_rank(candidate, allow_software).map(|rank| (rank, index))
         })
-        .min()
-        .map(|(_, index)| index)
+        .collect();
+    ranked.sort_unstable();
+    ranked.into_iter().map(|(_, index)| index).collect()
+}
+
+/// 候補から使うアダプターの位置を選ぶ。`preferred`（起動前の確認でデバイスまで
+/// 作れたもの）が選べる候補にあればそれを、無ければ最も順位の高いものを選ぶ。
+/// 選べるものが無ければ `None`
+fn pick_adapter(
+    candidates: &[Candidate],
+    allow_software: bool,
+    preferred: Option<AdapterId>,
+) -> Option<usize> {
+    let ranked = ranked_adapters(candidates, allow_software);
+    preferred
+        .and_then(|id| {
+            ranked
+                .iter()
+                .copied()
+                .find(|&index| candidates[index].id == id)
+        })
+        .or_else(|| ranked.first().copied())
 }
 
 /// wgpu で描くときに選んだアダプター。統計 OSD とログに出す。
@@ -147,6 +175,7 @@ pub struct WgpuAdapter {
     pub name: String,
     pub backend: wgpu::Backend,
     pub device_type: wgpu::DeviceType,
+    id: AdapterId,
 }
 
 impl WgpuAdapter {
@@ -155,6 +184,7 @@ impl WgpuAdapter {
             name: info.name.clone(),
             backend: info.backend,
             device_type: info.device_type,
+            id: adapter_id(info),
         }
     }
 }
@@ -213,7 +243,8 @@ pub fn configure(options: &mut eframe::NativeOptions) -> RendererChoice {
                     info.name,
                     info.device_type
                 );
-                options.wgpu_options = wgpu_configuration(Arc::clone(&adapter), allow_software);
+                options.wgpu_options =
+                    wgpu_configuration(Arc::clone(&adapter), allow_software, info.id);
                 RendererKind::Wgpu
             }
             Err(reason) => {
@@ -243,8 +274,9 @@ fn dx12_instance_descriptor() -> wgpu::InstanceDescriptor {
     descriptor
 }
 
-/// DX12 のアダプターを列挙し、選んだものでデバイスまで作れるかを確かめる。
-/// 作ったものはすぐ捨てる（eframe が作り直す）。かかった時間も返す
+/// DX12 のアダプターを列挙し、優先順位の順にデバイスを作ってみて、最初に作れた
+/// アダプターを返す。作ったものはすぐ捨てる（eframe が作り直す）。かかった時間も返す。
+/// 最も順位の高いアダプターでデバイスを作れなくても、次の候補で作れれば wgpu で描く
 fn probe_dx12(allow_software: bool) -> Result<(WgpuAdapter, u128), String> {
     let started = Instant::now();
     let instance = wgpu::Instance::new(dx12_instance_descriptor());
@@ -253,12 +285,17 @@ fn probe_dx12(allow_software: bool) -> Result<(WgpuAdapter, u128), String> {
     // DX12 は Mailbox を常に出せる（`PRESENT_MODE`）
     let candidates: Vec<_> = adapters
         .iter()
-        .map(|adapter| Candidate {
-            device_type: adapter.get_info().device_type,
-            presentable: true,
+        .map(|adapter| {
+            let info = adapter.get_info();
+            Candidate {
+                id: adapter_id(&info),
+                device_type: info.device_type,
+                presentable: true,
+            }
         })
         .collect();
-    let Some(index) = pick_adapter(&candidates, allow_software) else {
+    let ranked = ranked_adapters(&candidates, allow_software);
+    if ranked.is_empty() {
         let names: Vec<_> = adapters
             .iter()
             .map(|adapter| {
@@ -269,43 +306,66 @@ fn probe_dx12(allow_software: bool) -> Result<(WgpuAdapter, u128), String> {
         return Err(format!(
             "GPU の DX12 のアダプターが無い（列挙できたもの: {names:?}。CPU で描く WARP は {RENDERER_ENV}=wgpu のときだけ使う）"
         ));
-    };
-    let adapter = &adapters[index];
-    let info = adapter.get_info();
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("capturecard_viewer probe"),
-        ..Default::default()
-    }))
-    .map_err(|e| format!("{} でデバイスを作れない: {e}", info.name))?;
-    Ok((WgpuAdapter::from_info(&info), started.elapsed().as_millis()))
+    }
+    let mut failures = Vec::new();
+    for index in ranked {
+        let adapter = &adapters[index];
+        let info = adapter.get_info();
+        match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("capturecard_viewer probe"),
+            ..Default::default()
+        })) {
+            Ok(_) => {
+                if !failures.is_empty() {
+                    log::warn!(
+                        "DX12 の順位の高いアダプターでデバイスを作れなかったので {} を使う: {}",
+                        info.name,
+                        failures.join(" / ")
+                    );
+                }
+                return Ok((WgpuAdapter::from_info(&info), started.elapsed().as_millis()));
+            }
+            Err(e) => failures.push(format!("{} でデバイスを作れない: {e}", info.name)),
+        }
+    }
+    Err(failures.join(" / "))
 }
 
 /// eframe へ渡す wgpu の設定。
+///
+/// `preferred` は起動前の確認（`probe_dx12`）でデバイスまで作れたアダプター。
+/// eframe が選ぶときもそれを優先し、確認と違うアダプターで初期化しないようにする
 fn wgpu_configuration(
     selected: Arc<OnceLock<WgpuAdapter>>,
     allow_software: bool,
+    preferred: AdapterId,
 ) -> WgpuConfiguration {
     let mut setup = WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor = dx12_instance_descriptor();
-    // アダプターは自分で選ぶ。起動前の確認（`probe_dx12`）と同じ順位で選び、
+    // アダプターは自分で選ぶ。起動前の確認と同じ順位で、確認で作れたものを優先し、
     // ウィンドウの surface へ Mailbox で出せるものに限る
     setup.native_adapter_selector = Some(Arc::new(move |adapters, surface| {
         let candidates: Vec<_> = adapters
             .iter()
-            .map(|adapter| Candidate {
-                device_type: adapter.get_info().device_type,
-                presentable: surface.is_none_or(|surface| {
-                    adapter.is_surface_supported(surface)
-                        && surface
-                            .get_capabilities(adapter)
-                            .present_modes
-                            .contains(&PRESENT_MODE)
-                }),
+            .map(|adapter| {
+                let info = adapter.get_info();
+                Candidate {
+                    id: adapter_id(&info),
+                    device_type: info.device_type,
+                    presentable: surface.is_none_or(|surface| {
+                        adapter.is_surface_supported(surface)
+                            && surface
+                                .get_capabilities(adapter)
+                                .present_modes
+                                .contains(&PRESENT_MODE)
+                    }),
+                }
             })
             .collect();
-        let index = pick_adapter(&candidates, allow_software).ok_or_else(|| {
-            format!("ウィンドウへ {PRESENT_MODE:?} で出せる DX12 のアダプターが無い")
-        })?;
+        let index =
+            pick_adapter(&candidates, allow_software, Some(preferred)).ok_or_else(|| {
+                format!("ウィンドウへ {PRESENT_MODE:?} で出せる DX12 のアダプターが無い")
+            })?;
         let adapter = adapters[index].clone();
         let info = adapter.get_info();
         log::info!(
@@ -336,7 +396,12 @@ mod tests {
     use wgpu::DeviceType;
 
     fn candidate(device_type: DeviceType) -> Candidate {
+        candidate_with_id(device_type, (0, 0))
+    }
+
+    fn candidate_with_id(device_type: DeviceType, id: AdapterId) -> Candidate {
         Candidate {
+            id,
             device_type,
             presentable: true,
         }
@@ -394,8 +459,8 @@ mod tests {
             candidate(DeviceType::IntegratedGpu),
             candidate(DeviceType::DiscreteGpu),
         ];
-        assert_eq!(pick_adapter(&candidates, true), Some(2));
-        assert_eq!(pick_adapter(&candidates, false), Some(2));
+        assert_eq!(pick_adapter(&candidates, true, None), Some(2));
+        assert_eq!(pick_adapter(&candidates, false, None), Some(2));
     }
 
     #[test]
@@ -403,8 +468,8 @@ mod tests {
         // GPU の無い VM では WARP（Microsoft Basic Render Driver）しか無い。
         // 既定では選ばず glow へ倒し、wgpu と明示したときだけ使う
         let candidates = [candidate(DeviceType::Cpu)];
-        assert_eq!(pick_adapter(&candidates, false), None);
-        assert_eq!(pick_adapter(&candidates, true), Some(0));
+        assert_eq!(pick_adapter(&candidates, false, None), None);
+        assert_eq!(pick_adapter(&candidates, true, None), Some(0));
     }
 
     #[test]
@@ -413,19 +478,58 @@ mod tests {
             candidate(DeviceType::IntegratedGpu),
             candidate(DeviceType::IntegratedGpu),
         ];
-        assert_eq!(pick_adapter(&candidates, false), Some(0));
+        assert_eq!(pick_adapter(&candidates, false, None), Some(0));
     }
 
     #[test]
     fn pick_adapter_skips_adapters_without_the_present_mode() {
         let not_presentable = Candidate {
-            device_type: DeviceType::DiscreteGpu,
             presentable: false,
+            ..candidate(DeviceType::DiscreteGpu)
         };
         let candidates = [not_presentable, candidate(DeviceType::IntegratedGpu)];
-        assert_eq!(pick_adapter(&candidates, false), Some(1));
-        assert_eq!(pick_adapter(&[not_presentable], true), None);
-        assert_eq!(pick_adapter(&[], true), None);
+        assert_eq!(pick_adapter(&candidates, false, None), Some(1));
+        assert_eq!(pick_adapter(&[not_presentable], true, None), None);
+        assert_eq!(pick_adapter(&[], true, None), None);
+    }
+
+    #[test]
+    fn ranked_adapters_lists_every_usable_adapter_in_trial_order() {
+        // 起動前の確認は、この順にデバイスを作ってみる。順位の高いもので作れなくても次を試す
+        let candidates = [
+            candidate(DeviceType::Cpu),
+            candidate(DeviceType::IntegratedGpu),
+            candidate(DeviceType::DiscreteGpu),
+            candidate(DeviceType::IntegratedGpu),
+        ];
+        assert_eq!(ranked_adapters(&candidates, false), vec![2, 1, 3]);
+        assert_eq!(ranked_adapters(&candidates, true), vec![2, 1, 3, 0]);
+    }
+
+    #[test]
+    fn pick_adapter_prefers_the_adapter_the_probe_could_open() {
+        // 起動前の確認で外付けの GPU のデバイスを作れず、内蔵の GPU で作れたときは、
+        // eframe が選ぶときも内蔵の GPU にする
+        let discrete = candidate_with_id(DeviceType::DiscreteGpu, (0x10de, 1));
+        let integrated = candidate_with_id(DeviceType::IntegratedGpu, (0x8086, 2));
+        let candidates = [discrete, integrated];
+        assert_eq!(pick_adapter(&candidates, false, Some((0x8086, 2))), Some(1));
+        // 確認で使ったものが見つからない（ウィンドウへ出せない）ときは順位で選ぶ
+        let unpresentable_integrated = Candidate {
+            presentable: false,
+            ..integrated
+        };
+        assert_eq!(
+            pick_adapter(
+                &[discrete, unpresentable_integrated],
+                false,
+                Some((0x8086, 2))
+            ),
+            Some(0)
+        );
+        // 選ばない種類（WARP）を確認の結果として渡されても選ばない
+        let warp = candidate_with_id(DeviceType::Cpu, (0x1414, 0x8c));
+        assert_eq!(pick_adapter(&[warp], false, Some((0x1414, 0x8c))), None);
     }
 
     #[test]
@@ -434,6 +538,7 @@ mod tests {
             name: "Microsoft Basic Render Driver".to_string(),
             backend: wgpu::Backend::Dx12,
             device_type: DeviceType::Cpu,
+            id: (0x1414, 0x8c),
         };
         assert_eq!(
             format_label(RendererKind::Wgpu, Some(&adapter)),
