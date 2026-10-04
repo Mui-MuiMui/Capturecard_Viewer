@@ -14,3 +14,7 @@ about.hbs                text eol=lf
 about.toml               text eol=lf
 # bash のスクリプトは CRLF だと「: command not found」で動かないので LF に固定する
 scripts/*.sh             text eol=lf
+# vendor/ のクレートは crates.io の版とバイト単位で同じに保つ（アップストリームとの差分が
+# 改行で汚れないように）。特に LICENSE は cargo-about が本文で一覧をまとめるので、
+# CRLF で取り出されると nokhwa の LICENSE と別の本文として扱われ、CI の一覧の照合が落ちる
+vendor/**                text eol=lf
