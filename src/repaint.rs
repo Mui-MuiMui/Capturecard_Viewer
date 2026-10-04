@@ -85,7 +85,7 @@ pub fn next_repaint_delay(condition: RepaintCondition) -> Duration {
 /// 描いている最中に届いた通知は、その `update()` が終わってから次の `update()` を
 /// 1 回呼ぶ。そのフレームを取り込む前に届いた通知なら次は「新着なし」になるが、
 /// フレームを取り込むのは `update()` の先頭近くなので、そうなるのはまれ
-/// （フェイク 1080p60 で 30 秒に 0〜4 回。16ms のポーリングの間は約 180 回あった）。
+/// （フェイク 1080p60 で 30 秒に 0〜5 回。16ms の予約の間は約 160 回あった）。
 pub fn should_wake_on_event(condition: RepaintCondition) -> bool {
     !condition.minimized
 }

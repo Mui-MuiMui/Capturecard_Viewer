@@ -34,8 +34,8 @@
 - 再接続の前にデバイスを列挙しない（理由: `docs/design/reconnect.md`）
 - まだ 1 枚も届いていない状態を切断とみなさない（理由: `docs/design/reconnect.md`）
 - 見送った音声のエラーを捨てない（理由: `docs/design/reconnect.md`）
-- 映像の有無にかかわらず一定間隔で再描画を予約する形へ戻さない（理由: `docs/design/video-pipeline.md`）
-- 16ms で回っている間と最小化中は `RepaintWaker` で起こさない（理由: `docs/design/video-pipeline.md`）
+- 映像の有無にかかわらず短い間隔（60fps など）で再描画を予約する形へ戻さない（理由: `docs/design/video-pipeline.md`）
+- 映像が流れている間の取り込みを再描画の予約（ポーリング）で駆動しない。フレームの到着で `RepaintWaker` が起こす。最小化中は起こさない（理由: `docs/design/video-pipeline.md`）
 - 映像調整（明るさ / コントラスト / 彩度）を後段のフィルタとして足さない。係数表へ畳み込む（理由: `docs/design/video-pipeline.md`）
 - フレームの世代番号をキャプチャ停止時に巻き戻さない（理由: `docs/design/video-pipeline.md`）
 
