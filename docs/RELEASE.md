@@ -31,7 +31,7 @@ flowchart TD
 
 ## 1. バージョンを上げる
 
-バージョンの出どころは `Cargo.toml` の `version` だけ（`docs/BUILD.md` の「バージョン番号」）。**`app.rc` は触らない。** `build.rs` が `version.h` を生成して exe のバージョンリソースへ流し込む。
+バージョンの出どころは `Cargo.toml` の `version` だけ（`docs/BUILD.md` の「バージョン番号」）。**`app.rc` にバージョンの数値を書かない。** `build.rs` が `version.h` を生成して exe のバージョンリソースへ流し込む。著作権表示など数値以外の項目は通常の PR で変えてよい。
 
 [セマンティック バージョニング](https://semver.org/lang/ja/)に従って上げる。
 
