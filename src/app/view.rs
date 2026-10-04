@@ -9,10 +9,13 @@ use super::video_overlay::show_video_overlay;
 use super::CaptureCardViewer;
 use crate::i18n::{self, Text};
 use crate::status::{self, ErrorSource};
-use crate::video::{frame_len_status, FrameLenStatus, FrameStats, VideoFrame};
+use crate::video::{
+    format_display_latency, frame_len_status, FrameLenStatus, FrameStats, VideoFrame,
+};
 use eframe::egui;
-use log::warn;
+use log::{debug, warn};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// 映像エリア（映像が無いときのプレースホルダーを含む）が受け付ける操作。
 ///
@@ -32,8 +35,9 @@ pub(super) const VIDEO_AREA_SENSE: egui::Sense = egui::Sense::CLICK.union(egui::
 ///
 /// `audio_line` は音声のアンダーランの行（`status::format_osd_audio_line`）。映像の統計では
 /// ないが、**バッファ長を詰めたときに音が途切れていないかを、設定画面を開かずに
-/// 見られるようにする**ためにここへ並べてある。
-fn format_stats_lines(stats: &FrameStats, audio_line: String) -> Vec<String> {
+/// 見られるようにする**ためにここへ並べてある。`latency_line` は表示までの遅れの行
+/// （`video::format_display_latency`、#455）で、映像の行の最後に置く。
+fn format_stats_lines(stats: &FrameStats, latency_line: String, audio_line: String) -> Vec<String> {
     let mut lines = Vec::new();
 
     match stats.intervals {
@@ -72,6 +76,7 @@ fn format_stats_lines(stats: &FrameStats, audio_line: String) -> Vec<String> {
     if let Some(elapsed_ms) = stats.since_last_frame_ms {
         lines.push(i18n::stats_since_last_frame(elapsed_ms));
     }
+    lines.push(latency_line);
 
     // 文言は「接続状態」タブと共通（`status::format_underrun_count`）。経路の印だけ OSD で足す
     lines.push(audio_line);
@@ -156,7 +161,7 @@ impl CaptureCardViewer {
         // この経路からログが出ることはない
         let new_frame = self.frames.newer_than(self.last_frame_generation);
 
-        if let Some((frame, generation)) = new_frame {
+        if let Some((frame, generation, received_at)) = new_frame {
             self.last_frame_generation = generation;
 
             // 最適化: テクスチャオプションをNearest（補間なし）に設定し、性能向上
@@ -184,6 +189,13 @@ impl CaptureCardViewer {
                 texture.set(image, texture_options);
             } else {
                 self.video_texture = Some(ctx.load_texture("video_frame", image, texture_options));
+            }
+            // 表示までの遅れ（#455）。GPU が画面へ出した時刻は取れないので、テクスチャを
+            // 更新した直後で測る。到着時刻は世代番号と同じロックの中で読んだもの
+            let now = Instant::now();
+            let latency = now.saturating_duration_since(received_at);
+            if let Some(s) = self.display_latency.record(now, latency) {
+                debug!("表示までの遅れ（到着→テクスチャ更新、30 秒）: 平均 {:.2}ms、最大 {:.2}ms、{} 枚", s.average_ms, s.max_ms, s.samples);
             }
 
             return true;
@@ -388,7 +400,8 @@ impl CaptureCardViewer {
     pub(super) fn show_stats_overlay(&self, ctx: &egui::Context) -> f32 {
         let stats = self.frames.stats();
         // ワーカーが書き出した観測値の複製。ここでデバイスへは問い合わせない
-        let mut lines = format_stats_lines(&stats, self.device_snapshot.osd_audio_line());
+        let latency = format_display_latency(self.display_latency.recent(Instant::now()));
+        let mut lines = format_stats_lines(&stats, latency, self.device_snapshot.osd_audio_line());
         // 録画中は録画の行を足す（経過時間、書いた枚数・捨てた枚数、エンコーダ）
         lines.extend(self.recording_stats_lines());
 
@@ -507,7 +520,12 @@ mod tests {
     fn format_stats_lines_without_frames_shows_no_numbers() {
         // デバイスに接続できていない状態。0 除算の結果や NaN を
         // そのまま画面へ出さないことを確かめる
-        let lines = format_stats_lines(&FrameStats::default(), status::format_underrun_count(None));
+        let lines = format_stats_lines(
+            &FrameStats::default(),
+            format_display_latency(None),
+            status::format_underrun_count(None),
+        );
+        assert!(lines.contains(&Text::StatsDisplayLatencyPending.get().to_string()));
         let joined = lines.join(
             "
 ",
@@ -560,7 +578,13 @@ mod tests {
             since_last_frame_ms: Some(12.4),
         };
 
-        let lines = format_stats_lines(&stats, status::format_underrun_count(Some(3)));
+        // 到着から 3.2ms でテクスチャへ取り込んだ 1 枚
+        let mut latency = crate::video::DisplayLatency::default();
+        let now = Instant::now();
+        latency.record(now, std::time::Duration::from_micros(3_200));
+        let latency_line = format_display_latency(latency.recent(now));
+        let lines =
+            format_stats_lines(&stats, latency_line, status::format_underrun_count(Some(3)));
         let joined = lines.join(
             "
 ",
@@ -575,6 +599,7 @@ mod tests {
         assert!(joined.contains("1920x1080 YUY2"), "{}", joined);
         assert!(joined.contains("最終フレーム 12ms 前"), "{}", joined);
         assert!(joined.contains("アンダーラン: 3 回"), "{}", joined);
+        assert!(joined.contains("平均 3.2ms / 最大 3.2ms"), "{}", joined);
     }
 
     // calculate_aspect_ratio_size のテストで使う値は、期待値が 2 進小数で

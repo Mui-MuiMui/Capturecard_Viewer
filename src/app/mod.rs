@@ -51,7 +51,7 @@ use crate::screenshot_sound::ScreenshotManager;
 use crate::settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace};
 use crate::status::ErrorCenter;
 use crate::ui;
-use crate::video::{SharedColorConversion, VideoAdjustments, VideoFrames};
+use crate::video::{DisplayLatency, SharedColorConversion, VideoAdjustments, VideoFrames};
 use eframe::egui;
 use log::{debug, info, warn};
 use std::path::PathBuf;
@@ -156,6 +156,8 @@ pub struct CaptureCardViewer {
     video_image: Option<Arc<egui::ColorImage>>,
     // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
     last_frame_generation: u64,
+    // フレームの到着からテクスチャへ取り込むまでの遅れの集計（`view.rs`、#455）
+    display_latency: DisplayLatency,
     // 最後に新しいフレームをテクスチャへ取り込んだ時刻。
     // None は起動してから 1 枚も取り込んでいないことを表す。
     // 再描画の間隔（`repaint::next_repaint_delay`）を決めるために持つ
@@ -310,6 +312,7 @@ impl Default for CaptureCardViewer {
             video_texture: None,
             video_image: None,
             last_frame_generation: 0,
+            display_latency: DisplayLatency::default(),
             last_new_frame_at: None,
             last_color_conversion: None,
             last_video_adjustments: None,

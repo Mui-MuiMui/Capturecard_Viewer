@@ -328,6 +328,7 @@ texts! {
     StatsFpsPending { ja: "FPS - (フレーム間隔の計測待ち)", en: "FPS - (measuring frame interval)" },
     StatsDecodeUnknown { ja: "デコード -", en: "Decode -" },
     StatsNoFrame { ja: "映像フレームなし", en: "No video frames" },
+    StatsDisplayLatencyPending { ja: "表示までの遅れ: - (到着→テクスチャ更新)", en: "Display latency: - (arrival→texture update)" },
     DragMoveEnabledNotice { ja: "ウィンドウを動かすため、画面ドラッグ移動を有効にしました", en: "Turned on dragging the video to move the window, so the window can still be moved" },
     FullscreenOn { ja: "フルスクリーン ON", en: "Fullscreen ON" },
     FullscreenOff { ja: "フルスクリーン OFF", en: "Fullscreen OFF" },
