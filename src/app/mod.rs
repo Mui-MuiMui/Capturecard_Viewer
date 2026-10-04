@@ -20,6 +20,7 @@ mod screenshot;
 mod screenshot_sound;
 mod settings_dialog;
 mod settings_store;
+mod stats_overlay;
 mod update;
 mod video_overlay;
 mod view;

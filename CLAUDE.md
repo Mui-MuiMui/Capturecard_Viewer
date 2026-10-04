@@ -31,7 +31,8 @@ cargo build --release
 | `src/platform.rs` | Windows 固有処理。日本語フォントの探索、埋め込みアイコンの読み込み、モニタの作業領域の列挙、保存されたウィンドウの大きさ・位置が使えるかの判定、OS の表示言語からの言語の推定、winit のイベント用のウィンドウへ届いた閉じる要求を本来のウィンドウへ回すフック（`redirect_misdirected_close`、#420） |
 | `src/com.rs` | COM（`ComApartment`、STA / MTA をモデル引数で選ぶ）と Media Foundation（`MfPlatform`）の初期化の RAII。DirectShow のバックエンドがデバイスワーカーで STA、録画スレッドが MTA で使う |
 | `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`Default`、1 フレームの処理 `update`、`eframe::App` 実装（`ui` が `update` を呼ぶ / `on_exit`） |
-| `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、統計 OSD、テクスチャの取り込み |
+| `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、テクスチャの取り込みと表示までの遅れの計測（#455）、フェイクデバイスの帯 |
+| `src/app/stats_overlay.rs` | 統計 OSD（情報表示）。出す行の組み立て（`format_stats_lines`）と描画（`show_stats_overlay`） |
 | `src/app/placeholder.rs` | 映像が出ていないときのプレースホルダー。文言の決め方（`video_placeholder_text`）と映像エリアの中央への配置（`show_video_placeholder`） |
 | `src/app/video_overlay.rs` | 映像の上に常設で重ねる表示（統計 OSD・フェイクデバイスの帯・録画中の印）を、映像の上・設定ダイアログの下の層へ寄せて描く `show_video_overlay` |
 | `src/app/menu/mod.rs` | 右クリックメニューの置き場所と閉じ方、平らな一覧／サブメニューの出し分け、描画が返した `MenuAction` の処理 |
@@ -82,7 +83,8 @@ cargo build --release
 | `src/video/color.rs` | YCbCr→RGB の係数表とその選び方、映像調整の畳み込み、設定の共有（`SharedColorConversion`） |
 | `src/video/convert.rs` | YUY2→RGB24 の画素変換と、DirectShow の RGB24（BGR）/ MJPEG の展開 |
 | `src/video/yuv420.rs` | 4:2:0 の YUV（NV12 / I420 / YV12）→ RGB24 の画素変換（`yuv420_to_rgb`、面の並び `Yuv420Layout`）。1 画素の式と係数表は YUY2 と同じで、違うのは色差の置き方だけ。`FrameSink` が呼ぶ |
-| `src/video/frame_buffer.rs` | `FrameBuffer`（`Arc` によるフレーム共有と世代番号）と観測値（`FrameStats`）、画素データの長さの判定（`frame_len_status`）、置き換えたフレームを `Arc` ごと使い回すか（`fill_recycled`） |
+| `src/video/frame_buffer.rs` | `FrameBuffer`（`Arc` によるフレーム共有と世代番号。新着と一緒に受け取った時刻も返す `newer_than`）と観測値（`FrameStats`）、画素データの長さの判定（`frame_len_status`）、置き換えたフレームを `Arc` ごと使い回すか（`fill_recycled`） |
+| `src/video/display_latency.rs` | 表示までの遅れ（フレームの到着 → テクスチャの更新、#455）の集計 `DisplayLatency`。直近 1 秒の平均・最大と 30 秒ごとのログの窓。UI スレッドだけが持つ |
 | `src/video/tap.rs` | 録画へ映像を回す差し込み口 `VideoTap`。録画中だけ、`FrameSink` が画面へ置いたのと同じ `Arc<VideoFrame>` を容量 3 のリングへ積む（待たない `try_lock`、満杯なら捨てて数える）。Vec の回収に失敗した回数も録画中だけ数える |
 | `src/audio/mod.rs` | 音声モジュールの入口。`ActiveAudio` / `AudioDirection` / `AudioError` と能力キャッシュのキー（`cache_key` / `device_name_from_key`）、外から使う経路（`crate::audio::...`）の `pub use` |
 | `src/audio/capabilities.rs` | デバイスの対応設定の取得（`query_capabilities`）と、設定画面に出す選択肢の組み立て（`selectable_*` / `ChoiceSource`） |
