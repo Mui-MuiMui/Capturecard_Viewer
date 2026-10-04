@@ -492,6 +492,9 @@ impl CaptureCardViewer {
         // ビデオフレームを更新。新着の時刻は末尾の再描画の予約で使う
         if self.update_video_texture(ctx) {
             self.last_new_frame_at = Some(Instant::now());
+        } else {
+            // 再描画の間隔の判断（#459）を確かめるため、新着なしで回った回数を数える
+            self.display_latency.note_idle_pass();
         }
 
         // 接続の再試行、フレームの途絶の検出、音声ストリームのエラーの回収、
