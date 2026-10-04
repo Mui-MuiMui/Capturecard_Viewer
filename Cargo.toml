@@ -117,3 +117,10 @@ panic = "abort"
 
 [profile.dev]
 opt-level = 1
+
+# nokhwa の Media Foundation の経路（nokhwa-bindings-windows）を、リポジトリ内に
+# 置いた版へ差し替える。ソースリーダーに MF_LOW_LATENCY を付けるため（#456）。
+# アップストリームの 0.4.6 からの差分と理由は vendor/README.md と
+# docs/design/video-pipeline.md の「Media Foundation のソースリーダーの低遅延モード」
+[patch.crates-io]
+nokhwa-bindings-windows = { path = "vendor/nokhwa-bindings-windows" }
