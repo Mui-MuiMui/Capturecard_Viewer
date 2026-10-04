@@ -77,6 +77,16 @@ impl DisplayLatency {
     /// 次の窓を始める。呼び出し側はそれをログへ出す。
     pub fn record(&mut self, at: Instant, latency: Duration) -> Option<LatencySummary> {
         let ms = latency.as_secs_f32() * 1000.0;
+        // 前の記録からログの窓の長さ以上空いた（映像が長く止まっていた）なら、止まる前の
+        // 集計は捨てて窓を張り直す。残すと再接続直後の 1 枚で止まる前の集計が出て、
+        // 再接続の前後の遅れが 1 行に混ざる
+        let stalled = self.recent.back().is_some_and(|&(last, _)| {
+            at.saturating_duration_since(last) >= DISPLAY_LATENCY_LOG_INTERVAL
+        });
+        if stalled {
+            self.log = Accumulator::default();
+            self.log_started = None;
+        }
         while let Some(&(oldest, _)) = self.recent.front() {
             if at.saturating_duration_since(oldest) > DISPLAY_LATENCY_WINDOW {
                 self.recent.pop_front();
@@ -187,6 +197,24 @@ mod tests {
         assert_eq!(line, i18n::stats_display_latency(3.24, 8.0));
         assert!(line.contains("3.2"), "{line}");
         assert!(line.contains("8.0"), "{line}");
+    }
+
+    #[test]
+    fn record_restarts_the_log_window_after_a_long_stall() {
+        // 止まる前の 10 秒ぶんを、再接続直後の 1 枚で出さない
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        latency.record(base, ms(50));
+        latency.record(base + ms(10_000), ms(50));
+
+        let resumed = base + ms(60_000);
+        assert_eq!(latency.record(resumed, ms(2)), None, "窓を張り直す");
+        assert_eq!(latency.record(resumed + ms(15_000), ms(3)), None);
+        let summary = latency
+            .record(resumed + ms(30_000), ms(4))
+            .expect("張り直してから 30 秒");
+        assert_eq!(summary.samples, 3);
+        assert!((summary.max_ms - 4.0).abs() < 1e-3, "{summary:?}");
     }
 
     #[test]
