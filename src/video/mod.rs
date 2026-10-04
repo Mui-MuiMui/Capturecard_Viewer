@@ -34,6 +34,7 @@ pub(crate) mod capture;
 mod color;
 mod convert;
 mod directshow;
+mod display_latency;
 mod fake;
 pub(crate) mod frame_buffer;
 mod frame_sink;
@@ -50,6 +51,7 @@ pub use directshow::{
     display_name as directshow_display_name, friendly_name as directshow_friendly_name,
     DirectShowCapture,
 };
+pub use display_latency::{format_display_latency, DisplayLatency};
 pub use fake::{FakeVideoCapture, FakeVideoOptions};
 pub use frame_buffer::{frame_len_status, FrameLenStatus, FrameStats, VideoFrame, VideoFrames};
 pub use tap::{VideoTap, VideoTapConsumer, VIDEO_TAP_CAPACITY};

@@ -313,6 +313,19 @@ pub fn stats_since_last_frame(elapsed_ms: f32) -> String {
     }
 }
 
+/// 表示までの遅れ（#455）。統計 OSD と「接続状態」タブの映像の欄で同じ文言を使う。
+/// 測っているのはフレームの到着からテクスチャを更新するまで（画面に出るまでではない）
+pub fn stats_display_latency(average_ms: f32, max_ms: f32) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "表示までの遅れ: 平均 {average_ms:.1}ms / 最大 {max_ms:.1}ms (到着→テクスチャ更新、直近 1 秒)"
+        ),
+        Language::English => format!(
+            "Display latency: avg {average_ms:.1}ms / max {max_ms:.1}ms (arrival→texture update, last 1 s)"
+        ),
+    }
+}
+
 // ---- 音量とミュート（app/audio_control.rs / app/menu/items.rs） ----
 
 /// 音量の表示。右クリックメニューと OSD で同じ文言を使う。
