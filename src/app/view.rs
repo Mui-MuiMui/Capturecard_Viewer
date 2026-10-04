@@ -102,6 +102,13 @@ impl CaptureCardViewer {
         let new_frame = self.frames.newer_than(self.last_frame_generation);
 
         if let Some((frame, generation, received_at)) = new_frame {
+            // 前に取り込んでからこのフレームまでに上書きされた枚数。ログにだけ出す（#459）。
+            // 1 枚目は比べる相手が無いので数えない
+            let skipped_frames = if self.last_frame_generation == 0 {
+                0
+            } else {
+                generation.saturating_sub(self.last_frame_generation + 1)
+            };
             self.last_frame_generation = generation;
 
             // 最適化: テクスチャオプションをNearest（補間なし）に設定し、性能向上
@@ -134,8 +141,12 @@ impl CaptureCardViewer {
             // 更新した直後で測る。到着時刻は世代番号と同じロックの中で読んだもの
             let now = Instant::now();
             let latency = now.saturating_duration_since(received_at);
-            if let Some(s) = self.display_latency.record(now, latency) {
-                debug!("表示までの遅れ（到着→テクスチャ更新、30 秒）: 平均 {:.2}ms、最大 {:.2}ms、{} 枚", s.average_ms, s.max_ms, s.samples);
+            if let Some(log) = self.display_latency.record(now, latency, skipped_frames) {
+                let s = log.latency;
+                debug!(
+                    "表示までの遅れ（到着→テクスチャ更新、30 秒）: 平均 {:.2}ms、最大 {:.2}ms、{} 枚（取り込む前に上書き {} 枚、新着なしの update() {} 回）",
+                    s.average_ms, s.max_ms, s.samples, log.skipped_frames, log.idle_passes
+                );
             }
 
             return true;

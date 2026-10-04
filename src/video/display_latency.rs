@@ -27,6 +27,18 @@ pub struct LatencySummary {
     pub samples: usize,
 }
 
+/// ログへ出す 30 秒ぶんの集計。遅れに加えて、再描画の間隔の判断（`crate::repaint`、#459）を
+/// 確かめるための数を持つ。最小化を挟んだ窓ではどちらも大きく出る（最小化中も 1 秒ごとの
+/// `update()` が数えられ、取り込むたびに世代が飛ぶ。`docs/design/video-pipeline.md`）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LatencyLog {
+    pub latency: LatencySummary,
+    /// 取り込む前に次のフレームで上書きされた枚数（世代番号が飛んだ数）
+    pub skipped_frames: u64,
+    /// 新着が無いまま回った `update()` の回数
+    pub idle_passes: u64,
+}
+
 /// 統計 OSD と「接続状態」タブに出す行。取り込んだフレームが無ければ数値を出さない
 pub fn format_display_latency(summary: Option<LatencySummary>) -> String {
     match summary {
@@ -68,14 +80,27 @@ pub struct DisplayLatency {
     // ログの窓の始まりと、そこからの集計
     log_started: Option<Instant>,
     log: Accumulator,
+    log_skipped_frames: u64,
+    log_idle_passes: u64,
 }
 
 impl DisplayLatency {
+    /// 新着が無いまま `update()` が回ったことを数える。ログにだけ出す
+    pub fn note_idle_pass(&mut self) {
+        self.log_idle_passes += 1;
+    }
+
     /// テクスチャへ取り込んだ時刻 `at` と、その遅れ `latency` を記録する。
+    /// `skipped_frames` は前に取り込んだフレームからこのフレームまでに上書きされた枚数。
     ///
     /// ログの窓が `DISPLAY_LATENCY_LOG_INTERVAL` に達していれば、その窓の集計を返して
     /// 次の窓を始める。呼び出し側はそれをログへ出す。
-    pub fn record(&mut self, at: Instant, latency: Duration) -> Option<LatencySummary> {
+    pub fn record(
+        &mut self,
+        at: Instant,
+        latency: Duration,
+        skipped_frames: u64,
+    ) -> Option<LatencyLog> {
         let ms = latency.as_secs_f32() * 1000.0;
         // 前の記録からログの窓の長さ以上空いた（映像が長く止まっていた）なら、止まる前の
         // 集計は捨てて窓を張り直す。残すと再接続直後の 1 枚で止まる前の集計が出て、
@@ -86,6 +111,8 @@ impl DisplayLatency {
         if stalled {
             self.log = Accumulator::default();
             self.log_started = None;
+            self.log_skipped_frames = 0;
+            self.log_idle_passes = 0;
         }
         while let Some(&(oldest, _)) = self.recent.front() {
             if at.saturating_duration_since(oldest) > DISPLAY_LATENCY_WINDOW {
@@ -98,13 +125,20 @@ impl DisplayLatency {
 
         let started = *self.log_started.get_or_insert(at);
         self.log.add(ms);
+        self.log_skipped_frames += skipped_frames;
         if at.saturating_duration_since(started) < DISPLAY_LATENCY_LOG_INTERVAL {
             return None;
         }
-        let summary = self.log.summary();
+        // 直前に足したので必ずある
+        let latency = self.log.summary()?;
+        let log = LatencyLog {
+            latency,
+            skipped_frames: std::mem::take(&mut self.log_skipped_frames),
+            idle_passes: std::mem::take(&mut self.log_idle_passes),
+        };
         self.log = Accumulator::default();
         self.log_started = Some(at);
-        summary
+        Some(log)
     }
 
     /// `now` から見て直近 `DISPLAY_LATENCY_WINDOW` の集計。取り込んだフレームが無ければ `None`。
@@ -139,9 +173,9 @@ mod tests {
     fn recent_reports_average_and_max_within_the_window() {
         let base = Instant::now();
         let mut latency = DisplayLatency::default();
-        latency.record(base, ms(2));
-        latency.record(base + ms(16), ms(4));
-        latency.record(base + ms(33), ms(12));
+        latency.record(base, ms(2), 0);
+        latency.record(base + ms(16), ms(4), 0);
+        latency.record(base + ms(33), ms(12), 0);
 
         let summary = latency.recent(base + ms(40)).expect("3 枚取り込んだ");
         assert_eq!(summary.samples, 3);
@@ -154,8 +188,8 @@ mod tests {
         // 1 秒より前の大きな遅れが、いまの最大に残らない
         let base = Instant::now();
         let mut latency = DisplayLatency::default();
-        latency.record(base, ms(50));
-        latency.record(base + ms(1_500), ms(3));
+        latency.record(base, ms(50), 0);
+        latency.record(base + ms(1_500), ms(3), 0);
 
         let summary = latency.recent(base + ms(1_500)).expect("1 枚は窓の中");
         assert_eq!(summary.samples, 1);
@@ -167,7 +201,7 @@ mod tests {
         // 取り込みが止まったら、止まる前の値を出し続けない
         let base = Instant::now();
         let mut latency = DisplayLatency::default();
-        latency.record(base, ms(5));
+        latency.record(base, ms(5), 0);
 
         assert!(latency.recent(base + ms(1_000)).is_some(), "窓の端は含む");
         assert_eq!(latency.recent(base + ms(1_001)), None);
@@ -179,7 +213,7 @@ mod tests {
         let base = Instant::now();
         let mut latency = DisplayLatency::default();
         for i in 0..600u64 {
-            latency.record(base + Duration::from_micros(i * 16_667), ms(1));
+            latency.record(base + Duration::from_micros(i * 16_667), ms(1), 0);
         }
         assert!(latency.recent.len() <= 62, "{}", latency.recent.len());
     }
@@ -204,15 +238,16 @@ mod tests {
         // 止まる前の 10 秒ぶんを、再接続直後の 1 枚で出さない
         let base = Instant::now();
         let mut latency = DisplayLatency::default();
-        latency.record(base, ms(50));
-        latency.record(base + ms(10_000), ms(50));
+        latency.record(base, ms(50), 0);
+        latency.record(base + ms(10_000), ms(50), 0);
 
         let resumed = base + ms(60_000);
-        assert_eq!(latency.record(resumed, ms(2)), None, "窓を張り直す");
-        assert_eq!(latency.record(resumed + ms(15_000), ms(3)), None);
+        assert_eq!(latency.record(resumed, ms(2), 0), None, "窓を張り直す");
+        assert_eq!(latency.record(resumed + ms(15_000), ms(3), 0), None);
         let summary = latency
-            .record(resumed + ms(30_000), ms(4))
-            .expect("張り直してから 30 秒");
+            .record(resumed + ms(30_000), ms(4), 0)
+            .expect("張り直してから 30 秒")
+            .latency;
         assert_eq!(summary.samples, 3);
         assert!((summary.max_ms - 4.0).abs() < 1e-3, "{summary:?}");
     }
@@ -221,22 +256,65 @@ mod tests {
     fn record_returns_the_log_summary_once_per_interval() {
         let base = Instant::now();
         let mut latency = DisplayLatency::default();
-        assert_eq!(latency.record(base, ms(2)), None, "窓の始まり");
-        assert_eq!(latency.record(base + ms(29_999), ms(10)), None);
+        assert_eq!(latency.record(base, ms(2), 0), None, "窓の始まり");
+        assert_eq!(latency.record(base + ms(29_999), ms(10), 0), None);
 
         let summary = latency
-            .record(base + ms(30_000), ms(6))
-            .expect("30 秒に達したら出す");
+            .record(base + ms(30_000), ms(6), 0)
+            .expect("30 秒に達したら出す")
+            .latency;
         assert_eq!(summary.samples, 3);
         assert!((summary.average_ms - 6.0).abs() < 1e-3, "{summary:?}");
         assert!((summary.max_ms - 10.0).abs() < 1e-3, "{summary:?}");
 
         // 次の窓は出したところから数え直す。前の窓の最大を持ち越さない
-        assert_eq!(latency.record(base + ms(59_999), ms(1)), None);
+        assert_eq!(latency.record(base + ms(59_999), ms(1), 0), None);
         let next = latency
-            .record(base + ms(60_000), ms(1))
-            .expect("次の 30 秒");
+            .record(base + ms(60_000), ms(1), 0)
+            .expect("次の 30 秒")
+            .latency;
         assert_eq!(next.samples, 2);
         assert!((next.max_ms - 1.0).abs() < 1e-3, "{next:?}");
+    }
+
+    #[test]
+    fn record_reports_skipped_frames_and_idle_passes_per_window() {
+        // 再描画の間隔の判断（#459）を確かめる数。窓ごとに数え直す
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        latency.record(base, ms(2), 0);
+        latency.note_idle_pass();
+        latency.record(base + ms(10_000), ms(2), 2);
+        latency.note_idle_pass();
+        let log = latency
+            .record(base + ms(30_000), ms(2), 1)
+            .expect("30 秒に達したら出す");
+        assert_eq!(log.skipped_frames, 3);
+        assert_eq!(log.idle_passes, 2);
+
+        latency.record(base + ms(45_000), ms(2), 0);
+        let next = latency
+            .record(base + ms(60_000), ms(2), 0)
+            .expect("次の 30 秒");
+        assert_eq!(next.skipped_frames, 0, "前の窓を持ち越している");
+        assert_eq!(next.idle_passes, 0, "前の窓を持ち越している");
+    }
+
+    #[test]
+    fn record_drops_the_counts_before_a_long_stall() {
+        // 止まっている間に回った update() を、再接続後の窓に混ぜない
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        latency.record(base, ms(2), 5);
+        latency.note_idle_pass();
+
+        let resumed = base + ms(60_000);
+        latency.record(resumed, ms(2), 0);
+        latency.record(resumed + ms(15_000), ms(2), 0);
+        let log = latency
+            .record(resumed + ms(30_000), ms(2), 0)
+            .expect("張り直してから 30 秒");
+        assert_eq!(log.skipped_frames, 0);
+        assert_eq!(log.idle_passes, 0);
     }
 }

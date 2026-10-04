@@ -307,8 +307,8 @@ impl CaptureCardViewer {
     ///
     /// 録画の失敗で一番困るのは「録っているつもりで止まっていた」「止め忘れた」なので、
     /// 情報表示を切っていても見えるようにする。経過時間の更新は 1 秒ごとでよく、
-    /// 再描画の間隔（`next_repaint_delay`）は変えない。映像が来ていれば 16ms、
-    /// 来ていなければ 250ms で回っている。
+    /// 再描画の間隔（`next_repaint_delay`）は変えない。映像が来ていればフレームの
+    /// 到着ごと、来ていなければ 250ms ごとに回っている。
     pub(super) fn draw_recording_indicator(&self, ctx: &egui::Context) {
         if !self.recorder.is_recording() {
             return;

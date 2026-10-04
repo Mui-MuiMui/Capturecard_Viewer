@@ -189,7 +189,7 @@ mod tests {
         // 到着から 3.2ms でテクスチャへ取り込んだ 1 枚
         let mut latency = crate::video::DisplayLatency::default();
         let now = Instant::now();
-        latency.record(now, std::time::Duration::from_micros(3_200));
+        latency.record(now, std::time::Duration::from_micros(3_200), 0);
         let latency_line = format_display_latency(latency.recent(now));
         let lines =
             format_stats_lines(&stats, latency_line, status::format_underrun_count(Some(3)));
