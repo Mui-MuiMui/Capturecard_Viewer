@@ -67,7 +67,6 @@ cargo build --release
 | `src/video/mod.rs` | `VideoError` とログ用の `elapsed_ms`。外から使う経路（`crate::video::...`）の `pub use` もここ |
 | `src/video/capture.rs` | nokhwa `CallbackCamera` によるキャプチャ。開く・閉じる・列挙する、フレームコールバック（nokhwa の `Buffer` から取り出して `FrameSink` へ渡す）、途絶の観測（`VideoLinkState`）。選んだ形式で開けなければ YUY2 で開き直す |
 | `src/video/mf_format.rs` | Media Foundation の経路の形式の対応表（`MF_FORMATS`、設定の形式名 ↔ nokhwa の `FrameFormat`。能力の取得と開くときが同じ表を引く、#81）と、YUY2 へ代えるか（`fallback_for`）・フレームをどの受け口へ渡すか（`sink_route`）の判定。純粋関数 |
-| `src/video/mf_low_latency.rs` | Media Foundation のソースリーダーに `MF_LOW_LATENCY` を付けるかの切り替え（#456）。環境変数 `CAPTURECARD_VIEWER_MF_LOW_LATENCY` の解釈（`parse_low_latency`、純粋関数）と、`vendor/` に置いた nokhwa-bindings-windows の旗を立てる `apply_mf_low_latency_from_env` |
 | `src/video/directshow/mod.rs` | DirectShow の映像デバイス `DirectShowCapture`（列挙・能力・開く・閉じる・観測）と、表示名の「(DirectShow)」の付け外し |
 | `src/video/directshow/devices.rs` | DirectShow の列挙（`ICreateDevEnum`）と対応形式（`IAMStreamConfig::GetStreamCaps`）、いまの解像度（`GetFormat`）の読み取り |
 | `src/video/directshow/stream_select.rs` | 対応形式の一覧から開く解像度と形式を選ぶ判定（`target_resolution` / `choose_candidate`）、fps の範囲と選択肢（`fps_range` / `fps_list` / `fps_choices`）、設定画面向けの並べ替え（`capabilities_from_candidates`）。純粋関数 |
