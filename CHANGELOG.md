@@ -4,6 +4,24 @@
 
 ## [未リリース]
 
+## [1.4.0] - 2026-10-04
+
+1.3.0 以降の変更をまとめたバージョン。設定ファイルは 1.3.0 のまま読める。**1.2.1 以降はアプリ内の「更新する」でこのバージョンへ更新できる。**
+
+- **「リプレイを保存」**: 録画を始めなくても、リプレイバッファに溜まっている直近の分（既定 30 秒、最大 5 分）だけを MP4 に保存できる。右クリックメニューとホットキーから
+- **映像の遅延を減らした**: 映像が届いたその場で描き始めるようにし、届いてから画面に取り込むまでの待ちを平均 8ms から 5ms に縮めた。実機（1080p60、Live Gamer EXTREME 3）でパススルーに対する遅れは約 38ms から約 33ms に。測り方と他のアプリとの比較は `docs/LATENCY.md`
+- **修正**: Media Foundation で開くデバイスで、選んだフォーマット（MJPEG / RGB24 / NV12）で開かれない・対応形式が取れない・取れなかった形式が選択肢に出る不具合、右クリックメニューが不要にスクロールになる不具合
+- 統計 OSD と「接続状態」タブに「表示までの遅れ」を出すようにした（遅延を調べるための情報）
+
+<hr>
+
+All changes since 1.3.0. Config files from 1.3.0 load as they are. **From 1.2.1 or later, use "Update" inside the app to update to this version.**
+
+- **"Save replay"**: saves just what is in the replay buffer (30 seconds by default, up to 5 minutes) to an MP4 without starting a recording, from the right-click menu or a hotkey
+- **Lower video latency**: the app now starts drawing as soon as a frame arrives, cutting the wait from arrival to the screen texture from 8 ms to 5 ms on average. On real hardware (1080p60, Live Gamer EXTREME 3) the lag behind the card's passthrough went from about 38 ms to about 33 ms. See `docs/LATENCY.md` for the method and a comparison with other apps
+- **Fixes**: with devices opened through Media Foundation, the chosen format (MJPEG / RGB24 / NV12) was not used, supported formats could fail to load, and formats that failed to load were still listed; the right-click menu scrolled when it did not need to
+- The stats overlay and the Status tab now show "Display latency" (diagnostic information for investigating latency)
+
 ### 追加
 
 - 録画を始めずに、リプレイバッファに溜まっている分（直近 N 秒）だけを MP4 に保存する「リプレイを保存」を、右クリックメニューとホットキーに足した（#438）
