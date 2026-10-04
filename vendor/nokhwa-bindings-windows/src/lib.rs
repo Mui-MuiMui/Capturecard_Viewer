@@ -78,9 +78,22 @@ pub mod wmf {
             System::Com::{CoInitializeEx, CoUninitialize, COINIT},
         },
     };
+    // [capturecard_viewer] 追加（#456）: ソースリーダーに付ける低遅延の属性
+    use windows::Win32::Media::MediaFoundation::MF_LOW_LATENCY;
 
     static INITIALIZED: Lazy<Arc<AtomicBool>> = Lazy::new(|| Arc::new(AtomicBool::new(false)));
     static CAMERA_REFCNT: Lazy<Arc<AtomicUsize>> = Lazy::new(|| Arc::new(AtomicUsize::new(0)));
+
+    // [capturecard_viewer] 追加（#456）: ソースリーダーに MF_LOW_LATENCY を付けるか。
+    // 既定は付ける。アプリが環境変数を読んで set_low_latency で切り替える。
+    // 次に開くデバイスから効く（開いているソースリーダーには効かない）
+    static LOW_LATENCY: AtomicBool = AtomicBool::new(true);
+
+    /// [capturecard_viewer] 追加（#456）: 次に開くデバイスのソースリーダーに
+    /// `MF_LOW_LATENCY` を付けるかを切り替える。
+    pub fn set_low_latency(enabled: bool) {
+        LOW_LATENCY.store(enabled, Ordering::SeqCst);
+    }
 
     // See: https://stackoverflow.com/questions/80160/what-does-coinit-speed-over-memory-do
     const CO_INIT_APARTMENT_THREADED: COINIT = COINIT(0x2);
@@ -474,6 +487,19 @@ pub mod wmf {
                                 value: u32::from(true).to_string(),
                                 error: why.to_string(),
                             });
+                        }
+
+                        // [capturecard_viewer] 追加（#456）: 取り込み側のバッファリングを減らす
+                        if LOW_LATENCY.load(Ordering::SeqCst) {
+                            if let Err(why) =
+                                unsafe { attr.SetUINT32(&MF_LOW_LATENCY, u32::from(true)) }
+                            {
+                                return Err(NokhwaError::SetPropertyError {
+                                    property: "MF_LOW_LATENCY".to_string(),
+                                    value: u32::from(true).to_string(),
+                                    error: why.to_string(),
+                                });
+                            }
                         }
 
                         attr

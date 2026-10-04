@@ -583,6 +583,7 @@ dependencies = [
  "image",
  "log",
  "nokhwa",
+ "nokhwa-bindings-windows",
  "rfd",
  "ringbuf",
  "rodio",
