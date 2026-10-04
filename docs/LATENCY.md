@@ -2,7 +2,7 @@
 
 **1080p60、Live Gamer EXTREME 3、Media Foundation の条件で、パススルーの表示に対して約 38ms（33〜42ms）の遅れ。**
 
-2026-10-04 に測った（Issue #453）。**この条件での値**であり、他のボード・解像度・開き方・モニターには当てはまらない。
+2026-10-04 に測った（Issue #453）。**この条件での値**であり、他のボード・解像度・開き方・モニターには当てはまらない。同じ機材で他のアプリも測ったところ、AVerMedia RECentral 4 が約 18ms、アマレコTV 3.10 が約 28ms で、**本アプリが 3 つの中で最も遅い**（「他のアプリとの比較」）。
 
 ## 結果
 
@@ -78,6 +78,35 @@ ffmpeg -ss <t> -i <動画> -frames:v 48 \
 
 差 9.2 カメラフレーム × 4.17ms = 約 38ms。左（パススルー）は 4 カメラフレームごと（16.7ms）に規則正しく進み、右（アプリ）は 3〜5 カメラフレームの間隔で揺れる。200Hz の描画と 60fps の到着の噛み合いによる。
 
+## 他のアプリとの比較
+
+同じ日に同じ機材・同じ信号源で、右のモニターに出すアプリだけを替えて撮り、同じ手順で読んだ（Issue #453）。値はどれもパススルーの表示に対する遅れ。
+
+| アプリ | 映像の経路 | 遅れ | 最小 / 最大 | 2 秒おき 40 枚の 左 − 右 |
+|---|---|---|---|---|
+| AVerMedia RECentral 4 | 不明（ボードの純正アプリ） | 約 18ms（4.3 カメラフレーム） | 13ms / 21ms | 1 が 36 枚、0 が 1 枚、2 が 3 枚 |
+| アマレコTV 3.10 | DirectShow | 約 28ms（6.8 カメラフレーム） | 21ms / 33ms | 1 が 30 枚、2 が 10 枚 |
+| Capturecard Viewer 1.3.0 | Media Foundation | 約 38ms（9.2 カメラフレーム） | 33ms / 42ms | 2 が 40 枚 |
+
+連続区間 3 つの差（カメラフレーム）:
+
+| アプリ | 区間 1（10s） | 区間 2（40s） | 区間 3（70s） |
+|---|---|---|---|
+| RECentral 4 | 番号 760〜771、差 3〜5、平均 4.0 | 番号 985〜997、差 4〜5、平均 4.7 | 番号 1209〜1221、差 4〜5、平均 4.1 |
+| アマレコTV 3.10 | 番号 347〜360、差 6〜7、平均 6.7 | 番号 572〜585、差 5〜8、平均 6.5 | 番号 796〜810、差 6〜8、平均 7.1 |
+
+読み取れたこと:
+
+- 3 つの中では本アプリが最も遅い。RECentral 4 との差は約 20ms（ソースの 1 フレーム強）、アマレコTV との差は約 10ms
+- RECentral 4 の表示は、パススルーと同じ 4 カメラフレームの刻みで、パススルーをちょうど 1 刻み（16.7ms）ずらした形で進む。届いたフレームを次の表示にそのまま出していると読める
+- アマレコTV の表示は 5〜8 カメラフレームの幅で揺れる。本アプリの 3〜5 カメラフレームの描画間隔の揺れと似た性質
+
+比べるときの注意:
+
+- 他のアプリの設定（表示モード、垂直同期、バッファの有無）は記録していない。ウィンドウの大きさや配置も本アプリと同じではない（切り出した画像の中でパターンの位置が違う）
+- 撮影した動画は RECentral 4 が 86 秒 2580 フレーム、アマレコTV が 87 秒 2605 フレーム。crop の座標は本アプリの撮影と違う（RECentral 4 は左 `400:180:260:450`・右 `400:180:1260:460`、アマレコTV は左 `400:180:200:430`・右 `400:180:1240:430`）
+- `drawtext` はフォントの設定が無い環境では落ちるので、`fontfile=` でフォントのファイルを渡す
+
 ## 注意
 
 - **含まれるもの**: ボードの取り込み（USB、Media Foundation）、アプリの変換と描画
@@ -87,4 +116,4 @@ ffmpeg -ss <t> -i <動画> -frames:v 48 \
 
 ## Summary (English)
 
-Measured on 2026-10-04 (Issue #453): with Capturecard Viewer 1.3.0, an AVerMedia Live Gamer EXTREME 3 opened through Media Foundation at 1920x1080 60fps (YUY2), and two identical MSI MAG 244F monitors at 200Hz, the app's picture lags the card's HDMI passthrough by about 38 ms (33 to 42 ms, reading error ±4 ms). A test video with burned-in frame numbers was played on another PC, both monitors were filmed with a smartphone at 240fps, and the frame numbers were read from stills extracted with ffmpeg (40 stills every 2 seconds, plus three continuous 48-frame bursts). The value includes capture, conversion, and drawing in the app, assumes both monitors have the same display latency (unit-to-unit differences were not evaluated), and applies only to these conditions.
+Measured on 2026-10-04 (Issue #453): with Capturecard Viewer 1.3.0, an AVerMedia Live Gamer EXTREME 3 opened through Media Foundation at 1920x1080 60fps (YUY2), and two identical MSI MAG 244F monitors at 200Hz, the app's picture lags the card's HDMI passthrough by about 38 ms (33 to 42 ms, reading error ±4 ms). A test video with burned-in frame numbers was played on another PC, both monitors were filmed with a smartphone at 240fps, and the frame numbers were read from stills extracted with ffmpeg (40 stills every 2 seconds, plus three continuous 48-frame bursts). The value includes capture, conversion, and drawing in the app, assumes both monitors have the same display latency (unit-to-unit differences were not evaluated), and applies only to these conditions. On the same day and setup, AVerMedia RECentral 4 lagged the passthrough by about 18 ms (13 to 21 ms) and AmaRecTV 3.10 by about 28 ms (21 to 33 ms), so Capturecard Viewer 1.3.0 was the slowest of the three.
