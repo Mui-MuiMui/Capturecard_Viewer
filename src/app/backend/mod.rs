@@ -256,11 +256,7 @@ pub(super) fn backends_from_env() -> (Box<dyn DeviceBackends>, bool) {
             );
             (Box::new(fake), true)
         }
-        None => {
-            // 実機の Media Foundation を開く前に、ソースリーダーに付ける属性を決める（#456）
-            crate::video::apply_mf_low_latency_from_env();
-            (Box::new(SystemBackends), false)
-        }
+        None => (Box::new(SystemBackends), false),
     }
 }
 

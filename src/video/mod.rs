@@ -8,7 +8,6 @@
 //! |---|---|
 //! | `capture.rs` | nokhwa の開閉、フレームコールバック、途絶の観測 |
 //! | `mf_format.rs` | Media Foundation の形式名と nokhwa の `FrameFormat` の対応表、YUY2 へ代えるかとフレームの渡し先の判定 |
-//! | `mf_low_latency.rs` | Media Foundation のソースリーダーに `MF_LOW_LATENCY` を付けるかの切り替え（環境変数の解釈、#456） |
 //! | `directshow/` | DirectShow の映像デバイス（Media Foundation に出ない仮想カメラや古いキャプチャーボード）。列挙・対応形式・フィルターグラフ・自前のレンダラーフィルター |
 //! | `fake.rs` | 実機なしで動くフェイクの映像デバイス（テストパターンを吐く）。環境変数で有効にしたときだけ使う |
 //! | `test_pattern.rs` | フェイクが吐くテストパターン（カラーバー、ベタ塗り、フレーム番号の焼き込み）の描画 |
@@ -40,7 +39,6 @@ mod fake;
 pub(crate) mod frame_buffer;
 mod frame_sink;
 mod mf_format;
-mod mf_low_latency;
 mod tap;
 mod test_pattern;
 mod yuv420;
@@ -56,7 +54,6 @@ pub use directshow::{
 pub use display_latency::{format_display_latency, DisplayLatency};
 pub use fake::{FakeVideoCapture, FakeVideoOptions};
 pub use frame_buffer::{frame_len_status, FrameLenStatus, FrameStats, VideoFrame, VideoFrames};
-pub use mf_low_latency::apply_mf_low_latency_from_env;
 pub use tap::{VideoTap, VideoTapConsumer, VIDEO_TAP_CAPACITY};
 
 use std::fmt;

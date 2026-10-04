@@ -127,7 +127,7 @@ release ビルドは `lto` と `codegen-units = 1` の影響で時間がかか�
 
 ### 開発者向けの環境変数
 
-どれも release ビルドに入っているが、**指定しなければ無効**（`CAPTURECARD_VIEWER_MF_LOW_LATENCY` だけは逆で、指定すると既定の動作を外す）で、設定ファイルには保存されない。起動するときだけ指定する。
+どれも release ビルドに入っているが、**指定しなければ無効**で、設定ファイルには保存されない。起動するときだけ指定する。
 
 | 変数 | 値 | 効果 | 詳しい説明の場所 |
 |---|---|---|---|
@@ -135,7 +135,6 @@ release ビルドは `lto` と `codegen-units = 1` の影響で時間がかか�
 | `CAPTURECARD_VIEWER_CONFIG_DIR` | フォルダの絶対パス（無ければ作る） | 設定ファイル（`default-config.toml`）とログ（`logs\`）をそのフォルダに置く。`%AppData%` の設定に触らずに起動できる。相対パスや作れないフォルダは使わず、WARN を出して既定の置き場所に戻る | `docs/design/settings.md` の「置き場所の差し替え」 |
 | `CAPTURECARD_VIEWER_FAKE_DEVICES` | 台数（1〜8） | 実機の代わりにフェイクの映像・音声デバイスで動く。0・空・数字でなければ無効 | `docs/design/device-worker.md` の「フェイクデバイス（#142）」、`docs/TROUBLESHOOTING.md` の「映像がカラーバーや青一色になる…」 |
 | `CAPTURECARD_VIEWER_FAKE_SCENARIO` | `disconnect:<秒>` / `reopen-fail:<秒>` / `fail:<回数>` / `audio-error:<秒>` / `audio-pin`（カンマ区切り。`audio-pin` だけ引数を取らない） | フェイクデバイスで映像の途絶・途絶後の開き直しの失敗・接続の失敗・音声ストリームのエラーを起こす。`audio-pin` はフェイクの映像デバイスに DirectShow の音声ピンを持たせ、「映像デバイスの音声 (DirectShow)」で正弦波（660Hz）が鳴るようにする（#394）。`CAPTURECARD_VIEWER_FAKE_DEVICES` と一緒に使う | 同上、`docs/design/directshow-audio.md` |
-| `CAPTURECARD_VIEWER_MF_LOW_LATENCY` | `0` / `false` / `off` / `no` で OFF（未指定・`1` などは ON） | Media Foundation で開くデバイスのソースリーダーに `MF_LOW_LATENCY` を付けない。**この変数だけ既定が ON** で、指定するのは遅延を撮り比べるときに外す場合。解釈できない値は WARN を出して ON のまま | `docs/design/video-pipeline.md` の「Media Foundation のソースリーダーの低遅延モード（#456）」、`docs/LATENCY.md` の「注意」 |
 | `CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` | 版（`1.0.0` / `v1.0.0`） | 更新の確認で比べる「いまの版」を差し替える。公開済みの最新より古くすれば通知ダイアログが出る | `docs/design/update.md` の「試すための環境変数」、`docs/TROUBLESHOOTING.md` の「更新の通知で、いまの版が違う…」 |
 | `CAPTURECARD_VIEWER_UPDATE_API_URL` | `http://` / `https://` の URL、または `file:///C:/path/latest.json` | 更新の確認の問い合わせ先（GitHub の Release API）を差し替える。`file://` なら Release の JSON をそのまま読む。平文の HTTP を使うのは `http://` を指したときだけで、`https://` の問い合わせとダウンロードは `http://` へのリダイレクトを辿らない | 同上 |
 
