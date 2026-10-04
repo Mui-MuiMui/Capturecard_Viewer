@@ -28,7 +28,8 @@ pub struct LatencySummary {
 }
 
 /// ログへ出す 30 秒ぶんの集計。遅れに加えて、再描画の間隔の判断（`crate::repaint`、#459）を
-/// 確かめるための数を持つ。
+/// 確かめるための数を持つ。最小化を挟んだ窓ではどちらも大きく出る（最小化中も 1 秒ごとの
+/// `update()` が数えられ、取り込むたびに世代が飛ぶ。`docs/design/video-pipeline.md`）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LatencyLog {
     pub latency: LatencySummary,
