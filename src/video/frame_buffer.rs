@@ -291,19 +291,19 @@ impl VideoFrames {
     }
 
     /// 世代番号が `last_generation` と異なるフレームがある場合だけ、
-    /// フレームと世代番号を返す。
+    /// フレームと世代番号、そのフレームを受け取った時刻を返す。
     ///
     /// 新着がなければ `None` を返すので、呼び出し側は前回の結果を使い回せる。
-    pub fn newer_than(&self, last_generation: u64) -> Option<(Arc<VideoFrame>, u64)> {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|fb| match fb.latest_frame() {
-                Some((frame, generation)) if generation != last_generation => {
-                    Some((frame, generation))
-                }
-                _ => None,
-            })
+    /// 受け取った時刻は世代番号と同じロックの中で読むので、必ず同じフレームのもの
+    /// （表示までの遅れの計測に使う、#455）。
+    pub fn newer_than(&self, last_generation: u64) -> Option<(Arc<VideoFrame>, u64, Instant)> {
+        self.inner.lock().ok().and_then(|fb| {
+            let (frame, generation) = fb.latest_frame()?;
+            // `push_back` が `latest` と一緒に入れ、`reset` が一緒に消すので、
+            // フレームがあれば必ずある
+            let received_at = fb.last_frame_instant?;
+            (generation != last_generation).then_some((frame, generation, received_at))
+        })
     }
 
     /// 映像パイプラインの観測値を返す。
@@ -457,6 +457,39 @@ mod tests {
     fn frame_buffer_latest_frame_without_push_returns_none() {
         let buffer = FrameBuffer::new();
         assert!(buffer.latest_frame().is_none());
+    }
+
+    #[test]
+    fn video_frames_newer_than_returns_arrival_time_of_the_same_frame() {
+        // 表示までの遅れ（#455）は、世代番号と一緒に返る時刻から測る。
+        // 前のフレームの時刻が混ざると遅れが 1 フレームぶん大きく出る
+        let frames = VideoFrames::new();
+        let first = Instant::now();
+        let second = first + Duration::from_millis(16);
+        let buffer = frames.buffer();
+        buffer
+            .lock()
+            .unwrap()
+            .push_back(test_frame(1), first, 1.0, true, "YUY2");
+        buffer
+            .lock()
+            .unwrap()
+            .push_back(test_frame(2), second, 1.0, true, "YUY2");
+
+        let (frame, generation, received_at) = frames.newer_than(0).expect("新着がある");
+        assert_eq!(frame.data, vec![2u8; TEST_FRAME_LEN]);
+        assert_eq!(generation, 2);
+        assert_eq!(received_at, second);
+
+        assert!(
+            frames.newer_than(generation).is_none(),
+            "同じ世代は新着ではない"
+        );
+        frames.reset();
+        assert!(
+            frames.newer_than(generation).is_none(),
+            "止めたらフレームが無い"
+        );
     }
 
     #[test]
