@@ -85,6 +85,10 @@ ffmpeg -ss <t> -i <動画> -frames:v 48 \
 - 読み取りの誤差は ±1 カメラフレーム（±4ms）。手持ちの手ぶれは番号の読み取りに影響しなかった
 - **同じ条件でしか比べられない。** ボード、解像度と fps、開き方、モニター、撮影の fps、アプリのバージョンのどれかが変われば測り直す
 
+## アプリ内の計測の読み方
+
+統計 OSD（右クリックメニューの「情報表示」）と「接続状態」タブの映像の欄に出る「表示までの遅れ: 平均 N ms / 最大 M ms」は、アプリが自分で測った値（#455）で、上の実測とは測っている範囲が違う。起点は Media Foundation（DirectShow なら自前のレンダラー）のコールバックが呼ばれた時刻で、ボードが取り込んだ時刻より後になる。終点は UI スレッドがそのフレームでテクスチャを更新した時刻で、GPU が画面へ出す（present）までと、モニターの表示遅延は含まない。つまり上の約 38ms のうち、アプリの変換と UI スレッドが取り込むまでの待ちの分だけを表す。ボードの取り込みの分は「実測の遅れ − この値 − present とモニターの分」として残る。値は直近 1 秒の平均と最大で、30 秒ごとの集計はログレベルを `debug`（環境変数 `CAPTURECARD_VIEWER_LOG=debug`）にするとログにも出る。
+
 ## Summary (English)
 
 Measured on 2026-10-04 (Issue #453): with Capturecard Viewer 1.3.0, an AVerMedia Live Gamer EXTREME 3 opened through Media Foundation at 1920x1080 60fps (YUY2), and two identical MSI MAG 244F monitors at 200Hz, the app's picture lags the card's HDMI passthrough by about 38 ms (33 to 42 ms, reading error ±4 ms). A test video with burned-in frame numbers was played on another PC, both monitors were filmed with a smartphone at 240fps, and the frame numbers were read from stills extracted with ffmpeg (40 stills every 2 seconds, plus three continuous 48-frame bursts). The value includes capture, conversion, and drawing in the app, assumes both monitors have the same display latency (unit-to-unit differences were not evaluated), and applies only to these conditions.
