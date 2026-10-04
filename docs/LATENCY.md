@@ -19,7 +19,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| アプリ | Capturecard Viewer 1.3.0 |
+| アプリ | Capturecard Viewer 1.3.0（1.4.0 の値も同じ条件で測った。「結果」に併記） |
 | 映像の開き方 | Media Foundation（このボードは Media Foundation でしか開けない） |
 | 解像度と fps、形式 | 1920x1080 60fps、YUY2 |
 | キャプチャーボード | AVerMedia Live Gamer EXTREME 3（USB） |
