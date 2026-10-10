@@ -28,9 +28,9 @@ YUY2 を GPU で変換するとき（既定、#456）は、フレームコール
 | NV12 | `push_yuv420` | `yuv420_to_rgb` | 効く | Media Foundation・DirectShow | `MFVideoFormat_NV12`（`NV12`） | `MEDIASUBTYPE_NV12` |
 | I420 | `push_yuv420` | `yuv420_to_rgb` | 効く | DirectShow | — | `MEDIASUBTYPE_I420` / `MEDIASUBTYPE_IYUV` |
 | YV12 | `push_yuv420` | `yuv420_to_rgb` | 効く | DirectShow | — | `MEDIASUBTYPE_YV12` |
-| MJPEG | `push_mjpeg` | `mjpeg_to_rgb` | 効かない（デコーダ任せ） | Media Foundation・DirectShow | `MFVideoFormat_MJPG`（`MJPEG`） | `MEDIASUBTYPE_MJPG` |
-| RGB24 | `push_bgr24` | `bgr24_to_rgb` | 効かない（RGB のまま） | Media Foundation・DirectShow | `MFVideoFormat_RGB24`（`RAWBGR`） | `MEDIASUBTYPE_RGB24` |
-| そのほか | `push_decoded` | nokhwa のデコーダ | 効かない（デコーダ任せ） | Media Foundation（幅が奇数の YUY2、GRAY） | `MFVideoFormat_L8`（`GRAY`） | — |
+| MJPEG | `push_mjpeg` | `mjpeg_to_rgb` | 色空間は効かない。レンジと映像調整は RGB で掛ける（`rgb_adjust.rs`、#472） | Media Foundation・DirectShow | `MFVideoFormat_MJPG`（`MJPEG`） | `MEDIASUBTYPE_MJPG` |
+| RGB24 | `push_bgr24` | `bgr24_to_rgb` | 色空間は効かない。レンジと映像調整は RGB で掛ける（`rgb_adjust.rs`、#472） | Media Foundation・DirectShow | `MFVideoFormat_RGB24`（`RAWBGR`） | `MEDIASUBTYPE_RGB24` |
+| そのほか | `push_decoded` | nokhwa のデコーダ | 色空間とレンジは効かない。映像調整は RGB で掛ける（`rgb_adjust.rs`、#472） | Media Foundation（幅が奇数の YUY2、GRAY） | `MFVideoFormat_L8`（`GRAY`） | — |
 
 - **NV12 / I420 / YV12 は YUY2 と同じ係数表と同じ 1 画素の式を通る。** 同じ Y・Cb・Cr なら YUY2 と同じ RGB になる（`yuv420.rs` のテストでカラーバーを突き合わせている）。違うのは色差の置き場所だけで、4:2:0 なので縦横 2x2 画素が 1 組の色差を共有する。統計でも高速パスとして数える
 - 幅か高さが奇数なら、色差は切り上げた大きさを持つものとして読む（右端の列・下端の行は 1 画素で 1 組）。YUY2 の奇数幅は最後の 1 画素を黒で残すが、4:2:0 は全画素を変換する
@@ -54,6 +54,25 @@ YUY2 を GPU で変換するとき（既定、#456）は、フレームコール
 色変換の係数は `ColorMatrix` の表で持つ。**色空間・レンジの選択に加えて、明るさ・コントラスト・彩度もこの表へ畳み込む**（`adjusted_color_matrix`）。Y'CbCr → RGB がアフィン変換であることを使い、コントラストは輝度と色差の係数へ、彩度は色差の係数へ、明るさとコントラストの定数分は `ColorMatrix::offset` へ落とす。変換関数の入口で `y_offset` と `offset` を 1 つの `bias` に畳むので、**調整の有無で 1 画素あたりの演算数は変わらない。** 調整を後段のフィルタとして足さないこと。
 
 色空間・レンジ・映像調整はすべて `SharedColorConversion`（`AtomicU8` ×2 と `AtomicI32` ×3）でフレームコールバックスレッドと共有する。**デバイスを開き直さずに次のフレームから効く。** ここに項目を足すときも `Mutex` にしないこと。フレームコールバックが毎フレーム読む。
+
+### RGB の経路のレンジと映像調整（#472）
+
+MJPEG の展開後・RGB24・デコーダ任せのフレームは係数表を通らない。1.4.0 で MJPEG / RGB24 を選んだとおりに開くようになり（#81）、この経路で色レンジと映像調整が効かないことが表に出たので、**RGB になったあとで同じ式を表引きで掛ける**（`video/rgb_adjust.rs` の `RgbAdjust`）。
+
+```text
+Y(v)  = y * (v - y_offset) + offset        … 同じ設定の係数表（adjusted_color_matrix）の輝度の項、1024 倍
+L     = 0.299 Y(R) + 0.587 Y(G) + 0.114 Y(B)
+out_c = (L + saturation * (Y(c) - L)) >> 10
+```
+
+- 輝度の項（リミテッドの伸長 1192 / 1024、コントラストと明るさの畳み込み）は YUY2 の経路が同じ設定で使う係数表からそのまま取り、`>> 10` の切り捨ても同じにしてある。**灰色は YUY2 の経路と 1 も違わない**（`rgb_adjust.rs` のテストで突き合わせている）。有彩色は、YUY2 の経路が Y'CbCr の色差に彩度を掛けるのに対して RGB から輝度を取り直すので一致しない。彩度の中心の輝度は JPEG（JFIF）の Y と同じ BT.601 の重みで取る
+- 式はチャンネルごとの 256 要素の表だけで書ける。`Y(c)` から輝度の寄与を引いた分を 1 つの表に、輝度に掛かる分を R・G・B の 3 つの表に入れ、1 画素は表引き 6 回と足し算だけ。彩度が無調整なら u8 の表を引くだけにする
+- **表は設定が変わったときだけ書き直す。** 置き場所（約 4KB）は `FrameSink` を作るときに 1 度だけ確保し、フレームごとには設定（レンジと調整値）を前回と突き合わせるだけ。フレームコールバックの中で確保しない。`FrameSink` に直に持たせないのは、それを抱える DirectShow の `StreamState::Video` が大きくなりすぎるため（clippy の `large_enum_variant`）
+- **何も効かせない設定（フルレンジ・無調整）では画素に触らない**
+- デコーダ任せ（`push_decoded`）はレンジを掛けない。nokhwa の YUYV の変換はリミテッドの伸長を自分で済ませるので、ここで伸ばすと二重になる。映像調整だけを掛ける
+- 色空間は掛けない（下の「UI にあるが動作していない設定がある」）
+
+YUY2 / 4:2:0 の経路のように係数表へ畳み込めないので、1 画素あたりの処理は増える（表引きだけで、展開そのものより軽いと見込むが未計測）。設定が既定（リミテッド）なら RGB の経路では常に掛かる。**既定がリミテッドなので、フルレンジの JPEG / RGB を出すデバイスでは黒が潰れて見える。** そのときは色レンジを「フル」にする（YUY2 の経路と同じ扱い）。
 
 `FrameBuffer` は push のたびに進む世代番号を持つ。`update_video_texture` は `VideoFrames::newer_than` で前回反映した世代と比較し、新着が無ければテクスチャを更新しない。**新着の有無を問わず最後のフレームが要る用途（スクリーンショット）は `VideoFrames::latest` を使う。** 世代番号はキャプチャ停止時も巻き戻さない。巻き戻すと再接続後の最初のフレームが呼び出し側の記録と一致し、新着と判別できなくなる。
 
@@ -271,6 +290,8 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 
 ## UI にあるが動作していない設定がある
 
-いまは無い。ビデオフォーマットの MJPEG / RGB24 が Media Foundation の経路で YUYV に強制されていたのは #81 で直した（上の「Media Foundation で開く形式（#81）」）。設定画面に効かない項目を足したときは、ここと README に書くこと。
+形式によって効かない項目が 1 つある。**色空間（BT.601 / BT.709）は MJPEG / RGB24 / デコーダ任せのフレームでは効かない。** Y'CbCr から RGB へ直す係数の選び方なので、届いた時点で（あるいはデコーダの中で）RGB になっているフレームには掛けようがない（上の「RGB の経路のレンジと映像調整（#472）」）。設定画面では色空間の説明（ホバーの文言）に「MJPEG / RGB24 のときは効かない」と書いてある。`notice_label` の注意書きは出していない。既定は「自動」で、選び直した人だけが読めば足りるため。デコーダ任せの経路では色レンジも効かず、`warn` に残す。
+
+ビデオフォーマットの MJPEG / RGB24 が Media Foundation の経路で YUYV に強制されていたのは #81 で直した（上の「Media Foundation で開く形式（#81）」）。設定画面に効かない項目を足したときは、ここと README に書くこと。
 
 オーディオのサンプリングレート／チャンネル数は `select_best_config` でストリームに反映され、**選択肢も入出力デバイスの対応設定から生成している**（`audio::selectable_sample_rates` / `selectable_channels`）。デバイスの能力を取得できなかった場合だけ固定の既定一覧へ倒すので、そのときは対応しない値も選べる。

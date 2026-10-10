@@ -160,8 +160,8 @@ flowchart LR
 |---|---|---|---|
 | YUY2 | `push_yuy2`（nokhwa の経路と同じ高速パス） | 効く | 使い回す |
 | NV12 / I420 / YV12 | `push_yuv420`（`video/yuv420.rs`。YUY2 と同じ係数表。IYUV は I420 として受ける。#228） | 効く | 使い回す |
-| RGB24 | `push_bgr24`（B・G・R を R・G・B へ、ボトムアップなら行を逆順に） | 効かない | 使い回す |
-| MJPEG | `push_mjpeg`（`convert::mjpeg_to_rgb`） | 効かない | 展開先は使い回すが、デコーダの内部で確保が起きる |
+| RGB24 | `push_bgr24`（B・G・R を R・G・B へ、ボトムアップなら行を逆順に） | 色空間は効かない。レンジと映像調整は RGB で掛ける（#472） | 使い回す |
+| MJPEG | `push_mjpeg`（`convert::mjpeg_to_rgb`） | 色空間は効かない。レンジと映像調整は RGB で掛ける（#472） | 展開先は使い回すが、デコーダの内部で確保が起きる |
 
 **MJPEG の展開に nokhwa のデコーダ（mozjpeg）は使わない。** mozjpeg は壊れたデータを panic で知らせて内部で `catch_unwind` するが、release は `panic = "abort"` なので（`docs/design/logging.md`）そのままプロセスが落ちる。キャプチャーの MJPEG は途中で欠けたフレームが混ざりうるので、エラーを値で返す `image` クレートの JPEG デコーダを使い、壊れたフレームは捨てて初回だけ記録する。
 
