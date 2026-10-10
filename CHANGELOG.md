@@ -4,6 +4,20 @@
 
 ## [未リリース]
 
+## [1.5.0] - 2026-10-10
+
+1.4.0 以降の変更をまとめたバージョン。設定ファイルは 1.4.0 のまま読める。**1.2.1 以降はアプリ内の「更新する」でこのバージョンへ更新できる。**
+
+- **映像の遅延をさらに減らした**: YUY2 の映像を GPU（シェーダー）で RGB に変換するようにし、届いてから画面に出るまでの待ちと CPU の負荷を減らした。実機（1080p60、Live Gamer EXTREME 3）でパススルーに対する遅れは約 33ms から約 28ms に（`docs/LATENCY.md`）。色は今までと同じ
+- **「映像の変換」の設定**: 「デバイス設定」タブで 自動 / GPU / CPU を選べる。自動では、GPU で変換できないとき・ソフトウェア描画のとき・描画が遅いときに CPU の変換へ自動で戻る（戻るのは 1 回だけで、勝手に GPU へ戻って映像が途切れることはない）。どちらで変換しているかは統計 OSD と「接続状態」タブに出る
+
+<hr>
+
+All changes since 1.4.0. Config files from 1.4.0 load as they are. **From 1.2.1 or later, use "Update" inside the app to update to this version.**
+
+- **Even lower video latency**: YUY2 video is now converted to RGB on the GPU (in a shader), cutting both the wait from arrival to the screen and the CPU load. On real hardware (1080p60, Live Gamer EXTREME 3) the lag behind the card's passthrough went from about 33 ms to about 28 ms (see `docs/LATENCY.md`). Colors are unchanged
+- **"Video conversion" setting**: choose Auto / GPU / CPU on the Device tab. In Auto, the app falls back to CPU conversion when the GPU cannot convert, when rendering is in software, or when drawing is too slow. The fallback happens once and never switches back on its own, so the picture does not stutter. The stats overlay and the Status tab show which one is in use
+
 ### 追加
 
 - 設定ダイアログの「デバイス設定」タブに「映像の変換」（自動 / GPU / CPU）を足した。設定ファイルでは `[video] convert`。プリセットには含めない（#456）
