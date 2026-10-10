@@ -7,12 +7,24 @@
 //! 計測しないテストでは何もしない。
 //!
 //! 使うのは `#[ignore]` のテスト `sample_timestamps_track_the_arrival_time`
-//! （`mod.rs`）だけ。結果と結論は `docs/design/recording.md` の
-//! 「DirectShow のサンプルのタイムスタンプ（#406）」。
+//! （`mod.rs`）と、このファイルの `directshow_sample_time_to_receive_lag`（#476）。
+//! 結果と結論は `docs/design/recording.md` の「DirectShow のサンプルの
+//! タイムスタンプ（#406）」と `docs/design/video-pipeline.md` の「取り込み側の
+//! 遅れの計測（#476）」。
+//!
+//! #476 のために、`Receive` の時点のグラフのストリーム時刻（基準時計の
+//! `GetTime` − `Run` に渡された原点）も書く。サンプルの開始時刻との差が
+//! 「ドライバーの打刻 → コールバック」の遅れになる。基準時計はレンダラーの
+//! `SetSyncSource` が、原点は `Run` がここへ渡す。遅れの集計（`report_lag`）は
+//! Media Foundation の経路の計測（`video::capture` のテスト）も使う。
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
+
+use windows::core::Interface;
+use windows::Win32::Media::IReferenceClock;
 
 /// 表の長さ。60fps の映像で 270 秒、10ms の塊の音声で 160 秒ぶん
 const CAPACITY: usize = 16384;
@@ -24,6 +36,7 @@ pub(super) struct Probe {
     start: [AtomicI64; CAPACITY],
     end: [AtomicI64; CAPACITY],
     hresult: [AtomicI64; CAPACITY],
+    stream_now: [AtomicI64; CAPACITY],
 }
 
 /// 1 つのサンプルの記録。
@@ -36,6 +49,8 @@ pub(super) struct Row {
     pub(super) end: i64,
     /// `GetTime` の結果。0 なら成功
     pub(super) hresult: i32,
+    /// `Receive` の時点のグラフのストリーム時刻（100ns）。基準時計が無ければ `None`
+    pub(super) stream_now: Option<i64>,
 }
 
 // 配列の初期化子にだけ使う。共有の値として読むことはない
@@ -50,6 +65,12 @@ pub(super) static BASE: OnceLock<Instant> = OnceLock::new();
 static DEFAULT_CLOCK: AtomicBool = AtomicBool::new(false);
 /// 偽の間は記録しない。測る区間の頭で立て、終わりで下ろす
 static RECORDING: AtomicBool = AtomicBool::new(false);
+/// グラフの基準時計（`IReferenceClock` の生ポインタ。参照を 1 つ持つ）。無ければ null
+static CLOCK: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+/// `Run` に渡されたストリーム時刻の原点（基準時計の時刻、100ns）。まだなら `NO_TIME`
+static RUN_START: AtomicI64 = AtomicI64::new(NO_TIME);
+/// 時刻が無いことを表す値
+const NO_TIME: i64 = i64::MIN;
 
 /// 記録を始めるか止める。止めたあとグラフを止めれば（`Stop` はストリーミングスレッドが
 /// 抜けるまで戻らない）、書きかけの行は残らない
@@ -65,6 +86,49 @@ pub(super) fn set_default_clock(value: bool) {
     DEFAULT_CLOCK.store(value, Ordering::Relaxed);
 }
 
+/// レンダラーの `SetSyncSource` から呼ぶ。前の時計の参照を手放して差し替える。
+/// `SetSyncSource` はグラフが止まっている間にしか呼ばれないので、
+/// `stream_time_now` が使っている最中の時計を手放すことはない
+pub(super) fn set_clock(clock: Option<&IReferenceClock>) {
+    let raw = clock.map_or(std::ptr::null_mut(), |clock| clock.clone().into_raw());
+    let old = CLOCK.swap(raw, Ordering::AcqRel);
+    if !old.is_null() {
+        // SAFETY: `into_raw` で参照を 1 つ持たせたポインタ。ここで手放す
+        drop(unsafe { IReferenceClock::from_raw(old) });
+    }
+}
+
+/// レンダラーの `Run` から呼ぶ。ストリーム時刻の原点
+pub(super) fn set_run_start(start: i64) {
+    RUN_START.store(start, Ordering::Release);
+}
+
+/// いまのグラフのストリーム時刻（100ns）。記録中でない・基準時計が無い・
+/// まだ `Run` されていないなら `None`。`Receive` から呼ぶ（ロックもアロケーションもしない）
+pub(super) fn stream_time_now() -> Option<i64> {
+    if !RECORDING.load(Ordering::Acquire) {
+        return None;
+    }
+    let raw = CLOCK.load(Ordering::Acquire);
+    let start = RUN_START.load(Ordering::Acquire);
+    if raw.is_null() || start == NO_TIME {
+        return None;
+    }
+    // SAFETY: `set_clock` が参照を持たせたポインタ。差し替えはグラフが止まっている間だけ
+    let clock = unsafe { IReferenceClock::from_raw_borrowed(&raw) }?;
+    let now = unsafe { clock.GetTime() }.ok()?;
+    Some(now - start)
+}
+
+/// 計測の対象のデバイス名（の一部）。環境変数 `CAPTURECARD_VIEWER_PIN_TEST_DEVICE`、既定は GC551。
+/// Media Foundation の経路の計測（`video::capture` のテスト）も使う
+pub(crate) fn test_device() -> String {
+    std::env::var("CAPTURECARD_VIEWER_PIN_TEST_DEVICE")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "GC551".to_string())
+}
+
 impl Probe {
     const fn new() -> Self {
         Self {
@@ -73,11 +137,19 @@ impl Probe {
             start: [ZERO; CAPACITY],
             end: [ZERO; CAPACITY],
             hresult: [ZERO; CAPACITY],
+            stream_now: [ZERO; CAPACITY],
         }
     }
 
     /// `Receive` から呼ぶ。表が埋まったら捨てる。
-    pub(super) fn record(&self, at: Instant, hresult: i32, start: i64, end: i64) {
+    pub(super) fn record(
+        &self,
+        at: Instant,
+        hresult: i32,
+        start: i64,
+        end: i64,
+        stream_now: Option<i64>,
+    ) {
         if !RECORDING.load(Ordering::Acquire) {
             return;
         }
@@ -93,6 +165,7 @@ impl Probe {
         self.start[i].store(start, Ordering::Relaxed);
         self.end[i].store(end, Ordering::Relaxed);
         self.hresult[i].store(i64::from(hresult), Ordering::Relaxed);
+        self.stream_now[i].store(stream_now.unwrap_or(NO_TIME), Ordering::Relaxed);
     }
 
     pub(super) fn reset(&self) {
@@ -107,6 +180,8 @@ impl Probe {
                 start: self.start[i].load(Ordering::Relaxed),
                 end: self.end[i].load(Ordering::Relaxed),
                 hresult: self.hresult[i].load(Ordering::Relaxed) as i32,
+                stream_now: Some(self.stream_now[i].load(Ordering::Relaxed))
+                    .filter(|t| *t != NO_TIME),
             })
             .collect()
     }
@@ -198,4 +273,154 @@ pub(super) fn report(label: &str, rows: &[Row]) -> Option<f64> {
     );
     let offsets: Vec<f64> = arrival.iter().zip(&time).map(|(a, t)| a - t).collect();
     Some(offsets.iter().sum::<f64>() / offsets.len() as f64)
+}
+
+/// 「打刻 → コールバック」の遅れの集計（ms）。DirectShow と Media Foundation の
+/// 経路で同じ集計を使う（#476）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LagStats {
+    pub(crate) count: usize,
+    pub(crate) mean: f64,
+    pub(crate) sd: f64,
+    pub(crate) min: f64,
+    pub(crate) p50: f64,
+    pub(crate) p95: f64,
+    pub(crate) max: f64,
+}
+
+/// 遅れ（ms）の列を集計して出す。3 個に満たなければ `None`
+pub(crate) fn report_lag(label: &str, lags_ms: &[f64]) -> Option<LagStats> {
+    if lags_ms.len() < 3 {
+        println!(
+            "== {label}: 遅れを測れたサンプルが {} 個しか無い",
+            lags_ms.len()
+        );
+        return None;
+    }
+    let (mean, sd, min, max) = stats(lags_ms);
+    let mut sorted = lags_ms.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let at = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
+    let lag = LagStats {
+        count: lags_ms.len(),
+        mean,
+        sd,
+        min,
+        p50: at(0.5),
+        p95: at(0.95),
+        max,
+    };
+    println!(
+        "== {label}: 打刻 → コールバックの遅れ ms（{} 個）: 平均 {:.3} 標準偏差 {:.3} 最小 {:.3} 中央値 {:.3} 95% {:.3} 最大 {:.3}（平均 − 最小 {:.3}、最大 − 最小 {:.3}）",
+        lag.count,
+        lag.mean,
+        lag.sd,
+        lag.min,
+        lag.p50,
+        lag.p95,
+        lag.max,
+        lag.mean - lag.min,
+        lag.max - lag.min
+    );
+    Some(lag)
+}
+
+/// 複数回の計測の集計を表の 1 行ずつで出す（Issue に写す形）
+pub(crate) fn print_lag_summary(label: &str, runs: &[Option<LagStats>]) {
+    println!("| {label} | 個数 | 平均 | 標準偏差 | 最小 | 中央値 | 95% | 最大 |");
+    for (i, run) in runs.iter().enumerate() {
+        match run {
+            Some(l) => println!(
+                "| {} 回目 | {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} |",
+                i + 1,
+                l.count,
+                l.mean,
+                l.sd,
+                l.min,
+                l.p50,
+                l.p95,
+                l.max
+            ),
+            None => println!("| {} 回目 | 測れない | | | | | | |", i + 1),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{display_name, DirectShowCapture};
+    use super::*;
+    use crate::audio::AudioPinFeed;
+    use crate::repaint::RepaintWaker;
+    use crate::video::{SharedColorConversion, VideoFrames};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    #[ignore = "DirectShow のキャプチャーボード（CAPTURECARD_VIEWER_PIN_TEST_DEVICE、既定 GC551）に 1920x1080 60Hz の入力信号を入れておく"]
+    fn directshow_sample_time_to_receive_lag() {
+        // 実行: cargo test directshow_sample_time_to_receive_lag -- --ignored --nocapture
+        // #476。基準時計を付けたグラフで 1920x1080 60fps YUY2 を開き、2 秒待ってから
+        // 10 秒のあいだ、サンプルの開始時刻（ドライバーの打刻、ストリーム時刻）と
+        // `Receive` の時点のストリーム時刻の差を測る。2 回開き直して再現性を見る。
+        // 音声ピンは繋がない。アプリは基準時計を外して動かすので、その点だけ条件が違う。
+        // Media Foundation の経路は `video::capture` の
+        // `media_foundation_capture_timestamp_to_callback_lag`
+        let device = test_device();
+        let _ = BASE.set(Instant::now());
+        let mut capture = DirectShowCapture::new(
+            VideoFrames::new(),
+            Arc::new(SharedColorConversion::new()),
+            RepaintWaker::default(),
+            AudioPinFeed::new(),
+        );
+        let name = capture
+            .list_friendly_names()
+            .into_iter()
+            .find(|name| name.contains(&device))
+            .unwrap_or_else(|| panic!("DirectShow のデバイス {device} がある"));
+        let display = display_name(&name);
+        set_default_clock(true);
+        let mut runs = Vec::new();
+        for run in 1..=2 {
+            capture
+                .start_capture(&display, Some((1920, 1080)), Some("YUY2"), Some(60), false)
+                .expect("開ける");
+            println!("{run} 回目: {:?}", capture.active());
+            std::thread::sleep(Duration::from_secs(2));
+            VIDEO.reset();
+            set_recording(true);
+            std::thread::sleep(Duration::from_secs(10));
+            set_recording(false);
+            // アロケーターは接続で決まる。止める前に読む
+            match capture
+                .graph
+                .as_ref()
+                .and_then(|graph| graph.video_allocator())
+            {
+                Some((bytes, count)) => {
+                    println!("映像ピンのアロケーター: cBuffers {count}、cbBuffer {bytes} バイト")
+                }
+                None => println!("映像ピンのアロケーターを読めない"),
+            }
+            // 止めてから読む（`sample_timestamps_track_the_arrival_time` と同じ理由）
+            capture.stop_capture();
+            let rows = VIDEO.take();
+            let label = format!("DirectShow {run} 回目");
+            report(&label, &rows);
+            let lags: Vec<f64> = rows
+                .iter()
+                .filter(|row| row.hresult == 0)
+                .filter_map(|row| row.stream_now.map(|now| (now - row.start) as f64 / 1e4))
+                .collect();
+            runs.push(report_lag(&label, &lags));
+        }
+        set_default_clock(false);
+        set_clock(None);
+        print_lag_summary("DirectShow", &runs);
+        assert!(
+            runs.iter().all(Option::is_some),
+            "サンプルの時刻か基準時計の時刻が取れない"
+        );
+    }
 }

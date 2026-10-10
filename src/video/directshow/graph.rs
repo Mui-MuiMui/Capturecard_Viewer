@@ -393,6 +393,13 @@ impl CaptureGraph {
         &self.audio.outcome
     }
 
+    /// 映像のレンダラーとの接続で決まったアロケーターの `(cbBuffer, cBuffers)`。
+    /// 実機の計測（#476、`timestamp_probe`）だけが読む
+    #[cfg(test)]
+    pub(super) fn video_allocator(&self) -> Option<(u32, i32)> {
+        self.renderer.allocator_buffers()
+    }
+
     /// 開いている形式の名前（`ActiveVideo::format` に入れる）。
     pub(super) fn format_name(&self) -> &'static str {
         self.format.kind.name()
