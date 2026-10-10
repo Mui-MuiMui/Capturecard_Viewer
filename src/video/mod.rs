@@ -12,6 +12,7 @@
 //! | `fake.rs` | 実機なしで動くフェイクの映像デバイス（テストパターンを吐く）。環境変数で有効にしたときだけ使う |
 //! | `test_pattern.rs` | フェイクが吐くテストパターン（カラーバー、ベタ塗り、フレーム番号の焼き込み）の描画 |
 //! | `frame_sink.rs` | フレームコールバックの本体（YUY2 → RGB、`FrameBuffer` へ積む、UI を起こす）。実機とフェイクで共有する |
+//! | `frame_sink_rgb.rs` | `FrameSink` の受け口のうち係数表を通らないもの（DirectShow の RGB24、MJPEG、デコーダ任せ） |
 //! | `frame_format.rs` | フレームの画素の並び（RGB24 / YUY2）と、YUY2 のまま積んだフレームから RGB を取り出す口（録画・スクリーンショット） |
 //! | `gpu_yuy2.rs` | YUY2 → RGB を GPU（シェーダー）で行う窓口。使うかの判断、フレームを預かる口、egui の描画へ差し込むコールバック |
 //! | `gpu_watch.rs` | GPU で変換しているときの性能の見張りとソフトウェア描画の見分け（判定だけ） |
@@ -43,6 +44,7 @@ mod fake;
 pub(crate) mod frame_buffer;
 mod frame_format;
 mod frame_sink;
+mod frame_sink_rgb;
 mod gpu_watch;
 mod gpu_yuy2;
 mod gpu_yuy2_gl;
