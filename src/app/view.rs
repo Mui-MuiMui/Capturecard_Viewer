@@ -86,6 +86,12 @@ fn reuse_or_new_color_image(
     Arc::new(image)
 }
 
+/// GPU で変換するフレーム（#456）のために、映像のテクスチャを作り直す（黒で確保する）か。
+/// まだ無いか、大きさが変わったときだけ。同じ大きさなら前の中身へシェーダーが上書きする
+fn needs_new_texture(current: Option<[usize; 2]>, frame: [usize; 2]) -> bool {
+    current != Some(frame)
+}
+
 /// 映像のテクスチャの拡大縮小。拡大は Nearest（補間なし）で軽く、縮小は Linear。
 /// GPU で変換するとき（#456）も同じテクスチャを egui が描くので、見え方は変わらない
 const VIDEO_TEXTURE_OPTIONS: egui::TextureOptions = egui::TextureOptions {
@@ -139,8 +145,9 @@ impl CaptureCardViewer {
             self.draw_frame(ctx, frame);
 
             // 表示までの遅れ（#455）。GPU が画面へ出した時刻は取れないので、テクスチャを
-            // 更新した直後で測る（GPU で変換するときは、変換を預けた直後。CPU の経路でも
-            // テクスチャへの転送は描画の終わりなので、測っている区間は同じ）。
+            // 更新した直後で測る。GPU で変換するとき（#456）は変換を預けた直後で止まり、
+            // このあと描画の中で走る YUY2 の転送とシェーダーの CPU 時間を含まない（CPU の経路は
+            // RGB → Color32 の詰め直しを含む）。CPU の経路との差の一部は計測点の移動による見かけ。
             // 到着時刻は世代番号と同じロックの中で読んだもの
             let now = Instant::now();
             let latency = now.saturating_duration_since(received_at);
@@ -170,7 +177,7 @@ impl CaptureCardViewer {
                 if self.gpu_yuy2.queue(Arc::clone(&frame)) {
                     // テクスチャは大きさが変わったときだけ作り直す（中身は黒。同じ描画の
                     // コールバックが映像を描く前に上書きする）
-                    if self.video_texture.as_ref().map(|t| t.size()) != Some(size) {
+                    if needs_new_texture(self.video_texture.as_ref().map(|t| t.size()), size) {
                         let blank = egui::ColorImage::filled(size, egui::Color32::BLACK);
                         self.set_video_texture(ctx, Arc::new(blank));
                     }
@@ -699,5 +706,13 @@ mod tests {
         assert!(!Arc::ptr_eq(&second, &held_by_egui));
         assert_eq!(size_and_rgba(&held_by_egui), ([1, 1], vec![[7, 7, 7, 255]]));
         assert_eq!(size_and_rgba(&second), ([1, 1], vec![[1, 2, 3, 255]]));
+    }
+
+    #[test]
+    fn needs_new_texture_only_when_missing_or_resized() {
+        assert!(needs_new_texture(None, [1920, 1080]));
+        assert!(needs_new_texture(Some([1280, 720]), [1920, 1080]));
+        // 同じ大きさなら作り直さない（毎フレーム 8MB の黒を確保しない）
+        assert!(!needs_new_texture(Some([1920, 1080]), [1920, 1080]));
     }
 }

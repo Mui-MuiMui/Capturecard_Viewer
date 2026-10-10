@@ -13,6 +13,16 @@ use std::time::{Duration, Instant};
 /// 映像のフレームを取りこぼし続ける
 pub(super) const SLOW_FRAME_RATIO: u32 = 2;
 
+/// 「遅い」の閾値の下限。60Hz の画面の 2 フレームぶん（約 33ms）より少し短い。120fps 以上の
+/// 映像では到着間隔の 2 倍が 17ms 未満になり、垂直同期やドライバーの待ちが 1 フレームの描画時間に
+/// 乗っただけで超えてしまう。その揺れで GPU を止めないよう、2 倍がこれを下回るときはこれを使う
+pub(super) const MIN_SLOW_FRAME: Duration = Duration::from_millis(32);
+
+/// 1 フレームの描画時間がこれを超えたら「遅い」。到着間隔の 2 倍と `MIN_SLOW_FRAME` の大きいほう
+pub(super) fn slow_threshold(interval: Duration) -> Duration {
+    (interval * SLOW_FRAME_RATIO).max(MIN_SLOW_FRAME)
+}
+
 /// 「遅い」がこの時間続いたら CPU へ戻す。途中で 1 フレームでも間に合えば数え直す
 pub(super) const SLOW_FOR: Duration = Duration::from_secs(5);
 
@@ -85,7 +95,7 @@ impl SlowPaintWatch {
         if now.saturating_duration_since(flowing_since) < GRACE {
             return false;
         }
-        if frame_time <= interval * SLOW_FRAME_RATIO {
+        if frame_time <= slow_threshold(interval) {
             self.slow_since = None;
             return false;
         }
@@ -274,5 +284,45 @@ mod tests {
         assert!(!is_software_renderer("SVGA3D; build: RELEASE;  LLVM;"));
         assert!(!is_software_renderer("NVIDIA GeForce RTX 4070/PCIe/SSE2"));
         assert!(!is_software_renderer("AMD Radeon(TM) Graphics"));
+    }
+
+    #[test]
+    fn slow_threshold_has_a_floor_for_high_frame_rates() {
+        // 60fps は 2 倍（33ms）、120fps は 2 倍が 16ms なので下限の 32ms
+        assert_eq!(slow_threshold(ms(16)), ms(32));
+        assert_eq!(
+            slow_threshold(Duration::from_micros(16_667)),
+            Duration::from_micros(33_334)
+        );
+        assert_eq!(slow_threshold(ms(8)), MIN_SLOW_FRAME);
+        assert_eq!(slow_threshold(ms(40)), ms(80));
+    }
+
+    #[test]
+    fn high_frame_rate_video_does_not_fire_below_the_floor() {
+        // 120fps（8ms 間隔）で描画が 20ms かかっても、下限の 32ms を超えなければ戻さない
+        let mut watch = SlowPaintWatch::default();
+        let start = Instant::now();
+        let observation = |frame_time| Observation {
+            frame_time: Some(frame_time),
+            frame_interval: Some(ms(8)),
+        };
+        assert_eq!(
+            run(
+                &mut watch,
+                start,
+                Duration::from_secs(10),
+                observation(ms(20))
+            ),
+            None
+        );
+        let mut watch = SlowPaintWatch::default();
+        assert!(run(
+            &mut watch,
+            start,
+            Duration::from_secs(10),
+            observation(ms(40))
+        )
+        .is_some());
     }
 }

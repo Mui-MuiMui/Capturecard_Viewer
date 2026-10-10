@@ -26,7 +26,7 @@ use super::color::SharedColorConversion;
 use super::frame_buffer::{FrameStats, VideoFrame};
 use super::frame_format::PixelFormat;
 use super::gpu_watch::{is_software_renderer, watched_interval, Observation, SlowPaintWatch};
-use super::gpu_yuy2_gl::GlConverter;
+use super::gpu_yuy2_gl::{GlConverter, GpuFailure};
 use crate::repaint::RepaintWaker;
 use crate::settings::VideoConvertSetting;
 
@@ -62,7 +62,7 @@ pub enum CpuReason {
     /// 描画が遅い状態が続いたので戻した（設定が「自動」のとき）
     TooSlow,
     /// GPU で変換できない（コンパイル・自己診断・描画の失敗）。理由の文
-    Unavailable(String),
+    Unavailable(GpuFailure),
 }
 
 impl CpuReason {
@@ -88,7 +88,7 @@ struct GlInfo {
 /// 描画の失敗 →（自動のときだけ）ソフトウェア描画 → 遅さ。**
 fn decide(
     prepared: &Result<GlInfo, CpuReason>,
-    failure: Option<&str>,
+    failure: Option<&GpuFailure>,
     preference: VideoConvertSetting,
     too_slow: bool,
 ) -> Yuy2Conversion {
@@ -96,7 +96,7 @@ fn decide(
         (Err(CpuReason::DisabledByEnv), _, _) => CpuReason::DisabledByEnv,
         (_, VideoConvertSetting::Cpu, _) => CpuReason::DisabledBySetting,
         (Err(reason), _, _) => reason.clone(),
-        (Ok(_), _, Some(failure)) => CpuReason::Unavailable(failure.to_string()),
+        (Ok(_), _, Some(failure)) => CpuReason::Unavailable(failure.clone()),
         (Ok(info), VideoConvertSetting::Auto, None) if info.software => {
             CpuReason::SoftwareRenderer(info.renderer.clone())
         }
@@ -116,7 +116,7 @@ struct Shared {
     /// 次の描画で変換するフレーム。新しいものが来たら古いものは捨てる（変換しない）
     pending: Option<Arc<VideoFrame>>,
     /// 描画の途中で失敗した理由。以後このセッションでは GPU を使わない
-    failure: Option<String>,
+    failure: Option<GpuFailure>,
     color_conversion: Arc<SharedColorConversion>,
     /// 失敗したとき、CPU で描き直す `update()` を起こす
     repaint_waker: RepaintWaker,
@@ -330,7 +330,7 @@ impl GpuYuy2 {
             .and_then(|shared| shared.lock().ok()?.failure.clone());
         let next = decide(
             &self.prepared,
-            failure.as_deref(),
+            failure.as_ref(),
             self.preference,
             self.too_slow,
         );
@@ -347,6 +347,11 @@ impl GpuYuy2 {
             }
             if self.current == Yuy2Conversion::Gpu {
                 self.switched_to_cpu = true;
+                // 預けたまま描かれていないフレームを捨てる。残すと、CPU で描き直した
+                // テクスチャを次の描画のコールバックが古いフレームで上書きしうる
+                if let Some(mut shared) = self.shared.as_ref().and_then(|s| s.lock().ok()) {
+                    shared.pending = None;
+                }
             }
             self.current = next;
         }
@@ -368,7 +373,9 @@ impl GpuYuy2 {
     /// YUY2 のフレームを次の描画で変換するよう預ける。預けられたら `true`。GPU を使って
     /// いなければ `false` で、呼び出し側は CPU で変換して描く（切り替えの前後に届いたもの）
     pub fn queue(&self, frame: Arc<VideoFrame>) -> bool {
-        if self.current != Yuy2Conversion::Gpu {
+        // 奇数幅は 2 画素 1 組が行をまたぐのでシェーダーでは描けない。`FrameSink` が CPU へ
+        // 回しているので来ないはずだが、ここでも弾く（守りを 1 か所にしない）
+        if self.current != Yuy2Conversion::Gpu || !frame.width.is_multiple_of(2) {
             return false;
         }
         let Some(mut shared) = self.shared.as_ref().and_then(|s| s.lock().ok()) else {
@@ -471,16 +478,21 @@ mod tests {
         // 「GPU」を選んでいても、GPU で変換できなければ CPU へ戻す（強制はしない）
         assert_eq!(
             decide(
-                &Err(CpuReason::Unavailable("compile".into())),
+                &Err(CpuReason::Unavailable(GpuFailure::Compile("log".into()))),
                 None,
                 VideoConvertSetting::Gpu,
                 false
             ),
-            Yuy2Conversion::Cpu(CpuReason::Unavailable("compile".into()))
+            Yuy2Conversion::Cpu(CpuReason::Unavailable(GpuFailure::Compile("log".into())))
         );
         assert_eq!(
-            decide(&ready(false), Some("draw"), VideoConvertSetting::Gpu, false),
-            Yuy2Conversion::Cpu(CpuReason::Unavailable("draw".into()))
+            decide(
+                &ready(false),
+                Some(&GpuFailure::GlError(0x502)),
+                VideoConvertSetting::Gpu,
+                false
+            ),
+            Yuy2Conversion::Cpu(CpuReason::Unavailable(GpuFailure::GlError(0x502)))
         );
     }
 

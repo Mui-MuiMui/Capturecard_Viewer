@@ -64,6 +64,7 @@ pub use fake::{FakeVideoCapture, FakeVideoOptions};
 pub use frame_buffer::{FrameStats, VideoFrame, VideoFrames};
 pub use frame_format::PixelFormat;
 pub use gpu_yuy2::{CpuReason, GpuYuy2, Yuy2Conversion, GPU_CONVERT_ENV};
+pub use gpu_yuy2_gl::GpuFailure;
 pub use tap::{VideoTap, VideoTapConsumer, VIDEO_TAP_CAPACITY};
 
 use std::fmt;

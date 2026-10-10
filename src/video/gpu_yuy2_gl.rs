@@ -12,12 +12,55 @@
 
 use eframe::egui_glow::ShaderVersion;
 use eframe::glow::{self, HasContext as _};
+use log::warn;
+use std::fmt;
 
 use super::color::{
     adjusted_color_matrix, ColorMatrix, VideoAdjustments, BT601, BT601_FULL, BT709, BT709_FULL,
 };
 use super::convert::yuy2_to_rgb_naive;
 use super::frame_buffer::VideoFrame;
+use crate::i18n;
+
+/// GPU で変換できない理由。ログと「接続状態」タブ・統計 OSD に出す。
+///
+/// **文言は `Display` から `crate::i18n` を引く**（`docs/design/error-reporting.md`）。
+/// 持たせる値は GL が返した文（シェーダーのログなど）と数値だけで、言語に依らない
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GpuFailure {
+    /// GLSL 1.40 / ES 3.00 に満たない。egui_glow が判定した版
+    ShaderVersion(String),
+    /// GL の資源（プログラム・シェーダー・頂点配列・テクスチャ・フレームバッファ）を作れない
+    Resources(String),
+    /// シェーダーをコンパイルできない。GL のログ
+    Compile(String),
+    /// シェーダーをリンクできない。GL のログ
+    Link(String),
+    /// 起動時の自己診断で CPU の変換と食い違った画素の数
+    SelfTestMismatch(usize),
+    /// 描画先のフレームバッファが不完全。`glCheckFramebufferStatus` の値
+    FramebufferIncomplete(u32),
+    /// 描画で GL のエラーが出た。`glGetError` の値
+    GlError(u32),
+    /// テクスチャの上限を超える大きさ
+    TooLarge {
+        width: usize,
+        height: usize,
+        max: usize,
+    },
+    /// 画素データの長さが YUY2 の `幅 × 高さ × 2` と合わない
+    LengthMismatch {
+        width: usize,
+        height: usize,
+        len: usize,
+    },
+}
+
+impl fmt::Display for GpuFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&i18n::gpu_failure(self))
+    }
+}
 
 const VERTEX_SOURCE: &str = include_str!("shaders/yuy2_to_rgb.vert");
 const FRAGMENT_SOURCE: &str = include_str!("shaders/yuy2_to_rgb.frag");
@@ -110,10 +153,10 @@ impl GlConverter {
     ///
     /// # Safety
     /// `gl` のコンテキストが current であること（UI スレッドの起動時か描画中）
-    pub(super) unsafe fn new(gl: &glow::Context) -> Result<Self, String> {
+    pub(super) unsafe fn new(gl: &glow::Context) -> Result<Self, GpuFailure> {
         let version = ShaderVersion::get(gl);
         let declaration = version_declaration(version)
-            .ok_or_else(|| format!("GLSL 1.40 / ES 3.00 に満たない（{version:?}）"))?;
+            .ok_or_else(|| GpuFailure::ShaderVersion(format!("{version:?}")))?;
         unsafe {
             let program = link_program(gl, declaration, version.is_embedded())?;
             let resources = (
@@ -123,7 +166,9 @@ impl GlConverter {
             );
             let (Ok(vertex_array), Ok(source), Ok(framebuffer)) = resources else {
                 gl.delete_program(program);
-                return Err("頂点配列・テクスチャ・フレームバッファを作れない".to_string());
+                return Err(GpuFailure::Resources(
+                    "vertex array / texture / framebuffer".to_string(),
+                ));
             };
             gl.bind_texture(glow::TEXTURE_2D, Some(source));
             for (parameter, value) in [
@@ -165,28 +210,31 @@ impl GlConverter {
         target: glow::Texture,
         restore: Option<glow::Framebuffer>,
         max_texture_side: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), GpuFailure> {
+        let too_large = GpuFailure::TooLarge {
+            width: frame.width,
+            height: frame.height,
+            max: max_texture_side,
+        };
         if frame.width > max_texture_side || frame.height > max_texture_side {
             // GL のテクスチャの上限を超える。映像のテクスチャ自体を作れないので変換もしない
-            return Err(format!(
-                "テクスチャの上限 {} を超える（{}x{}）",
-                max_texture_side, frame.width, frame.height
-            ));
+            return Err(too_large);
         }
         let (Ok(width), Ok(height)) = (i32::try_from(frame.width), i32::try_from(frame.height))
         else {
-            return Err(format!("大きすぎる（{}x{}）", frame.width, frame.height));
+            return Err(too_large);
         };
         if !frame.has_exact_len() {
             // 上げるときに GL が `幅 / 2 × 高さ × 4` バイトを読むので、足りないものは渡さない
-            return Err(format!(
-                "画素データの長さが合わない（{}x{}、{} バイト）",
-                frame.width,
-                frame.height,
-                frame.data.len()
-            ));
+            return Err(GpuFailure::LengthMismatch {
+                width: frame.width,
+                height: frame.height,
+                len: frame.data.len(),
+            });
         }
         unsafe {
+            // egui や他の描画が残したエラーを、この変換の失敗と取り違えない
+            clear_gl_errors(gl);
             self.upload(gl, width / 2, height, &frame.data);
             let result = self.draw(gl, target, width, height, matrix);
             gl.bind_framebuffer(glow::FRAMEBUFFER, restore);
@@ -239,7 +287,7 @@ impl GlConverter {
         width: i32,
         height: i32,
         matrix: &ColorMatrix,
-    ) -> Result<(), String> {
+    ) -> Result<(), GpuFailure> {
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.framebuffer));
             gl.framebuffer_texture_2d(
@@ -251,7 +299,7 @@ impl GlConverter {
             );
             let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
             if status != glow::FRAMEBUFFER_COMPLETE {
-                return Err(format!("描画先のフレームバッファが不完全（0x{status:X}）"));
+                return Err(GpuFailure::FramebufferIncomplete(status));
             }
             // egui はクリップのためにシザーを、半透明のためにブレンドを有効にしている。
             // テクスチャへの書き込みには両方とも要らない（書き残しと混色を避ける）
@@ -271,7 +319,7 @@ impl GlConverter {
             gl.bind_texture(glow::TEXTURE_2D, None);
             match gl.get_error() {
                 glow::NO_ERROR => Ok(()),
-                error => Err(format!("GL のエラー 0x{error:X}")),
+                error => Err(GpuFailure::GlError(error)),
             }
         }
     }
@@ -285,13 +333,11 @@ impl GlConverter {
         &mut self,
         gl: &glow::Context,
         restore: Option<glow::Framebuffer>,
-    ) -> Result<(), String> {
+    ) -> Result<(), GpuFailure> {
         let source = self_test_source();
         let (width, height) = (SELF_TEST_WIDTH as i32, SELF_TEST_HEIGHT as i32);
         unsafe {
-            let target = gl
-                .create_texture()
-                .map_err(|e| format!("自己診断のテクスチャを作れない: {e}"))?;
+            let target = gl.create_texture().map_err(GpuFailure::Resources)?;
             gl.bind_texture(glow::TEXTURE_2D, Some(target));
             gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
@@ -309,6 +355,7 @@ impl GlConverter {
                 glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(None),
             );
+            clear_gl_errors(gl);
             let mut gpu = vec![0u8; SELF_TEST_WIDTH * SELF_TEST_HEIGHT * 4];
             let mut cpu = Vec::new();
             let mut result = Ok(());
@@ -337,10 +384,11 @@ impl GlConverter {
                 );
                 let mismatches = count_mismatches(&gpu, &cpu);
                 if mismatches > 0 {
-                    result = Err(format!(
+                    warn!(
                         "自己診断で CPU の変換と {} 画素が食い違った（{}）",
                         mismatches, matrix.name
-                    ));
+                    );
+                    result = Err(GpuFailure::SelfTestMismatch(mismatches));
                     break;
                 }
             }
@@ -364,20 +412,33 @@ impl GlConverter {
     }
 }
 
+/// 前に積まれていた GL のエラーを読み捨てる。`draw` の末尾の `get_error` が、呼ぶ前から
+/// 残っていた別のエラー（egui や他の描画のもの）を拾い、変換の失敗と取り違えないようにする。
+/// コンテキストを失うと同じエラーを返し続ける実装があるので、読む回数に上限を置く
+unsafe fn clear_gl_errors(gl: &glow::Context) {
+    const MAX_PENDING_ERRORS: usize = 16;
+    for _ in 0..MAX_PENDING_ERRORS {
+        // SAFETY: 呼び出し側が GL のコンテキストを current にしている
+        if unsafe { gl.get_error() } == glow::NO_ERROR {
+            break;
+        }
+    }
+}
+
 /// 頂点・フラグメントのシェーダーをコンパイルしてリンクする
 unsafe fn link_program(
     gl: &glow::Context,
     declaration: &str,
     embedded: bool,
-) -> Result<glow::Program, String> {
+) -> Result<glow::Program, GpuFailure> {
     unsafe {
-        let program = gl.create_program()?;
+        let program = gl.create_program().map_err(GpuFailure::Resources)?;
         let mut shaders = Vec::new();
         for (kind, source) in [
             (glow::VERTEX_SHADER, VERTEX_SOURCE),
             (glow::FRAGMENT_SHADER, FRAGMENT_SOURCE),
         ] {
-            let shader = gl.create_shader(kind)?;
+            let shader = gl.create_shader(kind).map_err(GpuFailure::Resources)?;
             gl.shader_source(shader, &format!("{declaration}{source}"));
             gl.compile_shader(shader);
             if !gl.get_shader_compile_status(shader) {
@@ -387,7 +448,7 @@ unsafe fn link_program(
                     gl.delete_shader(shader);
                 }
                 gl.delete_program(program);
-                return Err(format!("シェーダーをコンパイルできない: {}", log.trim()));
+                return Err(GpuFailure::Compile(log.trim().to_string()));
             }
             gl.attach_shader(program, shader);
             shaders.push(shader);
@@ -405,7 +466,7 @@ unsafe fn link_program(
         }
         if !linked {
             gl.delete_program(program);
-            return Err(format!("シェーダーをリンクできない: {}", log.trim()));
+            return Err(GpuFailure::Link(log.trim().to_string()));
         }
         Ok(program)
     }
