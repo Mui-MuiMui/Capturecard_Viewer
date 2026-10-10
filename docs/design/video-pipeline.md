@@ -206,6 +206,25 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 - 集計（`video/display_latency.rs` の `DisplayLatency`）は UI スレッドだけが持つ `CaptureCardViewer` のフィールド。直近 1 秒の平均と最大を統計 OSD と「接続状態」タブの映像の欄に出し、30 秒ごとの平均・最大・枚数を `debug` でログへ出す（音声の観測値のログと同じ間隔）。ログには、取り込む前に次のフレームで上書きされた枚数と、新着が無いまま回った `update()` の回数も並べる（再描画の間隔の判断を確かめるため、#459）。**最小化を挟んだ窓ではどちらも大きく出る。** 最小化中も 1 秒ごとの `update()` が数えられ、取り込むたびに 1 秒ぶんの世代が飛ぶため。比べるときは最小化しない 30 秒を使う。取り込みが止まって 1 秒経てば「-」に戻り、止まる前の値を出し続けない
 - 測れるのは取り込んだフレームだけ。UI スレッドが追いつかずに上書きされたフレーム（世代が飛んだもの）は遅れの数に入らない（上書きされた枚数だけをログに出す）。コマ落ちの有無はフレーム間隔の行で見る
 
+## 取り込み側の遅れの計測（#476）
+
+上の計測（#455）の起点より前、**ドライバーがサンプルに打った時刻 → アプリのコールバックが呼ばれるまで**を、Media Foundation と DirectShow の 2 経路で同じ条件（1920x1080 60fps YUY2、開いて 2 秒待ってから 10 秒、2 回）で測る `#[ignore]` のテストを置いてある。製品のコードは変えていない。詳しい数値と条件は Issue #476 のコメント。
+
+| 経路 | テスト | 測るもの |
+|---|---|---|
+| DirectShow | `directshow_sample_time_to_receive_lag`（`src/video/directshow/timestamp_probe.rs`） | 基準時計を付けたグラフで、`Receive` の時点のストリーム時刻（基準時計の `GetTime` − `Run` に渡された原点）− サンプルの開始時刻。あわせて映像ピンで交渉されたアロケーターの `cBuffers` / `cbBuffer` |
+| Media Foundation | `media_foundation_capture_timestamp_to_callback_lag`（`src/video/capture.rs`） | コールバックの入口の UNIX 時刻 − nokhwa の `Buffer::capture_timestamp`。コールバックではアプリと同じ `FrameSink::push_yuy2` も行う |
+
+- 対象のデバイスは環境変数 `CAPTURECARD_VIEWER_PIN_TEST_DEVICE`（名前の一部、既定 GC551）。実行は `cargo test <テスト名> -- --ignored --nocapture`。デバイスは 1 プロセスしか開けないので、2 つを同時に走らせない
+- **DirectShow のアプリの形（基準時計なし）ではサンプルに時刻が付かない**（#406、`docs/design/recording.md` の「DirectShow のサンプルのタイムスタンプ（#406）」）。そのため計測だけ基準時計を付ける。条件はこの 1 点だけアプリと違う
+- **Media Foundation の `capture_timestamp` は絶対時刻として読めない。** nokhwa-bindings-windows 0.4.6 は `start_stream` の時点の UNIX 時刻（`stream_epoch`）に `ReadSample` のサンプル時刻を足している。サンプル時刻の原点がその瞬間でなければ、差にはその分のずれが乗る。テストは `open_stream` の前後の UNIX 時刻で `stream_epoch` を挟み、推定したサンプル時刻を `MFGetSystemTime`（QPC 基準）と比べた値も出す
+
+2026-10-11 に VM（USB パススルー）の Live Gamer EXTREME 3 で測った結果の要点。
+
+- **DirectShow のサンプルの時刻は、このボードでは実際の取り込みの時刻ではない。** 間隔がきっちり 16.667ms（600 枚で標準偏差 0.000ms）で、到着より後の時刻が付くサンプルもある（「遅れ」の最小が -3.3ms）。原点は開くたびに変わり、「遅れ」の平均は 1 回目 -1.3ms、2 回目 +1.2ms。**絶対値からは何も言えず、言えるのは揺れだけ**（標準偏差 1.5〜2.4ms、平均 − 最小 1.9〜2.0ms）。GC551 は `Receive` に渡す瞬間の時刻を刻んでいた（#406）ので、ボードとドライバーによって時刻の意味が違う
+- 映像ピンのアロケーターは 2 回とも `cBuffers` 10、`cbBuffer` 4147200 バイト（1920x1080 の YUY2 1 枚）。`Receive` は待たずに戻り、届く間隔も平均 16.667ms で詰まっていないので、バッファの数が遅れとして積み上がっている様子は無い。`IAMBufferNegotiation::SuggestAllocatorProperties` で減らしても効く見込みは小さい（試していない）
+- **Media Foundation はこの VM では開けず、測れていない。** ソースリーダーを作る段で `MF_E_REBOOT_REQUIRED`（0xC00D7167）が返り、アプリも自動で DirectShow へ倒れる。VM を再起動したあとに測り直す
+
 ## 試して外したもの: ソースリーダーの `MF_LOW_LATENCY`（#456）
 
 **Media Foundation のソースリーダーに `MF_LOW_LATENCY = TRUE` を付けても、1080p60 YUY2 の Live Gamer EXTREME 3 では遅延が変わらなかった**ので外した（PR #461 で入れ、同日に戻した）。同じ理由でもう一度入れないこと。
