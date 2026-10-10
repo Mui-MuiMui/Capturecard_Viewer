@@ -11,6 +11,10 @@ A viewer for displaying video and audio from a capture card. For Windows 10/11.
 - Recent capture cards (as of 2026) should work, but older ones may not. The author has no way to verify this, as those devices are not available for testing.
   - More precisely, it should work with any device that Windows recognizes as a webcam.
   - Devices that only support DirectShow (such as the OBS Virtual Camera) also work. They appear in the device list with "(DirectShow)" appended to their name.
+- Capture cards the author has verified on real hardware (as of October 2026):
+  - **AVerMedia Live Gamer EXTREME 3 (GC551G2)**: opened through Media Foundation at 1080p60 (YUY2); audio comes from the Windows audio input device. The latency figures were measured with this card
+  - **AVerMedia GC550 PLUS / Live Gamer EXTREME 2 (GC551)**: cannot be opened through Media Foundation, so with "Open video with" left at "Auto" it is opened through DirectShow. It exposes no Windows audio input, so use the "[Linked to video device]" audio input (see "Video device audio" under "Recommended settings")
+  - Reports about other cards are welcome in [Issues](https://github.com/Mui-MuiMui/Capturecard_Viewer/issues) (please include the model and how the video and audio were opened)
 - The interface is available in English and Japanese. By default it follows the Windows display language (see "Language").
 - AI is used in parts of this project's development. If you would rather not use software developed this way, please do not use it.
 
