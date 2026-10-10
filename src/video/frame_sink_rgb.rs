@@ -2,33 +2,75 @@
 //! 並べ替え（`push_bgr24`）、MJPEG の展開（`push_mjpeg`）、デコーダが RGB に
 //! 直したフレーム（`push_decoded`）。
 //!
-//! **どれも色空間・色レンジ・映像調整が効かず、統計ではデコーダの経路
-//! （`ConvertPath::Fallback`）として数える。** YUY2 / 4:2:0 の受け口と、積んで
-//! UI スレッドを起こす本体（`push`）は `frame_sink.rs` に置いてある。状態は
-//! `frame_sink.rs` の `FrameSink` が持ち、ここは `impl FrameSink` を足すだけ。
+//! **係数表を通らないので色空間（BT.601 / BT.709）は効かない。** 輝度レンジの
+//! 伸長と映像調整は、RGB になったあとで表（`super::rgb_adjust`）を引いて掛ける
+//! （#472）。統計ではデコーダの経路（`ConvertPath::Fallback`）として数える。
+//! YUY2 / 4:2:0 の受け口と、積んで UI スレッドを起こす本体（`push`）は
+//! `frame_sink.rs` に置いてある。状態は `frame_sink.rs` の `FrameSink` が持ち、
+//! ここは `impl FrameSink` を足すだけ。
 //!
 //! 例外の確保（`push_decoded` はデコーダが確保した Vec を受け取り、`push_mjpeg`
 //! はデコーダの内部で確保が起きる）は `frame_sink.rs` の冒頭を参照。
 
 use log::warn;
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::convert::{bgr24_stride, bgr24_to_rgb, mjpeg_to_rgb};
-use super::frame_buffer::{frame_len_status, FrameLenStatus};
+use super::frame_buffer::{frame_len_status, FrameLenStatus, VideoFrame};
 use super::frame_format::{ConvertPath, PixelFormat};
 use super::frame_sink::FrameSink;
+use crate::settings::ColorRange;
 
-/// デコーダへ倒れたフレームの「色変換」欄に出す文字列。
-/// 係数表を選べないので、そのことが分かる文言にしてある
-const DECODER_MATRIX_NAME: &str = "（デコーダ任せ）";
+/// MJPEG を展開したフレームの「色変換」欄に出す文字列（ログ用）。
+/// 係数表はデコーダの中にあり、色空間は選べないことが分かる文言にしてある
+const MJPEG_MATRIX_NAME: &str =
+    "（デコーダ任せ。レンジと映像調整は RGB で掛ける、色空間は効かない）";
 
 /// RGB24 のまま届いたフレームの「色変換」欄に出す文字列（ログ用）
-const RGB_MATRIX_NAME: &str = "（RGB のまま）";
+const RGB_MATRIX_NAME: &str = "（RGB のまま。レンジと映像調整は RGB で掛ける、色空間は効かない）";
+
+/// nokhwa のデコーダが RGB に直したフレームの「色変換」欄に出す文字列（ログ用）。
+/// nokhwa の YUYV の変換はリミテッドの伸長を自分で済ませるので、レンジも効かない
+const DECODER_MATRIX_NAME: &str =
+    "（デコーダ任せ。映像調整は RGB で掛ける、色空間とレンジは効かない）";
+
+/// RGB の経路でレンジの伸長を掛けるか
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeSource {
+    /// 設定の輝度レンジに従う（MJPEG の展開後、RGB24）
+    Setting,
+    /// デコーダが伸長を済ませているので掛けない（`push_decoded`）
+    Decoder,
+}
 
 impl FrameSink {
+    /// いまの設定で RGB の経路の表を作り直す（設定が前回と同じなら何もしない）。
+    /// 読むのはアトミックだけ
+    fn refresh_rgb_adjust(&mut self, source: RangeSource) {
+        let range = match source {
+            RangeSource::Setting => self.color_conversion.load().1,
+            RangeSource::Decoder => ColorRange::Full,
+        };
+        let adjustments = self.color_conversion.load_adjustments();
+        self.rgb_adjust.refresh(range, adjustments);
+    }
+
+    /// `fill_frame` で作ったばかりのフレームへ表を掛ける。
+    ///
+    /// まだ誰にも渡していないので `Arc::get_mut` は必ず取れる。取れなければ
+    /// 掛けずに積む（書き換えると他の持ち主の画が変わるため）
+    fn adjust_new_frame(&mut self, frame: &mut Arc<VideoFrame>, source: RangeSource) {
+        self.refresh_rgb_adjust(source);
+        if let Some(frame) = Arc::get_mut(frame) {
+            self.rgb_adjust.apply(&mut frame.data);
+        }
+    }
+
     /// DirectShow の RGB24（BGR の並び、行は 4 バイト境界）を RGB に並べ替えて積む。
     ///
-    /// **係数表を通らないので、色空間・色レンジ・映像調整は効かない。**
+    /// **係数表を通らないので色空間は効かない。** 輝度レンジの伸長と映像調整は
+    /// 並べ替えたあとで表を引いて掛ける（#472）。
     /// 変換先の Vec は YUY2 と同じく使い回す。データが足りなければ捨てる。
     pub(super) fn push_bgr24(
         &mut self,
@@ -51,9 +93,10 @@ impl FrameSink {
             }
             return false;
         }
-        let (frame, ()) = self.fill_frame(width, height, PixelFormat::Rgb24, |rgb| {
+        let (mut frame, ()) = self.fill_frame(width, height, PixelFormat::Rgb24, |rgb| {
             bgr24_to_rgb(width, height, stride, bottom_up, src, rgb)
         });
+        self.adjust_new_frame(&mut frame, RangeSource::Setting);
         self.push(
             frame,
             received_at,
@@ -65,8 +108,9 @@ impl FrameSink {
 
     /// MJPEG の 1 フレームを展開して積む。
     ///
-    /// **この経路でも色空間・色レンジ・映像調整は効かない**（`push_decoded` と
-    /// 同じ）。展開先の Vec は使い回すが、デコーダの内部では確保が起きる
+    /// **色空間は効かない**（係数はデコーダの中で BT.601 に決まっている）。輝度
+    /// レンジの伸長と映像調整は展開したあとで表を引いて掛ける（#472）。
+    /// 展開先の Vec は使い回すが、デコーダの内部では確保が起きる
     /// （`convert::mjpeg_to_rgb`）。壊れたフレームは捨て、初回だけ記録する。
     /// **捨てるときも展開先は手放さず、次のフレームの変換先として残す。**
     pub(super) fn push_mjpeg(
@@ -76,7 +120,7 @@ impl FrameSink {
         src: &[u8],
         received_at: Instant,
     ) -> bool {
-        let (frame, decoded) = self.fill_frame(width, height, PixelFormat::Rgb24, |rgb| {
+        let (mut frame, decoded) = self.fill_frame(width, height, PixelFormat::Rgb24, |rgb| {
             mjpeg_to_rgb(width, height, src, rgb)
         });
         if let Err(reason) = decoded {
@@ -93,19 +137,22 @@ impl FrameSink {
             }
             return false;
         }
+        self.adjust_new_frame(&mut frame, RangeSource::Setting);
         self.push(
             frame,
             received_at,
             ConvertPath::Fallback,
             "MJPEG",
-            DECODER_MATRIX_NAME,
+            MJPEG_MATRIX_NAME,
         )
     }
 
     /// デコーダが RGB に直したフレームを積む（汎用パス）。
     ///
-    /// **この経路では色空間・色レンジ・映像調整が効かない。** 係数表は
-    /// デコーダの内部にあり、外から差し替えられないため。
+    /// **この経路では色空間と輝度レンジが効かない。** 係数表はデコーダの内部に
+    /// あり、外から差し替えられないため（nokhwa の YUYV の変換はリミテッドの伸長も
+    /// 自分で済ませるので、ここで伸ばすと二重になる）。映像調整だけは RGB に
+    /// なったあとで表を引いて掛ける（#472）。
     /// `source_format` は元のフォーマットの表示名。積めたら `true`。
     ///
     /// **長さを `width * height * 3` に揃えてから積む**（#309）。nokhwa の
@@ -151,6 +198,8 @@ impl FrameSink {
                 return false;
             }
         }
+        self.refresh_rgb_adjust(RangeSource::Decoder);
+        self.rgb_adjust.apply(&mut rgb);
         // デコーダが確保した Vec はそのまま使う。回収したフレームは `Arc` だけを
         // 使い回し、中にあった古い Vec はここ（ロックの外）で手放す。以前は回収
         // せずに積んでいたので、置き換えた 2 世代前のフレームの解放がフレーム
@@ -183,7 +232,8 @@ impl Drop for FrameSink {
 mod tests {
     use super::*;
     use crate::repaint::RepaintWaker;
-    use crate::video::color::SharedColorConversion;
+    use crate::settings::ColorSpace;
+    use crate::video::color::{SharedColorConversion, VideoAdjustments};
     use crate::video::frame_buffer::VideoFrames;
     use std::sync::Arc;
 
@@ -252,6 +302,69 @@ mod tests {
         let stats = frames.stats();
         assert_eq!(stats.fallback_count, 1);
         assert_eq!(stats.source_format, Some("RGB24"));
+    }
+
+    fn sink_with(frames: &VideoFrames, color: &Arc<SharedColorConversion>) -> FrameSink {
+        FrameSink::new(frames, Arc::clone(color), RepaintWaker::default())
+    }
+
+    #[test]
+    fn frame_sink_push_bgr24_follows_the_range_and_adjustments() {
+        // 1x1 の灰色（16, 128, 235 を BGR の並びで。詰め物 1 バイト）
+        let frames = VideoFrames::new();
+        let color = Arc::new(SharedColorConversion::new());
+        let mut sink = sink_with(&frames, &color);
+        let src = [235, 128, 16, 0];
+
+        // 既定はリミテッド。16〜235 を 0〜255 へ伸ばす
+        assert!(sink.push_bgr24(1, 1, true, &src, Instant::now()));
+        assert_eq!(frames.latest().expect("1 枚目").data, vec![0, 130, 255]);
+
+        // フルで無調整なら並べ替えただけのまま
+        color.set_color_conversion(ColorSpace::Auto, ColorRange::Full);
+        assert!(sink.push_bgr24(1, 1, true, &src, Instant::now()));
+        assert_eq!(frames.latest().expect("2 枚目").data, vec![16, 128, 235]);
+
+        // 映像調整は次のフレームから効く
+        color.set_video_adjustments(VideoAdjustments::new(10, 0, 0));
+        assert!(sink.push_bgr24(1, 1, true, &src, Instant::now()));
+        assert_eq!(frames.latest().expect("3 枚目").data, vec![26, 138, 245]);
+    }
+
+    #[test]
+    fn frame_sink_push_mjpeg_applies_the_brightness() {
+        // 一様な灰色の JPEG を、明るさ -100 で展開すると 100 だけ暗くなる
+        let rgb = vec![200u8; 2 * 2 * 3];
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 100)
+            .encode(&rgb, 2, 2, image::ExtendedColorType::Rgb8)
+            .expect("JPEG にできる");
+        let frames = VideoFrames::new();
+        let color = Arc::new(SharedColorConversion::new());
+        color.set_color_conversion(ColorSpace::Auto, ColorRange::Full);
+        let mut sink = sink_with(&frames, &color);
+        assert!(sink.push_mjpeg(2, 2, &jpeg, Instant::now()));
+        let plain = frames.latest().expect("1 枚目").data.clone();
+
+        color.set_video_adjustments(VideoAdjustments::new(-100, 0, 0));
+        assert!(sink.push_mjpeg(2, 2, &jpeg, Instant::now()));
+        let darker = &frames.latest().expect("2 枚目").data;
+        let expected: Vec<u8> = plain.iter().map(|v| v.saturating_sub(100)).collect();
+        assert_eq!(darker, &expected);
+    }
+
+    #[test]
+    fn frame_sink_push_decoded_applies_adjustments_but_not_the_range() {
+        // nokhwa の変換はリミテッドの伸長を済ませているので、設定がリミテッドでも伸ばさない
+        let frames = VideoFrames::new();
+        let color = Arc::new(SharedColorConversion::new());
+        let mut sink = sink_with(&frames, &color);
+        assert!(sink.push_decoded(1, 1, vec![16, 128, 235], Instant::now(), "YUYV"));
+        assert_eq!(frames.latest().expect("1 枚目").data, vec![16, 128, 235]);
+
+        color.set_video_adjustments(VideoAdjustments::new(0, -100, 0));
+        assert!(sink.push_decoded(1, 1, vec![16, 128, 235], Instant::now(), "YUYV"));
+        assert_eq!(frames.latest().expect("2 枚目").data, vec![128, 128, 128]);
     }
 
     #[test]

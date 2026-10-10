@@ -181,7 +181,7 @@ texts! {
     ResolutionLabel { ja: "解像度:", en: "Resolution:" },
     FrameRateLabel { ja: "フレームレート:", en: "Frame rate:" },
     ColorSpaceLabel { ja: "色空間:", en: "Color space:" },
-    ColorSpaceHint { ja: "色がずれて見える場合に切り替えます。通常は自動のままで構いません", en: "Change this if colors look off. Auto is usually fine" },
+    ColorSpaceHint { ja: "色がずれて見える場合に切り替えます。通常は自動のままで構いません。フォーマットが MJPEG / RGB24 のときは効きません", en: "Change this if colors look off. Auto is usually fine. Has no effect when the format is MJPEG or RGB24" },
     ColorRangeLabel { ja: "色レンジ:", en: "Color range:" },
     ColorRangeHint { ja: "黒が灰色に浮く、または黒潰れ・白飛びする場合に切り替えます", en: "Change this if blacks look gray, or if shadows are crushed or highlights are blown out" },
     VideoAdjustments { ja: "映像調整", en: "Picture adjustments" },

@@ -49,6 +49,7 @@ mod gpu_watch;
 mod gpu_yuy2;
 mod gpu_yuy2_gl;
 mod mf_format;
+mod rgb_adjust;
 mod tap;
 mod test_pattern;
 mod yuv420;

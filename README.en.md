@@ -286,8 +286,8 @@ They are meant for per-device quirks that remain after the color space and range
 
 The adjustments are folded into the YUY2 -> RGB coefficients, so **the CPU cost barely changes**. The per-pixel work is exactly the same as with no adjustment; what is added is a handful of coefficient multiplications once per frame (no measurable difference at 1080p). Like the color space and range, they take effect on the next frame and the device is not reopened.
 
-> **The color space, color range and picture adjustments can all be inactive.**
-> They work by swapping the coefficients used when this app converts YUV frames itself (YUY2 and NV12, plus I420 and YV12 for "(DirectShow)" devices). If the device delivers something else (MJPEG or RGB24, for example), the frames are decoded or used as RGB as they are, and none of these settings apply. No log line is written for MJPEG or RGB24; only frames that this app has no dedicated conversion for (such as GRAY, or YUY2 with an odd width) leave a line about falling back to the decoder.
+> **Some settings do not apply to every format.**
+> All three apply when this app converts YUV frames itself (YUY2 and NV12, plus I420 and YV12 for "(DirectShow)" devices). With MJPEG or RGB24 the frames are already RGB when they arrive, so **the color space has no effect.** The color range (stretching 16-235 to 0-255 when set to Limited) and the picture adjustments are applied after the frame is RGB, so they do work. Frames that this app has no dedicated conversion for (such as GRAY, or YUY2 with an odd width) are decoded by the library on Media Foundation devices; there the color space and range have no effect and only the picture adjustments apply, and the log has a line about falling back to the decoder.
 
 **Audio**
 
@@ -340,12 +340,12 @@ Only issues the author is aware of are listed here. See [docs/TROUBLESHOOTING.md
 - With "Open video with" set to "Auto" (the default), a device that appears in both but cannot be opened with Media Foundation is reopened with DirectShow (such as the AVerMedia GC551). When opening with DirectShow on first launch (no config file), or when the configured resolution is not offered by the card, the resolution the card reports (usually the input signal's resolution) is used (on first launch it is also saved to the settings; an unavailable configured resolution is left as is), which avoids warning screens such as "Signal Out of Range". The Connection status tab shows which one was actually used.
 - To open such a device with DirectShow instead, set "Open video with" on the Devices tab of the settings window to "DirectShow" (the default is "Auto"). The Connection status tab shows which one was actually used. A device that the selected method does not list cannot be connected, so switch back to "Auto" if no picture appears.
 - The accepted formats are YUY2, NV12, I420, YV12, MJPEG and RGB24. A device that only outputs other formats, such as UYVY, shows no video.
-- Colour space, colour range and brightness / contrast / saturation only take effect with YUY2, NV12, I420 and YV12 (not with MJPEG or RGB24).
+- The colour space only takes effect with YUY2, NV12, I420 and YV12 (not with MJPEG or RGB24). The colour range and brightness / contrast / saturation work with every format.
 
 **Video format**
 
 - The device is opened in the format selected in the settings window. Only the formats the device offers are listed; for a device without "(DirectShow)" in its name these are the ones it supports out of YUY2, NV12, MJPEG and RGB24.
-- If a device cannot deliver 1080p60 in YUY2 because of bandwidth, selecting MJPEG may help. Colour space, colour range and the picture adjustments do not apply to MJPEG or RGB24.
+- If a device cannot deliver 1080p60 in YUY2 because of bandwidth, selecting MJPEG may help. The colour space does not apply to MJPEG or RGB24 (the colour range and picture adjustments do).
 - If a device without "(DirectShow)" in its name cannot be opened in the selected format, it is reopened in YUY2, and Settings → Connection status shows a line such as "Format: could not open as MJPEG, opened as YUY2".
 
 ## Reporting problems

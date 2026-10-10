@@ -31,6 +31,7 @@ use super::color::{adjusted_color_matrix, color_matrix_for, ColorMatrix, SharedC
 use super::convert::yuy2_to_rgb_naive;
 use super::frame_buffer::{fill_recycled, FrameBuffer, VideoFrame, VideoFrames};
 use super::frame_format::{ConvertPath, PixelFormat};
+use super::rgb_adjust::RgbAdjust;
 use super::tap::VideoTap;
 use super::yuv420::{yuv420_frame_len, yuv420_to_rgb, Yuv420Layout};
 use crate::repaint::RepaintWaker;
@@ -66,7 +67,7 @@ impl FirstTimeOnly {
 /// また 1 回出る。
 pub(super) struct FrameSink {
     buffer: Arc<Mutex<FrameBuffer>>,
-    color_conversion: Arc<SharedColorConversion>,
+    pub(super) color_conversion: Arc<SharedColorConversion>,
     /// フレームを置いたことを UI スレッドへ知らせる窓口。
     /// これが無いと、UI 側は保険の間隔でしか新着を見に来ない
     repaint_waker: RepaintWaker,
@@ -89,6 +90,9 @@ pub(super) struct FrameSink {
     /// 警告は初回だけなので、何枚捨てたかはストリームを閉じるときに出す
     /// （`frame_sink_rgb.rs` の `Drop`）
     pub(super) decoded_short_drops: u64,
+    /// RGB の経路（`frame_sink_rgb.rs`）で掛けるレンジの伸長と映像調整の表（#472）。
+    /// 設定が変わったときだけ作り直す
+    pub(super) rgb_adjust: RgbAdjust,
 }
 
 impl FrameSink {
@@ -110,6 +114,7 @@ impl FrameSink {
             decoded_long_notice: FirstTimeOnly::default(),
             decoded_short_notice: FirstTimeOnly::default(),
             decoded_short_drops: 0,
+            rgb_adjust: RgbAdjust::default(),
         }
     }
 

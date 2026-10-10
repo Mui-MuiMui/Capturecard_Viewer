@@ -204,8 +204,21 @@ impl VideoAdjustments {
     }
 
     /// 3 つとも 0 か。ログに「調整あり」と出すかの判定に使う
-    fn is_neutral(self) -> bool {
+    pub(super) fn is_neutral(self) -> bool {
         self == Self::NEUTRAL
+    }
+
+    /// RGB の経路の LUT（`super::rgb_adjust`）が倍率を求めるときに読む
+    pub(super) fn brightness(self) -> i32 {
+        self.brightness
+    }
+
+    pub(super) fn contrast(self) -> i32 {
+        self.contrast
+    }
+
+    pub(super) fn saturation(self) -> i32 {
+        self.saturation
     }
 }
 
