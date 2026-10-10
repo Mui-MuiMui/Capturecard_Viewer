@@ -208,15 +208,8 @@ impl VideoAdjustments {
         self == Self::NEUTRAL
     }
 
-    /// RGB の経路の LUT（`super::rgb_adjust`）が倍率を求めるときに読む
-    pub(super) fn brightness(self) -> i32 {
-        self.brightness
-    }
-
-    pub(super) fn contrast(self) -> i32 {
-        self.contrast
-    }
-
+    /// RGB の経路の表（`super::rgb_adjust`）が彩度の倍率を求めるときに読む。
+    /// 明るさとコントラストは `adjusted_color_matrix` を通して受け取る
     pub(super) fn saturation(self) -> i32 {
         self.saturation
     }

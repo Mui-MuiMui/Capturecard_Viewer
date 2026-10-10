@@ -6,33 +6,33 @@
 //! 既に RGB になっていて係数表を通らない。ここでは同じ式を RGB の上で表す。
 //!
 //! ```text
-//! s(v)  = リミテッドなら (v - 16) * 255 / 219、フルなら v   … レンジの伸長
-//! L     = 0.299 s(R) + 0.587 s(G) + 0.114 s(B)            … 彩度の中心（輝度）
-//! out_c = contrast * (L + saturation * (s(c) - L) - 128) + 128 + brightness
+//! Y(v)  = y * (v - y_offset) + offset        … 係数表の輝度の項（1024 倍）
+//! L     = 0.299 Y(R) + 0.587 Y(G) + 0.114 Y(B) … 彩度の中心（輝度）
+//! out_c = (L + saturation * (Y(c) - L)) >> 10
 //! ```
 //!
-//! 倍率の意味（-100 で 0 倍、0 で 1 倍、100 で 2 倍、明るさは RGB へ直に足す）は
-//! 係数表の側と揃えてある。**色空間（BT.601 / BT.709）は RGB では意味を持たない**
-//! （Y'CbCr から RGB へ直す係数の選び方なので、既に RGB のフレームには掛けようが
-//! ない）。彩度の中心の輝度は、JPEG（JFIF）の Y と同じ BT.601 の重みで取る。
+//! `y` / `y_offset` / `offset` は、YUY2 の経路が同じ設定で使う係数表
+//! （`adjusted_color_matrix`）からそのまま取る。リミテッドの伸長（1192 / 1024）、
+//! コントラストと明るさの畳み込み、`>> 10` の切り捨てまで同じなので、**灰色
+//! （色差のない画素）は YUY2 の経路と 1 も違わない。** 倍率の意味（-100 で 0 倍、
+//! 0 で 1 倍、100 で 2 倍、明るさは RGB へ直に足す）もそちらと同じ。
 //!
-//! 式はチャンネルごとの表（256 要素）だけで書ける。`s(c)` に掛かる分と定数を
-//! `gain` に、輝度に掛かる分を `luma_*` に入れておけば、1 画素は表引き 6 回と
+//! **色空間（BT.601 / BT.709）は RGB では意味を持たない**（Y'CbCr から RGB へ
+//! 直す係数の選び方なので、既に RGB のフレームには掛けようがない）。輝度の項の
+//! 係数は BT.601 と BT.709 で同じなので、どちらの表から取っても変わらない。
+//! 彩度の中心の輝度は、JPEG（JFIF）の Y と同じ BT.601 の重みで取る。
+//!
+//! 式はチャンネルごとの表（256 要素）だけで書ける。`Y(c)` から輝度の寄与を
+//! 引いた分を `gain` に、輝度の寄与を `luma` に入れておけば、1 画素は表引き 6 回と
 //! 足し算だけになる。彩度が無調整なら輝度の項は消えるので、`direct`（u8 の表）を
 //! 引くだけにする。**表の置き場所（約 4KB）は受け口を作るときに 1 度だけ確保し、
 //! 設定が変わったときはその中を書き直す。** フレームコールバックの中で確保しない
 //! ため。`FrameSink` に直に持たせないのは、それを抱える DirectShow の列挙型
 //! （`directshow/filter.rs` の `StreamState::Video`）が大きくなりすぎるため。
 
-use crate::settings::ColorRange;
+use crate::settings::{ColorRange, ColorSpace};
 
-use super::color::VideoAdjustments;
-
-/// 表を 1024 倍の固定小数点で持つ。係数表（`ColorMatrix`）と同じ倍率
-const FIXED_POINT_SCALE: f32 = 1024.0;
-
-/// コントラストと彩度の中心。係数表の側（`ADJUSTMENT_PIVOT`）と同じ 128
-const PIVOT: f32 = 128.0;
+use super::color::{adjusted_color_matrix, color_matrix_for, VideoAdjustments};
 
 /// 彩度の中心にする輝度の重み（BT.601、JFIF の Y と同じ）
 const LUMA_WEIGHTS: [f32; 3] = [0.299, 0.587, 0.114];
@@ -44,14 +44,15 @@ struct Tables {
     direct: [u8; 256],
     /// 彩度を掛けるか。偽なら `direct` だけを引く
     mix: bool,
-    /// `contrast * saturation * s(v)` と定数項（1024 倍）
+    /// `Y(v)` から、その値が灰色だったときの輝度の寄与（`luma` の 3 つの和）を
+    /// 引いたもの（1024 倍）。灰色なら `luma` と足して `Y(v)` ちょうどに戻る
     gain: [i32; 256],
-    /// `contrast * (1 - saturation) * 重み * s(v)`（1024 倍）。R・G・B の順
+    /// `(1 - saturation) * 重み * (Y(v) - offset)`（1024 倍）。R・G・B の順
     luma: [[i32; 256]; 3],
 }
 
 impl Tables {
-    /// 中身が空の表。`fill` で書いてから使う
+    /// 中身が空の表。`fill_tables` で書いてから使う
     fn empty() -> Self {
         Self {
             direct: [0; 256],
@@ -61,7 +62,7 @@ impl Tables {
         }
     }
 
-    /// 1 画素（R・G・B）に掛ける
+    /// 1 画素（R・G・B）に掛ける。`>> 10` は YUY2 の経路と同じ切り捨て
     fn apply_pixel(&self, px: &mut [u8; 3]) {
         if !self.mix {
             for c in px.iter_mut() {
@@ -73,7 +74,7 @@ impl Tables {
             + self.luma[1][px[1] as usize]
             + self.luma[2][px[2] as usize];
         for c in px.iter_mut() {
-            *c = ((self.gain[*c as usize] + l + 512) >> 10).clamp(0, 255) as u8;
+            *c = ((self.gain[*c as usize] + l) >> 10).clamp(0, 255) as u8;
         }
     }
 }
@@ -85,23 +86,26 @@ fn is_identity(range: ColorRange, adjustments: VideoAdjustments) -> bool {
 
 /// レンジと映像調整から表を書く。確保はしない
 fn fill_tables(tables: &mut Tables, range: ColorRange, adjustments: VideoAdjustments) {
-    let contrast = 1.0 + adjustments.contrast() as f32 / 100.0;
-    let saturation = 1.0 + adjustments.saturation() as f32 / 100.0;
-    let offset = PIVOT * (1.0 - contrast) + adjustments.brightness() as f32;
-    let stretch = |v: usize| match range {
-        ColorRange::Limited => (v as f32 - 16.0) * 255.0 / 219.0,
-        ColorRange::Full => v as f32,
-    };
+    // 輝度の項だけを使うので、色空間と解像度はどれでもよい（BT.601 と BT.709 で同じ）
+    let matrix = adjusted_color_matrix(
+        color_matrix_for(0, 0, ColorSpace::Bt601, range),
+        adjustments,
+    );
+    let keep = 1.0 - (1.0 + adjustments.saturation() as f32 / 100.0);
 
     tables.mix = adjustments.saturation() != 0;
     for v in 0..256 {
-        let s = stretch(v);
-        tables.direct[v] = (contrast * s + offset).round().clamp(0.0, 255.0) as u8;
-        tables.gain[v] = (FIXED_POINT_SCALE * (contrast * saturation * s + offset)).round() as i32;
+        // 係数表の輝度の項（YUY2 の `cy * Y - bias` と同じ値）
+        let scaled = matrix.y * (v as i32 - matrix.y_offset);
+        let luma_term = scaled + matrix.offset;
+        tables.direct[v] = (luma_term >> 10).clamp(0, 255) as u8;
+        let mut gray_luma = 0;
         for (channel, weight) in LUMA_WEIGHTS.iter().enumerate() {
-            tables.luma[channel][v] =
-                (FIXED_POINT_SCALE * contrast * (1.0 - saturation) * weight * s).round() as i32;
+            let part = (keep * weight * scaled as f32).round() as i32;
+            tables.luma[channel][v] = part;
+            gray_luma += part;
         }
+        tables.gain[v] = luma_term - gray_luma;
     }
 }
 
@@ -157,6 +161,7 @@ impl RgbAdjust {
 
 #[cfg(test)]
 mod tests {
+    use super::super::convert::yuy2_to_rgb_naive;
     use super::*;
 
     fn adjusted(range: ColorRange, adjustments: VideoAdjustments, rgb: [u8; 3]) -> [u8; 3] {
@@ -189,12 +194,14 @@ mod tests {
 
     #[test]
     fn limited_range_stretches_16_235_to_0_255() {
+        // YUY2 の経路と同じく 1192 / 1024 倍して切り捨てる。235 は 254.9 で 254
+        // （YUY2 の白と同じ値）、236 から上は 255 に張り付く
         assert_eq!(gray(ColorRange::Limited, NEUTRAL, 0), 0);
         assert_eq!(gray(ColorRange::Limited, NEUTRAL, 16), 0);
         assert_eq!(gray(ColorRange::Limited, NEUTRAL, 17), 1);
-        // (128 - 16) * 255 / 219 = 130.4
         assert_eq!(gray(ColorRange::Limited, NEUTRAL, 128), 130);
-        assert_eq!(gray(ColorRange::Limited, NEUTRAL, 235), 255);
+        assert_eq!(gray(ColorRange::Limited, NEUTRAL, 235), 254);
+        assert_eq!(gray(ColorRange::Limited, NEUTRAL, 236), 255);
         assert_eq!(gray(ColorRange::Limited, NEUTRAL, 255), 255);
     }
 
@@ -264,6 +271,80 @@ mod tests {
     }
 
     #[test]
+    fn limited_range_with_all_three_adjustments_at_the_boundaries() {
+        // リミテッド・明るさ +20・コントラスト +50・彩度 -100。
+        // 輝度の係数は round(1192 * 1.5) = 1788、定数は 1024 * (128 * -0.5 + 20) = -45056
+        let mono = VideoAdjustments::new(20, 50, -100);
+        assert_eq!(gray(ColorRange::Limited, mono, 0), 0);
+        assert_eq!(gray(ColorRange::Limited, mono, 16), 0);
+        // (1788 * 112 - 45056) / 1024 = 151.6
+        assert_eq!(gray(ColorRange::Limited, mono, 128), 151);
+        assert_eq!(gray(ColorRange::Limited, mono, 235), 255);
+        assert_eq!(gray(ColorRange::Limited, mono, 255), 255);
+        // リミテッドの赤（235, 16, 16）は白黒になり、輝度 0.299 * 382.4 - 44 = 70.3
+        assert_eq!(
+            adjusted(ColorRange::Limited, mono, [235, 16, 16]),
+            [70, 70, 70]
+        );
+
+        // リミテッド・明るさ -20・コントラスト -50・彩度 +100。
+        // 輝度の係数は 596、定数は 1024 * (128 * 0.5 - 20) = 45056
+        let vivid = VideoAdjustments::new(-20, -50, 100);
+        // 16 を下回る入力も YUY2 の経路と同じく伸ばしたまま扱う（(596 * -16 + 45056) / 1024 = 34.7）
+        assert_eq!(gray(ColorRange::Limited, vivid, 0), 34);
+        assert_eq!(gray(ColorRange::Limited, vivid, 16), 44);
+        assert_eq!(gray(ColorRange::Limited, vivid, 235), 171);
+        assert_eq!(gray(ColorRange::Limited, vivid, 255), 183);
+        // 赤は輝度から遠ざかる。R は 260.8 で 255 に張り付き、G と B は 5.9 → 5
+        assert_eq!(
+            adjusted(ColorRange::Limited, vivid, [235, 16, 16]),
+            [255, 5, 5]
+        );
+    }
+
+    #[test]
+    fn grays_match_the_yuy2_path_exactly() {
+        // 同じ設定で、YUY2 の経路（係数表 + `yuy2_to_rgb_naive`）と RGB の経路の灰色を
+        // 突き合わせる。灰色（Cb = Cr = 128）は色差の項が消えるので、RGB の経路が
+        // 係数表から取った輝度の項と同じ値になり、1 も違わないはず。
+        //
+        // 有彩色は突き合わせない。YUY2 の経路は Y'CbCr の色差に彩度を掛け、色空間
+        // （BT.601 / BT.709）で輝度の重みも色差の係数も変わる。RGB の経路は届いた RGB
+        // から BT.601 の重みで輝度を取り直すので、同じ色を同じ値にする前提が無い
+        // （差は色と色空間しだいで、許容差を決める根拠が無い）
+        let cases = [
+            (0, 0, 0),
+            (100, 0, 0),
+            (-100, 0, 0),
+            (0, 100, 0),
+            (0, -100, 0),
+            (20, 50, -100),
+            (-20, -50, 100),
+            (50, -30, 40),
+            (-100, 100, -100),
+        ];
+        for (brightness, contrast, saturation) in cases {
+            let adjustments = VideoAdjustments::new(brightness, contrast, saturation);
+            for range in [ColorRange::Limited, ColorRange::Full] {
+                for space in [ColorSpace::Bt601, ColorSpace::Bt709] {
+                    let matrix =
+                        adjusted_color_matrix(color_matrix_for(2, 1, space, range), adjustments);
+                    for y in [0u8, 1, 15, 16, 17, 64, 128, 200, 234, 235, 236, 254, 255] {
+                        let mut yuy2 = Vec::new();
+                        yuy2_to_rgb_naive(2, 1, &[y, 128, y, 128], &matrix, &mut yuy2);
+                        let rgb = adjusted(range, adjustments, [y, y, y]);
+                        assert_eq!(
+                            &yuy2[..3],
+                            &rgb,
+                            "Y={y} {range:?} {space:?} 調整 {brightness} {contrast} {saturation}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn refresh_rebuilds_only_when_the_settings_change() {
         let mut adjust = RgbAdjust::default();
         adjust.refresh(ColorRange::Limited, NEUTRAL);
@@ -285,6 +366,6 @@ mod tests {
         adjust.refresh(ColorRange::Limited, NEUTRAL);
         let mut data = [235, 235, 235, 16];
         adjust.apply(&mut data);
-        assert_eq!(data, [255, 255, 255, 16]);
+        assert_eq!(data, [254, 254, 254, 16]);
     }
 }

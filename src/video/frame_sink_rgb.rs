@@ -316,9 +316,9 @@ mod tests {
         let mut sink = sink_with(&frames, &color);
         let src = [235, 128, 16, 0];
 
-        // 既定はリミテッド。16〜235 を 0〜255 へ伸ばす
+        // 既定はリミテッド。16〜235 を 0〜255 へ伸ばす（YUY2 の経路と同じ切り捨てで 235 は 254）
         assert!(sink.push_bgr24(1, 1, true, &src, Instant::now()));
-        assert_eq!(frames.latest().expect("1 枚目").data, vec![0, 130, 255]);
+        assert_eq!(frames.latest().expect("1 枚目").data, vec![0, 130, 254]);
 
         // フルで無調整なら並べ替えただけのまま
         color.set_color_conversion(ColorSpace::Auto, ColorRange::Full);
