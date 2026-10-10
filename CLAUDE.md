@@ -76,14 +76,18 @@ cargo build --release
 | `src/video/directshow/audio_pin.rs` | 映像デバイスの音声ピン（#388）。列挙の時点での有無の判定（`probe_presence`、#409）、有無の記録、10ms の塊の提案と接続、`Run` が通らないときに外してやり直す（`run_with_fallback`）、`WAVEFORMATEX` の読み取り（`pin_format_from_wave`）、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
 | `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
 | `src/video/directshow/timestamp_probe.rs` | テストを含むビルドだけ（`#[cfg(test)]`）。`Receive` に届いたサンプルの到着時刻と `IMediaSample::GetTime` を Atomic の表へ書き、`#[ignore]` のテストが揺れを出す（#406）。グラフに基準時計を付けるかの切り替えもここ |
-| `src/video/frame_sink.rs` | フレームコールバックの本体 `FrameSink`（YUY2→RGB、`FrameBuffer` へ積む、`RepaintWaker` で UI を起こす）。実機（Media Foundation / DirectShow）とフェイクで共有する。DirectShow の RGB24 / MJPEG / 4:2:0 の YUV（NV12 / I420 / YV12）の受け口もここ |
+| `src/video/frame_sink.rs` | フレームコールバックの本体 `FrameSink`（YUY2→RGB、GPU で変換するときは YUY2 のまま写す（#456）、`FrameBuffer` へ積む、`RepaintWaker` で UI を起こす）。実機（Media Foundation / DirectShow）とフェイクで共有する。DirectShow の RGB24 / MJPEG / 4:2:0 の YUV（NV12 / I420 / YV12）の受け口もここ |
 | `src/video/fake.rs` | 実機なしで動くフェイクの映像デバイス `FakeVideoCapture`。テストパターンを指定 fps で吐く生成スレッド、切断・接続失敗のシナリオ、音声ピンを持つシナリオ（`with_audio_pin`、#394） |
 | `src/video/test_pattern.rs` | フェイクが吐くテストパターン（カラーバー、ベタ塗り、フレーム番号の焼き込み）の描画。純粋関数 |
 | `src/video/capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の取得 |
 | `src/video/color.rs` | YCbCr→RGB の係数表とその選び方、映像調整の畳み込み、設定の共有（`SharedColorConversion`） |
 | `src/video/convert.rs` | YUY2→RGB24 の画素変換と、DirectShow の RGB24（BGR）/ MJPEG の展開 |
 | `src/video/yuv420.rs` | 4:2:0 の YUV（NV12 / I420 / YV12）→ RGB24 の画素変換（`yuv420_to_rgb`、面の並び `Yuv420Layout`）。1 画素の式と係数表は YUY2 と同じで、違うのは色差の置き方だけ。`FrameSink` が呼ぶ |
-| `src/video/frame_buffer.rs` | `FrameBuffer`（`Arc` によるフレーム共有と世代番号。新着と一緒に受け取った時刻も返す `newer_than`）と観測値（`FrameStats`）、画素データの長さの判定（`frame_len_status`）、置き換えたフレームを `Arc` ごと使い回すか（`fill_recycled`） |
+| `src/video/frame_buffer.rs` | `FrameBuffer`（`Arc` によるフレーム共有と世代番号。新着と一緒に受け取った時刻も返す `newer_than`）と観測値（`FrameStats`）、RGB の画素データの長さの判定（`frame_len_status`）、置き換えたフレームを `Arc` ごと使い回すか（`fill_recycled`） |
+| `src/video/frame_format.rs` | フレームの画素の並び `PixelFormat`（RGB24 / YUY2 と係数表、#456）、統計の経路 `ConvertPath`、形式を問わない長さの判定（`pixel_len_status`）、YUY2 のまま積まれたフレームから RGB を取り出す口（録画の `rgb`、スクリーンショットの `into_rgb`） |
+| `src/video/gpu_yuy2.rs` | YUY2 → RGB を GPU（シェーダー）で行う窓口 `GpuYuy2`（#456）。使うかの判断（環境変数・設定・失敗・ソフトウェア描画・見張り、`decide`）、フレームを預かる口（`queue`）、egui の描画へ差し込むコールバック（`paint_callback`）、GPU → CPU の切り替え（一方向・1 回）。UI スレッドだけが触る |
+| `src/video/gpu_yuy2_gl.rs` | その GL の部分 `GlConverter`。シェーダー（`src/video/shaders/`）のコンパイル、YUY2 のアップロード、フレームバッファ経由で egui のテクスチャへ描く、起動時の自己診断（CPU の変換と全画素の突き合わせ） |
+| `src/video/gpu_watch.rs` | GPU で変換しているときの性能の見張り `SlowPaintWatch`（描画が到着間隔の 2 倍を 5 秒、猶予 3 秒）とソフトウェア描画の見分け（`is_software_renderer`）。判定だけの純粋関数 |
 | `src/video/display_latency.rs` | 表示までの遅れ（フレームの到着 → テクスチャの更新、#455）の集計 `DisplayLatency`。直近 1 秒の平均・最大と 30 秒ごとのログの窓。UI スレッドだけが持つ |
 | `src/video/tap.rs` | 録画へ映像を回す差し込み口 `VideoTap`。録画中だけ、`FrameSink` が画面へ置いたのと同じ `Arc<VideoFrame>` を容量 3 のリングへ積む（待たない `try_lock`、満杯なら捨てて数える）。Vec の回収に失敗した回数も録画中だけ数える |
 | `src/audio/mod.rs` | 音声モジュールの入口。`ActiveAudio` / `AudioDirection` / `AudioError` と能力キャッシュのキー（`cache_key` / `device_name_from_key`）、外から使う経路（`crate::audio::...`）の `pub use` |
@@ -133,7 +137,7 @@ cargo build --release
 | `src/screenshot.rs` | `ScreenshotError`（クリップボードへのコピーと効果音で共通）と、映像フレームのクリップボードへのコピー（`copy_frame_to_clipboard`） |
 | `src/screenshot_sound.rs` | rodio による効果音の読み込みと再生。埋め込みの既定音、設定のパスの解決（`resolve_sound_path`）、読み込み要求の番号の管理（`ScreenshotManager`） |
 | `src/settings/mod.rs` | 設定の入口。`AppSettings` と、読み込みで必ず通る `RawAppSettings` → `From`（旧形式からの移行とプリセットの整え）、`SettingsError`、`APP_NAME`。外から使う経路（`crate::settings::...`）の `pub use` もここ |
-| `src/settings/video.rs` | `[video]`。`VideoSettings`、色空間・輝度レンジ・開き方の選択肢、映像調整の範囲と、それぞれの serde の補助 |
+| `src/settings/video.rs` | `[video]`。`VideoSettings`、色空間・輝度レンジ・開き方・変換の場所（`VideoConvertSetting`、#456）の選択肢、映像調整の範囲と、それぞれの serde の補助 |
 | `src/settings/audio.rs` | `[audio]`。`AudioSettings`、サンプリングレート・チャンネル数の既定値、リングバッファの長さの範囲 |
 | `src/settings/screenshot.rs` | `[screenshot]`。出力先・保存形式・JPEG 品質の選択肢、保存先の既定値、保存するファイルのパス（`AppSettings::get_screenshot_path`） |
 | `src/settings/recording.rs` | `[recording]`。ビットレート・リプレイバッファの長さ・映像と音声のずれの補正の範囲、保存先の既定値 |

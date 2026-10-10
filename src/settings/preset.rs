@@ -48,7 +48,7 @@ pub(super) fn sanitize_presets(presets: Vec<Preset>) -> Vec<Preset> {
 // 驚きが大きく、「プリセットを切り替えたらホットキーが効かなくなった」
 // という迷い方をさせる。
 //
-// `video.auto_reconnect` だけは `video` の中にありながら対象外。理由は
+// `video.auto_reconnect` と `video.convert`（#456）は `video` の中にありながら対象外。理由は
 // `apply_to` のコメントを見ること。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -67,6 +67,8 @@ impl Preset {
         // 対象外の項目は既定値で固定する。現在値を書き込むと、設定ファイルを
         // 読んだ人に「プリセットで自動再接続が切り替わる」と読めてしまう
         video.auto_reconnect = VideoSettings::default().auto_reconnect;
+        // 変換の場所（#456）も同じ扱い。PC の GPU で決まる項目で、画は変わらない
+        video.convert = VideoSettings::default().convert;
         Self {
             name,
             video,
@@ -82,10 +84,16 @@ impl Preset {
     //   - プリセットを読み込んだだけで自動再接続が勝手に切り替わる
     //   - 自動再接続を切り替えただけでプリセットが「（変更あり）」になる
     // どちらもプリセットの目的と関係がない。
+    //
+    // `video.convert`（YUY2 を GPU と CPU のどちらで変換するか、#456）も写さない。
+    // 画は同じで、使える GPU は PC で決まる。キャプチャーボードの使い分けとも
+    // 低遅延 / 画質の切替とも関係がなく、含めると読み込んだだけで変換の場所が変わる。
     pub fn apply_to(&self, settings: &mut AppSettings) {
         let auto_reconnect = settings.video.auto_reconnect;
+        let convert = settings.video.convert;
         settings.video = self.video.clone();
         settings.video.auto_reconnect = auto_reconnect;
+        settings.video.convert = convert;
         settings.audio = self.audio.clone();
     }
 }
@@ -144,6 +152,7 @@ pub fn validate_preset_name(
 pub fn matches_preset(preset: &Preset, settings: &AppSettings) -> bool {
     let mut video = settings.video.clone();
     video.auto_reconnect = preset.video.auto_reconnect;
+    video.convert = preset.video.convert;
     video == preset.video && settings.audio == preset.audio
 }
 
@@ -226,7 +235,7 @@ mod tests {
     use super::*;
     use crate::hotkey::HotkeyAction;
     use crate::settings::testing::FULL_CONFIG;
-    use crate::settings::{export_to, import_from, VideoBackendSetting};
+    use crate::settings::{export_to, import_from, VideoBackendSetting, VideoConvertSetting};
     use tempfile::tempdir;
 
     #[test]
@@ -241,6 +250,25 @@ mod tests {
         assert!(!matches_preset(&preset, &target));
         preset.apply_to(&mut target);
         assert_eq!(target.video.backend, VideoBackendSetting::DirectShow);
+        assert!(matches_preset(&preset, &target));
+    }
+
+    #[test]
+    fn video_convert_is_not_part_of_the_preset() {
+        // 変換の場所（#456）は PC で決まる。プリセットで変わらず、比べもしない
+        let mut settings = AppSettings::default();
+        settings.video.convert = VideoConvertSetting::Cpu;
+        let preset = Preset::from_settings("CPU".to_string(), &settings);
+        assert_eq!(preset.video.convert, VideoConvertSetting::Auto);
+        assert!(
+            matches_preset(&preset, &settings),
+            "変換の場所だけ違っても一致"
+        );
+
+        let mut target = AppSettings::default();
+        target.video.convert = VideoConvertSetting::Gpu;
+        preset.apply_to(&mut target);
+        assert_eq!(target.video.convert, VideoConvertSetting::Gpu);
         assert!(matches_preset(&preset, &target));
     }
 

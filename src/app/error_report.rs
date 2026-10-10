@@ -88,6 +88,10 @@ impl CaptureCardViewer {
                 .details
                 .push(i18n::link_capture_api(active.api.label()));
             video.details.push(i18n::link_video(active.summary()));
+            // YUY2 をどこで RGB にしているか（#456）。GPU を使えない理由もここに出る
+            video
+                .details
+                .push(i18n::link_yuy2_conversion(&self.gpu_yuy2.conversion()));
             // 設定の形式で開けず YUY2 で開いたとき（#81）。選んだ形式が効いて
             // いないことが「映像:」の行だけでは分からないので並べて出す
             if let Some(requested) = &active.format_fallback {

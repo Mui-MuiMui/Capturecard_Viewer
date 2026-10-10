@@ -275,6 +275,9 @@ impl CaptureCardViewer {
         // ログ出力も UI スレッド側（drain_screenshot_results）へ寄せてある
         let result_tx = self.screenshot_tx.clone();
         let handle = std::thread::spawn(move || {
+            // YUY2 のまま積まれたフレーム（GPU で変換している、#456）はここで RGB にする。
+            // 1 枚だけなので CPU で変換してよい。UI スレッドでは行わない
+            let frame = frame.into_rgb();
             // 両方のときはクリップボードを先にする。撮ってすぐ貼る使い方で、
             // ディスクへの書き出しを待たせないため。
             // **片方が失敗しても他方は行う。** クリップボードを他のアプリが
@@ -501,6 +504,7 @@ mod tests {
                 0, 0, 255, // 左下: 青
                 255, 255, 255, // 右下: 白
             ],
+            format: video::PixelFormat::Rgb24,
         }
     }
 
@@ -519,6 +523,7 @@ mod tests {
             width: 64,
             height: 64,
             data,
+            format: video::PixelFormat::Rgb24,
         }
     }
 
@@ -616,6 +621,7 @@ mod tests {
             width: 2,
             height: 2,
             data: vec![0; 11],
+            format: video::PixelFormat::Rgb24,
         };
 
         let err = save_frame(&frame, &path, JPEG_Q90).expect_err("エラーになること");
@@ -633,6 +639,7 @@ mod tests {
             width: 0,
             height: 0,
             data: Vec::new(),
+            format: video::PixelFormat::Rgb24,
         };
 
         let err = save_frame(&frame, &path, JPEG_Q90).expect_err("エラーになること");

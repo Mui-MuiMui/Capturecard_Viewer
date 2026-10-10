@@ -9,12 +9,15 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use super::frame_format::{pixel_len_status, ConvertPath, PixelFormat};
 use super::tap::VideoTap;
 
+/// 1 枚のフレーム。`data` の並びは `format` で決まる（`super::frame_format`、#456）。
 pub struct VideoFrame {
     pub width: usize,
     pub height: usize,
     pub data: Vec<u8>,
+    pub format: PixelFormat,
 }
 
 /// RGB の画素データの長さが `幅 × 高さ × 3` と比べてどうか（`frame_len_status`）。
@@ -34,17 +37,9 @@ pub enum FrameLenStatus {
 }
 
 /// `len` バイトの RGB の画素データが `width` x `height` のフレームに合うかを判定する。
+/// 形式を問わない判定は `super::frame_format::pixel_len_status`。
 pub fn frame_len_status(len: usize, width: usize, height: usize) -> FrameLenStatus {
-    let Some(expected) = width.checked_mul(height).and_then(|n| n.checked_mul(3)) else {
-        return FrameLenStatus::TooShort {
-            expected: usize::MAX,
-        };
-    };
-    match len.cmp(&expected) {
-        std::cmp::Ordering::Equal => FrameLenStatus::Exact,
-        std::cmp::Ordering::Greater => FrameLenStatus::TooLong { expected },
-        std::cmp::Ordering::Less => FrameLenStatus::TooShort { expected },
-    }
+    pixel_len_status(len, width, height, 3)
 }
 
 /// フレーム間隔から求めたばらつきの指標。単位はミリ秒。
@@ -72,9 +67,10 @@ pub struct IntervalStats {
 pub struct FrameStats {
     /// フレーム間隔の集計。2 枚目が届くまでは `None`
     pub intervals: Option<IntervalStats>,
-    /// 直近 1 フレームの RGB 変換にかかった時間（ミリ秒）
+    /// 直近 1 フレームの RGB 変換にかかった時間（ミリ秒）。GPU で変換するフレームでは
+    /// 変換せずに積むまでの時間（`on_gpu`）
     pub last_decode_ms: f32,
-    /// 自前の YUY2 変換（高速パス）を通ったフレーム数
+    /// 自前の YUY2 変換（高速パス）を通ったフレーム数。GPU で変換するフレームも数える
     pub fast_count: u64,
     /// デコーダ任せの汎用パスを通ったフレーム数
     pub fallback_count: u64,
@@ -84,6 +80,8 @@ pub struct FrameStats {
     pub source_format: Option<&'static str>,
     /// 最後にフレームが届いてからの経過時間（ミリ秒）
     pub since_last_frame_ms: Option<f32>,
+    /// 直近フレームを YUY2 のまま積み、GPU で RGB にしているか（#456）
+    pub on_gpu: bool,
 }
 
 /// フレーム間隔の列から実効 FPS とばらつきを求める。
@@ -142,6 +140,8 @@ pub(super) struct FrameBuffer {
     last_decode_ms: f32,
     fast_count: u64,
     fallback_count: u64,
+    // 直近フレームを GPU で変換するか（`FrameStats::on_gpu`）
+    on_gpu: bool,
     // 直近フレームの入力フォーマット。デバイスが要求どおりに開けたとは
     // 限らないため、設定値ではなく実際に届いたフレームのものを持つ
     source_format: Option<&'static str>,
@@ -157,6 +157,7 @@ impl FrameBuffer {
             last_decode_ms: 0.0,
             fast_count: 0,
             fallback_count: 0,
+            on_gpu: false,
             source_format: None,
         }
     }
@@ -173,17 +174,17 @@ impl FrameBuffer {
         frame: Arc<VideoFrame>,
         received_at: Instant,
         decode_ms: f32,
-        fast: bool,
+        path: ConvertPath,
         source_format: &'static str,
     ) -> Option<Arc<VideoFrame>> {
         let replaced = self.latest.replace(frame);
         self.generation += 1;
         self.last_decode_ms = decode_ms;
         self.source_format = Some(source_format);
-        if fast {
-            self.fast_count += 1;
-        } else {
-            self.fallback_count += 1;
+        self.on_gpu = path == ConvertPath::Gpu;
+        match path {
+            ConvertPath::Fast | ConvertPath::Gpu => self.fast_count += 1,
+            ConvertPath::Fallback => self.fallback_count += 1,
         }
         // 間隔は RGB 変換が終わった時刻ではなく、フレームを受け取った時刻で測る。
         // 変換時間が揺れると、その差が間隔へそのまま乗ってばらつきが実態より
@@ -224,6 +225,7 @@ impl FrameBuffer {
         self.last_decode_ms = 0.0;
         self.fast_count = 0;
         self.fallback_count = 0;
+        self.on_gpu = false;
         self.source_format = None;
     }
 
@@ -242,6 +244,7 @@ impl FrameBuffer {
             since_last_frame_ms: self
                 .last_frame_instant
                 .map(|at| at.elapsed().as_secs_f32() * 1000.0),
+            on_gpu: self.on_gpu,
         }
     }
 }
@@ -368,6 +371,7 @@ pub(super) fn fill_recycled<R>(
         width: 0,
         height: 0,
         data: Vec::new(),
+        format: PixelFormat::Rgb24,
     };
     let result = fill(&mut fresh);
     (Arc::new(fresh), result, missed)
@@ -376,6 +380,7 @@ pub(super) fn fill_recycled<R>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ConvertPath::{Fallback, Fast};
 
     const TEST_WIDTH: usize = 2;
     const TEST_HEIGHT: usize = 2;
@@ -387,6 +392,7 @@ mod tests {
             width: TEST_WIDTH,
             height: TEST_HEIGHT,
             data: vec![marker; TEST_FRAME_LEN],
+            format: PixelFormat::Rgb24,
         })
     }
 
@@ -441,8 +447,8 @@ mod tests {
     #[test]
     fn frame_buffer_latest_frame_after_push_returns_newest_frame() {
         let mut buffer = FrameBuffer::new();
-        buffer.push_back(test_frame(1), Instant::now(), 1.0, true, "YUY2");
-        buffer.push_back(test_frame(2), Instant::now(), 1.0, true, "YUY2");
+        buffer.push_back(test_frame(1), Instant::now(), 1.0, Fast, "YUY2");
+        buffer.push_back(test_frame(2), Instant::now(), 1.0, Fast, "YUY2");
 
         let (frame, generation) = buffer
             .latest_frame()
@@ -470,11 +476,11 @@ mod tests {
         buffer
             .lock()
             .unwrap()
-            .push_back(test_frame(1), first, 1.0, true, "YUY2");
+            .push_back(test_frame(1), first, 1.0, Fast, "YUY2");
         buffer
             .lock()
             .unwrap()
-            .push_back(test_frame(2), second, 1.0, true, "YUY2");
+            .push_back(test_frame(2), second, 1.0, Fast, "YUY2");
 
         let (frame, generation, received_at) = frames.newer_than(0).expect("新着がある");
         assert_eq!(frame.data, vec![2u8; TEST_FRAME_LEN]);
@@ -495,13 +501,13 @@ mod tests {
     #[test]
     fn frame_buffer_latest_frame_without_new_push_keeps_generation() {
         let mut buffer = FrameBuffer::new();
-        buffer.push_back(test_frame(1), Instant::now(), 1.0, true, "YUY2");
+        buffer.push_back(test_frame(1), Instant::now(), 1.0, Fast, "YUY2");
 
         let (_, first) = buffer.latest_frame().expect("1 枚目が取れる");
         let (_, second) = buffer.latest_frame().expect("取り出しても消えない");
         assert_eq!(first, second, "push が無ければ世代は進まない");
 
-        buffer.push_back(test_frame(2), Instant::now(), 1.0, true, "YUY2");
+        buffer.push_back(test_frame(2), Instant::now(), 1.0, Fast, "YUY2");
         let (_, third) = buffer.latest_frame().expect("2 枚目が取れる");
         assert_eq!(third, second + 1, "push すれば世代が 1 つ進む");
     }
@@ -510,7 +516,7 @@ mod tests {
     fn frame_buffer_latest_frame_twice_shares_same_allocation() {
         // 取り出しで画素データが複製されないこと（このタスクの本題）
         let mut buffer = FrameBuffer::new();
-        buffer.push_back(test_frame(1), Instant::now(), 1.0, true, "YUY2");
+        buffer.push_back(test_frame(1), Instant::now(), 1.0, Fast, "YUY2");
 
         let (first, _) = buffer.latest_frame().expect("1 回目");
         let (second, _) = buffer.latest_frame().expect("2 回目");
@@ -520,14 +526,14 @@ mod tests {
     #[test]
     fn frame_buffer_reset_drops_frame_and_advances_generation() {
         let mut buffer = FrameBuffer::new();
-        buffer.push_back(test_frame(1), Instant::now(), 1.0, true, "YUY2");
+        buffer.push_back(test_frame(1), Instant::now(), 1.0, Fast, "YUY2");
         let (_, before) = buffer.latest_frame().expect("push 済み");
 
         buffer.reset();
         assert!(buffer.latest_frame().is_none());
 
         // 再接続後の最初のフレームが「新着」と判別できること
-        buffer.push_back(test_frame(2), Instant::now(), 1.0, true, "YUY2");
+        buffer.push_back(test_frame(2), Instant::now(), 1.0, Fast, "YUY2");
         let (_, after) = buffer.latest_frame().expect("再接続後の 1 枚目");
         assert!(after > before);
     }
@@ -546,7 +552,7 @@ mod tests {
                         test_frame(i as u8),
                         Instant::now(),
                         1.0,
-                        true,
+                        Fast,
                         "YUY2",
                     );
                 }
@@ -639,14 +645,14 @@ mod tests {
             test_frame(1),
             now - Duration::from_millis(32),
             2.5,
-            true,
+            Fast,
             "YUY2",
         );
         buffer.push_back(
             test_frame(2),
             now - Duration::from_millis(16),
             3.5,
-            false,
+            Fallback,
             "MJPEG",
         );
 
@@ -667,8 +673,8 @@ mod tests {
     fn frame_buffer_stats_after_reset_has_no_frame() {
         // キャプチャを止めたあとに前回の統計が残らないこと
         let mut buffer = FrameBuffer::new();
-        buffer.push_back(test_frame(1), Instant::now(), 2.5, true, "YUY2");
-        buffer.push_back(test_frame(2), Instant::now(), 3.5, true, "YUY2");
+        buffer.push_back(test_frame(1), Instant::now(), 2.5, Fast, "YUY2");
+        buffer.push_back(test_frame(2), Instant::now(), 3.5, Fast, "YUY2");
         buffer.reset();
 
         let stats = buffer.stats();
@@ -688,13 +694,13 @@ mod tests {
         let mut buffer = FrameBuffer::new();
         assert!(
             buffer
-                .push_back(test_frame(1), Instant::now(), 1.0, true, "YUY2")
+                .push_back(test_frame(1), Instant::now(), 1.0, Fast, "YUY2")
                 .is_none(),
             "1 枚目は置き換える対象が無い"
         );
 
         let replaced = buffer
-            .push_back(test_frame(2), Instant::now(), 1.0, true, "YUY2")
+            .push_back(test_frame(2), Instant::now(), 1.0, Fast, "YUY2")
             .expect("2 枚目は 1 枚目を置き換える");
         assert_eq!(replaced.data, vec![1u8; TEST_FRAME_LEN]);
         assert!(
@@ -708,6 +714,7 @@ mod tests {
             width: 1,
             height: 1,
             data,
+            format: PixelFormat::Rgb24,
         })
     }
 

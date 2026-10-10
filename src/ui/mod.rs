@@ -506,7 +506,7 @@ mod tests {
     use crate::settings::{
         AppSettings, AudioSettings, ColorRange, ColorSpace, HotkeySettings, LanguageSetting,
         Preset, RecordingSettings, ScreenshotDestination, ScreenshotFormat, ScreenshotSettings,
-        UiSettings, UpdateSettings, VideoBackendSetting, VideoSettings,
+        UiSettings, UpdateSettings, VideoBackendSetting, VideoConvertSetting, VideoSettings,
     };
 
     use std::collections::{BTreeMap, BTreeSet};
@@ -531,6 +531,8 @@ mod tests {
                 fps: Some(30),
                 // 開き方も既定値（自動）と異なる値にしておく
                 backend: VideoBackendSetting::DirectShow,
+                // 変換の場所も既定値（自動）と異なる値にしておく
+                convert: VideoConvertSetting::Cpu,
                 // 既定値（true）と異なる値にして、反映の有無を見分けられるようにする
                 auto_reconnect: false,
                 // 色空間とレンジも既定値と異なる値にしておく

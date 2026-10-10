@@ -7,8 +7,9 @@
 use crate::audio::{self, AudioDirection, ChoiceSource};
 use crate::i18n::Text;
 use crate::settings::{
-    AppSettings, AudioInputSource, ColorRange, ColorSpace, VideoBackendSetting, DEFAULT_CHANNELS,
-    DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS, MAX_VIDEO_ADJUSTMENT, MIN_BUFFER_MS, MIN_VIDEO_ADJUSTMENT,
+    AppSettings, AudioInputSource, ColorRange, ColorSpace, VideoBackendSetting,
+    VideoConvertSetting, DEFAULT_CHANNELS, DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS,
+    MAX_VIDEO_ADJUSTMENT, MIN_BUFFER_MS, MIN_VIDEO_ADJUSTMENT,
 };
 use eframe::egui;
 use log::debug;
@@ -105,6 +106,20 @@ pub(super) fn show_device_settings_tab(
         if settings.video.backend != VideoBackendSetting::Auto {
             warning_label(ui, Text::VideoBackendNotice.get());
         }
+
+        // YUY2 → RGB の変換の場所（#456）。デバイスは開き直さず、「適用」で次のフレームから効く
+        ui.horizontal(|ui| {
+            ui.label(Text::VideoConvertLabel.get());
+            egui::ComboBox::from_id_salt("video_convert_combo")
+                .selected_text(settings.video.convert.label())
+                .show_ui(ui, |ui| {
+                    for convert in VideoConvertSetting::ALL {
+                        ui.selectable_value(&mut settings.video.convert, convert, convert.label());
+                    }
+                })
+                .response
+                .on_hover_text(Text::VideoConvertHint.get());
+        });
 
         // 選択後のデバイス名と開き方。この下の能力参照はすべてこちらを使う。
         // 切り替えたフレームで切り替え前のキーを見ると、1 フレームだけ前の

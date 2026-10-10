@@ -102,6 +102,8 @@ pub(super) struct Session {
     path: Option<PathBuf>,
     /// NV12 の変換先。使い回す（録画スレッドは確保してよいが、毎フレーム確保し直す理由も無い）
     nv12: Vec<u8>,
+    /// YUY2 のまま積まれたフレーム（GPU で変換している、#456）を RGB にする先。使い回す
+    rgb: Vec<u8>,
     frames_skipped: u64,
     last_disk_check: Instant,
 }
@@ -159,6 +161,7 @@ impl Session {
             writer: None,
             path: None,
             nv12: Vec::new(),
+            rgb: Vec::new(),
             frames_skipped: 0,
             last_disk_check: t0,
         })
@@ -257,7 +260,7 @@ impl Session {
 
         let matrix = Nv12Matrix::for_size(width, height);
         let converted = rgb_to_nv12(
-            &frame.data,
+            frame.rgb(&mut self.rgb),
             frame.width,
             frame.height,
             width,

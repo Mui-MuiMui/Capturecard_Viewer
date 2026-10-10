@@ -13,6 +13,8 @@
 
 **`video.backend`（映像の開き方、#237）は対象に含める。** 設定ダイアログで選ぶ項目で、どの経路で開くかはデバイスと一体なので、キャプチャーボードの使い分けというプリセットの用途に合う。`video` を丸ごと写す・比べる作りなので、`apply_to` にも `matches_preset` にも手を入れずに揃っている。
 
+**`video.convert`（YUY2 を GPU と CPU のどちらで変換するか、#456）は対象外。** `auto_reconnect` と同じく `apply_to` が写さず、`from_settings` は既定値で固定し、`matches_preset` も比べない。画は同じで変わるのは負荷と遅れだけ、しかも使える GPU は PC で決まるので、キャプチャーボードの使い分けとも低遅延 / 画質の切替とも関係がない。含めると、プリセットを読み込んだだけで変換の場所が変わり（GPU の無い PC で作ったプリセットが別の PC で CPU を強いる）、変換の場所を変えただけでプリセットが「（変更あり）」になる（`video_convert_is_not_part_of_the_preset`）。
+
 **`audio.input_source`（音声の入力の種類、#388）も対象に含める。** WASAPI のデバイスか、DirectShow で開いた映像デバイスの音声ピンかで、キャプチャーボードと一体の選択だから。`audio` を丸ごと写す・比べるので、`backend` と同じく手を入れずに揃う（`matches_preset_different_audio_input_source_returns_false`）。プリセットの適用で入力の種類が変わると、音声ピンを繋ぐかが変わるので映像も 1 度開き直る（`docs/design/directshow-audio.md` の「音声ピンをいつ繋ぐか」）。
 
 `active_preset` は「いま選んでいるプリセット名」。`resolved_active_preset` が実際の `video` / `audio` と突き合わせ、食い違っていれば `None` を返す（これが「（変更あり）」表示の判定そのもの）。`video` / `audio` を書き換えたあとは `refresh_active_preset()` を呼んで辻褄を合わせる。**`commit_draft` の末尾で呼んでいるのを外さないこと。** 外すと、プリセットを読み込んだあと解像度を変えて「適用」したときに選択が残り、右クリックメニューのチェックが実際の設定と食い違う。

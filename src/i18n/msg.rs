@@ -306,6 +306,19 @@ pub fn stats_decode(decode_ms: f32, fast_count: u64, fallback_count: u64) -> Str
     }
 }
 
+/// YUY2 を GPU で変換しているときの「デコード」の行（#456）。コールバックは変換せずに
+/// 積むだけなので、出す時間は「受け取ってから積むまで」
+pub fn stats_decode_gpu(queue_ms: f32, fast_count: u64, fallback_count: u64) -> String {
+    match language() {
+        Language::Japanese => format!(
+            "デコード GPU (積むまで {queue_ms:.2}ms、高速 {fast_count} / 汎用 {fallback_count})"
+        ),
+        Language::English => format!(
+            "Decode GPU (queued in {queue_ms:.2}ms, fast {fast_count} / generic {fallback_count})"
+        ),
+    }
+}
+
 pub fn stats_since_last_frame(elapsed_ms: f32) -> String {
     match language() {
         Language::Japanese => format!("最終フレーム {elapsed_ms:.0}ms 前"),
