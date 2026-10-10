@@ -22,7 +22,7 @@ GPU 変換を入れた版の値は 2026-10-10 に 1 回撮った結果（連続�
 | 項目 | 内容 |
 |---|---|
 | アプリ | Capturecard Viewer 1.3.0（1.4.0 の値も同じ条件で測った。「結果」に併記） |
-| 映像の開き方 | Media Foundation（このボードは Media Foundation でしか開けない） |
+| 映像の開き方 | Media Foundation（DirectShow でも開ける。DirectShow で開いたときの値は未計測、#485） |
 | 解像度と fps、形式 | 1920x1080 60fps、YUY2 |
 | キャプチャーボード | AVerMedia Live Gamer EXTREME 3（USB） |
 | 信号源 | 別 PC で `scripts/make-testpattern.sh` のテスト動画（1080p60、フレーム番号を焼き込み）を全画面再生 |
