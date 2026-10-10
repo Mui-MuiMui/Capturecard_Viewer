@@ -130,6 +130,9 @@ texts! {
     VideoBackendAuto { ja: "自動", en: "Auto" },
     VideoBackendMediaFoundation { ja: "Media Foundation", en: "Media Foundation" },
     VideoBackendDirectShow { ja: "DirectShow", en: "DirectShow" },
+    // ---- 映像の変換の場所（settings::VideoConvertSetting の label、#456） ----
+    VideoConvertGpu { ja: "GPU", en: "GPU" },
+    VideoConvertCpu { ja: "CPU", en: "CPU" },
     CaptureApiFake { ja: "フェイク", en: "Fake" },
 
     // ---- 言語（settings::LanguageSetting の label） ----
@@ -169,6 +172,8 @@ texts! {
     VideoBackendLabel { ja: "映像の開き方:", en: "Open video with:" },
     VideoBackendHint { ja: "自動では、名前に「(DirectShow)」が付いたデバイスだけを DirectShow で、それ以外を Media Foundation で開きます", en: "Auto opens devices whose name ends with \"(DirectShow)\" with DirectShow, and all others with Media Foundation" },
     VideoBackendNotice { ja: "選んだ方法の一覧に無いデバイスには接続できません。映像が出ない場合は「自動」に戻してください。", en: "Devices that the selected method does not list cannot be connected. If no picture appears, switch back to Auto." },
+    VideoConvertLabel { ja: "映像の変換:", en: "Video conversion:" },
+    VideoConvertHint { ja: "YUY2 の映像を RGB に直す場所です。自動は GPU を使い、GPU で変換できないときや描画が遅いときは CPU に戻します。GPU を選ぶと遅くても CPU に戻しませんが、GPU で変換できないときは CPU に戻します。どれを選んでも映像の色は同じです。", en: "Where YUY2 video is converted to RGB. Auto uses the GPU and falls back to the CPU when the GPU cannot convert or drawing is slow. GPU never falls back for speed, but still falls back when the GPU cannot convert. The colors are the same either way." },
     VideoCapabilityPending { ja: "対応形式を取得中...", en: "Querying supported formats..." },
     VideoCapabilityFallback { ja: "下の選択肢は既定値です。", en: "The choices below are defaults." },
     VideoCapabilityAssumed { ja: "対応形式を取得できなかったので、既定の一覧を出しています。デバイスが対応しない組み合わせも含まれます。", en: "Could not get the supported formats, so a default list is shown. It may include combinations the device does not support." },

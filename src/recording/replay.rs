@@ -64,6 +64,8 @@ pub(super) struct ReplayPipeline {
     /// ハードウェアのエンコーダで最初の 1 枚から失敗したので、以降はソフトウェアを使う
     hardware_failed: bool,
     nv12: Vec<u8>,
+    /// YUY2 のまま積まれたフレーム（GPU で変換している、#456）を RGB にする先。使い回す
+    rgb: Vec<u8>,
     /// エンコーダへ渡す NV12 のサンプル。手放されたものを使い回す（#382）
     video_samples: SamplePool,
     ring: EncodedRing,
@@ -119,6 +121,7 @@ impl ReplayPipeline {
             size: None,
             hardware_failed: false,
             nv12: Vec::new(),
+            rgb: Vec::new(),
             video_samples: SamplePool::new(SAMPLE_POOL_CAPACITY),
             ring: EncodedRing::default(),
             last_keyframe: None,
@@ -332,7 +335,7 @@ impl ReplayPipeline {
                 continue;
             }
             let converted = rgb_to_nv12(
-                &frame.data,
+                frame.rgb(&mut self.rgb),
                 frame.width,
                 frame.height,
                 width,

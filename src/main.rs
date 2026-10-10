@@ -104,7 +104,9 @@ fn main() -> Result<(), eframe::Error> {
                 );
             }
             configure_japanese_font(&cc.egui_ctx);
-            let app = CaptureCardViewer::default();
+            let mut app = CaptureCardViewer::default();
+            // YUY2 → RGB を GPU で行う準備（#456）。GL のコンテキストが current なのはここ
+            app.init_gpu_yuy2(cc.gl.as_ref());
             // 画面の言語を設定と OS の表示言語から決める。**起動経路で 1 回だけ。**
             // `default()` の中では決めない。テストで作ったときにプロセス全体の
             // 言語を書き換えてしまうため（#256）。`default()` は文言を作らないので、

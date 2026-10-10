@@ -52,7 +52,7 @@ use crate::screenshot_sound::ScreenshotManager;
 use crate::settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace};
 use crate::status::ErrorCenter;
 use crate::ui;
-use crate::video::{DisplayLatency, SharedColorConversion, VideoAdjustments, VideoFrames};
+use crate::video::{DisplayLatency, GpuYuy2, SharedColorConversion, VideoAdjustments, VideoFrames};
 use eframe::egui;
 use log::{debug, info, warn};
 use std::path::PathBuf;
@@ -153,6 +153,8 @@ pub struct CaptureCardViewer {
 
     // 映像表示関連
     video_texture: Option<egui::TextureHandle>,
+    // YUY2 を GPU で RGB にする窓口（#456）。YUY2 のフレームはテクスチャへ描く前にここへ預ける（`view.rs`）
+    gpu_yuy2: GpuYuy2,
     // テクスチャへ渡した画像。egui が手放したら次のフレームはこの Vec へ詰め直す（`view.rs`）
     video_image: Option<Arc<egui::ColorImage>>,
     // テクスチャへ反映済みのフレーム世代。新着が無いフレームでは更新をまるごと省く
@@ -307,6 +309,7 @@ impl Default for CaptureCardViewer {
             autosave: AutoSavePolicy::from_load_outcome(load_outcome),
             settings_save_failures: SaveFailureStreak::default(),
             video_texture: None,
+            gpu_yuy2: GpuYuy2::default(),
             video_image: None,
             last_frame_generation: 0,
             display_latency: DisplayLatency::default(),
@@ -758,7 +761,16 @@ impl eframe::App for CaptureCardViewer {
     // `CaptureCardViewer::update` に置いてある。`App::logic` は実装しない。
     // 最小化中にも呼ばれる口だが、0.26 と同じく最小化中は UI スレッドで何も回さない
     // （時間で動く処理はワーカーが持つ。`docs/design/device-worker.md`）
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // YUY2 を GPU で変換しているあいだの見張り（#456）。直前のフレームの描画時間
+        // （swap の待ちを除く）が要るので、`Frame` を受け取るここで渡す
+        let frame_time = frame
+            .info()
+            .cpu_usage
+            .map(|seconds| std::time::Duration::from_secs_f32(seconds.max(0.0)));
+        let frames = &self.frames;
+        self.gpu_yuy2
+            .tick(Instant::now(), frame_time, || frames.stats());
         self.update(ui);
     }
 
@@ -769,7 +781,12 @@ impl eframe::App for CaptureCardViewer {
         self.remove_hotkey_key_events(ctx, raw_input);
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        // GPU の変換（#456）の GL の資源を消す。コンテキストが残っているうちに
+        if let Some(gl) = gl {
+            self.gpu_yuy2.destroy(gl);
+        }
+
         // **デバイスワーカーより先に**録画を止め、`Finalize` まで待つ。
         // 待たないと再生できない MP4 が残る
         self.stop_recording_for_exit();

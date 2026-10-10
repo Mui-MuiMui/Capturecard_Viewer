@@ -14,6 +14,7 @@ resolution = [1920, 1080]
 format = "MJPEG"
 fps = 30
 backend = "direct_show"
+convert = "cpu"
 auto_reconnect = false
 color_space = "bt601"
 color_range = "full"

@@ -56,8 +56,8 @@ pub use store::AutoSavePolicy;
 pub use transfer::{export_file_name, export_to, import_from};
 pub use ui::{LanguageSetting, UiSettings, UpdateSettings, MAX_VOLUME, MIN_VOLUME};
 pub use video::{
-    ColorRange, ColorSpace, VideoBackendSetting, VideoSettings, MAX_VIDEO_ADJUSTMENT,
-    MIN_VIDEO_ADJUSTMENT,
+    ColorRange, ColorSpace, VideoBackendSetting, VideoConvertSetting, VideoSettings,
+    MAX_VIDEO_ADJUSTMENT, MIN_VIDEO_ADJUSTMENT,
 };
 
 /// 設定ファイルの保存・書き出し・読み込みが失敗した理由。
