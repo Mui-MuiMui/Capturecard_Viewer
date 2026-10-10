@@ -7,7 +7,7 @@ A viewer for displaying video and audio from a capture card. For Windows 10/11.
 ## Overview
 
 - This application displays video and audio from a capture card (capture board) with low latency, good image quality, and a minimal interface.
-  - Measured latency is about 38 ms behind the card's passthrough (1080p60, AVerMedia Live Gamer EXTREME 3; see [docs/LATENCY.md](docs/LATENCY.md) for the method).
+  - Measured latency is about 28 ms behind the card's passthrough (as of 1.5.0, 1080p60, AVerMedia Live Gamer EXTREME 3; see [docs/LATENCY.md](docs/LATENCY.md) for the method).
 - Recent capture cards (as of 2026) should work, but older ones may not. The author has no way to verify this, as those devices are not available for testing.
   - More precisely, it should work with any device that Windows recognizes as a webcam.
   - Devices that only support DirectShow (such as the OBS Virtual Camera) also work. They appear in the device list with "(DirectShow)" appended to their name.
@@ -38,6 +38,8 @@ The labels in this README are the ones shown when the interface is in English.
 - **Right-click**: Open the context menu
   - Volume adjustment (0–200%)
   - Mute
+  - Start recording / Stop recording (see "Recording")
+  - Save replay (last N s) — while the replay buffer is on (see "Recording")
   - Keep aspect ratio
   - Always on top
   - Fullscreen
@@ -110,9 +112,10 @@ Turning on "Show stats" in the context menu (under View when collapsed) overlays
 |---|---|
 | FPS | Effective frame rate derived from the average of the last 120 frame intervals. It is calculated from the frames that actually arrived, not queried from the device |
 | Jitter | Standard deviation, minimum and maximum of the frame intervals. Dropped frames or capture stalls make this grow |
-| Decode | Time spent on the RGB conversion of the most recent frame, plus how many frames took the fast path versus the generic path |
+| Decode | Time spent on the RGB conversion of the most recent frame, plus how many frames took the fast path versus the generic path. When the GPU converts, it reads "Decode GPU" and the time is from receiving the frame to queuing it (see "Video conversion" under "Recommended settings") |
 | Resolution / format | Pixel size and input format of the frames actually arriving |
 | Last frame | Time elapsed since the last frame arrived |
+| Display latency | Average and maximum over the last second of the time from a frame's arrival to the screen texture update (diagnostic information for investigating latency; also shown in the Status tab) |
 | Recording | Only while recording: elapsed time, frames written and dropped, how far back the replay buffer went (when recording through it), and the encoder in use (hardware / software) |
 
 ### Settings
@@ -252,6 +255,13 @@ If the query fails, the reason and a "Retry" button are shown and the options fa
 - Frame rate: 60 fps
 - Color space: Auto (based on resolution)
 - Color range: Limited (16-235)
+- Video conversion: Auto
+
+**Video conversion (Auto / GPU / CPU)** — "Video conversion" in the Devices tab chooses where YUY2 video is converted to RGB (`[video] convert` in the settings file; not part of presets). The colors are the same either way.
+- **Auto** (default): converts on the GPU, and falls back to CPU conversion when the GPU cannot convert, when rendering is in software, or when drawing is too slow. The fallback happens once and never switches back to the GPU on its own, so the picture does not stutter
+- **GPU**: never falls back for speed, but still falls back to the CPU when the GPU cannot convert
+- **CPU**: always converts on the CPU
+- The "Decode" line of the stats overlay and the Status tab show which one is in use
 
 Only change the color space and range when the picture looks wrong. Both take effect on the next frame; the device is not reopened.
 
