@@ -169,6 +169,7 @@ flowchart LR
     dscb["自前のレンダラーの Receive<br/>(グラフのストリーミングスレッド)"]
     conv["色変換<br/>YUY2 → RGB<br/>BT.601 / BT.709<br/>リミテッド / フル<br/>明るさ / コントラスト / 彩度"]
     buf["フレーム受け渡し<br/>複製しない<br/>新着の有無を判別できる"]
+    gpu["GPU で色変換（既定、#456）<br/>YUY2 のまま積んだフレームを<br/>シェーダーで RGB に"]
     tex["egui テクスチャ"]
     draw["画面"]
     stats["統計<br/>間隔 / デコード時間 / 経路"]
@@ -176,12 +177,13 @@ flowchart LR
     dev --> cb --> conv --> buf
     dsdev --> dscb --> conv
     buf -->|UI スレッドが取り出す| tex --> draw
+    buf -->|YUY2 のまま| gpu --> tex
     conv -.-> stats
     buf -.-> stats
     stats -.->|OSD| draw
 ```
 
-映像デバイスへの経路は 2 本ある。**Media Foundation（nokhwa）が既定で、DirectShow は Media Foundation に出ないデバイスのためだけにある**（#143）。どちらの経路も受け取った画素を同じ `FrameSink`（`src/video/frame_sink.rs`）へ渡すので、変換から先（色変換・フレームの受け渡し・統計）は共通になる。
+映像デバイスへの経路は 2 本ある。**Media Foundation（nokhwa）が既定で、DirectShow は Media Foundation に出ないデバイスのためだけにある**（#143）。どちらの経路も受け取った画素を同じ `FrameSink`（`src/video/frame_sink.rs`）へ渡すので、変換から先（色変換・フレームの受け渡し・統計）は共通になる。 **YUY2 は既定では変換せずに積み、UI スレッドが描画の中でシェーダーで RGB にする**（同じ式・同じ係数表。GPU で変換できないときや描画が遅いときは CPU へ戻す、`docs/design/video-pipeline.md` の「YUY2 → RGB を GPU で変換する（#456）」）。
 
 | 経路 | 実装 | 列挙 | 対応形式 | サンプルの受け口 |
 |---|---|---|---|---|

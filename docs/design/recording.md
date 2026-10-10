@@ -191,6 +191,7 @@ sequenceDiagram
 ## 画素と音声の変換
 
 - **RGB → NV12 は録画スレッドで行う純粋関数**（`src/recording/convert.rs`）。係数は `ColorMatrix` の逆向き（BT.709 / BT.601、リミテッドレンジ）。HD の判定は表示と同じ「幅 1280 または高さ 720 以上」。色差は 2x2 の平均。カラーバーを往復させて差が一定以内に収まることをユニットテストで確かめる
+- **YUY2 を GPU で変換しているとき（#456）、リングの `VideoFrame` は YUY2 のまま（`PixelFormat::Yuy2`）届く。** 録画スレッドは `VideoFrame::rgb` で、フレームが持つ係数表（表示と同じ色空間・レンジ・映像調整）を使って使い回しの Vec へ RGB にしてから NV12 へ直す。見た目は CPU で変換していたころと同じで、変換の負荷がコールバックから録画スレッドへ移る（`docs/design/video-pipeline.md` の「YUY2 → RGB を GPU で変換する」）
 - 変換先の Vec は録画スレッドで使い回す（録画スレッドは確保してよいが、1 秒に 60 回 3MB を確保し直す理由も無い）
 - Sink Writer（①②）とエンコーダ MFT（③）へ渡す NV12 のサンプルも使い回す（#382、`src/recording/sample_pool.rs` の `SamplePool`）。渡したサンプルは非同期に消費されるので、**サンプルとバッファの参照が手元の分だけに戻ったものだけ**を次に使い、無ければ作る（持つのは 4 個まで）。フェイクの 1080p60 で、録画中・リプレイバッファ ON のページフォールトが毎秒約 4.4 万回からほぼ 0 に、カーネル時間が約 3 ポイント下がった。先に使い回して上書きしていないことは、`#[ignore]` のテスト `pooled_samples_do_not_overwrite_frames_still_queued_in_the_sink_writer`（明るさの違うフレームを待たずに書いて読み戻す）が見ている
 - 音声は入力の形（レート・チャンネル数）から 48kHz 2ch へ `PassthroughConverter`（`src/audio/convert.rs`）で寄せ、f32 → i16 は既存の `f32_to_i16`（`src/audio/sample.rs`）を使う。**変換器は録画用に 1 つ持ち、出力コールバックのものとは共有しない。** レート比の補正（`ResampleTelemetry`）も録画スレッドが自分で作った器（`ResampleTelemetry::for_recording`）を紐づけ、ドリフトの補正に使う（「ドリフト」の節、#288）。紐づけると入力が 48kHz 2ch でも補間の経路を通るが、係数が 1.0 の間は入力の値がそのまま出る
