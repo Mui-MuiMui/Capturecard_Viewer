@@ -8,7 +8,7 @@ use super::placeholder::{show_video_placeholder, video_placeholder_text};
 use super::video_overlay::show_video_overlay;
 use super::CaptureCardViewer;
 use crate::status::{self, ErrorSource};
-use crate::video::{frame_len_status, FrameLenStatus, VideoFrame};
+use crate::video::{GpuYuy2, PixelFormat, VideoFrame, GPU_CONVERT_ENV};
 use eframe::egui;
 use log::{debug, warn};
 use std::sync::Arc;
@@ -54,10 +54,11 @@ fn calculate_aspect_ratio_size(image_size: egui::Vec2, available_size: egui::Vec
     }
 }
 
-/// テクスチャへ取り込めるフレームか。画素データの長さが `幅 × 高さ × 3`
-/// ちょうどのときだけ真（`egui::ColorImage::from_rgb` の前提）。
+/// テクスチャへ取り込めるフレームか。画素データの長さが形式どおり（RGB なら
+/// `幅 × 高さ × 3`、YUY2 なら `幅 × 高さ × 2`）ちょうどのときだけ真
+/// （`egui::ColorImage::from_rgb` と GPU へのアップロードの前提）。
 fn is_drawable_frame(frame: &VideoFrame) -> bool {
-    frame_len_status(frame.data.len(), frame.width, frame.height) == FrameLenStatus::Exact
+    frame.has_exact_len()
 }
 
 /// テクスチャへ渡す画像を作る。前に渡した画像を egui が手放していれば、その画素の
@@ -85,6 +86,15 @@ fn reuse_or_new_color_image(
     Arc::new(image)
 }
 
+/// 映像のテクスチャの拡大縮小。拡大は Nearest（補間なし）で軽く、縮小は Linear。
+/// GPU で変換するとき（#456）も同じテクスチャを egui が描くので、見え方は変わらない
+const VIDEO_TEXTURE_OPTIONS: egui::TextureOptions = egui::TextureOptions {
+    magnification: egui::TextureFilter::Nearest,
+    minification: egui::TextureFilter::Linear,
+    wrap_mode: egui::TextureWrapMode::ClampToEdge,
+    mipmap_mode: None,
+};
+
 impl CaptureCardViewer {
     /// 新着フレームがあればテクスチャへ取り込む。取り込んだら `true`。
     ///
@@ -92,6 +102,14 @@ impl CaptureCardViewer {
     /// 以前はここで無条件に 16ms（60fps）の再描画を予約していたため、映像が
     /// 来ていなくても、最小化していても描き続けていた（Issue #98）。
     pub(super) fn update_video_texture(&mut self, ctx: &egui::Context) -> bool {
+        // GPU から CPU へ切り替わった直後（#456）は、新着を待たずに手元の最新フレームを
+        // CPU で描き直す。GPU で描けなかったフレームの代わりに、黒や前の画を残さない
+        if self.gpu_yuy2.take_switched_to_cpu() {
+            if let Some(frame) = self.frames.latest().filter(|f| is_drawable_frame(f)) {
+                self.draw_frame(ctx, frame);
+            }
+        }
+
         // 新着フレームが無ければ何もしない。既存のテクスチャをそのまま使い回す。
         // **フレームだけはワーカーのチャネルを通さない。** コマンドの列に
         // 並べると、接続や列挙の後ろで待たされて遅延が増える。
@@ -111,14 +129,6 @@ impl CaptureCardViewer {
             };
             self.last_frame_generation = generation;
 
-            // 最適化: テクスチャオプションをNearest（補間なし）に設定し、性能向上
-            let texture_options = egui::TextureOptions {
-                magnification: egui::TextureFilter::Nearest,
-                minification: egui::TextureFilter::Linear,
-                wrap_mode: egui::TextureWrapMode::ClampToEdge,
-                mipmap_mode: None,
-            };
-
             // 長さが合わないフレームは描かず、前のテクスチャを保つ。`from_rgb` は
             // 長さが違うと assert で落ちる（#309）。積む側（`FrameSink`）で揃えて
             // あるので通常は来ないが、二重の守りとして置いておく。世代は進めて
@@ -126,19 +136,12 @@ impl CaptureCardViewer {
             if !is_drawable_frame(&frame) {
                 return false;
             }
+            self.draw_frame(ctx, frame);
 
-            // 前に渡した画像の Vec を使い回す。1080p で約 8MB を毎フレーム確保・
-            // 解放しないため。手元にも `Arc` を 1 つ残しておき、egui が手放したら
-            // 次のフレームで詰め直す
-            let image = reuse_or_new_color_image(self.video_image.take(), &frame);
-            self.video_image = Some(Arc::clone(&image));
-            if let Some(texture) = &mut self.video_texture {
-                texture.set(image, texture_options);
-            } else {
-                self.video_texture = Some(ctx.load_texture("video_frame", image, texture_options));
-            }
             // 表示までの遅れ（#455）。GPU が画面へ出した時刻は取れないので、テクスチャを
-            // 更新した直後で測る。到着時刻は世代番号と同じロックの中で読んだもの
+            // 更新した直後で測る（GPU で変換するときは、変換を預けた直後。CPU の経路でも
+            // テクスチャへの転送は描画の終わりなので、測っている区間は同じ）。
+            // 到着時刻は世代番号と同じロックの中で読んだもの
             let now = Instant::now();
             let latency = now.saturating_duration_since(received_at);
             if let Some(log) = self.display_latency.record(now, latency, skipped_frames) {
@@ -153,6 +156,77 @@ impl CaptureCardViewer {
         }
 
         false
+    }
+
+    /// フレームを映像のテクスチャへ取り込む。呼び出し側は `is_drawable_frame` で確かめてから呼ぶ。
+    ///
+    /// YUY2 のフレーム（#456）は、GPU を使っていれば描画のコールバックへ預けるだけ。
+    /// 使っていなければ（GPU から CPU へ切り替わった前後に届いたものだけ）ここで CPU で変換する
+    fn draw_frame(&mut self, ctx: &egui::Context, frame: Arc<VideoFrame>) {
+        let rgb = match frame.format {
+            PixelFormat::Rgb24 => frame,
+            PixelFormat::Yuy2(_) => {
+                let size = [frame.width, frame.height];
+                if self.gpu_yuy2.queue(Arc::clone(&frame)) {
+                    // テクスチャは大きさが変わったときだけ作り直す（中身は黒。同じ描画の
+                    // コールバックが映像を描く前に上書きする）
+                    if self.video_texture.as_ref().map(|t| t.size()) != Some(size) {
+                        let blank = egui::ColorImage::filled(size, egui::Color32::BLACK);
+                        self.set_video_texture(ctx, Arc::new(blank));
+                    }
+                    return;
+                }
+                frame.into_rgb()
+            }
+        };
+        // 前に渡した画像の Vec を使い回す。1080p で約 8MB を毎フレーム確保・
+        // 解放しないため。手元にも `Arc` を 1 つ残しておき、egui が手放したら
+        // 次のフレームで詰め直す
+        let image = reuse_or_new_color_image(self.video_image.take(), &rgb);
+        self.video_image = Some(Arc::clone(&image));
+        self.set_video_texture(ctx, image);
+    }
+
+    /// 映像のテクスチャへ画像を渡す。まだ無ければ作る
+    fn set_video_texture(&mut self, ctx: &egui::Context, image: Arc<egui::ColorImage>) {
+        if let Some(texture) = &mut self.video_texture {
+            texture.set(image, VIDEO_TEXTURE_OPTIONS);
+        } else {
+            self.video_texture =
+                Some(ctx.load_texture("video_frame", image, VIDEO_TEXTURE_OPTIONS));
+        }
+    }
+
+    /// YUY2 → RGB を GPU で行う準備をする（#456）。**起動経路で 1 回だけ**呼ぶ（`main.rs`）。
+    /// GL のコンテキストが無い・環境変数で切ってある・シェーダーを使えないときは CPU のまま
+    pub(crate) fn init_gpu_yuy2(&mut self, gl: Option<&Arc<eframe::glow::Context>>) {
+        let env = std::env::var(GPU_CONVERT_ENV).ok();
+        let preference = self
+            .settings
+            .lock()
+            .map(|settings| settings.video.convert)
+            .unwrap_or_default();
+        self.gpu_yuy2 = GpuYuy2::init(
+            gl,
+            &self.color_conversion,
+            &self.repaint_waker,
+            preference,
+            env.as_deref(),
+        );
+    }
+
+    /// 映像を `rect` へ描く。GPU で変換するフレームを預かっていれば、変換のコールバックを
+    /// 映像より前に置く（egui は置いた順に描くので、変換してからテクスチャを描く）
+    fn paint_video(&self, ui: &egui::Ui, texture: &egui::TextureHandle, rect: egui::Rect) {
+        if let Some(callback) = self.gpu_yuy2.paint_callback(texture.id(), rect) {
+            ui.painter().add(callback);
+        }
+        ui.painter().image(
+            texture.id(),
+            rect,
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)),
+            egui::Color32::WHITE,
+        );
     }
 
     pub(super) fn show_windowed_ui(&mut self, ui: &mut egui::Ui) {
@@ -197,12 +271,7 @@ impl CaptureCardViewer {
                     );
 
                     let response = ui.allocate_rect(rect, VIDEO_AREA_SENSE);
-                    ui.painter().image(
-                        texture.id(),
-                        rect,
-                        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)),
-                        egui::Color32::WHITE,
-                    );
+                    self.paint_video(ui, texture, rect);
 
                     // ウィンドウドラッグを処理（設定が有効な場合のみ）
                     if response.dragged() && !on_resize_edge {
@@ -291,12 +360,7 @@ impl CaptureCardViewer {
                     );
 
                     let response = ui.allocate_rect(rect, VIDEO_AREA_SENSE);
-                    ui.painter().image(
-                        texture.id(),
-                        rect,
-                        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(1.0)),
-                        egui::Color32::WHITE,
-                    );
+                    self.paint_video(ui, texture, rect);
 
                     // フルスクリーンではドラッグ移動を完全に無効化
                     // （フルスクリーンでは画面の移動自体が意味をなさないため）
@@ -403,6 +467,7 @@ mod tests {
             width,
             height,
             data: vec![0; len],
+            format: PixelFormat::Rgb24,
         }
     }
 

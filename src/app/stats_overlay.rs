@@ -7,7 +7,7 @@
 use super::video_overlay::show_video_overlay;
 use super::CaptureCardViewer;
 use crate::i18n::{self, Text};
-use crate::video::{format_display_latency, FrameStats};
+use crate::video::{format_display_latency, FrameStats, Yuy2Conversion};
 use eframe::egui;
 use std::time::Instant;
 
@@ -24,7 +24,12 @@ const STATS_OVERLAY_MARGIN: f32 = 8.0;
 /// ないが、**バッファ長を詰めたときに音が途切れていないかを、設定画面を開かずに
 /// 見られるようにする**ためにここへ並べてある。`latency_line` は表示までの遅れの行
 /// （`video::format_display_latency`、#455）で、映像の行の最後に置く。
-fn format_stats_lines(stats: &FrameStats, latency_line: String, audio_line: String) -> Vec<String> {
+fn format_stats_lines(
+    stats: &FrameStats,
+    convert_note: Option<String>,
+    latency_line: String,
+    audio_line: String,
+) -> Vec<String> {
     let mut lines = Vec::new();
 
     match stats.intervals {
@@ -45,12 +50,20 @@ fn format_stats_lines(stats: &FrameStats, latency_line: String, audio_line: Stri
 
     match (stats.resolution, stats.source_format) {
         (Some((width, height)), Some(format)) => {
-            // フレームが 1 枚でも届いていれば、変換の計測値は実測値
-            lines.push(i18n::stats_decode(
+            // フレームが 1 枚でも届いていれば、変換の計測値は実測値。GPU で変換している
+            // ときは変換の時間が無いので、積むまでの時間を「GPU」と分かる形で出す（#456）
+            let decode = if stats.on_gpu {
+                i18n::stats_decode_gpu
+            } else {
+                i18n::stats_decode
+            };
+            lines.push(decode(
                 stats.last_decode_ms,
                 stats.fast_count,
                 stats.fallback_count,
             ));
+            // GPU から CPU へ自動で戻したとき（#456）は、その理由を「デコード」の行の下に出す
+            lines.extend(convert_note);
             lines.push(format!("{}x{} {}", width, height, format));
         }
         _ => {
@@ -83,7 +96,18 @@ impl CaptureCardViewer {
         let stats = self.frames.stats();
         // ワーカーが書き出した観測値の複製。ここでデバイスへは問い合わせない
         let latency = format_display_latency(self.display_latency.recent(Instant::now()));
-        let mut lines = format_stats_lines(&stats, latency, self.device_snapshot.osd_audio_line());
+        let convert_note = match self.gpu_yuy2.conversion() {
+            Yuy2Conversion::Cpu(reason) if reason.is_fallback() => {
+                Some(i18n::stats_gpu_fallback(&reason))
+            }
+            _ => None,
+        };
+        let mut lines = format_stats_lines(
+            &stats,
+            convert_note,
+            latency,
+            self.device_snapshot.osd_audio_line(),
+        );
         // 録画中は録画の行を足す（経過時間、書いた枚数・捨てた枚数、エンコーダ）
         lines.extend(self.recording_stats_lines());
 
@@ -130,6 +154,7 @@ mod tests {
         // そのまま画面へ出さないことを確かめる
         let lines = format_stats_lines(
             &FrameStats::default(),
+            None,
             format_display_latency(None),
             status::format_underrun_count(None),
         );
@@ -184,6 +209,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_format: Some("YUY2"),
             since_last_frame_ms: Some(12.4),
+            on_gpu: false,
         };
 
         // 到着から 3.2ms でテクスチャへ取り込んだ 1 枚
@@ -191,8 +217,12 @@ mod tests {
         let now = Instant::now();
         latency.record(now, std::time::Duration::from_micros(3_200), 0);
         let latency_line = format_display_latency(latency.recent(now));
-        let lines =
-            format_stats_lines(&stats, latency_line, status::format_underrun_count(Some(3)));
+        let lines = format_stats_lines(
+            &stats,
+            None,
+            latency_line,
+            status::format_underrun_count(Some(3)),
+        );
         let joined = lines.join(
             "
 ",
@@ -208,5 +238,53 @@ mod tests {
         assert!(joined.contains("最終フレーム 12ms 前"), "{}", joined);
         assert!(joined.contains("アンダーラン: 3 回"), "{}", joined);
         assert!(joined.contains("平均 3.2ms / 最大 3.2ms"), "{}", joined);
+    }
+
+    #[test]
+    fn format_stats_lines_on_gpu_says_so_in_the_decode_line() {
+        // GPU で変換しているとき（#456）は、変換の時間ではなく積むまでの時間を出す
+        let stats = FrameStats {
+            last_decode_ms: 0.4,
+            fast_count: 10,
+            resolution: Some((1920, 1080)),
+            source_format: Some("YUY2"),
+            on_gpu: true,
+            ..FrameStats::default()
+        };
+        let lines = format_stats_lines(
+            &stats,
+            None,
+            format_display_latency(None),
+            status::format_underrun_count(None),
+        );
+        assert!(
+            lines.contains(&"デコード GPU (積むまで 0.40ms、高速 10 / 汎用 0)".to_string()),
+            "{:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn format_stats_lines_shows_why_it_fell_back_below_the_decode_line() {
+        // GPU から CPU へ自動で戻したとき（#456）は、デコードの行のすぐ下に理由を出す
+        let stats = FrameStats {
+            last_decode_ms: 3.7,
+            resolution: Some((1920, 1080)),
+            source_format: Some("YUY2"),
+            ..FrameStats::default()
+        };
+        let note = i18n::stats_gpu_fallback(&crate::video::CpuReason::TooSlow);
+        let lines = format_stats_lines(
+            &stats,
+            Some(note.clone()),
+            format_display_latency(None),
+            status::format_underrun_count(None),
+        );
+        let decode = lines
+            .iter()
+            .position(|line| line.starts_with("デコード 3.70ms"))
+            .expect("デコードの行がある");
+        assert_eq!(lines[decode + 1], note);
+        assert!(note.contains("CPU"), "{note}");
     }
 }

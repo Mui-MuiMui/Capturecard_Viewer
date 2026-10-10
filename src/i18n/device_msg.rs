@@ -8,6 +8,7 @@
 use std::fmt::Display;
 
 use super::{language, Language};
+use crate::video::{CpuReason, Yuy2Conversion, GPU_CONVERT_ENV};
 
 // 英語の文の途中へ `Text` の語（「Input」「Sample rate」）を入れるときに
 // 小文字へ揃える。`Text` の側は単独で見出しやラベルに使うので、文頭の形で持つ
@@ -370,6 +371,50 @@ pub fn link_requested_fps(fps: u32) -> String {
     match language() {
         Language::Japanese => format!("要求フレームレート: {fps} fps"),
         Language::English => format!("Requested frame rate: {fps} fps"),
+    }
+}
+
+/// YUY2 をどこで RGB にしているか（#456）。「接続状態」タブの映像の欄に出す。
+/// CPU のときは理由も出す
+pub fn link_yuy2_conversion(conversion: &Yuy2Conversion) -> String {
+    match (conversion, language()) {
+        (Yuy2Conversion::Gpu, Language::Japanese) => "YUY2 の変換: GPU（シェーダー）".to_string(),
+        (Yuy2Conversion::Gpu, Language::English) => "YUY2 conversion: GPU (shader)".to_string(),
+        (Yuy2Conversion::Cpu(reason), Language::Japanese) => {
+            format!("YUY2 の変換: CPU（{}）", cpu_reason(reason))
+        }
+        (Yuy2Conversion::Cpu(reason), Language::English) => {
+            format!("YUY2 conversion: CPU ({})", cpu_reason(reason))
+        }
+    }
+}
+
+/// GPU から CPU へ自動で戻したときに、統計 OSD の「デコード」の行の下へ出す 1 行（#456）
+pub fn stats_gpu_fallback(reason: &CpuReason) -> String {
+    match language() {
+        Language::Japanese => format!("GPU の変換を止めて CPU へ戻した: {}", cpu_reason(reason)),
+        Language::English => format!("Fell back from GPU to CPU: {}", cpu_reason(reason)),
+    }
+}
+
+/// CPU で変換している理由
+fn cpu_reason(reason: &CpuReason) -> String {
+    let ja = language() == Language::Japanese;
+    match reason {
+        CpuReason::DisabledByEnv if ja => format!("{GPU_CONVERT_ENV}=0 で切ってある"),
+        CpuReason::DisabledByEnv => format!("turned off by {GPU_CONVERT_ENV}=0"),
+        CpuReason::DisabledBySetting if ja => "設定で CPU を選んでいる".to_string(),
+        CpuReason::DisabledBySetting => "CPU is selected in the settings".to_string(),
+        CpuReason::NoGl if ja => "OpenGL のコンテキストが無い".to_string(),
+        CpuReason::NoGl => "no OpenGL context".to_string(),
+        CpuReason::SoftwareRenderer(renderer) if ja => {
+            format!("ソフトウェア描画（{renderer}）")
+        }
+        CpuReason::SoftwareRenderer(renderer) => format!("software rendering ({renderer})"),
+        CpuReason::TooSlow if ja => "描画が映像に追いつかない".to_string(),
+        CpuReason::TooSlow => "drawing cannot keep up with the video".to_string(),
+        CpuReason::Unavailable(detail) if ja => format!("GPU で変換できない: {detail}"),
+        CpuReason::Unavailable(detail) => format!("cannot convert on the GPU: {detail}"),
     }
 }
 

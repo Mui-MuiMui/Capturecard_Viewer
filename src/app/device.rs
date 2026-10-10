@@ -246,6 +246,10 @@ impl CaptureCardViewer {
                 self.last_video_adjustments = Some(adjustments);
             }
 
+            // YUY2 → RGB の変換の場所（#456）。旗を書き換えるだけで、次のフレームから効く。
+            // 値が変わったときだけ、見張りによる切り替えを取り消して数え直す
+            self.gpu_yuy2.set_preference(settings.video.convert);
+
             // パススルーの有効・無効と音量・ミュートは、出力コールバックが読む
             // Atomic を書き換えるだけで効く。デバイスを開く処理を挟まないので、
             // ワーカーを経由させずに UI スレッドから直接入れる

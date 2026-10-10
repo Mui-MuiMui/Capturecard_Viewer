@@ -5,7 +5,7 @@
 //! 彩度）をフレームコールバックへ渡す箱（`SharedColorConversion`）も含む。
 
 use log::info;
-use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 
 use crate::settings::{ColorRange, ColorSpace, MAX_VIDEO_ADJUSTMENT, MIN_VIDEO_ADJUSTMENT};
 
@@ -34,8 +34,11 @@ use crate::settings::{ColorRange, ColorSpace, MAX_VIDEO_ADJUSTMENT, MIN_VIDEO_AD
 /// 明るさ・コントラスト・彩度の調整も、この表へ畳み込んで表現する
 /// （`adjusted_color_matrix`）。変換式そのものは変わらないため、
 /// 調整を入れても 1 画素あたりの演算は増えない。
+///
+/// **型だけは `pub`。** YUY2 のまま積むフレーム（`PixelFormat::Yuy2`、#456）が
+/// 変換に使う表を持ち回すため。中身（係数）は `video` の外へ見せない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ColorMatrix {
+pub struct ColorMatrix {
     /// ログに出す名前。どの表で変換したかを後から追えるようにする
     pub(super) name: &'static str,
     /// Y から引くオフセット。リミテッドは 16、フルは 0
@@ -289,6 +292,9 @@ pub struct SharedColorConversion {
     brightness: AtomicI32,
     contrast: AtomicI32,
     saturation: AtomicI32,
+    /// YUY2 を変換せずに積み、GPU（シェーダー）で RGB にするか（#456）。
+    /// UI スレッドがシェーダーを用意できたときだけ立てる（`super::gpu_yuy2`）
+    yuy2_on_gpu: AtomicBool,
 }
 
 /// `ColorSpace` を `AtomicU8` へ詰めるときの値。
@@ -315,7 +321,20 @@ impl SharedColorConversion {
             brightness: AtomicI32::new(0),
             contrast: AtomicI32::new(0),
             saturation: AtomicI32::new(0),
+            yuy2_on_gpu: AtomicBool::new(false),
         }
+    }
+
+    /// YUY2 を GPU で RGB にするかを切り替える。**立てるのは UI スレッドが
+    /// シェーダーを用意できたときだけ**（`GpuYuy2::init`）。立っていなければ
+    /// フレームコールバックが従来どおり CPU で変換する。次のフレームから効く
+    pub(super) fn set_yuy2_on_gpu(&self, on_gpu: bool) {
+        self.yuy2_on_gpu.store(on_gpu, Ordering::Relaxed);
+    }
+
+    /// YUY2 を変換せずに積むか。フレームコールバックが毎フレーム読む
+    pub(super) fn yuy2_on_gpu(&self) -> bool {
+        self.yuy2_on_gpu.load(Ordering::Relaxed)
     }
 
     /// 色変換に使う色空間とレンジを差し替える。

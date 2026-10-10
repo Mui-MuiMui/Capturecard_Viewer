@@ -19,6 +19,11 @@ pub struct VideoSettings {
     // 切り替え（#237）。開き方はデバイスと一体なのでプリセットに含める
     #[serde(deserialize_with = "deserialize_video_backend")]
     pub backend: VideoBackendSetting,
+    // YUY2 → RGB の変換をどこで行うか（#456）。既定は自動（GPU を使い、使えないときと
+    // 描画が遅いときは CPU へ戻す）。画は同じで、変わるのは負荷と遅れだけ。
+    // PC の GPU で決まる設定なのでプリセットには含めない（docs/design/presets.md）
+    #[serde(deserialize_with = "deserialize_video_convert")]
+    pub convert: VideoConvertSetting,
     // 稼働中にフレームが途絶えたとき、自動でデバイスを開き直すか。
     //
     // 映像だけでなく音声のストリームエラーにも効く。右クリックメニューの
@@ -226,6 +231,70 @@ fn video_backend_from_str(raw: &str) -> Option<VideoBackendSetting> {
     }
 }
 
+// YUY2 → RGB の変換をどこで行うかの設定（#456）。設定ファイルには
+// convert = "auto" / "gpu" / "cpu" と書かれる。
+//
+// 実際にどこで変換しているか（`video::Yuy2Conversion`）とは別の型。こちらは利用者の
+// 希望で、GPU で変換できないとき（シェーダーの失敗など）は「GPU」でも CPU へ戻る
+// （`docs/design/video-pipeline.md` の「YUY2 → RGB を GPU で変換する」）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VideoConvertSetting {
+    // GPU を使う。ソフトウェア描画のときと、描画が遅いときは CPU へ戻す
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    // GPU を使う。性能では戻さない（GPU で変換できないときだけ CPU へ戻す）
+    #[serde(rename = "gpu")]
+    Gpu,
+    // CPU（フレームコールバック）で変換する。1.4.0 までと同じ
+    #[serde(rename = "cpu")]
+    Cpu,
+}
+
+impl VideoConvertSetting {
+    // 設定ダイアログのコンボボックスに出す表示名
+    pub fn label(self) -> &'static str {
+        match self {
+            // 「自動」は開き方と同じ語なのでキーを使い回す
+            VideoConvertSetting::Auto => Text::VideoBackendAuto.get(),
+            VideoConvertSetting::Gpu => Text::VideoConvertGpu.get(),
+            VideoConvertSetting::Cpu => Text::VideoConvertCpu.get(),
+        }
+    }
+
+    pub const ALL: [VideoConvertSetting; 3] = [
+        VideoConvertSetting::Auto,
+        VideoConvertSetting::Gpu,
+        VideoConvertSetting::Cpu,
+    ];
+}
+
+// 設定ファイルの convert に知らない値が書かれていても、設定全体を失わせない。
+// 開き方と同じ考え方で、自動として扱う
+fn deserialize_video_convert<'de, D>(deserializer: D) -> Result<VideoConvertSetting, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(video_convert_from_str(&raw).unwrap_or_else(|| {
+        warn!(
+            "設定の映像の変換 \"{}\" を解釈できないので自動として扱う",
+            raw
+        );
+        VideoConvertSetting::default()
+    }))
+}
+
+// 設定ファイルに書かれた文字列から変換の場所を決める。解釈できない場合は None。
+fn video_convert_from_str(raw: &str) -> Option<VideoConvertSetting> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(VideoConvertSetting::Auto),
+        "gpu" => Some(VideoConvertSetting::Gpu),
+        "cpu" => Some(VideoConvertSetting::Cpu),
+        _ => None,
+    }
+}
+
 // 映像調整（明るさ・コントラスト・彩度）の下限と上限。0 が無調整。
 //
 // 3 つで範囲を揃えてあるのは、スライダーの中央が常に「無調整」になり、
@@ -297,6 +366,8 @@ impl Default for VideoSettings {
             // 既存ユーザーの設定ファイルには backend が無い。自動にしておけば
             // これまでどおり名前で経路が決まる
             backend: VideoBackendSetting::Auto,
+            // 既定は自動。GPU が使えなければ CPU（1.4.0 までと同じ経路）へ戻る
+            convert: VideoConvertSetting::Auto,
             // 既定は有効。USB を挿し直したときに何もしなくても復帰するほうが、
             // 「映像が止まったまま気付かない」よりも害が少ない
             auto_reconnect: true,
@@ -592,5 +663,46 @@ mod tests {
         );
         assert_eq!(video_backend_from_str(""), None);
         assert_eq!(video_backend_from_str("vfw"), None);
+    }
+
+    #[test]
+    fn video_convert_is_read_from_the_full_config_and_defaults_to_auto() {
+        let settings: AppSettings = toml::from_str(FULL_CONFIG).expect("読めること");
+        assert_eq!(settings.video.convert, VideoConvertSetting::Cpu);
+
+        // 既存の設定ファイルには無い。自動になり、他の項目は巻き添えにならない
+        let config = without_key(FULL_CONFIG, "convert");
+        let settings: AppSettings = toml::from_str(&config).expect("読めること");
+        assert_eq!(settings.video.convert, VideoConvertSetting::Auto);
+        assert_eq!(settings.video.backend, VideoBackendSetting::DirectShow);
+    }
+
+    #[test]
+    fn video_convert_unknown_value_falls_back_to_auto() {
+        let config = FULL_CONFIG.replace(r#"convert = "cpu""#, r#"convert = "npu""#);
+        let settings: AppSettings = toml::from_str(&config).expect("読めること");
+        assert_eq!(settings.video.convert, VideoConvertSetting::Auto);
+        assert_eq!(settings.video.format, Some("MJPEG".to_string()));
+    }
+
+    #[test]
+    fn video_convert_serializes_and_reads_back() {
+        // 設定ファイルに書き出される綴り。変えると配布済みの版の設定を読めなくなる
+        for (setting, expected) in [
+            (VideoConvertSetting::Auto, r#"convert = "auto""#),
+            (VideoConvertSetting::Gpu, r#"convert = "gpu""#),
+            (VideoConvertSetting::Cpu, r#"convert = "cpu""#),
+        ] {
+            let mut settings = AppSettings::default();
+            settings.video.convert = setting;
+            let serialized = toml::to_string(&settings).expect("設定を書き出せること");
+            assert!(serialized.contains(expected), "{}", serialized);
+            let restored: AppSettings = toml::from_str(&serialized).expect("読み戻せること");
+            assert_eq!(restored.video.convert, setting);
+        }
+        assert_eq!(
+            video_convert_from_str(" GPU "),
+            Some(VideoConvertSetting::Gpu)
+        );
     }
 }

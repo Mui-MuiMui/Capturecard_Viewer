@@ -28,6 +28,7 @@ use super::convert::{bgr24_stride, bgr24_to_rgb, mjpeg_to_rgb, yuy2_to_rgb_naive
 use super::frame_buffer::{
     fill_recycled, frame_len_status, FrameBuffer, FrameLenStatus, VideoFrame, VideoFrames,
 };
+use super::frame_format::{ConvertPath, PixelFormat};
 use super::tap::VideoTap;
 use super::yuv420::{yuv420_frame_len, yuv420_to_rgb, Yuv420Layout};
 use crate::repaint::RepaintWaker;
@@ -126,11 +127,13 @@ impl FrameSink {
         &mut self,
         width: usize,
         height: usize,
+        format: PixelFormat,
         fill: impl FnOnce(&mut Vec<u8>) -> R,
     ) -> (Arc<VideoFrame>, R) {
         let (frame, result, missed) = fill_recycled(self.recyclable.take(), |target| {
             target.width = width;
             target.height = height;
+            target.format = format;
             fill(&mut target.data)
         });
         if missed {
@@ -171,11 +174,34 @@ impl FrameSink {
 
         // 回収できたフレームがあれば使い回し、無ければ新規に確保する
         let matrix = self.current_matrix(width, height);
-        let (frame, ()) = self.fill_frame(width, height, |rgb| {
+        if self.color_conversion.yuy2_on_gpu() && width.is_multiple_of(2) {
+            // GPU で変換する（#456）。YUY2 のまま写して積み、係数表はフレームに持たせる。
+            // 写す先は回収した Vec で、RGB のころより短いので容量が足りて確保は起きない。
+            // 奇数幅は 2 画素 1 組の境目が行をまたぐので、従来どおり CPU で変換する
+            let len = width * height * 2;
+            let (frame, ()) = self.fill_frame(width, height, PixelFormat::Yuy2(matrix), |data| {
+                data.clear();
+                data.extend_from_slice(&src[..len]);
+            });
+            return self.push(
+                frame,
+                received_at,
+                ConvertPath::Gpu,
+                YUY2_FORMAT_NAME,
+                matrix.name,
+            );
+        }
+        let (frame, ()) = self.fill_frame(width, height, PixelFormat::Rgb24, |rgb| {
             yuy2_to_rgb_naive(width, height, src, &matrix, rgb)
         });
 
-        self.push(frame, received_at, true, YUY2_FORMAT_NAME, matrix.name)
+        self.push(
+            frame,
+            received_at,
+            ConvertPath::Fast,
+            YUY2_FORMAT_NAME,
+            matrix.name,
+        )
     }
 
     /// いまの設定で使う係数表。色空間・レンジ・映像調整を畳み込んだもの。
@@ -218,10 +244,16 @@ impl FrameSink {
             return false;
         }
         let matrix = self.current_matrix(width, height);
-        let (frame, ()) = self.fill_frame(width, height, |rgb| {
+        let (frame, ()) = self.fill_frame(width, height, PixelFormat::Rgb24, |rgb| {
             yuv420_to_rgb(layout, width, height, src, &matrix, rgb)
         });
-        self.push(frame, received_at, true, layout.name(), matrix.name)
+        self.push(
+            frame,
+            received_at,
+            ConvertPath::Fast,
+            layout.name(),
+            matrix.name,
+        )
     }
 
     /// DirectShow の RGB24（BGR の並び、行は 4 バイト境界）を RGB に並べ替えて積む。
@@ -249,10 +281,16 @@ impl FrameSink {
             }
             return false;
         }
-        let (frame, ()) = self.fill_frame(width, height, |rgb| {
+        let (frame, ()) = self.fill_frame(width, height, PixelFormat::Rgb24, |rgb| {
             bgr24_to_rgb(width, height, stride, bottom_up, src, rgb)
         });
-        self.push(frame, received_at, false, "RGB24", RGB_MATRIX_NAME)
+        self.push(
+            frame,
+            received_at,
+            ConvertPath::Fallback,
+            "RGB24",
+            RGB_MATRIX_NAME,
+        )
     }
 
     /// MJPEG の 1 フレームを展開して積む。
@@ -268,8 +306,9 @@ impl FrameSink {
         src: &[u8],
         received_at: Instant,
     ) -> bool {
-        let (frame, decoded) =
-            self.fill_frame(width, height, |rgb| mjpeg_to_rgb(width, height, src, rgb));
+        let (frame, decoded) = self.fill_frame(width, height, PixelFormat::Rgb24, |rgb| {
+            mjpeg_to_rgb(width, height, src, rgb)
+        });
         if let Err(reason) = decoded {
             // 誰にも渡していないので他に持ち主はいない。次のフレームで使い回す
             self.recyclable = Some(frame);
@@ -284,7 +323,13 @@ impl FrameSink {
             }
             return false;
         }
-        self.push(frame, received_at, false, "MJPEG", DECODER_MATRIX_NAME)
+        self.push(
+            frame,
+            received_at,
+            ConvertPath::Fallback,
+            "MJPEG",
+            DECODER_MATRIX_NAME,
+        )
     }
 
     /// デコーダが RGB に直したフレームを積む（汎用パス）。
@@ -340,11 +385,11 @@ impl FrameSink {
         // 使い回し、中にあった古い Vec はここ（ロックの外）で手放す。以前は回収
         // せずに積んでいたので、置き換えた 2 世代前のフレームの解放がフレーム
         // バッファのロックの中で起きていた
-        let (frame, ()) = self.fill_frame(width, height, |data| *data = rgb);
+        let (frame, ()) = self.fill_frame(width, height, PixelFormat::Rgb24, |data| *data = rgb);
         self.push(
             frame,
             received_at,
-            false,
+            ConvertPath::Fallback,
             source_format,
             DECODER_MATRIX_NAME,
         )
@@ -358,7 +403,7 @@ impl FrameSink {
         &mut self,
         frame: Arc<VideoFrame>,
         received_at: Instant,
-        used_fast: bool,
+        path: ConvertPath,
         source_format: &'static str,
         matrix_name: &'static str,
     ) -> bool {
@@ -372,7 +417,7 @@ impl FrameSink {
         let pushed = match self.buffer.lock() {
             Ok(mut guard) => {
                 self.recyclable =
-                    guard.push_back(frame, received_at, decode_ms, used_fast, source_format);
+                    guard.push_back(frame, received_at, decode_ms, path, source_format);
                 if self.first_frame.take() {
                     // 「接続した」と「映像が出ている」は別物なので、
                     // 最初の 1 枚が届いたことだけは info で残す
@@ -382,7 +427,11 @@ impl FrameSink {
                         height,
                         source_format,
                         decode_ms,
-                        if used_fast { "高速パス" } else { "デコーダ" },
+                        match path {
+                            ConvertPath::Fast => "高速パス",
+                            ConvertPath::Gpu => "GPU（YUY2 のまま積む）",
+                            ConvertPath::Fallback => "デコーダ",
+                        },
                         matrix_name
                     );
                 } else {
@@ -470,11 +519,7 @@ mod tests {
         // 白（Y=235）の 2x1。BT.601 のリミテッドレンジで 254 になる
         // （`convert.rs` の既存テストと同じ値）
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
 
         assert!(sink.push_yuy2(2, 1, &[235, 128, 235, 128], Instant::now()));
 
@@ -490,11 +535,7 @@ mod tests {
     fn frame_sink_push_yuy2_short_frame_is_dropped() {
         // 2x2 には 8 バイト要る。足りなければ積まない
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
 
         assert!(!sink.push_yuy2(2, 2, &[235, 128, 235, 128], Instant::now()));
         assert!(frames.latest().is_none());
@@ -547,11 +588,7 @@ mod tests {
             (Yuv420Layout::I420, [235, 235, 235, 235, 128, 128], "I420"),
         ] {
             let frames = VideoFrames::new();
-            let mut sink = FrameSink::new(
-                &frames,
-                Arc::new(SharedColorConversion::new()),
-                RepaintWaker::default(),
-            );
+            let mut sink = sink_for(&frames);
 
             assert!(sink.push_yuv420(layout, 2, 2, &src, Instant::now()));
 
@@ -568,11 +605,7 @@ mod tests {
     fn frame_sink_push_yuv420_short_frame_is_dropped() {
         // 3x3 には 17 バイト要る（色差は切り上げて 2x2 組）
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
 
         assert!(!sink.push_yuv420(Yuv420Layout::I420, 3, 3, &[235; 16], Instant::now()));
         assert!(frames.latest().is_none());
@@ -581,11 +614,7 @@ mod tests {
     #[test]
     fn frame_sink_push_decoded_counts_as_fallback() {
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
 
         assert!(sink.push_decoded(1, 1, vec![1, 2, 3], Instant::now(), "MJPEG"));
 
@@ -601,11 +630,7 @@ mod tests {
         // 幅 3 の YUYV を nokhwa が RGB にすると、入力 6 バイトから 6 画素ぶん
         // （18 バイト）が返る。3x1 に要るのは 9 バイトなので、先頭へ切り詰めて積む
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
         let rgb: Vec<u8> = (0..18).collect();
 
         assert!(sink.push_decoded(3, 1, rgb, Instant::now(), "YUYV"));
@@ -623,11 +648,7 @@ mod tests {
     fn frame_sink_push_decoded_drops_a_shorter_frame_and_counts_it() {
         // 2x2 には 12 バイト要る。足りなければ積まず、捨てた枚数を数える
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
 
         assert!(!sink.push_decoded(2, 2, vec![0; 11], Instant::now(), "YUYV"));
         assert!(!sink.push_decoded(2, 2, vec![0; 3], Instant::now(), "YUYV"));
@@ -641,11 +662,7 @@ mod tests {
     fn frame_sink_push_bgr24_reorders_into_rgb() {
         // 1x1 の赤（BGR の並びで 0, 0, 255、詰め物 1 バイト）
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
 
         assert!(sink.push_bgr24(1, 1, true, &[0, 0, 255, 0], Instant::now()));
 
@@ -660,11 +677,7 @@ mod tests {
     fn frame_sink_push_bgr24_short_frame_is_dropped() {
         // 1x2 は詰め物込みで 8 バイト要る
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
 
         assert!(!sink.push_bgr24(1, 2, true, &[0, 0, 255, 0], Instant::now()));
         assert!(frames.latest().is_none());
@@ -673,11 +686,7 @@ mod tests {
     #[test]
     fn frame_sink_push_mjpeg_broken_frame_is_dropped() {
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
 
         assert!(!sink.push_mjpeg(2, 2, &[0xFF, 0xD8], Instant::now()));
         assert!(frames.latest().is_none());
@@ -691,11 +700,7 @@ mod tests {
             .encode(&rgb, 2, 2, image::ExtendedColorType::Rgb8)
             .expect("JPEG にできる");
         let frames = VideoFrames::new();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
 
         assert!(sink.push_mjpeg(2, 2, &jpeg, Instant::now()));
 
@@ -710,11 +715,7 @@ mod tests {
         let frames = VideoFrames::new();
         let tap = frames.tap();
         let mut consumer = tap.attach(super::super::tap::VIDEO_TAP_CAPACITY);
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
         let at = Instant::now();
 
         assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], at));
@@ -729,11 +730,7 @@ mod tests {
     fn frame_sink_push_without_recording_leaves_the_tap_empty() {
         let frames = VideoFrames::new();
         let tap = frames.tap();
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
         assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
 
         // 差し込まれていないので何も積まず、捨てた数にも入れない
@@ -748,11 +745,7 @@ mod tests {
         let frames = VideoFrames::new();
         let tap = frames.tap();
         let mut consumer = tap.attach(super::super::tap::VIDEO_TAP_CAPACITY);
-        let mut sink = FrameSink::new(
-            &frames,
-            Arc::new(SharedColorConversion::new()),
-            RepaintWaker::default(),
-        );
+        let mut sink = sink_for(&frames);
         for _ in 0..3 {
             assert!(sink.push_yuy2(2, 1, &[16, 128, 16, 128], Instant::now()));
         }
@@ -824,5 +817,37 @@ mod tests {
         let third = frames.latest().expect("3 枚目");
         assert_eq!(Arc::as_ptr(&third), first);
         assert_eq!(third.data, vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn frame_sink_push_yuy2_on_gpu_stores_the_raw_frame_with_its_matrix() {
+        // GPU で変換するとき（#456）は YUY2 のまま積み、係数表をフレームに持たせる
+        let frames = VideoFrames::new();
+        let color = Arc::new(SharedColorConversion::new());
+        color.set_yuy2_on_gpu(true);
+        let mut sink = FrameSink::new(&frames, color, RepaintWaker::default());
+        // 末尾の余り（詰め物）は写さない
+        assert!(sink.push_yuy2(2, 1, &[235, 128, 235, 128, 9, 9], Instant::now()));
+
+        let frame = frames.latest().expect("積んだ");
+        assert_eq!(frame.data, vec![235, 128, 235, 128]);
+        assert_eq!(frame.format, PixelFormat::Yuy2(super::super::color::BT601));
+        let stats = frames.stats();
+        assert!(stats.on_gpu);
+        assert_eq!(stats.fast_count, 1);
+    }
+
+    #[test]
+    fn frame_sink_push_yuy2_on_gpu_converts_an_odd_width_on_the_cpu() {
+        // 2 画素 1 組が行をまたぐ奇数幅は GPU へ回さない
+        let frames = VideoFrames::new();
+        let color = Arc::new(SharedColorConversion::new());
+        color.set_yuy2_on_gpu(true);
+        let mut sink = FrameSink::new(&frames, color, RepaintWaker::default());
+        assert!(sink.push_yuy2(3, 1, &[235, 128, 235, 128, 235, 128], Instant::now()));
+
+        let frame = frames.latest().expect("積んだ");
+        assert_eq!(frame.format, PixelFormat::Rgb24);
+        assert!(!frames.stats().on_gpu);
     }
 }

@@ -156,6 +156,7 @@ mod tests {
             width: 2,
             height: 2,
             data: vec![marker; 12],
+            format: super::super::frame_format::PixelFormat::Rgb24,
         })
     }
 
