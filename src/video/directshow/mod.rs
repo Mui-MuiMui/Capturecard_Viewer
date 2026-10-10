@@ -15,7 +15,7 @@
 //! | `audio_pin.rs` | 音声ピン（#388）。列挙の時点での有無の判定（#409）、有無の記録、塊の長さの提案と接続、`Run` が通らないときに外してやり直す、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
 //! | `video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
 //! | `media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放（COM の初期化は `crate::com`） |
-//! | `timestamp_probe.rs` | テストを含むビルドだけ。サンプルの到着時刻とタイムスタンプの計測（#406） |
+//! | `timestamp_probe.rs` | テストを含むビルドだけ。サンプルの到着時刻とタイムスタンプの計測（#406）、打刻 → `Receive` の遅れの計測（#476） |
 //!
 //! **デバイス名には「(DirectShow)」を添える**（`display_name`）。設定に
 //! 保存されるのもこの名前で、Media Foundation の経路とどちらで開くかは
@@ -29,8 +29,9 @@ mod filter;
 mod graph;
 mod media_type;
 mod stream_select;
+// 遅れの集計（`report_lag`）は Media Foundation の経路の計測（`video::capture`）も使う
 #[cfg(test)]
-mod timestamp_probe;
+pub(super) mod timestamp_probe;
 mod video_stream;
 
 use log::{debug, info, warn};
@@ -727,11 +728,13 @@ mod tests {
             .unwrap_or(10);
         let _ = timestamp_probe::BASE.set(Instant::now());
         let mut capture = capture();
+        // 対象は `CAPTURECARD_VIEWER_PIN_TEST_DEVICE`（既定 GC551）
+        let device = timestamp_probe::test_device();
         let name = capture
             .list_friendly_names()
             .into_iter()
-            .find(|name| name.contains("GC551"))
-            .expect("GC551 がある");
+            .find(|name| name.contains(&device))
+            .expect("対象のデバイスがある");
         let display = display_name(&name);
         for default_clock in [false, true] {
             timestamp_probe::set_default_clock(default_clock);

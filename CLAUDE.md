@@ -75,7 +75,7 @@ cargo build --release
 | `src/video/directshow/video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
 | `src/video/directshow/audio_pin.rs` | 映像デバイスの音声ピン（#388）。列挙の時点での有無の判定（`probe_presence`、#409）、有無の記録、10ms の塊の提案と接続、`Run` が通らないときに外してやり直す（`run_with_fallback`）、`WAVEFORMATEX` の読み取り（`pin_format_from_wave`）、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
 | `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
-| `src/video/directshow/timestamp_probe.rs` | テストを含むビルドだけ（`#[cfg(test)]`）。`Receive` に届いたサンプルの到着時刻と `IMediaSample::GetTime` を Atomic の表へ書き、`#[ignore]` のテストが揺れを出す（#406）。グラフに基準時計を付けるかの切り替えもここ |
+| `src/video/directshow/timestamp_probe.rs` | テストを含むビルドだけ（`#[cfg(test)]`）。`Receive` に届いたサンプルの到着時刻と `IMediaSample::GetTime` を Atomic の表へ書き、`#[ignore]` のテストが揺れを出す（#406）。グラフに基準時計を付けるかの切り替えもここ。`Receive` の時点のストリーム時刻も書き、打刻 → コールバックの遅れを測る（#476。集計の `report_lag` は Media Foundation の経路のテストも使う） |
 | `src/video/frame_sink.rs` | フレームコールバックの本体 `FrameSink`（YUY2→RGB、GPU で変換するときは YUY2 のまま写す（#456）、`FrameBuffer` へ積む、`RepaintWaker` で UI を起こす）。実機（Media Foundation / DirectShow）とフェイクで共有する。DirectShow の RGB24 / MJPEG / 4:2:0 の YUV（NV12 / I420 / YV12）の受け口もここ |
 | `src/video/fake.rs` | 実機なしで動くフェイクの映像デバイス `FakeVideoCapture`。テストパターンを指定 fps で吐く生成スレッド、切断・接続失敗のシナリオ、音声ピンを持つシナリオ（`with_audio_pin`、#394） |
 | `src/video/test_pattern.rs` | フェイクが吐くテストパターン（カラーバー、ベタ塗り、フレーム番号の焼き込み）の描画。純粋関数 |
