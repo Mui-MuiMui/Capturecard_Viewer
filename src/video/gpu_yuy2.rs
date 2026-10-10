@@ -306,12 +306,20 @@ impl GpuYuy2 {
     ) {
         if self.current == Yuy2Conversion::Gpu && self.preference == VideoConvertSetting::Auto {
             let stats = stats();
-            let observation = Observation {
-                frame_time,
-                frame_interval: watched_interval(
+            // 見張るのは、実際に GPU で変換しているフレーム（偶数幅の YUY2）が流れている間だけ。
+            // MJPEG / NV12 / RGB24 や奇数幅の YUY2 は CPU の経路で積まれるので、その間の
+            // 描画が遅くても GPU の判断材料にしない（`None` を渡すと見張りは数え直す）
+            let frame_interval = if stats.on_gpu {
+                watched_interval(
                     stats.intervals.map(|i| i.average_ms),
                     stats.since_last_frame_ms,
-                ),
+                )
+            } else {
+                None
+            };
+            let observation = Observation {
+                frame_time,
+                frame_interval,
             };
             if self.watch.observe(now, observation) {
                 self.too_slow = true;
@@ -553,6 +561,41 @@ mod tests {
         assert_eq!(gpu.conversion(), Yuy2Conversion::Gpu);
         gpu.set_preference(VideoConvertSetting::Auto);
         assert_eq!(gpu.conversion(), Yuy2Conversion::Gpu);
+    }
+
+    #[test]
+    fn slow_paint_counts_only_while_frames_are_converted_on_the_gpu() {
+        // MJPEG などで CPU の経路を通っている間は、描画が遅くても GPU を止めない。
+        // 同じ描画時間でも、GPU で変換しているフレームなら猶予と 5 秒のあとに止める
+        use crate::video::frame_buffer::IntervalStats;
+        let stats = |on_gpu: bool| FrameStats {
+            intervals: Some(IntervalStats {
+                fps: 60.0,
+                average_ms: 16.7,
+                min_ms: 16.0,
+                max_ms: 17.5,
+                stddev_ms: 0.3,
+                samples: 120,
+            }),
+            since_last_frame_ms: Some(5.0),
+            on_gpu,
+            ..FrameStats::default()
+        };
+        let slow = Some(Duration::from_millis(100));
+        let start = Instant::now();
+        let mut gpu = test_gpu();
+        for tenth in 0..120 {
+            let now = start + Duration::from_millis(tenth * 100);
+            gpu.tick(now, slow, || stats(false));
+        }
+        assert_eq!(gpu.conversion(), Yuy2Conversion::Gpu);
+
+        let mut gpu = test_gpu();
+        for tenth in 0..120 {
+            let now = start + Duration::from_millis(tenth * 100);
+            gpu.tick(now, slow, || stats(true));
+        }
+        assert_eq!(gpu.conversion(), Yuy2Conversion::Cpu(CpuReason::TooSlow));
     }
 
     #[test]
