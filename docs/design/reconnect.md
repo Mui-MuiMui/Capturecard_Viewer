@@ -88,23 +88,16 @@ cpal は WASAPI の `IMMNotificationClient` を公開していないため、開
 - 接続処理を足すときは `apply_config` で開かず、`ConnectRetry::request()` で要求だけ立てる。実際に開くのは `poll_connection()`
 - ユーザーが明示的にやり直しを求める経路（右クリック → デバイス再接続）は `request_now()` を使い、待ち時間を飛ばす
 
-### 両方に出るが Media Foundation では開けないデバイス（#387）
+### 自動の開き方で DirectShow から Media Foundation へ倒す（#490、#387）
 
-**開き方が「自動」で、Media Foundation で「見つかったが開けない」なら、同じ試行の中で DirectShow でも試す**（`app::backend::system` の `attempt_with_fallback`）。AVerMedia GC551（Live Gamer EXTREME 2、ベンダー ドライバー）は Media Foundation と DirectShow の両方の列挙に同じ名前で出るので、一覧（`merge_video_devices`）は Media Foundation のほうだけを残し、自動の開き方は Media Foundation を選ぶ。ところが Media Foundation では `IMFActivate::ActivateObject` の時点で `0xC00D36B4`（`MF_E_INVALIDMEDIATYPE`）になり、解像度・fps を変えても、対応形式の問い合わせも同じ失敗になる。DirectShow なら 1280x720 / 1920x1080 の YUY2 60fps で開ける。倒さなければ、既定の設定のまま永遠に再試行を繰り返して映らず、利用者は「映像の開き方」を知らないと直せない。
+**開き方が「自動」なら名前の付いたデバイスをまず DirectShow で開き、DirectShow の一覧に無いか開けなければ、同じ試行の中で Media Foundation で開く**（`app::backend::system_route` の `attempt_with_fallback`）。DirectShow を先にする理由と、条件ごとの振る舞いの表は `docs/design/device-worker.md` の「自動で DirectShow を先に試す理由（#490）」。
 
-| 条件 | 振る舞い |
-|---|---|
-| 自動で Media Foundation が `CameraOpenFailed` / `StreamOpenFailed` | 同じ名前で DirectShow を試す（`DirectShowCapture` は印の有無を問わず `FriendlyName` で探す） |
-| DirectShow で開けた | 成功。`SystemVideo::open` を DirectShow にし、`link_state` / `stop_capture` / `active` もそちらを見る。「接続状態」タブの「開き方」は `ActiveVideo::api` から DirectShow と出る。INFO で 1 行残す |
-| DirectShow の一覧にも無い（`DeviceNotFound`）・あっても開けない | **Media Foundation の失敗をそのまま返す。** 利用者が選んだのは自動で、DirectShow は代わりに試しただけなので、画面に出す理由は本来の経路のもの。DirectShow の失敗は WARN でログに残す |
-| 自動で Media Foundation が `DeviceNotFound` / `DeviceQueryFailed` / `NoDevices` | 試さない。抜いている間の再試行のたびに DirectShow の列挙を足すことになり、Media Foundation に居ないデバイスはもともと「(DirectShow)」付きで DirectShow の経路へ行く |
-| 開き方を Media Foundation / DirectShow に固定 | 試さない。利用者が選んだ経路の結果をそのまま返す |
+- **`ConnectRetry` から見ると試行 1 回のまま。** DirectShow → Media Foundation は `VideoBackend::start_capture` の 1 回の呼び出しの中で済ませ、バックオフの単位も「接続を試す（N 回目）」のログも変えない。上の「再接続の前にデバイスを列挙しない」も守っている。DirectShow で探すのは `DirectShowCapture::start_capture` の中の列挙で、Media Foundation の `start_capture` の中の列挙と同じ扱い
+- **倒したことを覚えておかない。** 次に開くときもまず DirectShow を試す。開き直しは設定の変更か切断のときだけなので、DirectShow の失敗にかかる分の遅れは許容している
+- **抜いている間の再試行は、DirectShow と Media Foundation の両方で「見つからない」になる。** 画面に出す理由は Media Foundation の「見つからない」。挿し直せば次の再試行で DirectShow で開く
+- 判定は純粋関数 `media_foundation_fallback`（倒すか・どの名前で探すか）で、`attempt_with_fallback` は経路ごとの操作をクロージャで受け取る。テストは経路ごとに `MockVideoBackend` を 1 つずつ置いて回す
 
-- **`ConnectRetry` から見ると試行 1 回のまま。** Media Foundation → DirectShow は `VideoBackend::start_capture` の 1 回の呼び出しの中で済ませ、バックオフの単位も「接続を試す（N 回目）」のログも変えない。上の「再接続の前にデバイスを列挙しない」も守っている。DirectShow で探すのは `DirectShowCapture::start_capture` の中の列挙で、Media Foundation の `start_capture` の中の列挙と同じ扱い
-- **対応形式の問い合わせ（`capabilities`）も同じ規則で倒す。** 能力キャッシュのキーはデバイス名と開き方の組（#249）なので、（GC551、自動）には DirectShow の対応形式が入る。自動で開くときもやはり DirectShow へ倒れるので、選択肢と実際に開く経路は食い違わない
-- **倒したことを覚えておかない。** 次に開くときもまず Media Foundation を試す。ドライバーの更新などで Media Foundation でも開けるようになれば、そのまま Media Foundation へ戻る。Media Foundation の失敗にかかる分だけ毎回の接続が遅れるが、開き直しは設定の変更か切断のときだけなので許容している
-- 判定は純粋関数 `directshow_fallback`（倒すか・どの名前で探すか）で、`attempt_with_fallback` は経路ごとの操作をクロージャで受け取る。テストは経路ごとに `MockVideoBackend` を 1 つずつ置いて回す
-- **音声ピンを繋ぐ指定（`CaptureRequest::connect_audio_pin`、#388）も DirectShow へ倒すときに渡す。** GC551 はこの経路で開くので、渡し忘れると既定の開き方のままでは音声ピンが繋がらない
+**経緯（#387）:** AVerMedia GC551（Live Gamer EXTREME 2、ベンダー ドライバー）は Media Foundation と DirectShow の両方の列挙に同じ名前で出るが、Media Foundation では `IMFActivate::ActivateObject` の時点で `0xC00D36B4`（`MF_E_INVALIDMEDIATYPE`）になり、解像度・fps を変えても、対応形式の問い合わせも同じ失敗になる。DirectShow なら 1280x720 / 1920x1080 の YUY2 60fps で開ける。#490 の前は自動で Media Foundation を先に開いていたので、Media Foundation で「見つかったが開けない」ときに DirectShow でも試す倒し込み（`directshow_fallback`）を入れていた。#490 で DirectShow が先になり、GC551 は最初から DirectShow で開くので、この倒し込みは無くした。
 
 ### 映像の開き直しに合わせて音声も開き直す（音声ピン、#388）
 

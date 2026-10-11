@@ -190,7 +190,7 @@ flowchart LR
 | Media Foundation | `video::VideoCapture`（`capture.rs`） | `nokhwa::query` | `Camera::compatible_list_by_resolution` | nokhwa のフレームコールバック |
 | DirectShow | `video::DirectShowCapture`（`directshow/`） | `ICreateDevEnum`（`CLSID_VideoInputDeviceCategory`） | `IAMStreamConfig::GetStreamCaps` | 自前のレンダラーフィルターの `IMemInputPin::Receive` |
 
-2 本を束ねるのは `app::backend::system` の `SystemVideo` で、ワーカーから見れば `VideoBackend` 1 つのまま。一覧は Media Foundation を優先し、DirectShow にしか無いデバイスだけを名前に「(DirectShow)」を添えて足す。どちらで開くかはまずこの印で決まり、開き方が「自動」で Media Foundation では開けない（見つかったが開けない）ときは、同じ試行の中で DirectShow でも試す（#387、`docs/design/reconnect.md` の「両方に出るが Media Foundation では開けないデバイス」）。詳しくは `docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」。
+2 本を束ねるのは `app::backend::system` の `SystemVideo` で、ワーカーから見れば `VideoBackend` 1 つのまま。一覧は Media Foundation を優先し、DirectShow にしか無いデバイスだけを名前に「(DirectShow)」を添えて足す。開き方が「自動」なら名前の付いたデバイスをまず DirectShow で開き、DirectShow の一覧に無いか開けなければ同じ試行の中で Media Foundation で開く（#490、`docs/design/reconnect.md` の「自動の開き方で DirectShow から Media Foundation へ倒す」）。詳しくは `docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」。
 
 ### 要求どおりのフォーマットで開く
 

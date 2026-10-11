@@ -4,6 +4,10 @@
 
 ## [未リリース]
 
+### 変更
+
+- 「映像の開き方」が「自動」のとき、まず DirectShow で開き、DirectShow の一覧に無いか開けなければ Media Foundation で開くようにした（オーディオ入力に映像デバイスの音声を選んでいるときは、DirectShow で開けなくても DirectShow のまま）。Media Foundation と DirectShow の両方に出るキャプチャーボードは DirectShow で開くと表示の遅れが短い（Live Gamer EXTREME 3 で約 32ms → 約 25ms）。今までどおり Media Foundation で開きたいときは「映像の開き方」を「Media Foundation」にする（#490）
+
 ### 修正
 
 - フォーマットが MJPEG / RGB24 のとき、色レンジと映像調整（明るさ・コントラスト・彩度）が効かなかったのを直した。色レンジがリミテッドなら黒の浮きが取れる。MJPEG / RGB24 で黒が潰れて見える場合は色レンジを「フル」にする。色空間は MJPEG / RGB24 では引き続き効かない（#472）
