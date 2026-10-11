@@ -43,7 +43,7 @@ WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の�
 - `docs/design/audio.md` の「ミュートは音量と別に持つ」は「`AudioCapture` の `muted`（`Arc<AtomicBool>`）」と書いているが、実際は `AudioControls::muted`（`AtomicBool`。`Arc<AudioControls>` ごと共有）
 - `docs/design/device-worker.md` の「開いたストリームは実装自身が持つ」の表は、`AudioCapture` が開くたびに作り直すものに `dropped_frames`（#350）と `xruns`（#377）を挙げていない
 - `src/app/backend/mod.rs` の冒頭のコメントは、trait を呼ぶのを「`worker_connect` と `worker_timers`」、本番の実装を「`VideoCapture` / `AudioCapture`」と書いている。いまは `worker_audio_connect` / `worker_audio_timers` も呼び、映像の本番は `SystemVideo`
-- `docs/design/threads.md` の「DirectShow のストリーミングスレッド」の行は本数を「「(DirectShow)」のデバイスをキャプチャ中」としているが、映像の開き方を DirectShow にしたとき（#237）と、自動で Media Foundation から倒したとき（#387）は、印の無いデバイスもこの経路で開く
+- `docs/design/threads.md` の「DirectShow のストリーミングスレッド」の行は本数を「「(DirectShow)」のデバイスをキャプチャ中」としているが、映像の開き方を DirectShow にしたとき（#237）と、自動で Media Foundation から倒したとき（#387）は、印の無いデバイスもこの経路で開く（#490 からは自動で DirectShow で開けたとき。#387 の倒し込みは無くした）
 
 ## 全体の形
 
@@ -483,7 +483,7 @@ input_device_name = "Line (AVerMedia Live Gamer)"   # "video_pin" の間は使�
 | 映像の開き直しに合わせた音声 | 毎回開き直す（`tick` の監視で番号を比べる） | 形式が同じなら差し込み先を残して続ける |
 | 塊が長い機種 | そのストリームに限ってリングを広げ、「接続状態」タブに出す | 開かずに理由を出す |
 | 初回の既定 | 最初の映像の試行のあとに決める（初回だけ映像がもう 1 度開き直る） | 今までどおり WASAPI の先頭（初回は HDMI の音が出ない） |
-| 「映像デバイスの音声」を選んで映像が Media Foundation のとき | 開かずに理由を出し、映像の開き方の変更を案内する | 映像の開き方が「自動」なら DirectShow を優先して開く（**#425 でこちらに変えた**。(5)） |
+| 「映像デバイスの音声」を選んで映像が Media Foundation のとき | 開かずに理由を出し、映像の開き方の変更を案内する | 映像の開き方が「自動」なら DirectShow を優先して開く（**#425 でこちらに変えた**。(5)。#490 からは音声の入力によらず、自動は名前の付いたデバイスを DirectShow で先に試す） |
 | 段階分け | 第 1 段（設定ファイルで鳴る）→ 第 2 段（UI・初回の既定・フェイク）→ 必要なら第 3 段 | 第 1 段と第 2 段を 1 本にする |
 
 **決定（2026-10-01、指示役のレビュー）: 8 点すべてこの文書の推奨どおりにする。** 第 1 段の実装はこの決定を前提にし、実機で前提（音声ピンを繋いでも映像の `Run` が通る、塊の長さが 10ms 前後になる）が崩れたときだけ、この表に戻って別案を検討する。

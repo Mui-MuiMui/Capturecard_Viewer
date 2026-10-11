@@ -18,9 +18,10 @@
 //! | `timestamp_probe.rs` | テストを含むビルドだけ。サンプルの到着時刻とタイムスタンプの計測（#406）、打刻 → `Receive` の遅れの計測（#476） |
 //!
 //! **デバイス名には「(DirectShow)」を添える**（`display_name`）。設定に
-//! 保存されるのもこの名前で、Media Foundation の経路とどちらで開くかは
-//! まずこの印で決まる（自動で Media Foundation が開けないときに DirectShow で
-//! 試し直すのは `app::backend::system`、#387）。言語によって変えない（設定に
+//! 保存されるのもこの名前。印は Media Foundation に居ないことの目印で、どちらで
+//! 開くかは `app::backend::system_route` が印と設定の開き方から決める（自動では
+//! 印の有無によらず DirectShow を先に試し、駄目なら印の無い名前は Media Foundation
+//! で開く、#490）。言語によって変えない（設定に
 //! 残る識別子なので、画面の言語を切り替えると別のデバイスになってしまう）。
 
 mod audio_pin;

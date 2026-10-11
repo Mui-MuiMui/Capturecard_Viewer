@@ -28,7 +28,9 @@ use crate::video::{
 };
 use std::sync::Arc;
 
-use super::system_route::{attempt_with_fallback, merge_video_devices, VideoRoute};
+use super::system_route::{
+    attempt_with_fallback, capabilities_with_fallback, merge_video_devices, Operation, VideoRoute,
+};
 
 /// 本番のバックエンド。映像は Media Foundation（nokhwa）と DirectShow、音声は
 /// WASAPI（cpal）。
@@ -99,24 +101,19 @@ impl VideoBackend for SystemVideo {
         // キャッシュはデバイス名と開き方の組で引くので、DirectShow で開く
         // 設定なら選択肢も DirectShow 側の対応形式になる。自動では開くときと
         // 同じくまず DirectShow に問い合わせ、DirectShow の一覧に無いか取れなければ
-        // Media Foundation に問い合わせる（#490）。キャッシュの (名前, 自動) には
-        // 開くときと同じ経路の対応形式が入るので食い違わない
+        // Media Foundation に問い合わせる（#490）。DirectShow が空の一覧を返したときも
+        // Media Foundation に問い合わせる（開くときは DirectShow のグラフが失敗して
+        // Media Foundation で開くため、`capabilities_with_fallback`）。キャッシュの
+        // (名前, 自動) には開くときと同じ経路の対応形式が入るので食い違わない
         let direct_show = &self.direct_show;
         // 音声ピンを繋ぐ指定は見ない。能力キャッシュの鍵は (名前, 開き方) で、
         // 入力の種類を含まないため。違いが出るのは DirectShow の一覧にあって
         // 開けないときだけ（音声ピンの指定があると開くときは Media Foundation へ
         // 倒さない、#425）で、そのときは開けないので選択肢の食い違いは問題にならない
-        let (result, _) = attempt_with_fallback(
-            device_name,
-            backend,
-            false,
-            "対応形式の取得",
-            |route, name| match (route, name) {
-                (VideoRoute::DirectShow, Some(name)) => direct_show.capabilities(name),
-                (_, name) => VideoCapture::get_device_capabilities(name),
-            },
-        );
-        result
+        capabilities_with_fallback(device_name, backend, |route, name| match (route, name) {
+            (VideoRoute::DirectShow, Some(name)) => direct_show.capabilities(name),
+            (_, name) => VideoCapture::get_device_capabilities(name),
+        })
     }
 
     fn start_capture(&mut self, request: &CaptureRequest<'_>) -> Result<(), VideoError> {
@@ -140,7 +137,7 @@ impl VideoBackend for SystemVideo {
             device_name,
             backend,
             connect_audio_pin,
-            "接続",
+            Operation::Connect,
             |route, name| match (route, name) {
                 (VideoRoute::DirectShow, Some(name)) => {
                     direct_show.start_capture(name, resolution, format, fps, connect_audio_pin)

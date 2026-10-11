@@ -143,7 +143,7 @@ flowchart LR
 
 | 条件 | 振る舞い |
 |---|---|
-| 自動で名前の付いたデバイス | まず DirectShow で開く（`route_for`）。開けたら INFO で「開き方が自動なので DirectShow で試し、接続に成功した」 |
+| 自動で名前の付いたデバイス | まず DirectShow で開く（`route_for`）。開けたら INFO で「開き方が自動なので DirectShow で試し、接続に成功した」（「(DirectShow)」付きの名前は「名前に「(DirectShow)」が付いている…ので」。対応形式の問い合わせは DEBUG） |
 | DirectShow の一覧に無い（`DeviceNotFound`） | 同じ試行の中で Media Foundation で開く。Media Foundation にだけ居るデバイスと、抜いている間がここ。再試行のたびに出るので debug |
 | DirectShow で見つかったが開けない・列挙に失敗した | 同じ試行の中で Media Foundation で開く。INFO で DirectShow の失敗を、開けたら「Media Foundation で試し、成功した」、開けなければ WARN を残す |
 | Media Foundation でも開けない | **Media Foundation の失敗を返す。** 両方に居るデバイスにとって Media Foundation は今までの経路なので、画面に出す理由も今までと同じにする |
@@ -155,7 +155,7 @@ flowchart LR
 - **代わりに、Media Foundation にだけ居るデバイスと、抜いている間の再試行では、DirectShow の列挙が 1 回ずつ増える。** #387 の倒し込み（Media Foundation → DirectShow）では「見つからない」で倒さないことでこれを避けていたが、ここでは DirectShow の一覧に居ないことが「Media Foundation で開くべきデバイス」の目印なので避けられない。DirectShow の列挙（`ICreateDevEnum`）は再試行の間隔（最大 5 秒）に比べて短い
 - **#387 の倒し込み（Media Foundation → DirectShow）は無くした。** 自動で名前の付いたデバイスを Media Foundation から開く場面が無くなったため。Media Foundation では開けないボード（AVerMedia GC551）は、最初から DirectShow で開くので Media Foundation の失敗を待たなくなった
 - **一覧の名前は変えない。** 両方に居るデバイスは今までどおり印の無い名前で並ぶ。開き方で名前を変えると、設定に残る名前が変わって別のデバイス扱いになる
-- **対応形式の問い合わせ（`capabilities`）も同じ順で引く。** 能力キャッシュの（名前, 自動）には、開くときと同じ経路（両方に居れば DirectShow）の対応形式が入る。Media Foundation 側の選択肢で保存していた形式が DirectShow に無ければ、DirectShow は近い形式を選んで開く（`stream_select::choose_candidate`）
+- **対応形式の問い合わせ（`capabilities`）も同じ順で引く。** 能力キャッシュの（名前, 自動）には、開くときと同じ経路（両方に居れば DirectShow）の対応形式が入る。Media Foundation 側の選択肢で保存していた形式が DirectShow に無ければ、DirectShow は近い形式を選んで開く（`stream_select::choose_candidate`）。**DirectShow が空の一覧を返したとき（`IAMStreamConfig` が無い・受け取れる形式が 0 件。`DirectShowCapture::capabilities` は失敗にせず `Ok(空)` を返す）も Media Foundation を引く**（`capabilities_with_fallback`）。開くときはグラフの組み立てが失敗して Media Foundation で開くので、選択肢が空なのに Media Foundation で映る食い違いを避ける
 - 実際に開いた経路は今までどおり「接続状態」タブの「開き方」（`ActiveVideo::api`）に出る。統計 OSD には開き方の行が無い
 - **初回起動の入力の既定は、開いた映像に音声ピンがあれば「映像デバイスの音声」になる**（#394、`docs/design/directshow-audio.md` の (4)）。自動で DirectShow を先にしたので、両方に出るボードでも DirectShow のフィルターに音声ピンがあればこちらに決まる
 
