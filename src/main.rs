@@ -19,6 +19,7 @@ mod logging;
 mod overlay;
 mod platform;
 mod recording;
+mod renderer;
 mod repaint;
 mod screenshot;
 mod screenshot_sound;
@@ -34,6 +35,7 @@ use platform::{
     redirect_misdirected_close, window_size_or_default,
 };
 use settings::AppSettings;
+use video::GpuContext;
 
 fn main() -> Result<(), eframe::Error> {
     // 何よりも先にログ基盤を用意する。これ以降の失敗を記録できるようにするため。
@@ -79,7 +81,7 @@ fn main() -> Result<(), eframe::Error> {
     // 位置を捨てたときは OS の既定の配置のモニタで最大化される
     viewport_builder = viewport_builder.with_maximized(settings.ui.maximized);
 
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: viewport_builder,
         // winit のイベント用のウィンドウへ届いた閉じる要求を、本来のウィンドウへ
         // 回す。最小化中の taskkill（/F なし）がそちらへ WM_CLOSE を送るため（#420、
@@ -90,11 +92,15 @@ fn main() -> Result<(), eframe::Error> {
         })),
         ..Default::default()
     };
+    // 描画のバックエンド（wgpu / glow、#492）を決める。**`run_native` より前に。**
+    // イベントループは 1 回しか作れず、起動に失敗してから選び直せないため
+    let renderer = renderer::configure(&mut options);
+    let renderer_name = renderer.kind.name();
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "Capturecard Viewer",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             // イベントループを作り終えたここで外す。winit はイベントループを
             // 作るときにキーボードの Raw Input を登録し、それが残っていると
             // このアプリが前面にある間ホットキーのフックが呼ばれない（#238）
@@ -105,8 +111,16 @@ fn main() -> Result<(), eframe::Error> {
             }
             configure_japanese_font(&cc.egui_ctx);
             let mut app = CaptureCardViewer::default();
-            // YUY2 → RGB を GPU で行う準備（#456）。GL のコンテキストが current なのはここ
-            app.init_gpu_yuy2(cc.gl.as_ref());
+            // 統計 OSD にどちらで描いているかを出す。wgpu のアダプターはここまでに選ばれている
+            app.set_renderer_label(renderer.label());
+            // YUY2 → RGB を GPU で行う準備（#456）。描画バックエンドのコンテキスト（GL が
+            // current なのも wgpu のデバイスが作られているのも）ここ。wgpu を先に見る（#492）
+            let context = match (&cc.wgpu_render_state, &cc.gl) {
+                (Some(render_state), _) => GpuContext::Wgpu(render_state),
+                (None, Some(gl)) => GpuContext::Glow(gl),
+                (None, None) => GpuContext::None,
+            };
+            app.init_gpu_yuy2(context);
             // 画面の言語を設定と OS の表示言語から決める。**起動経路で 1 回だけ。**
             // `default()` の中では決めない。テストで作ったときにプロセス全体の
             // 言語を書き換えてしまうため（#256）。`default()` は文言を作らないので、
@@ -114,5 +128,12 @@ fn main() -> Result<(), eframe::Error> {
             app.apply_language();
             Ok(Box::new(app))
         }),
-    )
+    );
+    // 描画の初期化（wgpu のデバイスや surface、glow のコンテキスト）に失敗すると
+    // ウィンドウが出ないまま終わる。理由をログに残す。wgpu で失敗したときは
+    // `CAPTURECARD_VIEWER_RENDERER=glow` で起動できるかを試せる
+    if let Err(e) = &result {
+        log::error!("ウィンドウを開けずに終了する（描画 {renderer_name}）: {e}");
+    }
+    result
 }

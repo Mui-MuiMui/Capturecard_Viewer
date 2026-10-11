@@ -22,7 +22,7 @@ use super::convert::yuy2_to_rgb_naive;
 use super::frame_buffer::VideoFrame;
 use crate::i18n;
 
-/// GPU で変換できない理由。ログと「接続状態」タブ・統計 OSD に出す。
+/// GPU で変換できない理由。ログと「接続状態」タブ・統計 OSD に出す。GL と wgpu（#492）で共通。
 ///
 /// **文言は `Display` から `crate::i18n` を引く**（`docs/design/error-reporting.md`）。
 /// 持たせる値は GL が返した文（シェーダーのログなど）と数値だけで、言語に依らない
@@ -54,6 +54,8 @@ pub enum GpuFailure {
         height: usize,
         len: usize,
     },
+    /// wgpu の版（`super::gpu_yuy2_wgpu`、#492）でエラースコープが捕まえたエラー。wgpu の文
+    Wgpu(String),
 }
 
 impl fmt::Display for GpuFailure {
