@@ -2,7 +2,7 @@
 
 # Capturecard Viewer
 
-A viewer for displaying video and audio from a capture card. For Windows 10/11.
+A viewer for displaying video and audio from a capture card. For Windows 10/11 (drawn with DirectX 12; on systems without a DirectX 12 capable GPU it draws with OpenGL instead).
 
 ## Overview
 

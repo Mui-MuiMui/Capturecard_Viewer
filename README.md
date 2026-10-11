@@ -2,7 +2,7 @@
 
 # Capturecard Viewer
 キャプチャーボードの映像と音声を表示するためのアプリです。  
-Windows10/11向け
+Windows10/11向け（画面の描画は DirectX 12。DirectX 12 に対応した GPU が無い環境では OpenGL で描きます）
 
 ## 概要
 
