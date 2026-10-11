@@ -6,7 +6,7 @@
 
 ### 変更
 
-- 「映像の開き方」が「自動」のとき、まず DirectShow で開き、DirectShow の一覧に無いか開けなければ Media Foundation で開くようにした。Media Foundation と DirectShow の両方に出るキャプチャーボードは DirectShow で開くと表示の遅れが短い（Live Gamer EXTREME 3 で約 32ms → 約 25ms）。今までどおり Media Foundation で開きたいときは「映像の開き方」を「Media Foundation」にする（#490）
+- 「映像の開き方」が「自動」のとき、まず DirectShow で開き、DirectShow の一覧に無いか開けなければ Media Foundation で開くようにした（オーディオ入力に映像デバイスの音声を選んでいるときは、DirectShow で開けなくても DirectShow のまま）。Media Foundation と DirectShow の両方に出るキャプチャーボードは DirectShow で開くと表示の遅れが短い（Live Gamer EXTREME 3 で約 32ms → 約 25ms）。今までどおり Media Foundation で開きたいときは「映像の開き方」を「Media Foundation」にする（#490）
 
 ### 修正
 

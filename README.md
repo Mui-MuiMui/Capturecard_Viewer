@@ -12,7 +12,7 @@ Windows10/11向け
   - 正確にはWebカメラとして認識できれば表示できると思います。
   - DirectShow にしか対応していないデバイス（OBS の仮想カメラなど）も使えます。デバイス一覧に「(DirectShow)」付きで表示されます。
 - 作者が実機で動作を確認したキャプチャーボード（2026-10 時点）:
-  - **AVerMedia Live Gamer EXTREME 3（GC551G2）**: 「映像の開き方」が「自動」のまま DirectShow で 1080p60（YUY2）。Media Foundation でも開けます（DirectShow のほうが表示の遅れが約 6ms 短い）。音声は Windows の音声入力デバイスから。遅延の実測もこのボード
+  - **AVerMedia Live Gamer EXTREME 3（GC551G2）**: 「映像の開き方」が「自動」のまま DirectShow で 1080p60（YUY2）。Media Foundation でも開けます（DirectShow のほうが表示の遅れが約 6ms 短い）。音声は Windows の音声入力デバイスから。遅延の実測もこのボードで行いました
   - **AVerMedia GC550 PLUS / Live Gamer EXTREME 2（GC551）**: Media Foundation では開けず、「映像の開き方」が「自動」のまま DirectShow で開きます。音声は Windows の音声入力デバイスに出ないので「[映像デバイスと連動]」の音声入力で鳴らします（「おすすめ設定」の「映像デバイスの音声」）
   - 上記以外のボードについての動作報告は [Issues](https://github.com/Mui-MuiMui/Capturecard_Viewer/issues) で歓迎します（型番と、映像の開き方・音声の出方を添えてください）
 - 開発に一部AIを活用しています。 忌避感のある方は利用しないようにしてください。  
@@ -330,7 +330,7 @@ JPEG はファイルが小さくなりますが、文字や細い線ににじみ
 
 **DirectShow のデバイスについて**
  - 名前に「(DirectShow)」が付いたデバイスは、Media Foundation に出ないデバイス（OBS の仮想カメラ、古いキャプチャーボードなど）です。Media Foundation と DirectShow の両方に出るデバイスは、Media Foundation のほうだけを表示します。
- - 「映像の開き方」が「自動」（既定）のとき、まず DirectShow で開き、DirectShow の一覧に無いか開けなければ Media Foundation で開きます。両方に出るデバイスは DirectShow で開いたほうが表示の遅れが短いためです（Live Gamer EXTREME 3 で約 6ms。[docs/LATENCY.md](docs/LATENCY.md)）。Media Foundation では開けないデバイス（AVerMedia GC551 など）もそのまま DirectShow で開きます。実際にどちらで開いたかは「接続状態」タブに出ます。
+ - 「映像の開き方」が「自動」（既定）のとき、まず DirectShow で開き、DirectShow の一覧に無いか開けなければ Media Foundation で開きます（オーディオ入力に映像デバイスの音声を選んでいるときは、DirectShow で開けなくても DirectShow のまま）。両方に出るデバイスは DirectShow で開いたほうが表示の遅れが短いためです（Live Gamer EXTREME 3 で約 6ms。[docs/LATENCY.md](docs/LATENCY.md)）。Media Foundation では開けないデバイス（AVerMedia GC551 など）もそのまま DirectShow で開きます。実際にどちらで開いたかは「接続状態」タブに出ます。
  - 両方に出るデバイスを Media Foundation で開きたいとき（DirectShow で映りが不安定なときなど）は、設定画面のデバイス設定タブの「映像の開き方」を「Media Foundation」にします（既定は「自動」）。「DirectShow」にすると DirectShow だけで開きます。選んだ方法の一覧に無いデバイスには接続できないので、映像が出ない場合は「自動」に戻してください。
  - 受け取れる形式は YUY2 / NV12 / I420 / YV12 / MJPEG / RGB24 です。UYVY など、それ以外の形式しか出さないデバイスは映りません。
  - 色空間は YUY2 / NV12 / I420 / YV12 のときだけ効きます（MJPEG と RGB24 では効きません）。色レンジと明るさ / コントラスト / 彩度はどの形式でも効きます。
