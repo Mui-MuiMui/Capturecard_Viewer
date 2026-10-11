@@ -204,8 +204,14 @@ impl VideoAdjustments {
     }
 
     /// 3 つとも 0 か。ログに「調整あり」と出すかの判定に使う
-    fn is_neutral(self) -> bool {
+    pub(super) fn is_neutral(self) -> bool {
         self == Self::NEUTRAL
+    }
+
+    /// RGB の経路の表（`super::rgb_adjust`）が彩度の倍率を求めるときに読む。
+    /// 明るさとコントラストは `adjusted_color_matrix` を通して受け取る
+    pub(super) fn saturation(self) -> i32 {
+        self.saturation
     }
 }
 

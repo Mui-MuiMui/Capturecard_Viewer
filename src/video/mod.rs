@@ -12,10 +12,13 @@
 //! | `fake.rs` | 実機なしで動くフェイクの映像デバイス（テストパターンを吐く）。環境変数で有効にしたときだけ使う |
 //! | `test_pattern.rs` | フェイクが吐くテストパターン（カラーバー、ベタ塗り、フレーム番号の焼き込み）の描画 |
 //! | `frame_sink.rs` | フレームコールバックの本体（YUY2 → RGB、`FrameBuffer` へ積む、UI を起こす）。実機とフェイクで共有する |
+//! | `frame_sink_rgb.rs` | `FrameSink` の受け口のうち係数表を通らないもの（DirectShow の RGB24、MJPEG、デコーダ任せ） |
 //! | `frame_format.rs` | フレームの画素の並び（RGB24 / YUY2）と、YUY2 のまま積んだフレームから RGB を取り出す口（録画・スクリーンショット） |
-//! | `gpu_yuy2.rs` | YUY2 → RGB を GPU（シェーダー）で行う窓口。使うかの判断、フレームを預かる口、egui の描画へ差し込むコールバック |
+//! | `gpu_yuy2.rs` | YUY2 → RGB を GPU（シェーダー）で行う窓口。使うかの判断、フレームを預かる口、描画へ差し込むコールバックを返す口 |
 //! | `gpu_watch.rs` | GPU で変換しているときの性能の見張りとソフトウェア描画の見分け（判定だけ） |
-//! | `gpu_yuy2_gl.rs` | その GL の部分。シェーダー（`shaders/`）、アップロード、テクスチャへの描き込み、起動時の自己診断 |
+//! | `gpu_yuy2_paint.rs` | egui の描画へ差し込む変換のコールバック（glow / wgpu）と、窓口と共有する状態 |
+//! | `gpu_yuy2_gl.rs` | その GL の部分（glow で描くとき）。シェーダー（`shaders/` の GLSL）、アップロード、テクスチャへの描き込み、起動時の自己診断 |
+//! | `gpu_yuy2_wgpu.rs` | その wgpu の部分（wgpu で描くとき、#492）。シェーダー（`shaders/` の WGSL）、アップロード、egui のテクスチャへの書き込み、起動時の自己診断 |
 //! | `capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の問い合わせ |
 //! | `color.rs` | 係数表とその選択、映像調整の畳み込み、設定の共有 |
 //! | `convert.rs` | YUY2 → RGB24 の画素変換と、DirectShow の RGB24 / MJPEG の展開 |
@@ -43,10 +46,14 @@ mod fake;
 pub(crate) mod frame_buffer;
 mod frame_format;
 mod frame_sink;
+mod frame_sink_rgb;
 mod gpu_watch;
 mod gpu_yuy2;
 mod gpu_yuy2_gl;
+mod gpu_yuy2_paint;
+mod gpu_yuy2_wgpu;
 mod mf_format;
+mod rgb_adjust;
 mod tap;
 mod test_pattern;
 mod yuv420;
@@ -63,7 +70,8 @@ pub use display_latency::{format_display_latency, DisplayLatency};
 pub use fake::{FakeVideoCapture, FakeVideoOptions};
 pub use frame_buffer::{FrameStats, VideoFrame, VideoFrames};
 pub use frame_format::PixelFormat;
-pub use gpu_yuy2::{CpuReason, GpuYuy2, Yuy2Conversion, GPU_CONVERT_ENV};
+pub use gpu_watch::is_software_renderer;
+pub use gpu_yuy2::{CpuReason, GpuContext, GpuYuy2, Yuy2Conversion, GPU_CONVERT_ENV};
 pub use gpu_yuy2_gl::GpuFailure;
 pub use tap::{VideoTap, VideoTapConsumer, VIDEO_TAP_CAPACITY};
 

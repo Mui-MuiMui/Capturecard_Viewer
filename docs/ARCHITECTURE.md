@@ -190,7 +190,7 @@ flowchart LR
 | Media Foundation | `video::VideoCapture`（`capture.rs`） | `nokhwa::query` | `Camera::compatible_list_by_resolution` | nokhwa のフレームコールバック |
 | DirectShow | `video::DirectShowCapture`（`directshow/`） | `ICreateDevEnum`（`CLSID_VideoInputDeviceCategory`） | `IAMStreamConfig::GetStreamCaps` | 自前のレンダラーフィルターの `IMemInputPin::Receive` |
 
-2 本を束ねるのは `app::backend::system` の `SystemVideo` で、ワーカーから見れば `VideoBackend` 1 つのまま。一覧は Media Foundation を優先し、DirectShow にしか無いデバイスだけを名前に「(DirectShow)」を添えて足す。どちらで開くかはまずこの印で決まり、開き方が「自動」で Media Foundation では開けない（見つかったが開けない）ときは、同じ試行の中で DirectShow でも試す（#387、`docs/design/reconnect.md` の「両方に出るが Media Foundation では開けないデバイス」）。詳しくは `docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」。
+2 本を束ねるのは `app::backend::system` の `SystemVideo` で、ワーカーから見れば `VideoBackend` 1 つのまま。一覧は Media Foundation を優先し、DirectShow にしか無いデバイスだけを名前に「(DirectShow)」を添えて足す。開き方が「自動」なら名前の付いたデバイスをまず DirectShow で開き、DirectShow の一覧に無いか開けなければ同じ試行の中で Media Foundation で開く（#490、`docs/design/reconnect.md` の「自動の開き方で DirectShow から Media Foundation へ倒す」）。詳しくは `docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」。
 
 ### 要求どおりのフォーマットで開く
 
@@ -230,7 +230,7 @@ GPU 側（egui のシェーダ）で行う案もあったが、採っていな�
 
 調整値（-100〜100、0 が無調整）は `AtomicI32` 3 本でフレームコールバックスレッドと共有し、色空間・レンジと同じく開き直しなしで次のフレームから効く。
 
-**色空間・レンジ・映像調整はいずれも高速パス（自前の YUY2 変換）でしか効かない。** 汎用パス（デコーダ任せ）では係数表がデコーダの内部にあり、外から差し替えられない。変換後の RGB へフィルタを掛ければ反映はできるが、もともと重い経路に 1 画素あたりの処理を足すことになるため採っていない。フォールバックしたことと、その経路では設定が効かないことは `warn` で残す。
+**色空間は高速パス（自前の YUV 変換）でしか効かない。** MJPEG / RGB24 / 汎用パス（デコーダ任せ）では係数表がデコーダの内部にあるか、届いた時点で RGB になっていて、外から差し替えられない。色レンジと映像調整は、変換後の RGB へ表引きで掛ける（#472、`docs/design/video-pipeline.md` の「RGB の経路のレンジと映像調整（#472）」。デコーダ任せでは色レンジも掛けない）。フォールバックしたことと、その経路では設定の一部が効かないことは `warn` で残す。
 
 高速パス（自前の整数演算）と汎用パス（デコーダ任せ）の使い分けは維持する。ただしどちらを通ったかは統計として観測できるようにする。現状は**最初の 1 枚がどちらを通ったか**と、高速パスを外れたことが `info` / `warn` でログに残るだけで、画面からは読めない。
 

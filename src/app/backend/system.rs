@@ -3,20 +3,17 @@
 //! trait に包むだけ。どれも中身には手を入れない。
 //!
 //! **Media Foundation と DirectShow のどちらで開くかは、デバイス名と設定の
-//! 「映像の開き方」（`video.backend`）と音声ピンを繋ぐ指定で決まる**（`route_for`）。
-//! 自動で音声ピンを繋ぐなら DirectShow（#425）。それ以外の自動は
-//! まず名前で決め、DirectShow のデバイスは名前に「(DirectShow)」が
-//! 付いていて、設定にもその名前で残る。一覧は Media Foundation を優先し、
-//! DirectShow にしか無いものだけを足す（`merge_video_devices`）。
-//! Web カメラやキャプチャーボードの多くは両方に出るが、同じデバイスを
-//! 2 つ並べても選び間違えるだけなので、実績のある Media Foundation を使う。
-//! それを DirectShow で開きたいときは開き方を DirectShow にする（#237）。
+//! 「映像の開き方」（`video.backend`）で決まる**（`route_for`）。一覧は
+//! Media Foundation を優先し、DirectShow にしか無いものだけを「(DirectShow)」を
+//! 添えて足す（`merge_video_devices`）。Web カメラやキャプチャーボードの多くは
+//! 両方に出るが、同じデバイスを 2 つ並べても選び間違えるだけなので 1 つにする。
 //!
-//! **自動のときだけ、Media Foundation で「見つかったが開けない」なら同じ
-//! 呼び出しの中で DirectShow でも試す**（`attempt_with_fallback`、#387）。
-//! 両方に出るのに Media Foundation では開けないボード（AVerMedia GC551）が
-//! あり、自動のままでは永遠に再試行を繰り返すため。対応形式の問い合わせも
-//! 同じ規則で倒す。開き方を Media Foundation に固定した設定では倒さない。
+//! **自動では名前の付いたデバイスをまず DirectShow で開き、開けなければ同じ
+//! 呼び出しの中で Media Foundation で開く**（`attempt_with_fallback`、#490）。両方に
+//! 出るボードは DirectShow で開いたほうが表示までの遅れが短く（`docs/LATENCY.md`）、
+//! Media Foundation では開けないボード（AVerMedia GC551、#387）もある。DirectShow の
+//! 一覧に無いデバイスは今までどおり Media Foundation で開く。対応形式の問い合わせも
+//! 同じ規則で引く。開き方を Media Foundation / DirectShow に固定した設定では倒さない。
 
 use super::{
     AudioBackend, BackendShared, CaptureRequest, DeviceBackends, VideoBackend, VideoEnumeration,
@@ -31,7 +28,9 @@ use crate::video::{
 };
 use std::sync::Arc;
 
-use super::system_route::{attempt_with_fallback, merge_video_devices, VideoRoute};
+use super::system_route::{
+    attempt_with_fallback, capabilities_with_fallback, merge_video_devices, Operation, VideoRoute,
+};
 
 /// 本番のバックエンド。映像は Media Foundation（nokhwa）と DirectShow、音声は
 /// WASAPI（cpal）。
@@ -100,26 +99,21 @@ impl VideoBackend for SystemVideo {
     ) -> Result<DeviceCapabilities, VideoError> {
         // 開くときと同じ規則で経路を決める（#249）。設定ダイアログの能力
         // キャッシュはデバイス名と開き方の組で引くので、DirectShow で開く
-        // 設定なら選択肢も DirectShow 側の対応形式になる。自動で Media
-        // Foundation が開けないデバイスは、開くときと同じく DirectShow の
-        // 対応形式を返す（#387）。キャッシュの (名前, 自動) にはこちらが入り、
-        // 自動で開くときもやはり DirectShow へ倒れるので食い違わない
+        // 設定なら選択肢も DirectShow 側の対応形式になる。自動では開くときと
+        // 同じくまず DirectShow に問い合わせ、DirectShow の一覧に無いか取れなければ
+        // Media Foundation に問い合わせる（#490）。DirectShow が空の一覧を返したときも
+        // Media Foundation に問い合わせる（開くときは DirectShow のグラフが失敗して
+        // Media Foundation で開くため、`capabilities_with_fallback`）。キャッシュの
+        // (名前, 自動) には開くときと同じ経路の対応形式が入るので食い違わない
         let direct_show = &self.direct_show;
         // 音声ピンを繋ぐ指定は見ない。能力キャッシュの鍵は (名前, 開き方) で、
-        // 入力の種類を含まないため。音声ピンのために自動のまま DirectShow で開く
-        // とき（#425）は選択肢が Media Foundation 側の対応形式のことがあるが、
-        // DirectShow は近い形式を選んで開く（`stream_select`）
-        let (result, _) = attempt_with_fallback(
-            device_name,
-            backend,
-            false,
-            "対応形式の取得",
-            |route, name| match (route, name) {
-                (VideoRoute::DirectShow, Some(name)) => direct_show.capabilities(name),
-                (_, name) => VideoCapture::get_device_capabilities(name),
-            },
-        );
-        result
+        // 入力の種類を含まないため。違いが出るのは DirectShow の一覧にあって
+        // 開けないときだけ（音声ピンの指定があると開くときは Media Foundation へ
+        // 倒さない、#425）で、そのときは開けないので選択肢の食い違いは問題にならない
+        capabilities_with_fallback(device_name, backend, |route, name| match (route, name) {
+            (VideoRoute::DirectShow, Some(name)) => direct_show.capabilities(name),
+            (_, name) => VideoCapture::get_device_capabilities(name),
+        })
     }
 
     fn start_capture(&mut self, request: &CaptureRequest<'_>) -> Result<(), VideoError> {
@@ -132,19 +126,18 @@ impl VideoBackend for SystemVideo {
             backend,
             connect_audio_pin,
         } = *request;
-        // 自動で Media Foundation が開けなければ DirectShow でも試す（#387）。
+        // 自動ではまず DirectShow で開き、開けなければ Media Foundation で開く（#490）。
         // `open` には実際に開けた経路を入れるので、`link_state` / `stop_capture` /
         // `active` もそちらを見る（「接続状態」タブの「開き方」も `active` から出る）。
-        // 音声ピンを繋ぐ指定は、倒したときの DirectShow にも渡す（GC551 はこの経路で開く）。
-        // 自動で音声ピンを繋ぐ指定があれば最初から DirectShow で開き、DirectShow の一覧に
-        // 無いときだけ Media Foundation で開く（#425、`route_for` / `attempt_with_fallback`）
+        // 音声ピンを繋ぐ指定があれば、DirectShow の一覧にあって開けなかったときは
+        // Media Foundation へ倒さない（#425、`route_for` / `attempt_with_fallback`）
         let media_foundation = &mut self.media_foundation;
         let direct_show = &mut self.direct_show;
         let (result, route) = attempt_with_fallback(
             device_name,
             backend,
             connect_audio_pin,
-            "接続",
+            Operation::Connect,
             |route, name| match (route, name) {
                 (VideoRoute::DirectShow, Some(name)) => {
                     direct_show.start_capture(name, resolution, format, fps, connect_audio_pin)

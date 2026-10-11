@@ -116,16 +116,16 @@ flowchart LR
 
 #### 一覧と名前
 
-- **一覧は Media Foundation を優先する。** DirectShow の列挙には Media Foundation に出るデバイス（WDM のキャプチャーボードや Web カメラ）も並ぶので、表示名が Media Foundation の一覧と同じものは捨て、DirectShow にしか無いものだけを「(DirectShow)」を添えて足す（`merge_video_devices`）。同じデバイスを 2 経路で並べても選び間違えるだけで、実績があるのは Media Foundation のほう
-- **どちらで開くかは、名前の印と設定の「映像の開き方」（`video.backend`、#237）で決まる**（`route_for`）。ただし自動で Media Foundation が開けないときは DirectShow でも試す（#387、下の「映像の開き方」）。自動で音声の入力が映像デバイスの音声（`input_source = "video_pin"`）なら最初から DirectShow で開き、DirectShow の一覧に無いときだけ Media Foundation で開く（#425。`docs/design/directshow-audio.md` の (5)。能力の問い合わせはこの指定を見ない）。設定に保存されるのも「(DirectShow)」付きの名前。**この印は翻訳しない。** 設定に残る識別子なので、画面の言語を切り替えると別のデバイス扱いになってしまう
+- **一覧は Media Foundation を優先する。** DirectShow の列挙には Media Foundation に出るデバイス（WDM のキャプチャーボードや Web カメラ）も並ぶので、表示名が Media Foundation の一覧と同じものは捨て、DirectShow にしか無いものだけを「(DirectShow)」を添えて足す（`merge_video_devices`）。同じデバイスを 2 経路で並べても選び間違えるだけ。印の無い名前で残るので、設定ファイルの名前は #490 の前と変わらない
+- **どちらで開くかは、名前の印と設定の「映像の開き方」（`video.backend`、#237）で決まる**（`route_for`）。自動では名前の付いたデバイスをまず DirectShow で開き、DirectShow の一覧に無いか開けなければ Media Foundation で開く（#490、下の「自動で DirectShow を先に試す理由」）。自動で音声の入力が映像デバイスの音声（`input_source = "video_pin"`）なら、DirectShow の一覧にあって開けなかったときは Media Foundation へ倒さない（#425。`docs/design/directshow-audio.md` の (5)。能力の問い合わせはこの指定を見ない）。設定に保存されるのも「(DirectShow)」付きの名前。**この印は翻訳しない。** 設定に残る識別子なので、画面の言語を切り替えると別のデバイス扱いになってしまう
 
 #### 映像の開き方（#237）
 
-一覧は Media Foundation を優先するので、両方に出るデバイスを DirectShow で開く手段が名前の印だけでは無い。MF 側の挙動が怪しいときの切り分けや、Media Foundation の経路が扱えない形式（I420 / YV12）で開きたいとき（`docs/design/video-pipeline.md` の「Media Foundation で開く形式（#81）」）のために、設定で経路を固定できるようにしてある。
+一覧は 1 つにまとめてあるので、両方に出るデバイスをどちらで開くかは名前の印からは決まらない。片方の経路の挙動が怪しいときの切り分けや、Media Foundation の経路が扱えない形式（I420 / YV12）で開きたいとき（`docs/design/video-pipeline.md` の「Media Foundation で開く形式（#81）」）のために、設定で経路を固定できるようにしてある。**Media Foundation に固定すれば #490 の前の自動と同じ経路で開ける**（DirectShow で問題が出たときの逃げ道）。
 
 | `video.backend` | 経路 | 経路へ渡す名前 |
 |---|---|---|
-| `auto`（既定） | 名前に「(DirectShow)」があれば DirectShow、無ければ Media Foundation（#143 のまま）。Media Foundation で「見つかったが開けない」ときは同じ試行の中で DirectShow でも試す（#387、`docs/design/reconnect.md` の「両方に出るが Media Foundation では開けないデバイス」） | そのまま |
+| `auto`（既定） | 名前の付いたデバイスはまず DirectShow。DirectShow の一覧に無い（`DeviceNotFound`）か開けなければ、同じ試行の中で Media Foundation で開く（#490、下の「自動で DirectShow を先に試す理由」）。未指定は Media Foundation の先頭 | そのまま |
 | `direct_show` | DirectShow | そのまま。`DirectShowCapture` は印の有無を問わず `FriendlyName` で探す |
 | `media_foundation` | Media Foundation | 「(DirectShow)」を外した名前 |
 
@@ -136,6 +136,28 @@ flowchart LR
 - 実際に開いた経路は `ActiveVideo::api`（`CaptureApi`）に持たせ、「接続状態」タブの映像の欄に「開き方」として出す
 - **プリセットに含める**（`video` の中にあるので `Preset::apply_to` と `matches_preset` の両方に自然に入る）。開き方はデバイスと一体の設定で、キャプチャーボードの使い分けというプリセットの用途に合う（`docs/design/presets.md`）
 - 名前の照合は表示名（`FriendlyName`）で行う。同じ名前のデバイスが 2 台あれば先に列挙されたほうを開く（Media Foundation の経路と同じ）
+
+#### 自動で DirectShow を先に試す理由（#490）
+
+**同じボードを DirectShow で開くと、表示までの遅れが Media Foundation より約 6ms 短かった**（#485。Live Gamer EXTREME 3、1080p60 YUY2、1.5.0。Media Foundation が約 32ms、DirectShow が約 25ms。`docs/LATENCY.md` の「Media Foundation と DirectShow の撮り比べ」）。#476 で、ドライバーの打刻からコールバックまでが Media Foundation のほうが約 1 フレーム長いことも測れていた（`docs/design/video-pipeline.md` の「取り込み側の遅れの計測（#476）」）。既定の「自動」のままでこの差を取れるよう、両方に出るデバイスは DirectShow を先にした（ユーザー判断 2026-10-11）。
+
+| 条件 | 振る舞い |
+|---|---|
+| 自動で名前の付いたデバイス | まず DirectShow で開く（`route_for`）。開けたら INFO で「開き方が自動なので DirectShow で試し、接続に成功した」（「(DirectShow)」付きの名前は「名前に「(DirectShow)」が付いている…ので」。対応形式の問い合わせは DEBUG） |
+| DirectShow の一覧に無い（`DeviceNotFound`） | 同じ試行の中で Media Foundation で開く。Media Foundation にだけ居るデバイスと、抜いている間がここ。再試行のたびに出るので debug |
+| DirectShow で見つかったが開けない・列挙に失敗した | 同じ試行の中で Media Foundation で開く。INFO で DirectShow の失敗を、開けたら「Media Foundation で試し、成功した」、開けなければ WARN を残す |
+| Media Foundation でも開けない | **Media Foundation の失敗を返す。** 両方に居るデバイスにとって Media Foundation は今までの経路なので、画面に出す理由も今までと同じにする |
+| 音声ピンを繋ぐ指定があり、DirectShow の一覧にあって開けない | Media Foundation へは倒さない（#425。Media Foundation には音声ピンが無い） |
+| 名前に「(DirectShow)」がある | DirectShow だけ。Media Foundation の一覧に居ない |
+| 開き方を Media Foundation / DirectShow に固定 | 倒さない。利用者が選んだ経路の結果をそのまま返す |
+
+- **両方に居るかは、開くときの DirectShow の列挙で分かる。** 印の無い名前は Media Foundation の一覧に居るもの（`merge_video_devices`）で、DirectShow の一覧にも居れば DirectShow で開ける。居なければ `DirectShowCapture::start_capture` の中の列挙が `DeviceNotFound` を返す。開く前に一覧を取り直して確かめる形にしなかったのは、起動直後の最初の接続は列挙より先に走り（`worker_commands` の `apply_config`、列挙で最初の接続を遅らせない）、`docs/design/reconnect.md` の「再接続の前にデバイスを列挙しない」があるため。前回の一覧を覚えておく形も、起動直後は空なので最初の接続が Media Foundation になり、起動と再接続で経路が変わってしまう
+- **代わりに、Media Foundation にだけ居るデバイスと、抜いている間の再試行では、DirectShow の列挙が 1 回ずつ増える。** #387 の倒し込み（Media Foundation → DirectShow）では「見つからない」で倒さないことでこれを避けていたが、ここでは DirectShow の一覧に居ないことが「Media Foundation で開くべきデバイス」の目印なので避けられない。DirectShow の列挙（`ICreateDevEnum`）は再試行の間隔（最大 5 秒）に比べて短い
+- **#387 の倒し込み（Media Foundation → DirectShow）は無くした。** 自動で名前の付いたデバイスを Media Foundation から開く場面が無くなったため。Media Foundation では開けないボード（AVerMedia GC551）は、最初から DirectShow で開くので Media Foundation の失敗を待たなくなった
+- **一覧の名前は変えない。** 両方に居るデバイスは今までどおり印の無い名前で並ぶ。開き方で名前を変えると、設定に残る名前が変わって別のデバイス扱いになる
+- **対応形式の問い合わせ（`capabilities`）も同じ順で引く。** 能力キャッシュの（名前, 自動）には、開くときと同じ経路（両方に居れば DirectShow）の対応形式が入る。Media Foundation 側の選択肢で保存していた形式が DirectShow に無ければ、DirectShow は近い形式を選んで開く（`stream_select::choose_candidate`）。**DirectShow が空の一覧を返したとき（`IAMStreamConfig` が無い・受け取れる形式が 0 件。`DirectShowCapture::capabilities` は失敗にせず `Ok(空)` を返す）も Media Foundation を引く**（`capabilities_with_fallback`）。開くときはグラフの組み立てが失敗して Media Foundation で開くので、選択肢が空なのに Media Foundation で映る食い違いを避ける
+- 実際に開いた経路は今までどおり「接続状態」タブの「開き方」（`ActiveVideo::api`）に出る。統計 OSD には開き方の行が無い
+- **初回起動の入力の既定は、開いた映像に音声ピンがあれば「映像デバイスの音声」になる**（#394、`docs/design/directshow-audio.md` の (4)）。自動で DirectShow を先にしたので、両方に出るボードでも DirectShow のフィルターに音声ピンがあればこちらに決まる
 
 #### スレッドと COM
 
@@ -160,8 +182,8 @@ flowchart LR
 |---|---|---|---|
 | YUY2 | `push_yuy2`（nokhwa の経路と同じ高速パス） | 効く | 使い回す |
 | NV12 / I420 / YV12 | `push_yuv420`（`video/yuv420.rs`。YUY2 と同じ係数表。IYUV は I420 として受ける。#228） | 効く | 使い回す |
-| RGB24 | `push_bgr24`（B・G・R を R・G・B へ、ボトムアップなら行を逆順に） | 効かない | 使い回す |
-| MJPEG | `push_mjpeg`（`convert::mjpeg_to_rgb`） | 効かない | 展開先は使い回すが、デコーダの内部で確保が起きる |
+| RGB24 | `push_bgr24`（B・G・R を R・G・B へ、ボトムアップなら行を逆順に） | 色空間は効かない。レンジと映像調整は RGB で掛ける（#472） | 使い回す |
+| MJPEG | `push_mjpeg`（`convert::mjpeg_to_rgb`） | 色空間は効かない。レンジと映像調整は RGB で掛ける（#472） | 展開先は使い回すが、デコーダの内部で確保が起きる |
 
 **MJPEG の展開に nokhwa のデコーダ（mozjpeg）は使わない。** mozjpeg は壊れたデータを panic で知らせて内部で `catch_unwind` するが、release は `panic = "abort"` なので（`docs/design/logging.md`）そのままプロセスが落ちる。キャプチャーの MJPEG は途中で欠けたフレームが混ざりうるので、エラーを値で返す `image` クレートの JPEG デコーダを使い、壊れたフレームは捨てて初回だけ記録する。
 
@@ -181,7 +203,7 @@ WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の�
 
 #### DirectShow で確かめたもの・確かめていないもの
 
-確かめたのは OBS の仮想カメラ（YUY2 / NV12 / I420 を出す。#143 の時点で受け取れたのは YUY2 だけ）と、実機の AVerMedia GC551（2026-10-01）。GC551 は Media Foundation では開けず、開き方が自動なら DirectShow へ倒して 1280x720 / 1920x1080 の YUY2 60fps で開く（#387、`docs/design/reconnect.md`）。入力と違う解像度では警告画面を送ってくるので、開く解像度を入力に合わせる（#391、`docs/design/video-pipeline.md`）。同じフィルターの音声ピンから 48kHz 2ch 16bit の PCM を受け取り、鳴らすことと録画に入ることも確かめた（#393、`docs/design/directshow-audio.md`）。**NV12 / I420 / YV12 の受け口（#228）は実機では未確認（OBS の仮想カメラは YV12 を出さず、GC551 は YUY2 で開く）。MJPEG / RGB24 を出すデバイス、途中で形式が変わるデバイス、変換フィルターが間に入る組み合わせは試していない。** 抜き差しの検出は、グラフのイベント（`EC_DEVICE_LOST` など、#229）とフレームの途絶（3 秒）の 2 本立て（`docs/design/reconnect.md` の「切断の検出と再接続」）。イベントがどの機器で実際に届くかは確かめていない（OBS の仮想カメラの停止で確かめる手順は `docs/MANUAL-TEST.md` の「DirectShow のデバイス（#143）」）。
+確かめたのは OBS の仮想カメラ（YUY2 / NV12 / I420 を出す。#143 の時点で受け取れたのは YUY2 だけ）と、実機の AVerMedia GC551（2026-10-01）。GC551 は Media Foundation では開けず、開き方が自動なら DirectShow で 1280x720 / 1920x1080 の YUY2 60fps で開く（#387 で倒し込みを足し、#490 からは最初から DirectShow）。Live Gamer EXTREME 3 も自動で DirectShow で 1920x1080 の YUY2 60fps で開く（#485、#490）。入力と違う解像度では警告画面を送ってくるので、開く解像度を入力に合わせる（#391、`docs/design/video-pipeline.md`）。同じフィルターの音声ピンから 48kHz 2ch 16bit の PCM を受け取り、鳴らすことと録画に入ることも確かめた（#393、`docs/design/directshow-audio.md`）。**NV12 / I420 / YV12 の受け口（#228）は実機では未確認（OBS の仮想カメラは YV12 を出さず、GC551 は YUY2 で開く）。MJPEG / RGB24 を出すデバイス、途中で形式が変わるデバイス、変換フィルターが間に入る組み合わせは試していない。** 抜き差しの検出は、グラフのイベント（`EC_DEVICE_LOST` など、#229）とフレームの途絶（3 秒）の 2 本立て（`docs/design/reconnect.md` の「切断の検出と再接続」）。イベントがどの機器で実際に届くかは確かめていない（OBS の仮想カメラの停止で確かめる手順は `docs/MANUAL-TEST.md` の「DirectShow のデバイス（#143）」）。
 
 ### フェイクデバイス（#142）
 

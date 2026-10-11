@@ -149,9 +149,11 @@ impl StreamState {
 
     /// サンプル 1 つを渡し先へ渡す。
     fn receive(&mut self, sample: &IMediaSample, received_at: Instant) {
-        // 実機の計測（#406）。到着時刻とタイムスタンプを Atomic の表へ書くだけ
+        // 実機の計測（#406、#476）。到着時刻・タイムスタンプ・いまのストリーム時刻を
+        // Atomic の表へ書くだけ
         #[cfg(test)]
         {
+            let stream_now = super::timestamp_probe::stream_time_now();
             let (mut start, mut end) = (0i64, 0i64);
             let hr = match unsafe { sample.GetTime(&mut start, &mut end) } {
                 Ok(()) => 0,
@@ -161,7 +163,7 @@ impl StreamState {
                 StreamState::Video(_) => &super::timestamp_probe::VIDEO,
                 StreamState::Audio(_) => &super::timestamp_probe::AUDIO,
             };
-            probe.record(received_at, hr, start, end);
+            probe.record(received_at, hr, start, end, stream_now);
         }
         match self {
             StreamState::Video(stream) => stream.receive(sample, received_at),
@@ -501,6 +503,9 @@ impl IMediaFilter_Impl for RendererFilter_Impl {
     }
 
     fn Run(&self, _start: i64) -> Result<()> {
+        // 実機の計測（#476）。ストリーム時刻の原点を控える
+        #[cfg(test)]
+        super::timestamp_probe::set_run_start(_start);
         self.shared.set_state(State_Running);
         Ok(())
     }
@@ -512,6 +517,9 @@ impl IMediaFilter_Impl for RendererFilter_Impl {
     fn SetSyncSource(&self, clock: Ref<IReferenceClock>) -> Result<()> {
         // 時計は持つだけで使わない。届いたサンプルは待たずにすぐ積む
         let clock = clock.as_ref().cloned();
+        // 実機の計測（#476）。`Receive` から読めるように控える
+        #[cfg(test)]
+        super::timestamp_probe::set_clock(clock.as_ref());
         let mut guard = self.clock.lock().map_err(|_| error(E_UNEXPECTED))?;
         *guard = clock;
         Ok(())

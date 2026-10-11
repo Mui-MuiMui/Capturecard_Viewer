@@ -405,8 +405,8 @@ fn cpu_reason(reason: &CpuReason) -> String {
         CpuReason::DisabledByEnv => format!("turned off by {GPU_CONVERT_ENV}=0"),
         CpuReason::DisabledBySetting if ja => "設定で CPU を選んでいる".to_string(),
         CpuReason::DisabledBySetting => "CPU is selected in the settings".to_string(),
-        CpuReason::NoGl if ja => "OpenGL のコンテキストが無い".to_string(),
-        CpuReason::NoGl => "no OpenGL context".to_string(),
+        CpuReason::NoGpuContext if ja => "描画の GPU のコンテキストが無い".to_string(),
+        CpuReason::NoGpuContext => "no GPU rendering context".to_string(),
         CpuReason::SoftwareRenderer(renderer) if ja => {
             format!("ソフトウェア描画（{renderer}）")
         }
@@ -460,6 +460,8 @@ pub fn gpu_failure(failure: &GpuFailure) -> String {
         GpuFailure::LengthMismatch { width, height, len } => {
             format!("pixel data length does not match ({width}x{height}, {len} bytes)")
         }
+        GpuFailure::Wgpu(error) if ja => format!("wgpu のエラー: {error}"),
+        GpuFailure::Wgpu(error) => format!("wgpu error: {error}"),
     }
 }
 

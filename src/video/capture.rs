@@ -377,14 +377,13 @@ impl VideoCapture {
                     SinkRoute::Decoder => {
                         // 受け口を持たない形式（幅が奇数の YUY2 など）は nokhwa のデコーダへ。
                         //
-                        // **この経路では色空間・色レンジ・映像調整が効かない。**
-                        // 係数表はデコーダの内部にあり、外から差し替えられないため。
-                        // 変換後の RGB へフィルタを掛ければ反映はできるが、
-                        // もともと重い経路に 1 画素あたりの処理を足すことになるので
-                        // 採っていない。設定が効かないことをログに残す
+                        // **この経路では色空間と色レンジが効かない。** 係数表は
+                        // デコーダの内部にあり、外から差し替えられないため。映像調整
+                        // だけは RGB になったあとで表を引いて掛ける（`push_decoded`、
+                        // #472）。設定の一部が効かないことをログに残す
                         if fallback_notice.take() {
                             warn!(
-                                "このフォーマットの受け口が無いのでデコーダへフォールバックする（フォーマット: {:?}、{}x{}）。この経路では色空間・色レンジ・映像調整が反映されない。以降は記録しない",
+                                "このフォーマットの受け口が無いのでデコーダへフォールバックする（フォーマット: {:?}、{}x{}）。この経路では色空間・色レンジが反映されない（映像調整は反映する）。以降は記録しない",
                                 source_format, width, height
                             );
                         }
@@ -537,5 +536,156 @@ mod tests {
     fn format_actual_video_without_any_value_says_so() {
         // 取得できないことと「値が無い」ことを画面上で区別する
         assert_eq!(format_actual_video(None, None), "（取得できない）");
+    }
+
+    /// `media_foundation_capture_timestamp_to_callback_lag` が 1 サンプルごとに控える値
+    struct LagSample {
+        /// コールバックの入口の UNIX 時刻
+        unix: Duration,
+        /// nokhwa の `Buffer::capture_timestamp`（ストリームを開いたときの UNIX 時刻 + サンプル時刻）
+        capture: Option<Duration>,
+        /// コールバックの入口の `MFGetSystemTime`（100ns、QPC 基準）
+        system_100ns: i64,
+    }
+
+    fn unix_now() -> Duration {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("時計が 1970 年より後")
+    }
+
+    /// 2 つの時刻の差（a − b、ms）。負にもなる
+    fn diff_ms(a: Duration, b: Duration) -> f64 {
+        (a.as_nanos() as i128 - b.as_nanos() as i128) as f64 / 1e6
+    }
+
+    #[test]
+    #[ignore = "Media Foundation のキャプチャーボード（CAPTURECARD_VIEWER_PIN_TEST_DEVICE、既定 GC551）に 1920x1080 60Hz の入力信号を入れておく"]
+    fn media_foundation_capture_timestamp_to_callback_lag() {
+        // 実行: cargo test media_foundation_capture_timestamp_to_callback_lag -- --ignored --nocapture
+        // #476。1920x1080 60fps YUY2 で開き、2 秒待ってから 10 秒のあいだ、コールバックの
+        // 入口の UNIX 時刻と nokhwa の `capture_timestamp` の差を測る。2 回開き直して
+        // 再現性を見る。コールバックではアプリと同じ仕事（`FrameSink::push_yuy2`）もする。
+        //
+        // `capture_timestamp` は nokhwa-bindings-windows 0.4.6 が `start_stream` の時点の
+        // UNIX 時刻（`stream_epoch`）に `ReadSample` のサンプル時刻を足したもの。
+        // サンプル時刻の原点がストリームを開いた時刻でなければ、差にはその分のずれが乗る。
+        // そこで `open_stream` の前後の UNIX 時刻で `stream_epoch` を挟み、サンプル時刻を
+        // 推定して `MFGetSystemTime`（QPC 基準）と比べた値も出す。DirectShow の経路は
+        // `video::directshow::timestamp_probe` の `directshow_sample_time_to_receive_lag`
+        use crate::video::directshow::timestamp_probe::{
+            print_lag_summary, report_lag, test_device,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Mutex;
+        use windows::Win32::Media::MediaFoundation::MFGetSystemTime;
+
+        let device = test_device();
+        let info = nokhwa::query(ApiBackend::MediaFoundation)
+            .expect("列挙できる")
+            .into_iter()
+            .find(|info| info.human_name().contains(&device))
+            .unwrap_or_else(|| panic!("Media Foundation のデバイス {device} がある"));
+        let mut runs = Vec::new();
+        for run in 1..=2 {
+            let rows: Arc<Mutex<Vec<LagSample>>> = Arc::new(Mutex::new(Vec::with_capacity(4096)));
+            let recording = Arc::new(AtomicBool::new(false));
+            let frames = VideoFrames::new();
+            let callback = {
+                let rows = rows.clone();
+                let recording = recording.clone();
+                let mut sink = FrameSink::new(
+                    &frames,
+                    Arc::new(SharedColorConversion::new()),
+                    RepaintWaker::default(),
+                );
+                move |frame: nokhwa::Buffer| {
+                    let start = Instant::now();
+                    let unix = unix_now();
+                    let system_100ns = unsafe { MFGetSystemTime() };
+                    if recording.load(Ordering::Acquire) {
+                        if let Ok(mut rows) = rows.lock() {
+                            rows.push(LagSample {
+                                unix,
+                                capture: frame.capture_timestamp(),
+                                system_100ns,
+                            });
+                        }
+                    }
+                    let res = frame.resolution();
+                    let (width, height) = (res.width_x as usize, res.height_y as usize);
+                    sink.push_yuy2(width, height, frame.buffer(), start);
+                }
+            };
+            let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(
+                CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::YUYV, 60),
+            ));
+            let mut camera =
+                CallbackCamera::new(info.index().clone(), requested, callback).expect("開ける");
+            let format = camera.camera_format().expect("形式を読める");
+            println!("{run} 回目: {format:?}");
+            assert_eq!(format.format(), FrameFormat::YUYV, "YUY2 で開ける");
+            let before = unix_now();
+            camera.open_stream().expect("ストリームを開ける");
+            let after = unix_now();
+            std::thread::sleep(Duration::from_secs(2));
+            recording.store(true, Ordering::Release);
+            std::thread::sleep(Duration::from_secs(10));
+            recording.store(false, Ordering::Release);
+            camera.stop_stream().expect("止められる");
+            let rows = std::mem::take(&mut *rows.lock().expect("ロックできる"));
+
+            let label = format!("Media Foundation {run} 回目");
+            let stamped: Vec<(&LagSample, Duration)> = rows
+                .iter()
+                .filter_map(|row| row.capture.map(|capture| (row, capture)))
+                .collect();
+            println!(
+                "== {label}: サンプル {} 個（capture_timestamp なし {} 個）、stream_epoch を挟む幅 {:.3}ms",
+                rows.len(),
+                rows.len() - stamped.len(),
+                diff_ms(after, before)
+            );
+            let intervals: Vec<f64> = rows
+                .windows(2)
+                .map(|w| diff_ms(w[1].unix, w[0].unix))
+                .collect();
+            let longest = intervals.iter().copied().fold(0.0, f64::max);
+            println!(
+                "コールバックの間隔 ms: 平均 {:.3} 最大 {longest:.3}",
+                intervals.iter().sum::<f64>() / intervals.len().max(1) as f64
+            );
+            if let Some((first, capture)) = stamped.first() {
+                // サンプル時刻（推定）。stream_epoch は before と after の間にある
+                let sample_ms = diff_ms(*capture, before);
+                println!(
+                    "最初のサンプル: サンプル時刻（推定）{sample_ms:.3}ms〜{:.3}ms、そのときの MFGetSystemTime {:.3}ms",
+                    diff_ms(*capture, after),
+                    first.system_100ns as f64 / 1e4
+                );
+            }
+            // サンプル時刻が QPC 基準（MFGetSystemTime と同じ原点）なら、こちらが遅れそのもの
+            let system_lags: Vec<f64> = stamped
+                .iter()
+                .map(|(row, capture)| row.system_100ns as f64 / 1e4 - diff_ms(*capture, before))
+                .collect();
+            report_lag(
+                &format!("{label}（MFGetSystemTime − 推定のサンプル時刻。stream_epoch を before とした場合）"),
+                &system_lags,
+            );
+            let lags: Vec<f64> = stamped
+                .iter()
+                .map(|(row, capture)| diff_ms(row.unix, *capture))
+                .collect();
+            runs.push(report_lag(
+                &format!("{label}（UNIX 時刻 − capture_timestamp）"),
+                &lags,
+            ));
+        }
+        print_lag_summary("Media Foundation", &runs);
+        assert!(
+            runs.iter().all(Option::is_some),
+            "capture_timestamp が付かない"
+        );
     }
 }

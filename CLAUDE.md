@@ -30,7 +30,8 @@ cargo build --release
 | `src/main.rs` | エントリポイント。ロガーの初期化、`NativeOptions` の組み立て、`run_native` だけ |
 | `src/platform.rs` | Windows 固有処理。日本語フォントの探索、埋め込みアイコンの読み込み、モニタの作業領域の列挙、保存されたウィンドウの大きさ・位置が使えるかの判定、OS の表示言語からの言語の推定、winit のイベント用のウィンドウへ届いた閉じる要求を本来のウィンドウへ回すフック（`redirect_misdirected_close`、#420） |
 | `src/com.rs` | COM（`ComApartment`、STA / MTA をモデル引数で選ぶ）と Media Foundation（`MfPlatform`）の初期化の RAII。DirectShow のバックエンドがデバイスワーカーで STA、録画スレッドが MTA で使う |
-| `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`Default`、1 フレームの処理 `update`、`eframe::App` 実装（`ui` が `update` を呼ぶ / `on_exit`） |
+| `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`Default`、1 フレームの処理 `update` の本体（描画と、その間に挟まる設定ダイアログ・ホットキー入力ダイアログの処理）、`eframe::App` 実装（`ui` が `update` を呼ぶ / `on_exit`） |
+| `src/app/frame_cycle.rs` | `update` の前後。描画より前の結果の取り込みと起動直後の処理（`begin_frame`）、描画のあとの一時表示・設定の書き出し・次の再描画の予約・ホットキーのリスナーへのウィンドウの状態の受け渡し（`end_frame`）。呼び出しの順に意味がある |
 | `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、テクスチャの取り込みと表示までの遅れの計測（#455）、フェイクデバイスの帯 |
 | `src/app/stats_overlay.rs` | 統計 OSD（情報表示）。出す行の組み立て（`format_stats_lines`）と描画（`show_stats_overlay`） |
 | `src/app/placeholder.rs` | 映像が出ていないときのプレースホルダー。文言の決め方（`video_placeholder_text`）と映像エリアの中央への配置（`show_video_placeholder`） |
@@ -49,7 +50,7 @@ cargo build --release
 | `src/app/worker_default_input.rs` | 入力が未設定のまま起動したときの入力の既定（#394）。最初の映像の試行のあとに、音声ピンがあれば `video_pin`、無ければ WASAPI の先頭に決める（`settle_default_input`）。決めるまでと UI の書き戻しが届くまで音声を理由なしで待たせる（`DefaultInput`） |
 | `src/app/backend/mod.rs` | ワーカーがデバイスに触るときの入口の trait（`VideoBackend` / `AudioBackend` / `DeviceBackends`）と、本番かフェイクかを環境変数で選ぶ `backends_from_env`。テスト用のモックもここ（`#[cfg(test)]`） |
 | `src/app/backend/system.rs` | 本番のバックエンド `SystemBackends`。映像は `VideoCapture`（Media Foundation）と `DirectShowCapture` を `SystemVideo` で束ね、音声は `AudioCapture` を trait に載せる。一覧の突き合わせとどちらで開くかの判定は `system_route.rs` |
-| `src/app/backend/system_route.rs` | `system.rs` が使う映像の経路の判定（純粋関数）。一覧の突き合わせ（`merge_video_devices`）、どちらで開くか（`route_for`）、自動で Media Foundation が開けないときの DirectShow への倒し方（`directshow_fallback` / `attempt_with_fallback`） |
+| `src/app/backend/system_route.rs` | `system.rs` が使う映像の経路の判定（純粋関数）。一覧の突き合わせ（`merge_video_devices`）、どちらで開くか（`route_for`。自動では DirectShow が先、#490）、自動で DirectShow が開けないときの Media Foundation への倒し方（`media_foundation_fallback` / `attempt_with_fallback`。対応形式が空のときも倒す `capabilities_with_fallback`） |
 | `src/app/backend/fake.rs` | フェイクのバックエンド `FakeBackends`。`FakeVideoCapture` / `FakeAudioCapture` を trait に載せる実装と、環境変数（`CAPTURECARD_VIEWER_FAKE_DEVICES` / `CAPTURECARD_VIEWER_FAKE_SCENARIO`）の解釈 |
 | `src/app/monitor.rs` | 切断や既定デバイスの切り替え、列挙をログへ出す回と「Windows 側にも見えていない」の**判定**（純粋関数）。ワーカーが使う |
 | `src/app/monitor_audio_pin.rs` | 音声の入力が映像デバイスの音声ピンのときの**判定**（純粋関数）。開くか待つか（`decide_pin_readiness`）、映像の開き直しに合わせて音声を開き直すか（`should_resync_pin_audio`）、設定ダイアログで選べるか（基準はドラフトの映像デバイスで `draft_pin_choice`、#425。中身は `pin_choice`。列挙の時点の有無は `presence_of` で引く、#409）、初回の入力の既定を音声ピンにするか（`default_input_uses_pin`）。`monitor.rs` が 800 行に近いので分けた |
@@ -75,18 +76,22 @@ cargo build --release
 | `src/video/directshow/video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
 | `src/video/directshow/audio_pin.rs` | 映像デバイスの音声ピン（#388）。列挙の時点での有無の判定（`probe_presence`、#409）、有無の記録、10ms の塊の提案と接続、`Run` が通らないときに外してやり直す（`run_with_fallback`）、`WAVEFORMATEX` の読み取り（`pin_format_from_wave`）、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
 | `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
-| `src/video/directshow/timestamp_probe.rs` | テストを含むビルドだけ（`#[cfg(test)]`）。`Receive` に届いたサンプルの到着時刻と `IMediaSample::GetTime` を Atomic の表へ書き、`#[ignore]` のテストが揺れを出す（#406）。グラフに基準時計を付けるかの切り替えもここ |
-| `src/video/frame_sink.rs` | フレームコールバックの本体 `FrameSink`（YUY2→RGB、GPU で変換するときは YUY2 のまま写す（#456）、`FrameBuffer` へ積む、`RepaintWaker` で UI を起こす）。実機（Media Foundation / DirectShow）とフェイクで共有する。DirectShow の RGB24 / MJPEG / 4:2:0 の YUV（NV12 / I420 / YV12）の受け口もここ |
+| `src/video/directshow/timestamp_probe.rs` | テストを含むビルドだけ（`#[cfg(test)]`）。`Receive` に届いたサンプルの到着時刻と `IMediaSample::GetTime` を Atomic の表へ書き、`#[ignore]` のテストが揺れを出す（#406）。グラフに基準時計を付けるかの切り替えもここ。`Receive` の時点のストリーム時刻も書き、打刻 → コールバックの遅れを測る（#476。集計の `report_lag` は Media Foundation の経路のテストも使う） |
+| `src/video/frame_sink.rs` | フレームコールバックの本体 `FrameSink`（YUY2→RGB、GPU で変換するときは YUY2 のまま写す（#456）、`FrameBuffer` へ積む、`RepaintWaker` で UI を起こす）。実機（Media Foundation / DirectShow）とフェイクで共有する。4:2:0 の YUV（NV12 / I420 / YV12）の受け口もここ |
+| `src/video/frame_sink_rgb.rs` | `FrameSink` の受け口のうち係数表を通らないもの。DirectShow の RGB24（`push_bgr24`）、MJPEG（`push_mjpeg`）、デコーダ任せ（`push_decoded`）と、デコーダの経路で捨てた枚数を閉じるときに出す `Drop`。状態は `frame_sink.rs` の `FrameSink` が持つ |
 | `src/video/fake.rs` | 実機なしで動くフェイクの映像デバイス `FakeVideoCapture`。テストパターンを指定 fps で吐く生成スレッド、切断・接続失敗のシナリオ、音声ピンを持つシナリオ（`with_audio_pin`、#394） |
 | `src/video/test_pattern.rs` | フェイクが吐くテストパターン（カラーバー、ベタ塗り、フレーム番号の焼き込み）の描画。純粋関数 |
 | `src/video/capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の取得 |
 | `src/video/color.rs` | YCbCr→RGB の係数表とその選び方、映像調整の畳み込み、設定の共有（`SharedColorConversion`） |
+| `src/video/rgb_adjust.rs` | RGB の経路（MJPEG の展開後・RGB24・デコーダ任せ）に掛ける色レンジの伸長と映像調整の表 `RgbAdjust`（#472）。設定が変わったときだけ表を書き直し、何も効かせない設定では画素に触らない。色空間は掛けない |
 | `src/video/convert.rs` | YUY2→RGB24 の画素変換と、DirectShow の RGB24（BGR）/ MJPEG の展開 |
 | `src/video/yuv420.rs` | 4:2:0 の YUV（NV12 / I420 / YV12）→ RGB24 の画素変換（`yuv420_to_rgb`、面の並び `Yuv420Layout`）。1 画素の式と係数表は YUY2 と同じで、違うのは色差の置き方だけ。`FrameSink` が呼ぶ |
 | `src/video/frame_buffer.rs` | `FrameBuffer`（`Arc` によるフレーム共有と世代番号。新着と一緒に受け取った時刻も返す `newer_than`）と観測値（`FrameStats`）、RGB の画素データの長さの判定（`frame_len_status`）、置き換えたフレームを `Arc` ごと使い回すか（`fill_recycled`） |
 | `src/video/frame_format.rs` | フレームの画素の並び `PixelFormat`（RGB24 / YUY2 と係数表、#456）、統計の経路 `ConvertPath`、形式を問わない長さの判定（`pixel_len_status`）、YUY2 のまま積まれたフレームから RGB を取り出す口（録画の `rgb`、スクリーンショットの `into_rgb`） |
-| `src/video/gpu_yuy2.rs` | YUY2 → RGB を GPU（シェーダー）で行う窓口 `GpuYuy2`（#456）。使うかの判断（環境変数・設定・失敗・ソフトウェア描画・見張り、`decide`）、フレームを預かる口（`queue`）、egui の描画へ差し込むコールバック（`paint_callback`）、GPU → CPU の切り替え（一方向・1 回）。UI スレッドだけが触る |
-| `src/video/gpu_yuy2_gl.rs` | その GL の部分 `GlConverter`。シェーダー（`src/video/shaders/`）のコンパイル、YUY2 のアップロード、フレームバッファ経由で egui のテクスチャへ描く、起動時の自己診断（CPU の変換と全画素の突き合わせ） |
+| `src/video/gpu_yuy2.rs` | YUY2 → RGB を GPU（シェーダー）で行う窓口 `GpuYuy2`（#456）。使うかの判断（環境変数・設定・失敗・ソフトウェア描画・見張り、`decide`）、起動時のコンテキスト（`GpuContext`、glow / wgpu、#492）からの変換器の用意、フレームを預かる口（`queue`）、egui の描画へ差し込むコールバックを返す口（`paint_callback`）、GPU → CPU の切り替え（一方向・1 回）。UI スレッドだけが触る |
+| `src/video/gpu_yuy2_paint.rs` | その描画のコールバックの部分。窓口と共有する状態（`Shared`、変換器 `Converter`、預けたフレーム、失敗）と、glow の `CallbackFn` / wgpu の `CallbackTrait` の中で変換器を呼ぶところ |
+| `src/video/gpu_yuy2_gl.rs` | その GL の部分 `GlConverter`（glow で描くとき）。シェーダー（`src/video/shaders/` の GLSL）のコンパイル、YUY2 のアップロード、フレームバッファ経由で egui のテクスチャへ描く、起動時の自己診断（CPU の変換と全画素の突き合わせ）。`GpuFailure` と自己診断の入力・係数表は wgpu の版と共有 |
+| `src/video/gpu_yuy2_wgpu.rs` | その wgpu の部分 `WgpuConverter`（wgpu で描くとき、#492）。WGSL（`src/video/shaders/yuy2_to_rgb.wgsl`）のパイプライン、YUY2 のアップロード、自前のテクスチャへ描いて egui のテクスチャへ写す、起動時の自己診断、wgpu のエラーをエラースコープで捕まえる（`with_error_scope`） |
 | `src/video/gpu_watch.rs` | GPU で変換しているときの性能の見張り `SlowPaintWatch`（描画が到着間隔の 2 倍を 5 秒、猶予 3 秒）とソフトウェア描画の見分け（`is_software_renderer`）。判定だけの純粋関数 |
 | `src/video/display_latency.rs` | 表示までの遅れ（フレームの到着 → テクスチャの更新、#455）の集計 `DisplayLatency`。直近 1 秒の平均・最大と 30 秒ごとのログの窓。UI スレッドだけが持つ |
 | `src/video/tap.rs` | 録画へ映像を回す差し込み口 `VideoTap`。録画中だけ、`FrameSink` が画面へ置いたのと同じ `Arc<VideoFrame>` を容量 3 のリングへ積む（待たない `try_lock`、満杯なら捨てて数える）。Vec の回収に失敗した回数も録画中だけ数える |
@@ -177,6 +182,7 @@ cargo build --release
 | `src/update/checksum.rs` | `SHA256SUMS.txt` の行の読み方（`find_checksum`）と、大文字小文字を区別しない照合（`checksum_matches`） |
 | `src/update/overrides.rs` | 更新の確認を試すための環境変数（`CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` / `CAPTURECARD_VIEWER_UPDATE_API_URL`）の解釈（`CheckOverrides`） |
 | `src/overlay.rs` | 操作したときだけ数秒出て消える OSD（フルスクリーンの切り替え、音量、失敗や録画の保存のトーストなど）。期限と描画の `TransientOverlay` と、中身の `OverlayContent`（テキストだけ / バー付き）。常設の統計 OSD は `app/video_overlay.rs` の側 |
+| `src/renderer.rs` | 描画のバックエンド（wgpu の DX12 / glow）を起動前に決める（`configure`、#492）。環境変数 `CAPTURECARD_VIEWER_RENDERER` の解釈（`parse_renderer`）、DX12 のアダプターの確認（`probe_dx12`）と選び方（`pick_adapter`）、present mode（Mailbox）と溜めるフレーム数（1）、統計 OSD に出す説明（`RendererChoice::label`） |
 | `src/repaint.rs` | 次の再描画までの間隔の判定（`next_repaint_delay`）と、UI スレッド以外から再描画を促す窓口（`RepaintWaker`） |
 | `src/i18n/mod.rs` | 画面に出す文字列の入口。現在の言語（`Language` と `static LANGUAGE`）を持ち、`set_language` で切り替える。外から使う経路（`crate::i18n::...`）の `pub use` もここ |
 | `src/i18n/text.rs` | 引数を取らない文字列の表（`texts!` が `Text` のキーと言語ごとの `match` を作る） |
@@ -208,7 +214,7 @@ cargo build --release
 | `docs/design/device-worker.md` | デバイス操作をワーカースレッド 1 本へ隔離した理由、チャネルを通さない共有、開き直しの差分判定、最小化中の扱い |
 | `docs/design/threads.md` | スレッドの一覧と役割、ロック順序、ホットキーのリスナー、スクリーンショットの保存とクリップボード |
 | `docs/design/reconnect.md` | 切断の検出、バックオフでの再試行、音声のフォールバックを外した経緯、Windows の既定デバイスの追従 |
-| `docs/design/video-pipeline.md` | `FrameBuffer` と世代番号、色変換への映像調整の畳み込み、再描画の間隔と `RepaintWaker`、Media Foundation で開く形式（#81）、UI にあるが効かない設定 |
+| `docs/design/video-pipeline.md` | `FrameBuffer` と世代番号、色変換への映像調整の畳み込み、再描画の間隔と `RepaintWaker`、Media Foundation で開く形式（#81）、YUY2 → RGB の GPU 変換（#456）、描画バックエンド（wgpu の DX12 / glow、#492。PresentMon の数値と present mode）、UI にあるが効かない設定 |
 | `docs/design/audio.md` | 入出力の形が違う場合の変換、クロックドリフト補正、対応設定の取得、ミュート |
 | `docs/design/directshow-audio.md` | DirectShow の映像デバイスの音声ピンから音声を取り込む設計（#388）。**第 1 段（設定ファイルの `input_source = "video_pin"` で鳴る・録画に入る、#393）と第 2 段（設定ダイアログの項目・初回の既定・フェイクの音声ピン、#394）を実装済み。** 受け口のフィルター、`AudioCapture` の入力の種類と `AudioPinFeed`、映像のグラフと音声の寿命、`[audio] input_source`、UI、対応設定、ドリフトと録画の PTS、段階分け |
 | `docs/design/settings.md` | `#[serde(default)]`、デバウンス保存、壊れた設定ファイルと `AutoSavePolicy` |

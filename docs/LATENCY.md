@@ -1,17 +1,23 @@
 # 映像遅延の実測
 
-**1080p60、Live Gamer EXTREME 3、Media Foundation の条件で、パススルーの表示に対して 1.3.0 は約 38ms（33〜42ms）、1.4.0（#459 を入れた版）は約 33ms（29〜42ms）、YUY2 の GPU 変換を入れた版（#456、1.4.0 の次）は約 28ms（25〜29ms）の遅れ。**
+**1080p60、Live Gamer EXTREME 3、Media Foundation の条件で、パススルーの表示に対して 1.3.0 は約 38ms（33〜42ms）、1.4.0（#459 を入れた版）は約 33ms（29〜42ms）、YUY2 の GPU 変換を入れた版（#456、1.4.0 の次）は約 28ms（25〜29ms）の遅れ。DirectShow を先に試す「自動」（#490）と wgpu の描画（#492）を入れた版（1.5.0 の次、DirectShow で開いた）は約 22ms（17〜25ms）。**
 
 2026-10-04 と 2026-10-10 に測った（Issue #453、#456）。**この条件での値**であり、他のボード・解像度・開き方・モニターには当てはまらない。同じ機材で他のアプリも測ったところ、AVerMedia RECentral 4 が約 18ms、アマレコTV 3.10 が約 28ms だった（「他のアプリとの比較」）。1.3.0 は 3 つの中で最も遅く、GPU 変換を入れた版でアマレコTV と同等になった。
 
+2026-10-11 に 1.5.0 で同じボードを Media Foundation と DirectShow で続けて撮ると、DirectShow のほうが約 6ms 短かった（約 32ms → 約 25ms、「Media Foundation と DirectShow の撮り比べ」、#485）。これを受けて、開き方が「自動」のとき両方に出るデバイスは DirectShow を先に試すようにした（#490）。
+
+同じ機材・同じ測り方での推移は **約 38ms（1.3.0）→ 約 33ms（1.4.0）→ 約 28ms（GPU 変換を入れた版）→ 約 22ms（DirectShow 優先 + wgpu の版）**。最後の値は 2026-10-11 に撮った（#476）。同じ機材の RECentral 4 は約 18ms、アマレコTV 3.10 は約 28ms。
+
 ## 結果
 
-| 項目 | 1.3.0 | 1.4.0（#459 を入れた版） | GPU 変換を入れた版（#456、1.4.0 の次） |
-|---|---|---|---|
-| パススルーの表示に対するアプリの表示の遅れ | 約 38ms（平均 9.2 カメラフレーム） | 約 33ms（平均 8.0 カメラフレーム、2 回の撮影の平均） | 約 28ms（平均 6.7 カメラフレーム） |
-| 最小 / 最大 | 33ms / 42ms（8 / 10 カメラフレーム） | 29ms / 42ms（7 / 10 カメラフレーム） | 25ms / 29ms（6 / 7 カメラフレーム） |
-| アプリ内の計測（到着→テクスチャ更新、下の「アプリ内の計測の読み方」） | 平均 8.1ms | 平均 5.3ms | 平均 0.7ms（GPU 側の転送とシェーダーの時間は含まない） |
-| 読み取りの誤差 | ±4ms（±1 カメラフレーム） | 同じ | 同じ |
+| 項目 | 1.3.0 | 1.4.0（#459 を入れた版） | GPU 変換を入れた版（#456、1.4.0 の次） | DirectShow 優先 + wgpu の版（1.5.0 の次） |
+|---|---|---|---|---|
+| パススルーの表示に対するアプリの表示の遅れ | 約 38ms（平均 9.2 カメラフレーム） | 約 33ms（平均 8.0 カメラフレーム、2 回の撮影の平均） | 約 28ms（平均 6.7 カメラフレーム） | 約 22ms（平均 5.2 カメラフレーム） |
+| 最小 / 最大 | 33ms / 42ms（8 / 10 カメラフレーム） | 29ms / 42ms（7 / 10 カメラフレーム） | 25ms / 29ms（6 / 7 カメラフレーム） | 17ms / 25ms（4 / 6 カメラフレーム） |
+| アプリ内の計測（到着→テクスチャ更新、下の「アプリ内の計測の読み方」） | 平均 8.1ms | 平均 5.3ms | 平均 0.7ms（GPU 側の転送とシェーダーの時間は含まない） | 記録なし |
+| 読み取りの誤差 | ±4ms（±1 カメラフレーム） | 同じ | 同じ | 同じ |
+
+DirectShow 優先 + wgpu の版の値は 2026-10-11 13:25 に dev（afbd4d0）を 1 回撮った結果（84 秒、連続区間の差の平均が 5.1 / 5.1 / 5.3 カメラフレーム、2 秒おきの 40 枚は 2 が 35 枚と 1 が 5 枚）。開き方「自動」で DirectShow で開き、描画は wgpu の DX12（Mailbox、最大フレーム遅延 1）、GPU 変換 ON、フルスクリーン。GPU 変換を入れた版から約 1.5 カメラフレーム（約 6ms）短い。取り込み側の差は「Media Foundation と DirectShow の撮り比べ」、present 側の差は「present の計測」にある。
 
 GPU 変換を入れた版の値は 2026-10-10 に 1 回撮った結果（連続区間の差の平均が 6.6 / 6.9 / 6.7 カメラフレーム、2 秒おきの 40 枚は 2 が 36 枚と 1 が 4 枚）。1.4.0 から約 1.3 カメラフレーム（5ms）、1.3.0 から約 10ms 速く、アマレコTV 3.10（約 28ms）と同等になった。アプリ内の計測は GPU 経路だと計測点が「GPU に預けた直後」に動くので、0.7ms には UI スレッドの転送とシェーダーの時間が含まれない。実測の縮み（約 5ms）のほうを効果として読む。
 
@@ -22,7 +28,8 @@ GPU 変換を入れた版の値は 2026-10-10 に 1 回撮った結果（連続�
 | 項目 | 内容 |
 |---|---|
 | アプリ | Capturecard Viewer 1.3.0（1.4.0 の値も同じ条件で測った。「結果」に併記） |
-| 映像の開き方 | Media Foundation（このボードは Media Foundation でしか開けない） |
+| DirectShow 優先 + wgpu の版だけ違う条件 | 映像の開き方「自動」（DirectShow で開いた）、描画 wgpu の DX12（Mailbox、最大フレーム遅延 1）、GPU 変換 ON、フルスクリーン |
+| 映像の開き方 | Media Foundation（DirectShow でも開ける。DirectShow で開いたときの値は「Media Foundation と DirectShow の撮り比べ」、#485） |
 | 解像度と fps、形式 | 1920x1080 60fps、YUY2 |
 | キャプチャーボード | AVerMedia Live Gamer EXTREME 3（USB） |
 | 信号源 | 別 PC で `scripts/make-testpattern.sh` のテスト動画（1080p60、フレーム番号を焼き込み）を全画面再生 |
@@ -93,6 +100,7 @@ ffmpeg -ss <t> -i <動画> -frames:v 48 \
 | アマレコTV 3.10 | DirectShow | 約 28ms（6.8 カメラフレーム） | 21ms / 33ms | 1 が 30 枚、2 が 10 枚 |
 | Capturecard Viewer 1.3.0 | Media Foundation | 約 38ms（9.2 カメラフレーム） | 33ms / 42ms | 2 が 40 枚 |
 | Capturecard Viewer（GPU 変換を入れた版、2026-10-10） | Media Foundation | 約 28ms（6.7 カメラフレーム） | 25ms / 29ms | 2 が 36 枚、1 が 4 枚 |
+| Capturecard Viewer（DirectShow 優先 + wgpu の版、2026-10-11） | DirectShow | 約 22ms（5.2 カメラフレーム） | 17ms / 25ms | 2 が 35 枚、1 が 5 枚 |
 
 連続区間 3 つの差（カメラフレーム）:
 
@@ -127,7 +135,7 @@ Media Foundation のソースリーダーに `MF_LOW_LATENCY = TRUE` を付け�
 
 同じ日の実機で、アプリ内の計測（下の「アプリ内の計測の読み方」）は平均 8ms / 最大 11ms だった。約 38ms のうちアプリ内で見える分はこれだけで、残りはボードの取り込みと present・モニターの側にある。
 
-## 描画バックエンド glow / wgpu の撮り比べ（#456、効果なし）
+## 描画バックエンド glow / wgpu の撮り比べ（#456、撮影では差が見えず。#492 で採用）
 
 描画を wgpu（DX12、フリップモデル、`PresentMode::Mailbox`、溜めるフレーム 1）にした版（PR #465、マージせず閉じた）を、同じ exe で wgpu と glow（環境変数で切り替え）にして、上と同じ機材・同じ手順で撮り比べた。どちらで動いたかは統計 OSD の「描画」の行で確かめている（wgpu は Dx12 Mailbox / NVIDIA GeForce RTX 4070 Ti、glow は OpenGL）。この exe には #459（到着で UI スレッドを起こす）が入っている。
 
@@ -136,16 +144,62 @@ Media Foundation のソースリーダーに `MF_LOW_LATENCY = TRUE` を付け�
 | wgpu（DX12、Mailbox） | 2 が 39 枚、1 が 1 枚 | 7 / 8 / 7 | 約 31ms |
 | glow（OpenGL） | 2 が 40 枚 | 8.1 / 8.0 / 7 | 約 32ms |
 
-差は約 2ms で読み取りの誤差（±1 カメラフレーム）の中。200Hz のモニターでは present の 1 段が 5ms なので、フリップモデルで減らせる量がこの測り方の底を割っていたとみられる。exe が 3.7MB 増え、描画バックエンドが 2 本になる保守に見合わないので採らなかった（`docs/design/video-pipeline.md` の「試して外したもの」）。
+差は約 2ms で読み取りの誤差（±1 カメラフレーム）の中。200Hz のモニターでは present の 1 段が 5ms なので、フリップモデルで減らせる量がこの測り方の底を割っていたとみられる。exe が 3.7MB 増え、描画バックエンドが 2 本になる保守に見合わないので、このときは採らなかった。**のちに PresentMon で present の経路を直接測ると、平均約 2ms・裾で 4〜8ms の差があったので、#492 で採用した**（下の「present の計測（PresentMon）」、`docs/design/video-pipeline.md` の「描画バックエンド」）。
 
 **この撮り比べで、#459 を入れた版の遅れが 1.3.0 の約 38ms（9.2 カメラフレーム）より下がったことも分かった**（この回は 7.3〜7.7 カメラフレーム。リリース前にもう 1 本撮った結果と合わせた値は上の「結果」）。同じ日の実機で、アプリ内の計測は平均 5.3ms（#459 の前は 8.1ms）。
+
+## Media Foundation と DirectShow の撮り比べ（#485）
+
+1.5.0 で、同じボード（Live Gamer EXTREME 3）を「映像の開き方」だけ Media Foundation と DirectShow に替えて、上と同じ機材・同じ設置で続けて撮った（2026-10-11）。解像度と fps、形式はどちらも 1920x1080 60fps の YUY2。DirectShow でも 59.9fps で開け、フレーム番号の焼き込みも正しく出ることを先に確かめた。読み方は上の「2. 連続区間 3 つ」と同じで、同じ番号が左（パススルー）→ 右（アプリ）に出るまでのカメラフレームの差を取った（1 カメラフレーム = 4.17ms）。
+
+| 区間 | Media Foundation | DirectShow |
+|---|---|---|
+| 10s | 約 8.0 | 約 6.0 |
+| 40s | 7.4 | 6.2 |
+| 70s | 7.5 | 6.0 |
+| 平均 | **7.6 ≈ 32ms** | **6.1 ≈ 25ms** |
+
+- **同じボードを DirectShow で開くと約 6ms（5〜8ms）短い。** #476 の計測（ドライバーの打刻 → コールバック）で見えた約 1 フレーム（16.7ms）の差は、そのままは表示に出ず、半分弱になった
+- RECentral 4（約 18ms）には届かないが、アマレコTV 3.10（約 28ms）より短い
+- 音声は WASAPI の入力から来るので、映像の開き方とは別の経路で、この差には関係しない
+- Media Foundation の値（約 32ms）は前日の「GPU 変換を入れた版」の値（約 28ms）と撮影が別で、比べられるのはこの表の 2 列の間だけ
+- この結果を受けて、開き方が「自動」のとき両方に出るデバイスは DirectShow を先に試すようにした（#490、`docs/design/device-worker.md` の「自動で DirectShow を先に試す理由」）
 
 ## 注意
 
 - **含まれるもの**: ボードの取り込み（USB、Media Foundation）、アプリの変換と描画
 - **含まれないもの**: パススルー自体の遅れ。つまり絶対的な入力遅延ではなく、パススルーとの差。モニターの表示遅延は左右で等しいとみなして差し引いているが、2 台の個体差は評価していないので、その差は値に入りうる
 - 読み取りの誤差は ±1 カメラフレーム（±4ms）。手持ちの手ぶれは番号の読み取りに影響しなかった
-- **同じ条件でしか比べられない。** ボード、解像度と fps、開き方、モニター、撮影の fps、アプリのバージョンのどれかが変われば測り直す
+- **同じ条件でしか比べられない。** ボード、解像度と fps、開き方、モニター、撮影の fps、アプリのバージョン、描画バックエンド（wgpu / glow、統計 OSD の「描画」の行）のどれかが変われば測り直す
+
+## present の計測（PresentMon、#476 / #492）
+
+撮影（上）は取り込みから表示までをまとめて測るので、±4ms の読み取りの誤差より小さい差は見えない。**アプリが Present を呼んでから画面に出るまで**は、Intel の PresentMon で別に測れる。描画バックエンドを glow から wgpu へ変えた（#492）のはこの計測による。
+
+### 結果（2026-10-11、メイン PC、フルスクリーン、各 20 秒）
+
+| | Capturecard Viewer 1.5.0（glow） | wgpu（PR #465 のブランチ） | RECentral 4（参考） |
+|---|---|---|---|
+| `PresentRuntime` / `PresentMode` | Other（OpenGL）/ Composed: Copy with GPU GDI（1197 枚すべて） | DXGI / **Hardware: Independent Flip（1199 枚すべて）** | DXGI / Hardware: Independent Flip 465 枚、Composed: Flip 133 枚 |
+| `MsBetweenPresents` | 16.67（60fps） | 16.67（60fps） | 33.33（30fps で present している） |
+| `MsUntilDisplayed`（Present → 表示）平均 / 中央値 / 95% / 最大 | 6.7 / 6.3 / 11.6 / 18.4 | **4.6 / 4.5 / 7.9 / 10.5** | 3.0 / 2.3 / 6.9 / 10.5 |
+
+- glow は OpenGL のフレームを GDI 経由で DWM が合成する経路、wgpu の DX12 はフリップモデルで DWM を飛ばす独立フリップ。平均で約 2ms、裾（95%・最大）で 4〜8ms 縮む
+- wgpu の列は PR #465 のブランチの exe。#492 の exe（present mode は Mailbox、溜めるフレーム数 1）での値は未計測
+- 独立フリップになる条件は `docs/design/video-pipeline.md` の「フルスクリーンで独立フリップが効く条件」
+
+### 測り方
+
+1. PresentMon（コンソール版の `PresentMon.exe`）を用意する。管理者権限のコマンドプロンプトで動かす
+2. Capturecard Viewer を起動し、映像を流してフルスクリーンにする。他のウィンドウや通知を重ねない。統計 OSD の「描画」の行で、どちらで描いているか（`wgpu Dx12 Mailbox / <GPU の名前>` か `glow (OpenGL)`）を書き残す
+3. 次を実行し、20 秒待つ
+
+```bat
+PresentMon.exe --process_name capturecard_viewer.exe --output_file cv.csv --timed 20 --terminate_after_timed
+```
+
+4. `cv.csv` の `PresentMode` の列（どの経路で出たか）と `MsUntilDisplayed` の列（Present → 表示）を集計する。平均・中央値・95%・最大を出す
+5. glow と比べるときは、同じ exe を `CAPTURECARD_VIEWER_RENDERER=glow` で起動して 2〜4 をなぞる。コマンドプロンプトなら `set CAPTURECARD_VIEWER_RENDERER=glow` のあとに同じ窓から exe を起動し、戻すときは `set CAPTURECARD_VIEWER_RENDERER=` で消してから起動する
 
 ## アプリ内の計測の読み方
 
@@ -153,4 +207,4 @@ Media Foundation のソースリーダーに `MF_LOW_LATENCY = TRUE` を付け�
 
 ## Summary (English)
 
-Measured on 2026-10-04 (Issue #453): with Capturecard Viewer 1.3.0, an AVerMedia Live Gamer EXTREME 3 opened through Media Foundation at 1920x1080 60fps (YUY2), and two identical MSI MAG 244F monitors at 200Hz, the app's picture lags the card's HDMI passthrough by about 38 ms (33 to 42 ms, reading error ±4 ms). A test video with burned-in frame numbers was played on another PC, both monitors were filmed with a smartphone at 240fps, and the frame numbers were read from stills extracted with ffmpeg (40 stills every 2 seconds, plus three continuous 48-frame bursts). The value includes capture, conversion, and drawing in the app, assumes both monitors have the same display latency (unit-to-unit differences were not evaluated), and applies only to these conditions. On the same day and setup, AVerMedia RECentral 4 lagged the passthrough by about 18 ms (13 to 21 ms) and AmaRecTV 3.10 by about 28 ms (21 to 33 ms), so Capturecard Viewer 1.3.0 was the slowest of the three. Version 1.4.0, which wakes the UI thread on frame arrival instead of polling every 16 ms (#459), measured about 33 ms (29 to 42 ms, average of two recordings on the same setup); the in-app measurement dropped from 8.1 ms to 5.3 ms. Adding MF_LOW_LATENCY to the Media Foundation source reader and switching the renderer from glow to wgpu (DX12 flip model) were both tried on the same day and made no measurable difference, so neither was kept. Converting YUY2 to RGB in a GPU shader instead of on the CPU (#456, measured on 2026-10-10 on the same setup) brought the lag down to about 28 ms (25 to 29 ms), on par with AmaRecTV 3.10; the in-app measurement reads 0.7 ms on that build, but on the GPU path it stops when the frame is handed to the GPU and so excludes the upload and shader time. The "Display latency" line in the stats overlay and the Status tab (#455) measures a narrower span inside the app: it starts when the Media Foundation (or DirectShow) callback receives the frame, which is after the card has captured it, and ends when the UI thread updates the texture, so it does not include GPU presentation or the monitor.
+Measured on 2026-10-04 (Issue #453): with Capturecard Viewer 1.3.0, an AVerMedia Live Gamer EXTREME 3 opened through Media Foundation at 1920x1080 60fps (YUY2), and two identical MSI MAG 244F monitors at 200Hz, the app's picture lags the card's HDMI passthrough by about 38 ms (33 to 42 ms, reading error ±4 ms). A test video with burned-in frame numbers was played on another PC, both monitors were filmed with a smartphone at 240fps, and the frame numbers were read from stills extracted with ffmpeg (40 stills every 2 seconds, plus three continuous 48-frame bursts). The value includes capture, conversion, and drawing in the app, assumes both monitors have the same display latency (unit-to-unit differences were not evaluated), and applies only to these conditions. On the same day and setup, AVerMedia RECentral 4 lagged the passthrough by about 18 ms (13 to 21 ms) and AmaRecTV 3.10 by about 28 ms (21 to 33 ms), so Capturecard Viewer 1.3.0 was the slowest of the three. Version 1.4.0, which wakes the UI thread on frame arrival instead of polling every 16 ms (#459), measured about 33 ms (29 to 42 ms, average of two recordings on the same setup); the in-app measurement dropped from 8.1 ms to 5.3 ms. Adding MF_LOW_LATENCY to the Media Foundation source reader and switching the renderer from glow to wgpu (DX12 flip model) were both tried on the same day and made no measurable difference in this filming method, so neither was kept at that time. Measuring the present path directly with PresentMon on 2026-10-11 (#476) later showed that glow presents through "Composed: Copy with GPU GDI" (Present to display: average 6.7 ms, 95th percentile 11.6 ms, max 18.4 ms in fullscreen), while wgpu on DX12 gets "Hardware: Independent Flip" (average 4.6 ms, 95th percentile 7.9 ms, max 10.5 ms), so the app now draws with wgpu on DX12 (Mailbox, maximum frame latency 1) by default and falls back to glow when no DX12 GPU adapter is available; set `CAPTURECARD_VIEWER_RENDERER=glow` to use glow from the same exe (#492). Converting YUY2 to RGB in a GPU shader instead of on the CPU (#456, measured on 2026-10-10 on the same setup) brought the lag down to about 28 ms (25 to 29 ms), on par with AmaRecTV 3.10; the in-app measurement reads 0.7 ms on that build, but on the GPU path it stops when the frame is handed to the GPU and so excludes the upload and shader time. On 2026-10-11, version 1.5.0 was filmed twice in a row on the same setup with only "Open video with" changed (#485): Media Foundation averaged 7.6 camera frames (about 32 ms) and DirectShow 6.1 camera frames (about 25 ms), so opening the same card through DirectShow is about 6 ms (5 to 8 ms) faster. Following this, "Auto" now tries DirectShow first for devices that appear in both lists (#490). The "Display latency" line in the stats overlay and the Status tab (#455) measures a narrower span inside the app: it starts when the Media Foundation (or DirectShow) callback receives the frame, which is after the card has captured it, and ends when the UI thread updates the texture, so it does not include GPU presentation or the monitor. On 2026-10-11 (#476), the build after 1.5.0 (dev at afbd4d0), which tries DirectShow first in "Auto" (#490) and draws with wgpu on DX12 (Mailbox, maximum frame latency 1, #492), was filmed on the same setup with the same method (opened through DirectShow, GPU conversion on, fullscreen): it averaged 5.2 camera frames, about 22 ms (17 to 25 ms; the three continuous bursts averaged 5.1, 5.1, and 5.3; of the 40 stills, 35 read 2 and 5 read 1). On this setup and method the lag has gone from about 38 ms (1.3.0) to about 33 ms (1.4.0), about 28 ms (GPU conversion) and about 22 ms (DirectShow first + wgpu), against about 18 ms for RECentral 4 and about 28 ms for AmaRecTV 3.10.

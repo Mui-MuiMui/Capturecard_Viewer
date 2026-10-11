@@ -28,9 +28,9 @@ YUY2 を GPU で変換するとき（既定、#456）は、フレームコール
 | NV12 | `push_yuv420` | `yuv420_to_rgb` | 効く | Media Foundation・DirectShow | `MFVideoFormat_NV12`（`NV12`） | `MEDIASUBTYPE_NV12` |
 | I420 | `push_yuv420` | `yuv420_to_rgb` | 効く | DirectShow | — | `MEDIASUBTYPE_I420` / `MEDIASUBTYPE_IYUV` |
 | YV12 | `push_yuv420` | `yuv420_to_rgb` | 効く | DirectShow | — | `MEDIASUBTYPE_YV12` |
-| MJPEG | `push_mjpeg` | `mjpeg_to_rgb` | 効かない（デコーダ任せ） | Media Foundation・DirectShow | `MFVideoFormat_MJPG`（`MJPEG`） | `MEDIASUBTYPE_MJPG` |
-| RGB24 | `push_bgr24` | `bgr24_to_rgb` | 効かない（RGB のまま） | Media Foundation・DirectShow | `MFVideoFormat_RGB24`（`RAWBGR`） | `MEDIASUBTYPE_RGB24` |
-| そのほか | `push_decoded` | nokhwa のデコーダ | 効かない（デコーダ任せ） | Media Foundation（幅が奇数の YUY2、GRAY） | `MFVideoFormat_L8`（`GRAY`） | — |
+| MJPEG | `push_mjpeg` | `mjpeg_to_rgb` | 色空間は効かない。レンジと映像調整は RGB で掛ける（`rgb_adjust.rs`、#472） | Media Foundation・DirectShow | `MFVideoFormat_MJPG`（`MJPEG`） | `MEDIASUBTYPE_MJPG` |
+| RGB24 | `push_bgr24` | `bgr24_to_rgb` | 色空間は効かない。レンジと映像調整は RGB で掛ける（`rgb_adjust.rs`、#472） | Media Foundation・DirectShow | `MFVideoFormat_RGB24`（`RAWBGR`） | `MEDIASUBTYPE_RGB24` |
+| そのほか | `push_decoded` | nokhwa のデコーダ | 色空間とレンジは効かない。映像調整は RGB で掛ける（`rgb_adjust.rs`、#472） | Media Foundation（幅が奇数の YUY2、GRAY） | `MFVideoFormat_L8`（`GRAY`） | — |
 
 - **NV12 / I420 / YV12 は YUY2 と同じ係数表と同じ 1 画素の式を通る。** 同じ Y・Cb・Cr なら YUY2 と同じ RGB になる（`yuv420.rs` のテストでカラーバーを突き合わせている）。違うのは色差の置き場所だけで、4:2:0 なので縦横 2x2 画素が 1 組の色差を共有する。統計でも高速パスとして数える
 - 幅か高さが奇数なら、色差は切り上げた大きさを持つものとして読む（右端の列・下端の行は 1 画素で 1 組）。YUY2 の奇数幅は最後の 1 画素を黒で残すが、4:2:0 は全画素を変換する
@@ -55,6 +55,25 @@ YUY2 を GPU で変換するとき（既定、#456）は、フレームコール
 
 色空間・レンジ・映像調整はすべて `SharedColorConversion`（`AtomicU8` ×2 と `AtomicI32` ×3）でフレームコールバックスレッドと共有する。**デバイスを開き直さずに次のフレームから効く。** ここに項目を足すときも `Mutex` にしないこと。フレームコールバックが毎フレーム読む。
 
+### RGB の経路のレンジと映像調整（#472）
+
+MJPEG の展開後・RGB24・デコーダ任せのフレームは係数表を通らない。1.4.0 で MJPEG / RGB24 を選んだとおりに開くようになり（#81）、この経路で色レンジと映像調整が効かないことが表に出たので、**RGB になったあとで同じ式を表引きで掛ける**（`video/rgb_adjust.rs` の `RgbAdjust`）。
+
+```text
+Y(v)  = y * (v - y_offset) + offset        … 同じ設定の係数表（adjusted_color_matrix）の輝度の項、1024 倍
+L     = 0.299 Y(R) + 0.587 Y(G) + 0.114 Y(B)
+out_c = (L + saturation * (Y(c) - L)) >> 10
+```
+
+- 輝度の項（リミテッドの伸長 1192 / 1024、コントラストと明るさの畳み込み）は YUY2 の経路が同じ設定で使う係数表からそのまま取り、`>> 10` の切り捨ても同じにしてある。**灰色は YUY2 の経路と 1 も違わない**（`rgb_adjust.rs` のテストで突き合わせている）。有彩色は、YUY2 の経路が Y'CbCr の色差に彩度を掛けるのに対して RGB から輝度を取り直すので一致しない。彩度の中心の輝度は JPEG（JFIF）の Y と同じ BT.601 の重みで取る
+- 式はチャンネルごとの 256 要素の表だけで書ける。`Y(c)` から輝度の寄与を引いた分を 1 つの表に、輝度に掛かる分を R・G・B の 3 つの表に入れ、1 画素は表引き 6 回と足し算だけ。彩度が無調整なら u8 の表を引くだけにする
+- **表は設定が変わったときだけ書き直す。** 置き場所（約 4KB）は `FrameSink` を作るときに 1 度だけ確保し、フレームごとには設定（レンジと調整値）を前回と突き合わせるだけ。フレームコールバックの中で確保しない。`FrameSink` に直に持たせないのは、それを抱える DirectShow の `StreamState::Video` が大きくなりすぎるため（clippy の `large_enum_variant`）
+- **何も効かせない設定（フルレンジ・無調整）では画素に触らない**
+- デコーダ任せ（`push_decoded`）はレンジを掛けない。nokhwa の YUYV の変換はリミテッドの伸長を自分で済ませるので、ここで伸ばすと二重になる。映像調整だけを掛ける
+- 色空間は掛けない（下の「UI にあるが動作していない設定がある」）
+
+YUY2 / 4:2:0 の経路のように係数表へ畳み込めないので、1 画素あたりの処理は増える（表引きだけで、展開そのものより軽いと見込むが未計測）。設定が既定（リミテッド）なら RGB の経路では常に掛かる。**既定がリミテッドなので、フルレンジの JPEG / RGB を出すデバイスでは黒が潰れて見える。** そのときは色レンジを「フル」にする（YUY2 の経路と同じ扱い）。
+
 `FrameBuffer` は push のたびに進む世代番号を持つ。`update_video_texture` は `VideoFrames::newer_than` で前回反映した世代と比較し、新着が無ければテクスチャを更新しない。**新着の有無を問わず最後のフレームが要る用途（スクリーンショット）は `VideoFrames::latest` を使う。** 世代番号はキャプチャ停止時も巻き戻さない。巻き戻すと再接続後の最初のフレームが呼び出し側の記録と一致し、新着と判別できなくなる。
 
 ## YUY2 → RGB を GPU で変換する（#456）
@@ -66,14 +85,20 @@ YUY2 を GPU で変換するとき（既定、#456）は、フレームコール
 - `VideoFrame::format`（`video/frame_format.rs` の `PixelFormat`）が画素の並びを持つ。`Rgb24` と、`Yuy2(ColorMatrix)` の 2 つ。**YUY2 のまま積むのは、GPU で変換すると決まっていて（`SharedColorConversion::yuy2_on_gpu`）、幅が偶数の YUY2 だけ。** 奇数幅（2 画素 1 組が行をまたぐ）とそれ以外の形式（NV12 / I420 / YV12 / MJPEG / RGB24 / デコーダ任せ）は従来どおり RGB で積む。UI はどちらも描ける
 - `FrameSink::push_yuy2` は回収したフレームの Vec へ YUY2 を写すだけ（`fill_recycled`、RGB のころより短いので確保は起きない）。**係数表（色空間・レンジ・映像調整を畳み込んだもの）は CPU の経路と同じく積む時点で決め、フレームに持たせる。** 設定を変えたら次のフレームから効くのも同じ
 - UI スレッド（`update_video_texture`）は YUY2 のフレームを `GpuYuy2::queue` で預け、映像のテクスチャ（egui のもの）は大きさが変わったときだけ作り直す。描画のとき映像より前に置いたコールバック（`egui_glow::CallbackFn`）が、YUY2 を RGBA8 のテクスチャ（幅は半分、1 テクセル = 2 画素）として上げ、フレームバッファ経由で**映像のテクスチャへ RGB を書く**。そのあと egui がそのテクスチャを普通に描くので、拡大縮小のフィルタ（拡大 Nearest、縮小 Linear）も CPU の経路と同じ
-- 預けたフレームと GL の資源は `Arc<Mutex<..>>`（`gpu_yuy2.rs` の `Shared`）に置く。egui のコールバックが `Send + Sync` を求めるためで、**触るのは UI スレッドだけ**（`update()` とその後の描画）。待つ相手はいない
+- 預けたフレームと GL の資源は `Arc<Mutex<..>>`（`gpu_yuy2_paint.rs` の `Shared`）に置く。egui のコールバックが `Send + Sync` を求めるためで、**触るのは UI スレッドだけ**（`update()` とその後の描画）。待つ相手はいない
+- **wgpu で描くとき（#492、下の「描画バックエンド」）は変換器が wgpu の版になる**（`gpu_yuy2_wgpu.rs` と `shaders/yuy2_to_rgb.wgsl`）。窓口（`GpuYuy2` の `queue` / `paint_callback` / `tick`）と判断（下の表）は同じで、どちらを使うかは起動時に eframe から受け取ったコンテキスト（`GpuContext`）で決まる。違いは 3 つ
+  - コールバックは `egui_wgpu::CallbackTrait` で、変換は描画の前段の `prepare` で行う。作ったコマンドは egui が自分の描画より先に送る
+  - egui-wgpu のテクスチャ（`Rgba8Unorm`）は描画先にできない（用途に `RENDER_ATTACHMENT` が無い）。映像と同じ大きさの自前のテクスチャへ描き、egui の映像のテクスチャへ丸ごと写す（`copy_texture_to_texture`。形式が同じなので値はそのまま）
+  - 写し先（egui の映像のテクスチャの実体）は `update()` の中（`paint_callback`）でレンダラーから引く。コールバックの中からはレンダラーに触れない（eframe が書き込みのロックを持っている）。大きさが変わった直後は作り直したテクスチャがレンダラーへ渡るのがその `update()` の後なので、預けたまま `RepaintWaker` で次の `update()` を起こしてやり直す（その 1 回だけ黒い）
+- wgpu は捕まえていない検証エラーを panic にする（release は `panic = "abort"`）。自前の資源づくり・描画・送信はすべてエラースコープの中で行い（`with_error_scope`）、失敗は `GpuFailure::Wgpu` で返して下の表の 3・4 と同じく CPU へ戻す
 - 表示までの遅れ（#455）は、GPU の経路では「預けた直後」で測る。**そのあと描画の中で走る YUY2 の転送とシェーダーの CPU 時間は含まない**（CPU の経路は UI スレッドの RGB → `Color32` の詰め直しを含む。GPU 側の時間はどちらも含まない）。CPU の経路との差の一部は計測点の移動による見かけなので、CPU 負荷（タスクマネージャーの CPU 使用率）と合わせて比べる
 
 ### 見た目を CPU の経路と揃える
 
 - **シェーダー（`video/shaders/yuy2_to_rgb.frag`）は CPU の変換（`yuy2_to_rgb_naive`）と同じ式・同じ係数表を、同じ整数の演算で行う。** 係数は `ColorMatrix` の 1024 倍の固定小数点をそのまま uniform で渡す（`bias` の畳み方も同じ）。浮動小数点で書くと丸めがずれるので、テクセルを 0〜255 の整数へ戻してから計算する。CPU は `(v >> 10).clamp(0, 255)` だが、シェーダーは負の値の右シフトに頼らないよう、先に 0〜262143 へ収めてからシフトする（結果は全ての値で同じ。`gpu_yuy2_gl.rs` のテストが Rust に写した式で確かめている）
-- **起動時に自己診断を行う**（`GlConverter::self_test`）。Y と Cb の全ての組と Cr の全ての値を並べた 512x256 の YUY2 を、素の係数表 4 つと映像調整で係数・定数が大きく動く 2 つで GPU に変換させて読み戻し、CPU の変換と 1 画素でも違えば GPU を使わない。GPU とドライバーごとの差（シェーダーの整数演算、8 ビットへの丸め）をその場で見つけるため
+- **起動時に自己診断を行う**（`GlConverter::self_test`、wgpu は `WgpuConverter::self_test`）。Y と Cb の全ての組と Cr の全ての値を並べた 512x256 の YUY2 を、素の係数表 4 つと映像調整で係数・定数が大きく動く 2 つで GPU に変換させて読み戻し、CPU の変換と 1 画素でも違えば GPU を使わない。GPU とドライバーごとの差（シェーダーの整数演算、8 ビットへの丸め）をその場で見つけるため。**GL と wgpu で入力・係数表・比べ方は同じ**（`gpu_yuy2_gl.rs` の `self_test_source` / `self_test_matrices` / `count_mismatches` を共有する）
 - 要るのは GLSL 1.40 か GLSL ES 3.00 以上（整数演算・`texelFetch`・`gl_VertexID`）。それ未満なら使わない
+- **wgpu の版（`shaders/yuy2_to_rgb.wgsl`）も同じ式・同じ係数表・同じ整数の演算で書く。** 違うのは入力の受け方だけで、YUY2 を `Rgba8Uint` のテクスチャとして上げ、`textureLoad` で 0〜255 の整数のまま読む（GL の版のように正規化された値から戻す手間が無い）。係数は `shader_coefficients` と同じ並びの uniform で渡す。DX12 では naga が HLSL にし、FXC がコンパイルする。CI（GPU なし）でも WARP の DX12 で自己診断を回している（`gpu_yuy2_wgpu.rs` のテスト）
 
 ### RGB を要る側（録画・スクリーンショット）
 
@@ -88,9 +113,9 @@ YUY2 を GPU で変換するとき（既定、#456）は、フレームコール
 |---|---|---|
 | 1 | 環境変数 `CAPTURECARD_VIEWER_GPU_CONVERT=0`（`false` / `off` も） | CPU。GPU の準備もしない。開発者向けの A/B で、設定より優先する |
 | 2 | 設定 `[video] convert = "cpu"` | CPU |
-| 3 | GL のコンテキストが無い・GLSL の版が足りない・コンパイル / リンク・自己診断の失敗 | CPU（以後このセッションでは GPU を使わない） |
-| 4 | 描画中の失敗（フレームバッファが不完全、GL のエラー、テクスチャの上限を超える大きさ）。GL のエラーは変換の前に積まれていたものを読み捨ててから見る（egui や他の描画のエラーを取り違えない） | CPU（同上） |
-| 5 | 設定が `"auto"` で、`GL_RENDERER` がソフトウェア描画（GDI Generic、llvmpipe、softpipe、Microsoft Basic Render Driver など、`gpu_watch::is_software_renderer`） | CPU。シェーダーも転送も CPU で行われ、速くならないため |
+| 3 | 描画のコンテキスト（GL / wgpu）が無い・GLSL の版が足りない・コンパイル / リンク・自己診断の失敗・wgpu のエラー | CPU（以後このセッションでは GPU を使わない） |
+| 4 | 描画中の失敗（フレームバッファが不完全、GL のエラー、wgpu のエラー、テクスチャの上限を超える大きさ）。GL のエラーは変換の前に積まれていたものを読み捨ててから見る（egui や他の描画のエラーを取り違えない） | CPU（同上） |
+| 5 | 設定が `"auto"` で、ソフトウェア描画。GL は `GL_RENDERER`（GDI Generic、llvmpipe、softpipe、Microsoft Basic Render Driver など、`gpu_watch::is_software_renderer`）、wgpu はアダプターの名前か種類（`DeviceType::Cpu`、WARP） | CPU。シェーダーも転送も CPU で行われ、速くならないため |
 | 6 | 設定が `"auto"` で、性能の見張りが遅いと判断した | CPU |
 | — | それ以外（`"auto"` / `"gpu"`） | GPU |
 
@@ -118,6 +143,7 @@ YUY2 を GPU で変換するとき（既定、#456）は、フレームコール
 
 - 判定は純粋関数（`SlowPaintWatch::observe`・`slow_threshold`）で、猶予・5 秒・境界（2 倍ちょうどは遅くない）・下限をテストで固定してある
 - 測れるのは CPU 側の時間だけ。ソフトウェア描画の GL は描画を swap まで遅らせることがあり、見張りでは捉えきれないので、`GL_RENDERER` の文字列でも見分ける（上の表の 5）
+- wgpu で描くときも同じ見張りが効く（`cpu_usage` は eframe がどちらの描画でも出す）。ソフトウェア描画（WARP）は既定では描画に選ばれず（下の「描画バックエンド」）、`CAPTURECARD_VIEWER_RENDERER=wgpu` で WARP を選んだときは上の表の 5 で CPU の変換になる
 - VM（VMware SVGA3D）では 1080p60 で 40 秒流しても発火しなかった
 
 ### 試していないもの
@@ -206,6 +232,25 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 - 集計（`video/display_latency.rs` の `DisplayLatency`）は UI スレッドだけが持つ `CaptureCardViewer` のフィールド。直近 1 秒の平均と最大を統計 OSD と「接続状態」タブの映像の欄に出し、30 秒ごとの平均・最大・枚数を `debug` でログへ出す（音声の観測値のログと同じ間隔）。ログには、取り込む前に次のフレームで上書きされた枚数と、新着が無いまま回った `update()` の回数も並べる（再描画の間隔の判断を確かめるため、#459）。**最小化を挟んだ窓ではどちらも大きく出る。** 最小化中も 1 秒ごとの `update()` が数えられ、取り込むたびに 1 秒ぶんの世代が飛ぶため。比べるときは最小化しない 30 秒を使う。取り込みが止まって 1 秒経てば「-」に戻り、止まる前の値を出し続けない
 - 測れるのは取り込んだフレームだけ。UI スレッドが追いつかずに上書きされたフレーム（世代が飛んだもの）は遅れの数に入らない（上書きされた枚数だけをログに出す）。コマ落ちの有無はフレーム間隔の行で見る
 
+## 取り込み側の遅れの計測（#476）
+
+上の計測（#455）の起点より前、**ドライバーがサンプルに打った時刻 → アプリのコールバックが呼ばれるまで**を、Media Foundation と DirectShow の 2 経路で同じ条件（1920x1080 60fps YUY2、開いて 2 秒待ってから 10 秒、2 回）で測る `#[ignore]` のテストを置いてある。製品のコードは変えていない。詳しい数値と条件は Issue #476 のコメント。
+
+| 経路 | テスト | 測るもの |
+|---|---|---|
+| DirectShow | `directshow_sample_time_to_receive_lag`（`src/video/directshow/timestamp_probe.rs`） | 基準時計を付けたグラフで、`Receive` の時点のストリーム時刻（基準時計の `GetTime` − `Run` に渡された原点）− サンプルの開始時刻。あわせて映像ピンで交渉されたアロケーターの `cBuffers` / `cbBuffer` |
+| Media Foundation | `media_foundation_capture_timestamp_to_callback_lag`（`src/video/capture.rs`） | コールバックの入口の UNIX 時刻 − nokhwa の `Buffer::capture_timestamp`。コールバックではアプリと同じ `FrameSink::push_yuy2` も行う |
+
+- 対象のデバイスは環境変数 `CAPTURECARD_VIEWER_PIN_TEST_DEVICE`（名前の一部、既定 GC551）。実行は `cargo test <テスト名> -- --ignored --nocapture`。デバイスは 1 プロセスしか開けないので、2 つを同時に走らせない
+- **DirectShow のアプリの形（基準時計なし）ではサンプルに時刻が付かない**（#406、`docs/design/recording.md` の「DirectShow のサンプルのタイムスタンプ（#406）」）。そのため計測だけ基準時計を付ける。条件はこの 1 点だけアプリと違う
+- **Media Foundation の `capture_timestamp` は絶対時刻として読めない。** nokhwa-bindings-windows 0.4.6 は `start_stream` の時点の UNIX 時刻（`stream_epoch`）に `ReadSample` のサンプル時刻を足している。サンプル時刻の原点がその瞬間でなければ、差にはその分のずれが乗る。テストは `open_stream` の前後の UNIX 時刻で `stream_epoch` を挟み、推定したサンプル時刻を `MFGetSystemTime`（QPC 基準）と比べた値も出す
+
+2026-10-11 に VM（USB パススルー）の Live Gamer EXTREME 3 で測った結果の要点。
+
+- **DirectShow のサンプルの時刻は、このボードでは実際の取り込みの時刻ではない。** 間隔がきっちり 16.667ms（600 枚で標準偏差 0.000ms）で、到着より後の時刻が付くサンプルもある（「遅れ」の最小が -3.3ms）。原点は開くたびに変わり、「遅れ」の平均は 1 回目 -1.3ms、2 回目 +1.2ms。**絶対値からは何も言えず、言えるのは揺れだけ**（標準偏差 1.5〜2.4ms、平均 − 最小 1.9〜2.0ms）。GC551 は `Receive` に渡す瞬間の時刻を刻んでいた（#406）ので、ボードとドライバーによって時刻の意味が違う
+- 映像ピンのアロケーターは 2 回とも `cBuffers` 10、`cbBuffer` 4147200 バイト（1920x1080 の YUY2 1 枚）。`Receive` は待たずに戻り、届く間隔も平均 16.667ms で詰まっていないので、バッファの数が遅れとして積み上がっている様子は無い。`IAMBufferNegotiation::SuggestAllocatorProperties` で減らしても効く見込みは小さい（試していない）
+- **Media Foundation はこの VM では開けず、測れていない。** ソースリーダーを作る段で `MF_E_REBOOT_REQUIRED`（0xC00D7167）が返り、アプリも自動で DirectShow へ倒れる。VM を再起動したあとに測り直す
+
 ## 試して外したもの: ソースリーダーの `MF_LOW_LATENCY`（#456）
 
 **Media Foundation のソースリーダーに `MF_LOW_LATENCY = TRUE` を付けても、1080p60 YUY2 の Live Gamer EXTREME 3 では遅延が変わらなかった**ので外した（PR #461 で入れ、同日に戻した）。同じ理由でもう一度入れないこと。
@@ -213,17 +258,74 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 - 付け方: nokhwa 0.10 はソースリーダーの属性を `nokhwa-bindings-windows` の中で組み立てていてアプリから足せないため、0.4.6 を `vendor/` に置いて `[patch.crates-io]` で差し替え、属性を 1 つ足した。環境変数で OFF にできるようにして、同じ exe で ON / OFF を撮り比べた
 - 結果: パススルーに対する遅れは ON が約 38ms、OFF も約 38ms（どちらも 9 カメラフレーム前後、読み取りの誤差 ±1 の中）。`docs/LATENCY.md` の「`MF_LOW_LATENCY` の撮り比べ」
 - 効かない理由の見立て: この属性が減らすのはソースリーダーの下にあるデコーダーや変換の MFT の溜め込みで、YUY2 を無変換で受け取る経路には溜める段が無い。取り込み側の遅れはボードと USB のドライバーにあり、アプリからは触れない
-- 残る候補は UI スレッドが 16ms のポーリングで取りに行く待ち（#459。到着で起こす形にした、上の「到着で起こす形にした理由」）と、present の経路（wgpu のフリップモデル、#456 の (2)。下の「試して外したもの: wgpu」）
+- 残る候補は UI スレッドが 16ms のポーリングで取りに行く待ち（#459。到着で起こす形にした、上の「到着で起こす形にした理由」）と、present の経路（wgpu のフリップモデル、#456 の (2)。下の「描画バックエンド」で #492 として採用した）
 
-## 試して外したもの: 描画を wgpu（DX12 のフリップモデル）にする（#456）
+## 描画バックエンド（#492）
 
-**eframe の描画を glow から wgpu（DX12、フリップモデル、`PresentMode::Mailbox`、溜めるフレーム 1）にしても、1080p60 の Live Gamer EXTREME 3 と 200Hz のモニターでは遅延が変わらなかった**ので採らなかった（PR #465、マージせずに閉じた）。同じ理由でもう一度試さないこと。
+**既定は wgpu の DX12 で描き、glow（OpenGL）も同じ exe に残す。** どちらで描くかは起動時に決める（`src/renderer.rs`）。最初の形は #456 の (2)（PR #465）で作り、撮影の比較で差が見えずに一度見送ったが、PresentMon で present の経路を測り直して採用した（#492）。
 
-- 試し方: 同じ exe で環境変数により wgpu / glow を切り替え、GPU のアダプターが無いときは glow へ倒す形で作り、実機で撮り比べた。VM（GPU 無し）では DX12 が WARP（ソフトウェア描画）しか無く CPU が 350% になるため、WARP は選ばず glow のままにする必要があった
-- 結果: パススルーに対する遅れは wgpu が約 31ms、glow が約 32ms（連続区間の差 7.3 と 7.7 カメラフレーム、読み取りの誤差 ±1 の中）。`docs/LATENCY.md` の「描画バックエンド glow / wgpu の撮り比べ」
-- 効かない理由の見立て: 200Hz のモニターでは present の 1 段が 5ms で、OpenGL が DWM の合成を余分に通る分があってもその程度。この測り方（±4ms）では見えない。60Hz のモニターなら 1 段が 16.7ms なので差が出る可能性はあるが、測っていない
-- 採らなかった理由: exe が 10.5MB → 14.2MB に増え、描画バックエンドが 2 本になる。eframe 0.36 では Mailbox が使えないときに Fifo へ倒す手段が無く、「wgpu は DX12 だけ」という制約も付く。見返りが誤差の中では見合わない
-- GPU での YUY2→RGB の変換（#456 の (3)）は glow のままシェーダー（egui の `PaintCallback`）で書いた。上の「YUY2 → RGB を GPU で変換する（#456）」
+### 採用した理由（PresentMon の数値）
+
+2026-10-11、メイン PC、フルスクリーン、各 20 秒を PresentMon で測った（#476 のコメント）。見るのは `PresentMode`（どの経路で画面に出たか）と `MsUntilDisplayed`（Present を呼んでから画面に出るまで）。
+
+| | glow（1.5.0） | wgpu（PR #465 のブランチ） | RECentral 4（参考） |
+|---|---|---|---|
+| `PresentMode` | Composed: Copy with GPU GDI（1197 枚すべて） | **Hardware: Independent Flip（1199 枚すべて）** | Hardware: Independent Flip が大半、Composed: Flip が一部 |
+| `MsUntilDisplayed` 平均 / 中央値 / 95% / 最大 | 6.7 / 6.3 / 11.6 / 18.4 | **4.6 / 4.5 / 7.9 / 10.5** | 3.0 / 2.3 / 6.9 / 10.5 |
+
+- glow の present は、OpenGL のフレームを GDI 経由で DWM が合成する一番遠回りの経路（Composed: Copy with GPU GDI）だった。wgpu の DX12 はフリップモデルの swapchain（`DXGI_SWAP_EFFECT_FLIP_DISCARD`、HWND から作る）で、フルスクリーンでは DWM を飛ばして直接スキャンアウトする独立フリップになった
+- **平均で約 2ms、ばらつきの裾（95%・最大）で 4〜8ms 縮む。** ユーザー判断で採用した
+- 2026-10-04 の撮影の比較（スマートフォンの 240fps、パススルーとの差）では wgpu 約 31ms、glow 約 32ms で、差は読み取りの誤差（±4ms）に埋もれていた。平均の 2ms はこの測り方では見えない（`docs/LATENCY.md` の「描画バックエンド glow / wgpu の撮り比べ」）
+- この表の wgpu は PR #465 のブランチ（`desired_maximum_frame_latency` を 1 にしていた版）の exe。#492 の exe で測り直すのはユーザー（`docs/LATENCY.md` の「present の計測（PresentMon）」）
+- 費用: exe が約 10.6MB → 約 14.3MB。描画バックエンドが 2 本になり、YUY2 → RGB の GPU 変換（#456）も GL と wgpu の 2 つを持つ（上の「YUY2 → RGB を GPU で変換する」）
+
+### present mode と溜めるフレーム数
+
+eframe 0.36 の `WgpuConfiguration` の範囲（`SurfaceConfig`）で指定できた。
+
+| 設定 | 値 | 理由 |
+|---|---|---|
+| バックエンド | DX12 だけ（`wgpu` のフィーチャも `dx12` と `wgsl` だけ） | Vulkan / GLES は入れない。present mode を確実に選べるのが DX12 だけのため（下） |
+| present mode | **Mailbox** | 待たずに渡し、次の垂直同期で最新の 1 枚だけを出す。ティアリングは起きない。Fifo は垂直同期まで待たされ、待っている間に届いたフレームの取り込みが遅れる |
+| 溜めるフレーム数（`desired_maximum_frame_latency`） | 1（最小） | DX12 では `SetMaximumFrameLatency(1)` と、swapchain のバッファ 2 枚。wgpu の既定は 2 |
+| シェーダーのコンパイラ | FXC | Windows に入っている `d3dcompiler_47.dll`。既定の Auto は PATH 上の `dxcompiler.dll` を拾いうるので固定する |
+
+- **Immediate（垂直同期を切る）は使わない。** ティアリングによる画質の低下が大きいので、ユーザーが却下した（#456 のコメント）
+- **Mailbox が使えないときに Fifo へ倒す形にはできなかった。** eframe 0.36 は present mode を起動前の `WgpuConfiguration` で決め、起動後に変える口（`Frame::set_wgpu_surface_config`）は `Frame` が持つ `RenderState` の複製を書き換えるだけで描画側へ届かない。wgpu は対応していない present mode を指定すると落ちる（Fifo への自動の切り替えは `AutoVsync` / `AutoNoVsync` にしか無い）。そこで **Mailbox を必ず出せる DX12 だけで wgpu を使い**、出せないときは glow へ倒す。wgpu-hal の DX12 は Mailbox と Fifo を常に対応一覧に載せる。アダプターを選ぶとき（`native_adapter_selector`）にもウィンドウの surface が Mailbox を出せるかを確かめ、出せないアダプターは選ばない
+- **Mailbox は垂直同期で待たないので、描画の回数を垂直同期が抑えない。** 映像の取り込みは到着で起こす形（上の「再描画をいつ要求するか」）なので、普段は到着の回数（60fps なら毎秒 60 回）しか描かない。ただし egui が描き続けを要求する間（`ui.spinner()` を出している間、アニメーションの間）は、GPU が描ける限りの回数で回る。いまスピナーを出すのは、対応設定の取得中と更新の確認・適用中だけ
+
+### glow を残す理由と、どちらで描くかの決め方
+
+| 条件 | 描画 | ログ |
+|---|---|---|
+| 環境変数 `CAPTURECARD_VIEWER_RENDERER` が未指定・空、または解釈できない値（`opengl` など） | GPU の DX12 アダプターがあれば wgpu、無ければ glow | wgpu なら INFO（アダプター名と present mode）、glow へ倒したら WARN（理由と列挙できたアダプター）。解釈できない値は WARN |
+| `CAPTURECARD_VIEWER_RENDERER=wgpu` | DX12 のアダプターがあれば wgpu（**CPU で描く WARP も使う**）、無ければ glow | 同上 |
+| `CAPTURECARD_VIEWER_RENDERER=glow` | glow | INFO |
+
+- **glow は撮り比べのために残す。** 同じ exe で glow と wgpu を切り替えて測る（`docs/LATENCY.md`）。設定ファイルには入れない
+- **GPU の DX12 アダプターが無いときの逃げ道でもある。** 既定では WARP（Microsoft Basic Render Driver。画素を CPU で塗る）を選ばない。GPU の無い VM でも、VMware の OpenGL ドライバーなら glow は軽く動くため（下の表）
+- **どちらで描くかは `run_native` の前に決める。** winit のイベントループは 1 プロセスに 1 回しか作れないので、wgpu で起動に失敗してから glow で開き直すことはできない。起動の前に DX12 のインスタンスを作ってアダプターを列挙し、優先順位（外付け → 内蔵 → 仮想 → その他、WARP は明示したときだけ最後）の順にデバイスを作ってみて、最初に作れたアダプターを使う（`probe_dx12`、手元の VM で 60〜150ms）。eframe がアダプターを選ぶときもそのアダプターを優先する（`native_adapter_selector`）。それでも描画の初期化に失敗したらウィンドウは出ずに終わり、ログに ERROR が残る。そのときは `CAPTURECARD_VIEWER_RENDERER=glow` で起動できる
+- どちらで描いているかは統計 OSD の「描画」の行（「描画 wgpu Dx12 Mailbox / <アダプター名>」「描画 glow (OpenGL)」。アンダーランの行の次）とログで分かる
+
+### GPU の無い VM での成立条件
+
+この開発用の VM（VMware、GPU のパススルーなし）では、DX12 のアダプターは WARP しか無い。
+
+- 既定（環境変数なし）: WARP を選ばずに glow へ倒れる（WARN「DX12 で描けないので glow（OpenGL）で描く: GPU の DX12 のアダプターが無い…」）。GPU 変換は GL の版で、VMware SVGA3D（Mesa）で自己診断が通る（2026-10-11、#492）
+- `CAPTURECARD_VIEWER_RENDERER=wgpu`: WARP で描く。GPU 変換は wgpu の版で自己診断が通り、設定が「自動」ならソフトウェア描画として CPU の変換になる。「GPU」にするとフェイクの 720p60 が正しい色で映る（2026-10-11、#492）
+- 2026-10-04 の計測（PR #465）では、フェイクの 1080p60 を 30 秒流して、既定（→ glow）が CPU 52%・1526 枚、`wgpu`（WARP）は CPU 350%・101 枚（毎秒 3 枚ほど）だった。WARP で映像を描くのは実用にならないので、既定では選ばない
+- **GPU のある実機での CPU と見た目はここから決めない。** 実機で DX12 の GPU アダプターが選ばれることと present の数値は人が確かめる（`docs/MANUAL-TEST.md` の「描画バックエンド（wgpu / glow）」）
+
+### フルスクリーンで独立フリップが効く条件
+
+DWM が合成を飛ばしてフリップモデルの swapchain を直接スキャンアウトする（independent flip）のは、おおむね次の条件がそろったとき。そろわないときは DWM の合成を通る（Composed: Flip。それでも glow の GDI 経由の複製の段は無い）。
+
+- **ウィンドウの描画領域がモニター全体と一致している。** このアプリのフルスクリーン（`ViewportCommand::Fullscreen`、winit のボーダーレスのフルスクリーン）は装飾を外してモニター全体を覆うので満たす。装飾なし（ボーダーレス）の通常のウィンドウや最大化では、タスクバーが残るので満たさない
+- **他のウィンドウが上に重なっていない。** 音量やトーストの通知、他のアプリの OSD、常に最前面のウィンドウが重なると、その間は合成に戻る。右クリックメニューや設定ダイアログはこのアプリの中で描くので、重なりに数えない
+- swapchain の大きさがウィンドウと一致している（wgpu が大きさの変化に合わせて作り直す）。透明なウィンドウにしていない
+- GPU とドライバーがマルチプレーンオーバーレイに対応していれば、ウィンドウ表示でもオーバーレイの面へ載って合成を飛ばせることがある
+
+効いているかは PresentMon の `PresentMode` の列で見られる（`Hardware: Independent Flip` / `Composed: Flip`）。測り方は `docs/LATENCY.md` の「present の計測（PresentMon）」。
 
 ## 映像の上に重ねる表示の層
 
@@ -252,6 +354,8 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 
 ## UI にあるが動作していない設定がある
 
-いまは無い。ビデオフォーマットの MJPEG / RGB24 が Media Foundation の経路で YUYV に強制されていたのは #81 で直した（上の「Media Foundation で開く形式（#81）」）。設定画面に効かない項目を足したときは、ここと README に書くこと。
+形式によって効かない項目が 1 つある。**色空間（BT.601 / BT.709）は MJPEG / RGB24 / デコーダ任せのフレームでは効かない。** Y'CbCr から RGB へ直す係数の選び方なので、届いた時点で（あるいはデコーダの中で）RGB になっているフレームには掛けようがない（上の「RGB の経路のレンジと映像調整（#472）」）。設定画面では色空間の説明（ホバーの文言）に「MJPEG / RGB24 のときは効かない」と書いてある。`notice_label` の注意書きは出していない。既定は「自動」で、選び直した人だけが読めば足りるため。デコーダ任せの経路では色レンジも効かず、`warn` に残す。
+
+ビデオフォーマットの MJPEG / RGB24 が Media Foundation の経路で YUYV に強制されていたのは #81 で直した（上の「Media Foundation で開く形式（#81）」）。設定画面に効かない項目を足したときは、ここと README に書くこと。
 
 オーディオのサンプリングレート／チャンネル数は `select_best_config` でストリームに反映され、**選択肢も入出力デバイスの対応設定から生成している**（`audio::selectable_sample_rates` / `selectable_channels`）。デバイスの能力を取得できなかった場合だけ固定の既定一覧へ倒すので、そのときは対応しない値も選べる。

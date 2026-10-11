@@ -107,7 +107,7 @@ impl SlowPaintWatch {
 /// `GL_RENDERER` の文字列がソフトウェア描画のものか。設定が「自動」なら最初から CPU にする。
 /// GPU の無い環境の OpenGL（Windows の GDI Generic、Mesa の llvmpipe / softpipe など）は、
 /// シェーダーとテクスチャの転送も CPU で行うので、CPU で変換するより速くならない
-pub(super) fn is_software_renderer(renderer: &str) -> bool {
+pub fn is_software_renderer(renderer: &str) -> bool {
     const SOFTWARE: [&str; 6] = [
         "gdi generic",
         "llvmpipe",
