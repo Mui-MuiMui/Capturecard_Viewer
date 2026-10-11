@@ -88,8 +88,10 @@ cargo build --release
 | `src/video/yuv420.rs` | 4:2:0 の YUV（NV12 / I420 / YV12）→ RGB24 の画素変換（`yuv420_to_rgb`、面の並び `Yuv420Layout`）。1 画素の式と係数表は YUY2 と同じで、違うのは色差の置き方だけ。`FrameSink` が呼ぶ |
 | `src/video/frame_buffer.rs` | `FrameBuffer`（`Arc` によるフレーム共有と世代番号。新着と一緒に受け取った時刻も返す `newer_than`）と観測値（`FrameStats`）、RGB の画素データの長さの判定（`frame_len_status`）、置き換えたフレームを `Arc` ごと使い回すか（`fill_recycled`） |
 | `src/video/frame_format.rs` | フレームの画素の並び `PixelFormat`（RGB24 / YUY2 と係数表、#456）、統計の経路 `ConvertPath`、形式を問わない長さの判定（`pixel_len_status`）、YUY2 のまま積まれたフレームから RGB を取り出す口（録画の `rgb`、スクリーンショットの `into_rgb`） |
-| `src/video/gpu_yuy2.rs` | YUY2 → RGB を GPU（シェーダー）で行う窓口 `GpuYuy2`（#456）。使うかの判断（環境変数・設定・失敗・ソフトウェア描画・見張り、`decide`）、フレームを預かる口（`queue`）、egui の描画へ差し込むコールバック（`paint_callback`）、GPU → CPU の切り替え（一方向・1 回）。UI スレッドだけが触る |
-| `src/video/gpu_yuy2_gl.rs` | その GL の部分 `GlConverter`。シェーダー（`src/video/shaders/`）のコンパイル、YUY2 のアップロード、フレームバッファ経由で egui のテクスチャへ描く、起動時の自己診断（CPU の変換と全画素の突き合わせ） |
+| `src/video/gpu_yuy2.rs` | YUY2 → RGB を GPU（シェーダー）で行う窓口 `GpuYuy2`（#456）。使うかの判断（環境変数・設定・失敗・ソフトウェア描画・見張り、`decide`）、起動時のコンテキスト（`GpuContext`、glow / wgpu、#492）からの変換器の用意、フレームを預かる口（`queue`）、egui の描画へ差し込むコールバックを返す口（`paint_callback`）、GPU → CPU の切り替え（一方向・1 回）。UI スレッドだけが触る |
+| `src/video/gpu_yuy2_paint.rs` | その描画のコールバックの部分。窓口と共有する状態（`Shared`、変換器 `Converter`、預けたフレーム、失敗）と、glow の `CallbackFn` / wgpu の `CallbackTrait` の中で変換器を呼ぶところ |
+| `src/video/gpu_yuy2_gl.rs` | その GL の部分 `GlConverter`（glow で描くとき）。シェーダー（`src/video/shaders/` の GLSL）のコンパイル、YUY2 のアップロード、フレームバッファ経由で egui のテクスチャへ描く、起動時の自己診断（CPU の変換と全画素の突き合わせ）。`GpuFailure` と自己診断の入力・係数表は wgpu の版と共有 |
+| `src/video/gpu_yuy2_wgpu.rs` | その wgpu の部分 `WgpuConverter`（wgpu で描くとき、#492）。WGSL（`src/video/shaders/yuy2_to_rgb.wgsl`）のパイプライン、YUY2 のアップロード、自前のテクスチャへ描いて egui のテクスチャへ写す、起動時の自己診断、wgpu のエラーをエラースコープで捕まえる（`with_error_scope`） |
 | `src/video/gpu_watch.rs` | GPU で変換しているときの性能の見張り `SlowPaintWatch`（描画が到着間隔の 2 倍を 5 秒、猶予 3 秒）とソフトウェア描画の見分け（`is_software_renderer`）。判定だけの純粋関数 |
 | `src/video/display_latency.rs` | 表示までの遅れ（フレームの到着 → テクスチャの更新、#455）の集計 `DisplayLatency`。直近 1 秒の平均・最大と 30 秒ごとのログの窓。UI スレッドだけが持つ |
 | `src/video/tap.rs` | 録画へ映像を回す差し込み口 `VideoTap`。録画中だけ、`FrameSink` が画面へ置いたのと同じ `Arc<VideoFrame>` を容量 3 のリングへ積む（待たない `try_lock`、満杯なら捨てて数える）。Vec の回収に失敗した回数も録画中だけ数える |
@@ -180,6 +182,7 @@ cargo build --release
 | `src/update/checksum.rs` | `SHA256SUMS.txt` の行の読み方（`find_checksum`）と、大文字小文字を区別しない照合（`checksum_matches`） |
 | `src/update/overrides.rs` | 更新の確認を試すための環境変数（`CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` / `CAPTURECARD_VIEWER_UPDATE_API_URL`）の解釈（`CheckOverrides`） |
 | `src/overlay.rs` | 操作したときだけ数秒出て消える OSD（フルスクリーンの切り替え、音量、失敗や録画の保存のトーストなど）。期限と描画の `TransientOverlay` と、中身の `OverlayContent`（テキストだけ / バー付き）。常設の統計 OSD は `app/video_overlay.rs` の側 |
+| `src/renderer.rs` | 描画のバックエンド（wgpu の DX12 / glow）を起動前に決める（`configure`、#492）。環境変数 `CAPTURECARD_VIEWER_RENDERER` の解釈（`parse_renderer`）、DX12 のアダプターの確認（`probe_dx12`）と選び方（`pick_adapter`）、present mode（Mailbox）と溜めるフレーム数（1）、統計 OSD に出す説明（`RendererChoice::label`） |
 | `src/repaint.rs` | 次の再描画までの間隔の判定（`next_repaint_delay`）と、UI スレッド以外から再描画を促す窓口（`RepaintWaker`） |
 | `src/i18n/mod.rs` | 画面に出す文字列の入口。現在の言語（`Language` と `static LANGUAGE`）を持ち、`set_language` で切り替える。外から使う経路（`crate::i18n::...`）の `pub use` もここ |
 | `src/i18n/text.rs` | 引数を取らない文字列の表（`texts!` が `Text` のキーと言語ごとの `match` を作る） |
@@ -211,7 +214,7 @@ cargo build --release
 | `docs/design/device-worker.md` | デバイス操作をワーカースレッド 1 本へ隔離した理由、チャネルを通さない共有、開き直しの差分判定、最小化中の扱い |
 | `docs/design/threads.md` | スレッドの一覧と役割、ロック順序、ホットキーのリスナー、スクリーンショットの保存とクリップボード |
 | `docs/design/reconnect.md` | 切断の検出、バックオフでの再試行、音声のフォールバックを外した経緯、Windows の既定デバイスの追従 |
-| `docs/design/video-pipeline.md` | `FrameBuffer` と世代番号、色変換への映像調整の畳み込み、再描画の間隔と `RepaintWaker`、Media Foundation で開く形式（#81）、UI にあるが効かない設定 |
+| `docs/design/video-pipeline.md` | `FrameBuffer` と世代番号、色変換への映像調整の畳み込み、再描画の間隔と `RepaintWaker`、Media Foundation で開く形式（#81）、YUY2 → RGB の GPU 変換（#456）、描画バックエンド（wgpu の DX12 / glow、#492。PresentMon の数値と present mode）、UI にあるが効かない設定 |
 | `docs/design/audio.md` | 入出力の形が違う場合の変換、クロックドリフト補正、対応設定の取得、ミュート |
 | `docs/design/directshow-audio.md` | DirectShow の映像デバイスの音声ピンから音声を取り込む設計（#388）。**第 1 段（設定ファイルの `input_source = "video_pin"` で鳴る・録画に入る、#393）と第 2 段（設定ダイアログの項目・初回の既定・フェイクの音声ピン、#394）を実装済み。** 受け口のフィルター、`AudioCapture` の入力の種類と `AudioPinFeed`、映像のグラフと音声の寿命、`[audio] input_source`、UI、対応設定、ドリフトと録画の PTS、段階分け |
 | `docs/design/settings.md` | `#[serde(default)]`、デバウンス保存、壊れた設定ファイルと `AutoSavePolicy` |

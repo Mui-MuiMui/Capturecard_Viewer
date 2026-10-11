@@ -1,7 +1,11 @@
 //! YUY2 → RGB を GPU（シェーダー）で行う窓口（#456）。使うかどうかの判断、UI スレッドから
 //! 変換するフレームを預かる口、egui の描画へ差し込むコールバック、CPU へ戻す判断。
 //!
-//! GL の資源とシェーダーは `super::gpu_yuy2_gl`、性能の見張りは `super::gpu_watch`。
+//! 変換器は描画バックエンド（`crate::renderer`、#492）に合わせて 2 つある。glow で描くときは
+//! GL の資源と GLSL（`super::gpu_yuy2_gl`、egui の `egui_glow::CallbackFn`）、wgpu で描くときは
+//! wgpu の資源と WGSL（`super::gpu_yuy2_wgpu`、`egui_wgpu::CallbackTrait`）。どちらを使うかは
+//! 起動時に渡された描画のコンテキスト（`GpuContext`）で決まり、この窓口の使い方は変わらない。
+//! 性能の見張りは `super::gpu_watch`。
 //! 設計は `docs/design/video-pipeline.md` の「YUY2 → RGB を GPU で変換する（#456）」。
 //!
 //! - 起動時（`init`）にシェーダーを用意し、自己診断で CPU の変換と全画素が一致したら
@@ -16,7 +20,7 @@
 //! - 環境変数 `CAPTURECARD_VIEWER_GPU_CONVERT=0` で GPU を準備しない（開発者向けの A/B。設定より優先）
 
 use eframe::egui;
-use eframe::egui_glow;
+use eframe::egui_wgpu::{self, wgpu};
 use eframe::glow::{self, HasContext as _};
 use log::{info, warn};
 use std::sync::{Arc, Mutex};
@@ -24,11 +28,23 @@ use std::time::{Duration, Instant};
 
 use super::color::SharedColorConversion;
 use super::frame_buffer::{FrameStats, VideoFrame};
-use super::frame_format::PixelFormat;
 use super::gpu_watch::{is_software_renderer, watched_interval, Observation, SlowPaintWatch};
 use super::gpu_yuy2_gl::{GlConverter, GpuFailure};
+use super::gpu_yuy2_paint::{gl_paint_callback, wgpu_paint_callback, Converter, Shared};
+use super::gpu_yuy2_wgpu::WgpuConverter;
 use crate::repaint::RepaintWaker;
 use crate::settings::VideoConvertSetting;
+
+/// 起動時に eframe から受け取る描画のコンテキスト（#492）。どちらの変換器を使うかを決める
+#[derive(Clone, Copy)]
+pub enum GpuContext<'a> {
+    /// どちらも無い（テストで作ったアプリなど）
+    None,
+    /// glow（OpenGL）で描いている
+    Glow(&'a Arc<glow::Context>),
+    /// wgpu（DX12）で描いている
+    Wgpu(&'a egui_wgpu::RenderState),
+}
 
 /// GPU での変換を切る環境変数。`0`（または `false` / `off`）で CPU の経路に戻す
 pub const GPU_CONVERT_ENV: &str = "CAPTURECARD_VIEWER_GPU_CONVERT";
@@ -55,9 +71,9 @@ pub enum CpuReason {
     DisabledByEnv,
     /// 設定（`[video] convert = "cpu"`）で選んである
     DisabledBySetting,
-    /// GL のコンテキストが無い（テストで作ったアプリなど）
-    NoGl,
-    /// GL がソフトウェア描画（設定が「自動」のとき）。`GL_RENDERER` の文字列
+    /// 描画のコンテキスト（GL / wgpu）が無い（テストで作ったアプリなど）
+    NoGpuContext,
+    /// ソフトウェア描画（設定が「自動」のとき）。`GL_RENDERER` か wgpu のアダプターの名前
     SoftwareRenderer(String),
     /// 描画が遅い状態が続いたので戻した（設定が「自動」のとき）
     TooSlow,
@@ -75,19 +91,19 @@ impl CpuReason {
     }
 }
 
-/// 起動時に用意できた GL の様子。
+/// 起動時に用意できた GPU の様子。
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct GlInfo {
-    /// `GL_RENDERER`
+struct GpuInfo {
+    /// GL なら `GL_RENDERER`、wgpu ならアダプターの名前
     renderer: String,
-    /// ソフトウェア描画か（`gpu_watch::is_software_renderer`）
+    /// ソフトウェア描画か（`gpu_watch::is_software_renderer`。wgpu は CPU のアダプターも）
     software: bool,
 }
 
 /// いま YUY2 をどこで変換するかを決める。**優先順は 環境変数 → 設定の CPU → 準備の失敗 →
 /// 描画の失敗 →（自動のときだけ）ソフトウェア描画 → 遅さ。**
 fn decide(
-    prepared: &Result<GlInfo, CpuReason>,
+    prepared: &Result<GpuInfo, CpuReason>,
     failure: Option<&GpuFailure>,
     preference: VideoConvertSetting,
     too_slow: bool,
@@ -106,68 +122,10 @@ fn decide(
     Yuy2Conversion::Cpu(reason)
 }
 
-/// 描画のコールバックと UI スレッドで共有するもの。
-///
-/// **触るのは UI スレッドだけ**（`update()` と、その後の描画のコールバック）。`Mutex` に
-/// しているのは、egui のコールバック（`egui_glow::CallbackFn`）が `Send + Sync` を
-/// 求めるため。待つ相手はいない。
-struct Shared {
-    converter: GlConverter,
-    /// 次の描画で変換するフレーム。新しいものが来たら古いものは捨てる（変換しない）
-    pending: Option<Arc<VideoFrame>>,
-    /// 描画の途中で失敗した理由。以後このセッションでは GPU を使わない
-    failure: Option<GpuFailure>,
-    color_conversion: Arc<SharedColorConversion>,
-    /// 失敗したとき、CPU で描き直す `update()` を起こす
-    repaint_waker: RepaintWaker,
-}
-
-impl Shared {
-    /// 預かっているフレームを `target`（egui のテクスチャ）へ変換して書く。描画中に呼ぶ
-    fn convert_pending(&mut self, painter: &egui_glow::Painter, target: egui::TextureId) {
-        if self.failure.is_some() {
-            return;
-        }
-        let Some(frame) = self.pending.take() else {
-            return;
-        };
-        let PixelFormat::Yuy2(matrix) = frame.format else {
-            return;
-        };
-        let Some(texture) = painter.texture(target) else {
-            // 映像のテクスチャがまだレンダラーに無い。次の描画でやり直す
-            self.pending = Some(frame);
-            return;
-        };
-        // SAFETY: egui の描画中（UI スレッド、GL のコンテキストが current）に呼ばれる
-        let result = unsafe {
-            self.converter.convert(
-                painter.gl(),
-                &frame,
-                &matrix,
-                texture,
-                painter.intermediate_fbo(),
-                painter.max_texture_side(),
-            )
-        };
-        if let Err(reason) = result {
-            warn!(
-                "YUY2 を GPU で変換できなかったので、このセッションでは以後 CPU で変換する: {}",
-                reason
-            );
-            // フレームコールバックはすぐ CPU へ戻す。描けなかったこのフレームは、
-            // 次の update() が CPU で描き直す（`GpuYuy2::take_switched_to_cpu`）
-            self.color_conversion.set_yuy2_on_gpu(false);
-            self.failure = Some(reason);
-            self.repaint_waker.wake();
-        }
-    }
-}
-
 /// YUY2 を GPU で変換する窓口。`CaptureCardViewer` が 1 つ持つ。
 pub struct GpuYuy2 {
     /// 起動時の準備の結果
-    prepared: Result<GlInfo, CpuReason>,
+    prepared: Result<GpuInfo, CpuReason>,
     /// 設定（`[video] convert`）
     preference: VideoConvertSetting,
     /// 見張りが遅いと判断した。設定を変えて適用するまで戻さない
@@ -178,13 +136,20 @@ pub struct GpuYuy2 {
     /// GPU から CPU へ切り替わったのに、まだ CPU で描き直していない
     switched_to_cpu: bool,
     shared: Option<Arc<Mutex<Shared>>>,
+    /// wgpu で描くとき、egui の映像のテクスチャ（`wgpu::Texture`）を引くためのレンダラー。
+    /// 読むのは `update()` の中（`paint_callback`）だけで、eframe が描画で書き込みのロックを
+    /// 取るのはその後なので待たない
+    wgpu_renderer: Option<Arc<egui::mutex::RwLock<egui_wgpu::Renderer>>>,
     color_conversion: Arc<SharedColorConversion>,
 }
 
 impl Default for GpuYuy2 {
-    /// GL のコンテキストを渡されていない状態（CPU で変換する）
+    /// 描画のコンテキストを渡されていない状態（CPU で変換する）
     fn default() -> Self {
-        Self::not_prepared(CpuReason::NoGl, Arc::new(SharedColorConversion::new()))
+        Self::not_prepared(
+            CpuReason::NoGpuContext,
+            Arc::new(SharedColorConversion::new()),
+        )
     }
 }
 
@@ -198,16 +163,18 @@ impl GpuYuy2 {
             watch: SlowPaintWatch::default(),
             switched_to_cpu: false,
             shared: None,
+            wgpu_renderer: None,
             color_conversion,
         }
     }
 
-    /// 起動時に 1 回だけ呼ぶ。`env_value` は `GPU_CONVERT_ENV` の値、`preference` は設定。
+    /// 起動時に 1 回だけ呼ぶ。`context` は eframe から受け取った描画のコンテキスト、
+    /// `env_value` は `GPU_CONVERT_ENV` の値、`preference` は設定。
     ///
-    /// シェーダーを用意して自己診断を通し、設定と GL の様子から使うかを決める。どこかで
+    /// シェーダーを用意して自己診断を通し、設定と GPU の様子から使うかを決める。どこかで
     /// 失敗したら WARN を出して CPU のまま（`color_conversion` の旗は立てない）
     pub fn init(
-        gl: Option<&Arc<glow::Context>>,
+        context: GpuContext<'_>,
         color_conversion: &Arc<SharedColorConversion>,
         repaint_waker: &RepaintWaker,
         preference: VideoConvertSetting,
@@ -220,19 +187,89 @@ impl GpuYuy2 {
                 GPU_CONVERT_ENV
             );
             Self::not_prepared(CpuReason::DisabledByEnv, color)
-        } else if let Some(gl) = gl {
-            Self::prepare(gl, color, repaint_waker)
         } else {
-            warn!("GL のコンテキストが無いので、YUY2 → RGB の変換は CPU で行う");
-            Self::not_prepared(CpuReason::NoGl, color)
+            match context {
+                GpuContext::Glow(gl) => Self::prepare_gl(gl, color, repaint_waker),
+                GpuContext::Wgpu(render_state) => {
+                    Self::prepare_wgpu(render_state, color, repaint_waker)
+                }
+                GpuContext::None => {
+                    warn!("描画のコンテキストが無いので、YUY2 → RGB の変換は CPU で行う");
+                    Self::not_prepared(CpuReason::NoGpuContext, color)
+                }
+            }
         };
         gpu.preference = preference;
         gpu.refresh();
         gpu
     }
 
-    /// シェーダーを用意して自己診断を通す
-    fn prepare(
+    /// 準備が済んだ変換器を持たせる
+    fn prepared(
+        converter: Converter,
+        info: GpuInfo,
+        color_conversion: Arc<SharedColorConversion>,
+        repaint_waker: &RepaintWaker,
+    ) -> Self {
+        let mut gpu = Self::not_prepared(CpuReason::NoGpuContext, Arc::clone(&color_conversion));
+        gpu.prepared = Ok(info);
+        gpu.shared = Some(Arc::new(Mutex::new(Shared {
+            converter,
+            pending: None,
+            failure: None,
+            color_conversion,
+            repaint_waker: repaint_waker.clone(),
+        })));
+        gpu
+    }
+
+    /// wgpu: シェーダーを用意して自己診断を通す（#492）
+    fn prepare_wgpu(
+        render_state: &egui_wgpu::RenderState,
+        color_conversion: Arc<SharedColorConversion>,
+        repaint_waker: &RepaintWaker,
+    ) -> Self {
+        let adapter = render_state.adapter.get_info();
+        let device = &render_state.device;
+        let prepared = WgpuConverter::new(device).and_then(|mut converter| {
+            converter
+                .self_test(device, &render_state.queue)
+                .map(|()| converter)
+        });
+        match prepared {
+            Ok(converter) => {
+                info!(
+                    "YUY2 → RGB を GPU（シェーダー）で変換できる（自己診断で CPU の変換と全画素が一致、wgpu {:?}、{}）",
+                    adapter.backend, adapter.name
+                );
+                // WARP（CPU で描く DX12）は名前でも種類でも見分ける
+                let software = adapter.device_type == wgpu::DeviceType::Cpu
+                    || is_software_renderer(&adapter.name);
+                let info = GpuInfo {
+                    renderer: adapter.name,
+                    software,
+                };
+                let mut gpu = Self::prepared(
+                    Converter::Wgpu(Box::new(converter)),
+                    info,
+                    color_conversion,
+                    repaint_waker,
+                );
+                gpu.wgpu_renderer = Some(Arc::clone(&render_state.renderer));
+                gpu
+            }
+            Err(reason) => {
+                warn!(
+                    "YUY2 を GPU で変換できないので CPU で変換する（wgpu {:?}、{}）: {}",
+                    adapter.backend, adapter.name, reason
+                );
+                Self::not_prepared(CpuReason::Unavailable(reason), color_conversion)
+            }
+        }
+    }
+
+    /// glow: シェーダーを用意して自己診断を通す
+    fn prepare_gl(
         gl: &glow::Context,
         color_conversion: Arc<SharedColorConversion>,
         repaint_waker: &RepaintWaker,
@@ -262,16 +299,13 @@ impl GpuYuy2 {
                     version, renderer
                 );
                 let software = is_software_renderer(&renderer);
-                let mut gpu = Self::not_prepared(CpuReason::NoGl, Arc::clone(&color_conversion));
-                gpu.prepared = Ok(GlInfo { renderer, software });
-                gpu.shared = Some(Arc::new(Mutex::new(Shared {
-                    converter,
-                    pending: None,
-                    failure: None,
+                let info = GpuInfo { renderer, software };
+                Self::prepared(
+                    Converter::Gl(converter),
+                    info,
                     color_conversion,
-                    repaint_waker: repaint_waker.clone(),
-                })));
-                gpu
+                    repaint_waker,
+                )
             }
             Err(reason) => {
                 warn!(
@@ -405,26 +439,39 @@ impl GpuYuy2 {
         rect: egui::Rect,
     ) -> Option<egui::PaintCallback> {
         let shared = self.shared.as_ref()?;
+        let guard = shared.lock().ok()?;
         // 預かっていなければ置かない（同じフレームを描き直すたびに変換しない）
-        shared.lock().ok()?.pending.as_ref()?;
-        let shared = Arc::clone(shared);
-        let callback = egui_glow::CallbackFn::new(move |_info, painter| {
-            if let Ok(mut shared) = shared.lock() {
-                shared.convert_pending(painter, target);
-            }
-        });
-        Some(egui::PaintCallback {
-            rect,
-            callback: Arc::new(callback),
-        })
+        let pending = guard.pending.as_ref()?;
+        if let Converter::Wgpu(_) = guard.converter {
+            // 書き込み先（egui の映像のテクスチャ）をここで引く。コールバックの中からは
+            // レンダラーに触れない（eframe が書き込みのロックを持っている）。大きさが変わった
+            // 直後は、作り直したテクスチャがレンダラーへ渡るのがこの update() の後なので、
+            // 前の大きさのものしか無い。そのときは預けたまま次の update() でやり直す
+            let size = (pending.width, pending.height);
+            let destination = self
+                .wgpu_renderer
+                .as_ref()
+                .and_then(|renderer| renderer.read().texture(&target)?.texture.clone())
+                .filter(|t| (t.width() as usize, t.height() as usize) == size);
+            let Some(destination) = destination else {
+                guard.repaint_waker.wake();
+                return None;
+            };
+            drop(guard);
+            return Some(wgpu_paint_callback(Arc::clone(shared), destination, rect));
+        }
+        drop(guard);
+        Some(gl_paint_callback(Arc::clone(shared), target, rect))
     }
 
-    /// GL の資源を消す。アプリの終了時（`on_exit`）に呼ぶ
+    /// GL の資源を消す。アプリの終了時（`on_exit`）に呼ぶ。wgpu の資源は捨てれば消える
     pub fn destroy(&mut self, gl: &glow::Context) {
         if let Some(shared) = self.shared.take() {
             if let Ok(shared) = shared.lock() {
-                // SAFETY: on_exit は UI スレッドで、GL のコンテキストが current のまま呼ばれる
-                unsafe { shared.converter.destroy(gl) };
+                if let Converter::Gl(converter) = &shared.converter {
+                    // SAFETY: on_exit は UI スレッドで、GL のコンテキストが current のまま呼ばれる
+                    unsafe { converter.destroy(gl) };
+                }
             }
         }
     }
@@ -434,8 +481,8 @@ impl GpuYuy2 {
 mod tests {
     use super::*;
 
-    fn ready(software: bool) -> Result<GlInfo, CpuReason> {
-        Ok(GlInfo {
+    fn ready(software: bool) -> Result<GpuInfo, CpuReason> {
+        Ok(GpuInfo {
             renderer: "Renderer".to_string(),
             software,
         })
@@ -602,13 +649,16 @@ mod tests {
     fn init_without_gl_stays_on_the_cpu() {
         let color = Arc::new(SharedColorConversion::new());
         let gpu = GpuYuy2::init(
-            None,
+            GpuContext::None,
             &color,
             &RepaintWaker::default(),
             VideoConvertSetting::Auto,
             None,
         );
-        assert_eq!(gpu.conversion(), Yuy2Conversion::Cpu(CpuReason::NoGl));
+        assert_eq!(
+            gpu.conversion(),
+            Yuy2Conversion::Cpu(CpuReason::NoGpuContext)
+        );
         assert!(!color.yuy2_on_gpu(), "GPU を使えないなら旗を立てない");
     }
 
@@ -616,7 +666,7 @@ mod tests {
     fn init_turned_off_by_env_stays_on_the_cpu() {
         let color = Arc::new(SharedColorConversion::new());
         let gpu = GpuYuy2::init(
-            None,
+            GpuContext::None,
             &color,
             &RepaintWaker::default(),
             VideoConvertSetting::Gpu,
@@ -636,7 +686,7 @@ mod tests {
             width: 2,
             height: 1,
             data: vec![16, 128, 16, 128],
-            format: PixelFormat::Yuy2(super::super::color::BT601),
+            format: super::super::frame_format::PixelFormat::Yuy2(super::super::color::BT601),
         });
         let gpu = GpuYuy2::default();
         assert!(!gpu.queue(frame));

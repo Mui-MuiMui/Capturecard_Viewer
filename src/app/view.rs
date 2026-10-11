@@ -8,7 +8,7 @@ use super::placeholder::{show_video_placeholder, video_placeholder_text};
 use super::video_overlay::show_video_overlay;
 use super::CaptureCardViewer;
 use crate::status::{self, ErrorSource};
-use crate::video::{GpuYuy2, PixelFormat, VideoFrame, GPU_CONVERT_ENV};
+use crate::video::{GpuContext, GpuYuy2, PixelFormat, VideoFrame, GPU_CONVERT_ENV};
 use eframe::egui;
 use log::{debug, warn};
 use std::sync::Arc;
@@ -205,8 +205,9 @@ impl CaptureCardViewer {
     }
 
     /// YUY2 → RGB を GPU で行う準備をする（#456）。**起動経路で 1 回だけ**呼ぶ（`main.rs`）。
-    /// GL のコンテキストが無い・環境変数で切ってある・シェーダーを使えないときは CPU のまま
-    pub(crate) fn init_gpu_yuy2(&mut self, gl: Option<&Arc<eframe::glow::Context>>) {
+    /// `context` は描画バックエンド（glow / wgpu、#492）のコンテキスト。どちらも無い・環境変数で
+    /// 切ってある・シェーダーを使えないときは CPU のまま
+    pub(crate) fn init_gpu_yuy2(&mut self, context: GpuContext<'_>) {
         let env = std::env::var(GPU_CONVERT_ENV).ok();
         let preference = self
             .settings
@@ -214,7 +215,7 @@ impl CaptureCardViewer {
             .map(|settings| settings.video.convert)
             .unwrap_or_default();
         self.gpu_yuy2 = GpuYuy2::init(
-            gl,
+            context,
             &self.color_conversion,
             &self.repaint_waker,
             preference,

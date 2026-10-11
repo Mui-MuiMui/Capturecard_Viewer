@@ -85,6 +85,12 @@ fn format_stats_lines(
 }
 
 impl CaptureCardViewer {
+    /// 統計 OSD に出す描画のバックエンドの説明を入れる。起動経路（`main.rs`）が
+    /// 作った直後に 1 回だけ呼ぶ（`renderer::RendererChoice::label`、#492）
+    pub(crate) fn set_renderer_label(&mut self, label: String) {
+        self.renderer_label = Some(label);
+    }
+
     /// 映像の統計を左上へ半透明で重ねて描く。
     ///
     /// 統計の取り出しは 1 フレームにつきこの 1 回だけ。ロックの中では
@@ -108,6 +114,10 @@ impl CaptureCardViewer {
             latency,
             self.device_snapshot.osd_audio_line(),
         );
+        // どちらの描画バックエンドで描いているか（#492）。撮り比べで取り違えないため
+        if let Some(label) = &self.renderer_label {
+            lines.push(i18n::stats_renderer(label));
+        }
         // 録画中は録画の行を足す（経過時間、書いた枚数・捨てた枚数、エンコーダ）
         lines.extend(self.recording_stats_lines());
 
