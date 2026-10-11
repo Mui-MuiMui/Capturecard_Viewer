@@ -169,7 +169,7 @@ fn color_range_from_str(raw: &str) -> Option<ColorRange> {
 // `Hash` は設定ダイアログの能力キャッシュのキー（`ui::VideoCapabilityKey`）に使う
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum VideoBackendSetting {
-    // 名前に「(DirectShow)」があれば DirectShow、無ければ Media Foundation
+    // 名前の付いたデバイスはまず DirectShow で開き、開けなければ Media Foundation（#490）
     #[default]
     #[serde(rename = "auto")]
     Auto,

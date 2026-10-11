@@ -170,7 +170,7 @@ texts! {
     VideoDevice { ja: "ビデオデバイス", en: "Video device" },
     SelectDevice { ja: "デバイスを選択...", en: "Select a device..." },
     VideoBackendLabel { ja: "映像の開き方:", en: "Open video with:" },
-    VideoBackendHint { ja: "自動では、名前に「(DirectShow)」が付いたデバイスだけを DirectShow で、それ以外を Media Foundation で開きます", en: "Auto opens devices whose name ends with \"(DirectShow)\" with DirectShow, and all others with Media Foundation" },
+    VideoBackendHint { ja: "自動では、まず DirectShow で開き、DirectShow の一覧に無いか開けなければ Media Foundation で開きます", en: "Auto first opens the device with DirectShow, and uses Media Foundation if DirectShow does not list it or cannot open it" },
     VideoBackendNotice { ja: "選んだ方法の一覧に無いデバイスには接続できません。映像が出ない場合は「自動」に戻してください。", en: "Devices that the selected method does not list cannot be connected. If no picture appears, switch back to Auto." },
     VideoConvertLabel { ja: "映像の変換:", en: "Video conversion:" },
     VideoConvertHint { ja: "YUY2 の映像を RGB に直す場所です。自動は GPU を使い、GPU で変換できないときや描画が遅いときは CPU に戻します。GPU を選ぶと遅くても CPU に戻しませんが、GPU で変換できないときは CPU に戻します。どれを選んでも映像の色は同じです。", en: "Where YUY2 video is converted to RGB. Auto uses the GPU and falls back to the CPU when the GPU cannot convert or drawing is slow. GPU never falls back for speed, but still falls back when the GPU cannot convert. The colors are the same either way." },
