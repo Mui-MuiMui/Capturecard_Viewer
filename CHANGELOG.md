@@ -8,6 +8,7 @@
 
 - 「映像の開き方」が「自動」のとき、まず DirectShow で開き、DirectShow の一覧に無いか開けなければ Media Foundation で開くようにした（オーディオ入力に映像デバイスの音声を選んでいるときは、DirectShow で開けなくても DirectShow のまま）。Media Foundation と DirectShow の両方に出るキャプチャーボードは DirectShow で開くと表示の遅れが短い（Live Gamer EXTREME 3 で約 32ms → 約 25ms）。今までどおり Media Foundation で開きたいときは「映像の開き方」を「Media Foundation」にする（#490）
 - 画面の描画を OpenGL から DirectX 12（フリップモデル、垂直同期あり）に変えた。フルスクリーンで Windows の合成を通らずに画面へ出せるようになり、描いてから画面に出るまでの遅れが平均で約 2ms、ばらつきの大きいときで 4〜8ms 短くなる（PresentMon での計測）。DirectX 12 に対応した GPU が無い環境では今までどおり OpenGL で描く。環境変数 `CAPTURECARD_VIEWER_RENDERER=glow` で OpenGL に戻せる。どちらで描いているかは統計 OSD（情報表示）の「描画」の行に出る。描画の部品が増えたので、exe が約 10.6MB から約 14.3MB になった（#492）
+- 「映像の開き方」の「自動」が DirectShow を先に試すようになったこと（#490）と描画の DirectX 12 化（#492）を合わせて、パススルーに対する表示の遅れが約 28ms から約 22ms になった（1080p60、Live Gamer EXTREME 3、同じ機材・同じ測り方。`docs/LATENCY.md`）
 
 ### 修正
 
