@@ -392,26 +392,31 @@ impl WgpuConverter {
     }
 }
 
-/// 読み戻し用のバッファを CPU から読めるようにして、中身を写して返す。GPU の完了まで待つ
+/// 読み戻し用のバッファを CPU から読めるようにして、中身を写して返す。GPU の完了まで待つ。
+/// 起動時の自己診断（とテスト）でだけ使うので待ちは許容する。マップ・待ち・読み取りも
+/// ほかの wgpu の呼び出しと同じくエラースコープの中で行う
 fn read_back(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<Vec<u8>, GpuFailure> {
-    let slice = buffer.slice(..);
-    let (sender, receiver) = mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = sender.send(result);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuFailure::Wgpu(e.to_string()))?;
-    receiver
-        .recv()
-        .map_err(|e| GpuFailure::Wgpu(e.to_string()))?
-        .map_err(|e| GpuFailure::Wgpu(e.to_string()))?;
-    let data = slice
-        .get_mapped_range()
-        .map_err(|e| GpuFailure::Wgpu(e.to_string()))?
-        .to_vec();
-    buffer.unmap();
-    Ok(data)
+    let wgpu_error = |e: &dyn std::fmt::Display| GpuFailure::Wgpu(e.to_string());
+    with_error_scope(device, || {
+        let slice = buffer.slice(..);
+        let (sender, receiver) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| wgpu_error(&e))?;
+        receiver
+            .recv()
+            .map_err(|e| wgpu_error(&e))?
+            .map_err(|e| wgpu_error(&e))?;
+        let data = slice
+            .get_mapped_range()
+            .map_err(|e| wgpu_error(&e))?
+            .to_vec();
+        buffer.unmap();
+        Ok(data)
+    })?
 }
 
 #[cfg(test)]
@@ -458,6 +463,73 @@ mod tests {
         converter
             .self_test(&device, &queue)
             .unwrap_or_else(|e| panic!("{name} で自己診断が通らない: {e:?}"));
+    }
+
+    #[test]
+    fn convert_writes_the_same_pixels_as_the_cpu_into_the_destination_texture() {
+        // 自己診断が見るのは中間の描画先まで。ここでは egui のテクスチャへ写したあとの
+        // 最終の書き込み先を読み戻し、CPU の変換と全画素が一致することを確かめる
+        let (device, queue, _) = test_device();
+        let mut converter = WgpuConverter::new(&device).expect("シェーダーを用意できる");
+        // 1 行 64 画素 × 4 バイト = 256 バイトで、読み戻しの行の揃えを満たす
+        let (width, height) = (64u32, 4u32);
+        let destination = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            // egui-wgpu の映像のテクスチャと同じ用途に、読み戻すための COPY_SRC だけ足す
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        // Y・Cb・Cr がばらける並び（飽和する値も入る）
+        let data: Vec<u8> = (0..width * height * 2)
+            .map(|i| ((i * 37 + i / 7) % 256) as u8)
+            .collect();
+        let frame = VideoFrame {
+            width: width as usize,
+            height: height as usize,
+            data,
+            format: PixelFormat::Yuy2(BT601),
+        };
+        let command = converter
+            .convert(&device, &queue, &frame, &BT601, &destination)
+            .expect("変換できる")
+            .expect("同じ大きさなので書く");
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(width * 4 * height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            destination.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: None,
+                },
+            },
+            destination.size(),
+        );
+        // egui と同じく、変換のコマンドを先に送る
+        queue.submit([command, encoder.finish()]);
+        let gpu = read_back(&device, &readback).expect("読み戻せる");
+        let mut cpu = Vec::new();
+        yuy2_to_rgb_naive(frame.width, frame.height, &frame.data, &BT601, &mut cpu);
+        assert_eq!(gpu.len(), frame.width * frame.height * 4);
+        assert_eq!(count_mismatches(&gpu, &cpu), 0);
     }
 
     #[test]

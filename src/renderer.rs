@@ -16,6 +16,8 @@ use eframe::egui_wgpu::{self, wgpu, SurfaceConfig, WgpuConfiguration, WgpuSetupC
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+use crate::video::is_software_renderer;
+
 /// 描画のバックエンドを選ぶ環境変数。`glow` か `wgpu`（大文字小文字は問わない）。
 pub const RENDERER_ENV: &str = "CAPTURECARD_VIEWER_RENDERER";
 
@@ -111,11 +113,13 @@ fn adapter_id(info: &wgpu::AdapterInfo) -> AdapterId {
     (info.vendor, info.device)
 }
 
-/// アダプターの候補。種類と、ウィンドウへ `PRESENT_MODE` で出せるか。
+/// アダプターの候補。種類、名前がソフトウェア描画のものか、ウィンドウへ `PRESENT_MODE` で出せるか。
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
     id: AdapterId,
     device_type: wgpu::DeviceType,
+    /// 名前がソフトウェア描画（`video::is_software_renderer`。GPU 変換の判断と同じ見分け方）
+    software_name: bool,
     presentable: bool,
 }
 
@@ -123,10 +127,14 @@ struct Candidate {
 ///
 /// GPU（外付け → 内蔵 → 仮想）を先にする。CPU で描く WARP（Microsoft Basic Render
 /// Driver）は `allow_software` のときだけ最後の候補にする（`allows_software_adapter`）。
-/// Mailbox で出せないアダプターは選ばない（`PRESENT_MODE`）
+/// WARP は種類（`DeviceType::Cpu`）でも名前でも見分ける。ドライバーによっては種類が
+/// `Other` で返るため。Mailbox で出せないアダプターは選ばない（`PRESENT_MODE`）
 fn adapter_rank(candidate: Candidate, allow_software: bool) -> Option<u8> {
     if !candidate.presentable {
         return None;
+    }
+    if candidate.software_name {
+        return allow_software.then_some(4);
     }
     match candidate.device_type {
         wgpu::DeviceType::DiscreteGpu => Some(0),
@@ -291,6 +299,7 @@ fn probe_dx12(allow_software: bool) -> Result<(WgpuAdapter, u128), String> {
                 id: adapter_id(&info),
                 device_type: info.device_type,
                 presentable: true,
+                software_name: is_software_renderer(&info.name),
             }
         })
         .collect();
@@ -352,6 +361,7 @@ fn wgpu_configuration(
                 Candidate {
                     id: adapter_id(&info),
                     device_type: info.device_type,
+                    software_name: is_software_renderer(&info.name),
                     presentable: surface.is_none_or(|surface| {
                         adapter.is_surface_supported(surface)
                             && surface
@@ -404,6 +414,7 @@ mod tests {
             id,
             device_type,
             presentable: true,
+            software_name: false,
         }
     }
 
@@ -470,6 +481,19 @@ mod tests {
         let candidates = [candidate(DeviceType::Cpu)];
         assert_eq!(pick_adapter(&candidates, false, None), None);
         assert_eq!(pick_adapter(&candidates, true, None), Some(0));
+    }
+
+    #[test]
+    fn pick_adapter_excludes_warp_by_name_even_if_the_type_is_other() {
+        // 種類が Other で返っても、名前が WARP なら GPU として扱わない。順位も最後
+        let warp_named = Candidate {
+            software_name: true,
+            ..candidate(DeviceType::Other)
+        };
+        assert_eq!(pick_adapter(&[warp_named], false, None), None);
+        assert_eq!(pick_adapter(&[warp_named], true, None), Some(0));
+        let candidates = [warp_named, candidate(DeviceType::VirtualGpu)];
+        assert_eq!(ranked_adapters(&candidates, true), vec![1, 0]);
     }
 
     #[test]
