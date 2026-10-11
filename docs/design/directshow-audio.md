@@ -289,7 +289,7 @@ input_device_name = "Line (AVerMedia Live Gamer)"   # "video_pin" の間は使�
 
 今の `resolve_default_devices` は `ApplyConfig` の中、最初の接続より前に入力を埋めるので、ここを「入力の決定は映像の最初の試行のあとまで持ち越す」に変える。持ち越している間、音声は理由を出さずに待つ（「入力が選ばれていない」を出すと、初回起動のたびに一瞬トーストが出る）。決めたら `DefaultDevicesResolved` で UI へ返し、`mark_settings_dirty` 経由で書き戻す（今と同じ）。
 
-- 映像を開いてから決めるのは、#387 の自動の倒し込みで、どちらの経路で開くかが開いてみるまで分からないため。名前の「(DirectShow)」だけでは決められない
+- 映像を開いてから決めるのは、自動の開き方では DirectShow で開けなければ Media Foundation で開くので（#490。#387 のころは逆向きの倒し込み）、どちらの経路で開くかが開いてみるまで分からないため。名前の「(DirectShow)」だけでは決められない
 - `video_pin` に決まると `VideoTarget` の「音声ピンを繋ぐか」が変わるので、**初回だけ映像がもう 1 度開き直る**（1 秒前後）。最初から繋いで開く形にもできるが、ワーカーが UI から来た `VideoTarget` を書き換えることになるので採らない
 - 映像が開けないまま起動した（キャプチャーボードを挿していない）ときは、今までどおり WASAPI の先頭に決まる。あとからキャプチャーボードを挿しても入力は替えない（黙って入力を替えないのは `docs/design/reconnect.md` の「音声は繋がらなくても別のデバイスへ倒さない」と同じ考え方）。替えたい人は設定ダイアログで選ぶ
 - 設定の初期化・読み込み（`AudioSettings::default()`）は `input_source = Device`・入力 `None` になり、今までどおり #304 で開かずに待つ。ここで音声ピンへ倒さないのも同じ理由
@@ -312,11 +312,11 @@ input_device_name = "Line (AVerMedia Live Gamer)"   # "video_pin" の間は使�
 - **すでに選ばれている設定は、選べない状態でも選ばれたまま表示する。** 選び直しを強いない（映像デバイスを抜いているだけ、のことがあるため）。その代わりコンボボックスの下に `notice_label` で理由を出す
 - 文言は `crate::i18n` の `Text` に置く。**項目名以外は設定に残らない表示だけの文言なので翻訳してよい**（設定に残るのは `video_pin`）
 - 描画はドラフトの映像デバイスと `DeviceSnapshot` から写した値（`ActiveVideo` と `video_audio_pins`）から `app` が作った `ui::VideoPinChoice` を、`SettingsDialogView` の読み取り専用の借用で受け取る。描画の中でデバイスへ問い合わせない（GUARDRAIL）
-- **映像の開き方が「自動」のまま「映像デバイスの音声」を選んで適用したら、映像は最初から DirectShow で開く**（#425。ユーザー決定 2026-10-03）。`app::backend::system_route::route_for` に音声ピンを繋ぐ指定（`CaptureRequest::connect_audio_pin`）を渡し、自動でこれが立っていれば DirectShow の経路を選ぶ。利用者がそのデバイスの音声を取ると決めた以上、音声ピンのある DirectShow で開くのが正解で、裏で確かめなくても「Media Foundation でも開けるが音声は DirectShow の音声ピンにしか無い」機種の穴が埋まる。#409 では「入力の種類が映像の経路まで変えると設定の項目同士の関係が見えにくくなる」として採らなかったが、基準をドラフトにして「選んだ映像デバイスの音声」を一覧に出す以上、選んだのに鳴らない（Media Foundation で開いて理由が出る）ほうが分かりにくいので改めた
+- **映像の開き方が「自動」のまま「映像デバイスの音声」を選んで適用したら、映像は最初から DirectShow で開く**（#425。ユーザー決定 2026-10-03）。当初は `app::backend::system_route::route_for` に音声ピンを繋ぐ指定（`CaptureRequest::connect_audio_pin`）を渡し、自動でこれが立っていれば DirectShow の経路を選んでいた。#490 からは指定によらず自動は DirectShow を先に試すので、この指定が効くのは下の倒し方（`media_foundation_fallback`）だけ。利用者がそのデバイスの音声を取ると決めた以上、音声ピンのある DirectShow で開くのが正解で、裏で確かめなくても「Media Foundation でも開けるが音声は DirectShow の音声ピンにしか無い」機種の穴が埋まる。#409 では「入力の種類が映像の経路まで変えると設定の項目同士の関係が見えにくくなる」として採らなかったが、基準をドラフトにして「選んだ映像デバイスの音声」を一覧に出す以上、選んだのに鳴らない（Media Foundation で開いて理由が出る）ほうが分かりにくいので改めた
   - **DirectShow の一覧に同じ名前が無い（`DeviceNotFound`）ときだけは、今までどおり Media Foundation で開く**（`system_route::media_foundation_fallback`。指示役の判断 2026-10-03）。列挙の時点の一覧に無いデバイスは「選べる」側に倒すので、Media Foundation にだけ居る機種も選べてしまい、倒さないと映像まで開けなくなるため。音声は (3) の「Media Foundation で開いた映像には音声ピンが無い」の理由で待つ
   - DirectShow の一覧にあって開けなかったときは Media Foundation へは倒さず、DirectShow の失敗を返す。Media Foundation には音声ピンが無いので、倒しても音は鳴らない。名前が「(DirectShow)」付き（もともと DirectShow の経路）のときも倒さない
   - 開き方を「Media Foundation」に固定した設定では今までどおり倒さず、理由（「「映像の開き方」を「DirectShow」にすると使えます」）を出す。設定項目の選択肢の名前は利用者が画面で見る語なので、ここでは名指ししてよい（#409。避けるのは説明文で DirectShow の仕組みを前提にすることだけ）
-  - 対応形式の問い合わせ（`SystemVideo::capabilities`）はこの指定を見ない。設定ダイアログの能力キャッシュの鍵は (名前, 開き方) で入力の種類を含まないため。両方に出る機種では選択肢が Media Foundation 側の対応形式のことがあるが、DirectShow は近い形式を選んで開く（`stream_select`）
+  - 対応形式の問い合わせ（`SystemVideo::capabilities`）はこの指定を見ない。設定ダイアログの能力キャッシュの鍵は (名前, 開き方) で入力の種類を含まないため。#490 からは自動でも両方に出る機種は DirectShow 側の対応形式を引くので、食い違うのは DirectShow の一覧にあって開けないとき（開けないので選択肢は効かない）だけ
 
 ### 列挙の時点の有無（#409）
 

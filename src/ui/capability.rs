@@ -45,7 +45,8 @@ pub type AudioCapabilityCache = CapabilityCache<AudioCapabilities, String>;
 /// 開く設定なのに Media Foundation 側の一覧を選択肢に出すと、選んだ形式で
 /// 開けない。経路の決め方はワーカー側（`app::backend::system` の `route_for`）
 /// が持つので、ここでは設定値をそのまま持つ。自動と Media Foundation が同じ
-/// 経路になるデバイスでも別々に取るが、切り替えたときに 1 回取り直すだけで済む。
+/// 経路になるデバイス（自動と DirectShow など）でも別々に取るが、切り替えたときに
+/// 1 回取り直すだけで済む。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VideoCapabilityKey {
     pub device: String,
