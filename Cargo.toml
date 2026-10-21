@@ -50,7 +50,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 chrono = { version = "0.4", features = ["serde"] }
 # 既定のフィーチャはマイクからの録音（recording）や MP4 / AAC、ディザ（rand）まで
 # 引き込むので切る。0.17 の既定と同じ形式（MP3 / WAV / Ogg Vorbis / FLAC）だけを足す
-rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "wav", "vorbis", "flac"] }
+rodio = { version = "0.23", default-features = false, features = ["playback", "mp3", "wav", "vorbis", "flac"] }
 dirs = "7.0"
 # 設定ダイアログのフォルダ選択とファイル選択。既定のフィーチャ（xdg-portal / wayland）は
 # Linux 向けのバックエンドなので切る。Windows では IFileDialog を直接使い、フィーチャは要らない
