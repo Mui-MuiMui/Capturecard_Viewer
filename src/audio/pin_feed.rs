@@ -474,6 +474,34 @@ mod tests {
     }
 
     #[test]
+    fn push_keeps_the_recording_on_frame_boundaries() {
+        // 2ch 16bit の塊が 6 バイト（1.5 フレーム）でも、録画へは丸ごとの
+        // 1 フレームだけ積む。半端を積むと次の塊から左右が入れ替わる
+        use ringbuf::traits::Split;
+        let feed = AudioPinFeed::new();
+        let graph = feed.begin_graph();
+        let (producer, _consumer) = ringbuf::HeapRb::<f32>::new(64).split();
+        let tap = AudioTap::new();
+        let mut attachment = tap.attach(16);
+        feed.attach(PinSink {
+            graph,
+            format: GC551,
+            producer: Arc::new(Mutex::new(producer)),
+            tap: tap.clone(),
+            dropped_frames: Arc::new(AtomicU32::new(0)),
+            xruns: Arc::new(AtomicU32::new(0)),
+            started: false,
+        });
+        // 0.5, -0.5, 0.5（3 サンプル目は半端）
+        feed.push(graph, GC551, &[0x00, 0x40, 0x00, 0xC0, 0x00, 0x40], false);
+        // 次の塊は 1 フレーム（0.5, -0.5）
+        feed.push(graph, GC551, &[0x00, 0x40, 0x00, 0xC0], false);
+        let mut read = [0.0f32; 8];
+        let count = attachment.consumer.pop_slice(&mut read);
+        assert_eq!(&read[..count], &[0.5, -0.5, 0.5, -0.5]);
+    }
+
+    #[test]
     fn push_counts_discontinuities_after_the_first_sample() {
         // 最初のサンプルの不連続の印は、流れ始めの印なので数えない
         let feed = AudioPinFeed::new();

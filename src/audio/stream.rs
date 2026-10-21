@@ -295,8 +295,12 @@ pub(super) fn process_input_iter<T, I>(
     I: IntoIterator<Item = T>,
     I::IntoIter: ExactSizeIterator,
 {
+    // 丸ごとのフレームだけを扱う。cpal とフェイクは必ずフレームの倍数で渡すが、
+    // 音声ピンの塊はバイト数次第で半端なフレームが残りうる。半端を録画のリングへ
+    // 積むと、以降の録画のチャンネルの並びがずれる（左右が入れ替わる）ので捨てる
     let data = data.into_iter();
-    let len = data.len();
+    let len = whole_frame_samples(data.len(), channels);
+    let data = data.take(len);
     let mut passthrough = producer.try_lock().ok();
     let mut recording = tap.writer(len);
     if passthrough.is_none() && recording.is_none() {
@@ -495,6 +499,32 @@ mod tests {
         let count = attachment.consumer.pop_slice(&mut read);
         assert_eq!(&read[..count], &[0.5, -1.0]);
         assert_eq!(tap.snapshot().samples_total, 2);
+    }
+
+    #[test]
+    fn process_input_drops_a_trailing_partial_frame_from_both_rings() {
+        // 2ch に 3 サンプル。半端な 1 サンプルは録画にもパススルーにも積まない
+        let (producer, _consumer) = ring(8);
+        let tap = AudioTap::new();
+        let mut attachment = tap.attach(8);
+        let dropped = AtomicU32::new(0);
+
+        process_input(
+            &[0.25f32, 0.5, 0.75],
+            2,
+            &producer,
+            &tap,
+            &dropped,
+            |sample| sample,
+        );
+
+        let mut read = [0.0f32; 4];
+        let count = attachment.consumer.pop_slice(&mut read);
+        assert_eq!(&read[..count], &[0.25, 0.5]);
+        assert_eq!(tap.snapshot().samples_total, 2);
+        assert_eq!(producer.lock().expect("ロックできる").occupied_len(), 2);
+        // 半端はフレームに数えないので、満杯で捨てた数にも入らない
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
     }
 
     #[test]
