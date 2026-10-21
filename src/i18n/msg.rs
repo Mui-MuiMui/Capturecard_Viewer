@@ -319,14 +319,36 @@ pub fn preset_added(name: impl Display) -> String {
 
 // ---- 統計 OSD（app/view.rs） ----
 
-pub fn stats_fps(fps: f32, average_ms: f32, samples: usize) -> String {
+/// FPS の行。`fps` はボードから届いた速さ（フレーム間隔の平均から出す）。`shown` は
+/// 画面へ出した速さ（直近 1 秒にテクスチャへ取り込んだ枚数、#526）で、測れていなければ
+/// `None`。届いた速さと見分けられるよう「表示」と付けて同じ行の後ろに並べる
+pub fn stats_fps(fps: f32, average_ms: f32, samples: usize, shown: Option<usize>) -> String {
+    let shown = stats_shown_rate(shown);
     match language() {
         Language::Japanese => {
-            format!("FPS {fps:.1} (平均間隔 {average_ms:.1}ms / {samples} 件)")
+            format!("FPS {fps:.1} (平均間隔 {average_ms:.1}ms / {samples} 件) / 表示 {shown}")
         }
-        Language::English => {
-            format!("FPS {fps:.1} (avg interval {average_ms:.1}ms / {samples} samples)")
-        }
+        Language::English => format!(
+            "FPS {fps:.1} (avg interval {average_ms:.1}ms / {samples} samples) / shown {shown}"
+        ),
+    }
+}
+
+/// フレーム間隔をまだ測れていないときの FPS の行。表示の速さは `stats_fps` と同じ形で出す
+pub fn stats_fps_pending(shown: Option<usize>) -> String {
+    let shown = stats_shown_rate(shown);
+    match language() {
+        Language::Japanese => format!("FPS - (フレーム間隔の計測待ち) / 表示 {shown}"),
+        Language::English => format!("FPS - (measuring frame interval) / shown {shown}"),
+    }
+}
+
+/// FPS の行の「表示」の値。測れていなければ数値を出さない
+fn stats_shown_rate(shown: Option<usize>) -> String {
+    match (shown, language()) {
+        (None, _) => "-".to_string(),
+        (Some(frames), Language::Japanese) => format!("{frames} 枚/秒"),
+        (Some(frames), Language::English) => format!("{frames}/s"),
     }
 }
 
