@@ -505,7 +505,7 @@ mod tests {
         });
 
         assert!(message.contains(CONFIG), "{message}");
-        assert!(message.contains("not saved automatically"), "{message}");
+        assert!(message.contains("Auto-save stopped"), "{message}");
         assert!(message.contains("bad toml"), "{message}");
     }
 

@@ -160,8 +160,22 @@ impl CaptureCardViewer {
             video,
             audio,
             screenshot_sound_error: self.status_error(ErrorSource::ScreenshotSound),
-            settings_error: self.status_error(ErrorSource::Settings),
+            settings_load_notice: self
+                .settings_load_notice
+                .as_ref()
+                .map(|notice| status::recorded_error_line(ErrorSource::Settings, notice)),
+            settings_error: self.settings_error_apart_from_load_notice(),
         }
+    }
+
+    /// 設定ファイルの直近の失敗。起動時の読み込みの知らせ（#505）そのものなら、
+    /// そちらの行で出すので `None`（同じ文言を 2 度並べない）。
+    fn settings_error_apart_from_load_notice(&self) -> Option<(String, String)> {
+        let latest = self.errors.latest(ErrorSource::Settings)?;
+        if self.settings_load_notice.as_ref() == Some(latest) {
+            return None;
+        }
+        Some(status::recorded_error_line(ErrorSource::Settings, latest))
     }
 
     /// 「接続状態」タブに出す直近の失敗。`(整形済みの文言, 発生時刻)`。

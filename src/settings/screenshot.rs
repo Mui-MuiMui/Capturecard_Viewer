@@ -1,7 +1,7 @@
 //! スクリーンショットの設定（[screenshot]）。出力先・保存形式・JPEG 品質の
 //! 選択肢と serde の補助、保存先の既定値、保存するファイルのパスの決め方。
 
-use super::ui::{DEFAULT_VOLUME, MAX_VOLUME, MIN_VOLUME};
+use super::ui::{MAX_VOLUME, MIN_VOLUME};
 use super::AppSettings;
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -133,6 +133,9 @@ pub const MAX_JPEG_QUALITY: u8 = 100;
 // 一致で判定する（docs/design/assets.md）
 pub const DEFAULT_SOUND_FILE: &str = "sound/SS.mp3";
 
+// 効果音の音量の既定値（%、等倍）。`Default` と読み込みの補助の両方が使う（#505）
+const DEFAULT_SOUND_VOLUME: f32 = 100.0;
+
 // 設定ファイルの format に知らない値が書かれていても、設定全体を失わせない。
 // ここでエラーを返すと TOML のパースがファイル単位で失敗し、保存形式と
 // 無関係な項目まで既定値へ戻ってしまう。
@@ -194,10 +197,9 @@ where
     Ok(clamped as u8)
 }
 
-// 効果音の音量も `[ui] volume` と同じく、NaN・無限大と範囲外をそのまま受け取らない
-// （`ui::deserialize_volume` と同じ形、Issue #505）。設定ファイルに `nan` と書かれると
-// 再生側の `clamp` を素通りして NaN のまま `Player::set_volume` へ渡っていた。
-// 範囲は設定画面のスライダーと同じ 0〜200%。
+// 効果音の音量も `[ui] volume`（`ui::deserialize_volume`）と同じく NaN・無限大と範囲外を
+// 受け取らない（#505）。`nan` は再生側の `clamp` を素通りして `Player::set_volume` へ
+// 渡っていた。範囲は設定画面のスライダーと同じ 0〜200%。
 fn deserialize_sound_volume<'de, D>(deserializer: D) -> Result<f32, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -206,9 +208,9 @@ where
     if !raw.is_finite() {
         warn!(
             "設定の効果音の音量 {} は数値として扱えないので {}% として扱う",
-            raw, DEFAULT_VOLUME
+            raw, DEFAULT_SOUND_VOLUME
         );
-        return Ok(DEFAULT_VOLUME);
+        return Ok(DEFAULT_SOUND_VOLUME);
     }
 
     let clamped = raw.clamp(MIN_VOLUME, MAX_VOLUME);
@@ -319,7 +321,7 @@ impl Default for ScreenshotSettings {
             // 見つからなければ埋め込みの既定音へ倒す。
             // None は「効果音を鳴らさない」の意味なので、既定値には使えない
             sound_file: Some(PathBuf::from(DEFAULT_SOUND_FILE)),
-            sound_volume: 100.0,
+            sound_volume: DEFAULT_SOUND_VOLUME,
             // 既定は「旧版の項目が無い」。既定のホットキーは
             // default_hotkeys() が持つ
             legacy_hotkey: None,
@@ -782,9 +784,9 @@ mod tests {
     #[test]
     fn app_settings_non_finite_sound_volume_falls_back_to_default() {
         // Issue #505。NaN のまま再生側の clamp を素通りしていた
-        assert_eq!(sound_volume_read_as("nan"), DEFAULT_VOLUME);
-        assert_eq!(sound_volume_read_as("inf"), DEFAULT_VOLUME);
-        assert_eq!(sound_volume_read_as("-inf"), DEFAULT_VOLUME);
+        assert_eq!(sound_volume_read_as("nan"), DEFAULT_SOUND_VOLUME);
+        assert_eq!(sound_volume_read_as("inf"), DEFAULT_SOUND_VOLUME);
+        assert_eq!(sound_volume_read_as("-inf"), DEFAULT_SOUND_VOLUME);
     }
 
     #[test]

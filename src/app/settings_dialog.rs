@@ -281,9 +281,11 @@ impl CaptureCardViewer {
             let was_blocked = !self.autosave.is_allowed();
             self.autosave.note_explicit_save(saved);
             // 起動時に出した「自動保存を止めた」の知らせ（#505）を取り下げる。
-            // 再開した後も「接続状態」タブに残ると、まだ止まっているように読める
+            // 再開した後も「接続状態」タブに残ると、まだ止まっているように読める。
+            // 退避して既定値で起動した知らせは、保存しても事実は変わらないので残す
             if was_blocked && self.autosave.is_allowed() {
                 self.errors.clear(ErrorSource::Settings);
+                self.settings_load_notice = None;
             }
         }
 

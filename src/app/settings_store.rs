@@ -131,8 +131,9 @@ impl CaptureCardViewer {
     /// 初めて作る。** `new()` の中で作ると、英語の設定でも既定の日本語で出る。
     ///
     /// 書き戻しの失敗と読み込みの知らせは同じ発生源（`ErrorSource::Settings`）で、
-    /// 直近の 1 件しか持たないので、後から出す読み込みの知らせが残る。
-    /// トーストは後勝ちなので、直後に接続の失敗が届くと上書きされる
+    /// `ErrorCenter` は直近の 1 件しか持たないので、後から出す読み込みの知らせが残る。
+    /// 読み込みの知らせは `settings_load_notice` にも残し、あとの保存の成功
+    /// （`errors.clear`）や次の失敗では消さない。トーストは後勝ちなので、直後に接続の失敗が届くと上書きされる
     /// （`docs/design/error-reporting.md`）。優先度は付けず、「接続状態」タブの
     /// 「設定ファイル」の枠に残ることで読み返せるようにしてある。退避できずに
     /// 自動保存を止めた知らせは、「適用」「OK」で保存できたときに取り下げる
@@ -143,6 +144,8 @@ impl CaptureCardViewer {
         }
         if let Some(message) = startup_load_message(outcome) {
             self.report_error(ErrorSource::Settings, message);
+            // 保存の成功（`errors.clear`）や次の失敗で消えないよう、別に残す
+            self.settings_load_notice = self.errors.latest(ErrorSource::Settings).cloned();
         }
     }
 
@@ -476,10 +479,45 @@ mod tests {
         let japanese = with_language(Language::Japanese, || startup_load_message(&outcome))
             .expect("知らせること");
 
-        assert!(english.contains("could not be read"), "{english}");
+        assert!(english.contains("Reset to defaults"), "{english}");
         assert!(english.contains("the file is empty"), "{english}");
-        assert!(!japanese.contains("could not be read"), "{japanese}");
+        assert!(!japanese.contains("Reset to defaults"), "{japanese}");
         assert!(japanese.contains("既定値"), "{japanese}");
+    }
+
+    #[test]
+    fn startup_load_message_gist_fits_in_the_toast() {
+        // トーストは定型文と合わせて 60 文字で切れる。退避先のパスが長くても、
+        // 初期化した / 自動保存を止めた、は切れずに読めること
+        let backup = PathBuf::from(
+            r"C:\Users\someone\AppData\Roaming\capturecard_viewer\config\default-config.toml.bak",
+        );
+        let fell_back = LoadOutcome::FellBackToDefaults {
+            reason: LoadFailure::Unreadable("TOML parse error at line 1, column 5".into()),
+            backup: Some(backup.clone()),
+        };
+        let kept = LoadOutcome::BrokenFileLeftBehind {
+            reason: LoadFailure::Unreadable("TOML parse error at line 1, column 5".into()),
+            path: Some(backup),
+        };
+        let toast = |outcome: &LoadOutcome| {
+            let message = startup_load_message(outcome).expect("知らせること");
+            crate::status::truncate(
+                &crate::status::format_message(ErrorSource::Settings, &message),
+                crate::status::TOAST_MESSAGE_LIMIT,
+            )
+        };
+
+        let cases = [
+            (Language::Japanese, &fell_back, "既定値に初期化した"),
+            (Language::Japanese, &kept, "自動保存を止めた"),
+            (Language::English, &fell_back, "Reset to defaults"),
+            (Language::English, &kept, "Auto-save stopped"),
+        ];
+        for (language, outcome, gist) in cases {
+            let text = with_language(language, || toast(outcome));
+            assert!(text.contains(gist), "{text}");
+        }
     }
 
     #[test]

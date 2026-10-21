@@ -53,7 +53,7 @@ use crate::screenshot_sound::ScreenshotManager;
 use crate::settings::{
     AppSettings, AutoSavePolicy, ColorRange, ColorSpace, LoadOutcome, SettingsError,
 };
-use crate::status::ErrorCenter;
+use crate::status::{ErrorCenter, RecordedError};
 use crate::ui;
 use crate::video::{DisplayLatency, GpuYuy2, SharedColorConversion, VideoAdjustments, VideoFrames};
 use eframe::egui;
@@ -157,6 +157,11 @@ pub struct CaptureCardViewer {
     // 画面の言語を決めたあとの `report_startup_settings`。`new()` の中で文言を作ると、
     // 英語の設定でも既定の日本語で出るため（#505）。取り込んだら None
     pending_startup_save: Option<Result<(), SettingsError>>,
+    // 起動時に設定ファイルを読めなかった知らせ（#505）。「接続状態」タブに出す。
+    // `errors` の `ErrorSource::Settings` とは別に持つ。あちらは直近の 1 件だけで、
+    // あとの保存の失敗に上書きされ、保存の成功で消えるため。消すのは自動保存を
+    // 再開したとき（`app::settings_dialog`）だけ
+    settings_load_notice: Option<RecordedError>,
 
     // 映像表示関連
     video_texture: Option<egui::TextureHandle>,
@@ -324,6 +329,7 @@ impl CaptureCardViewer {
             autosave: AutoSavePolicy::from_load_outcome(load_outcome),
             settings_save_failures: SaveFailureStreak::default(),
             pending_startup_save: None,
+            settings_load_notice: None,
             video_texture: None,
             gpu_yuy2: GpuYuy2::default(),
             video_image: None,
