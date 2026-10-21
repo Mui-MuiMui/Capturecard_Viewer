@@ -7,19 +7,57 @@
 
 use super::write::write_atomically;
 use super::{AppSettings, SettingsError};
+use crate::i18n::{self, Text};
 use log::{error, warn};
+use std::fmt;
 use std::path::{Path, PathBuf};
 
-// 設定ファイルをどう読めたか。起動時に既定値を書き戻してよいかの判断に使う。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// 起動時に設定ファイルを読めなかった理由。
+//
+// 読み込むのは画面の言語が決まる前（`main.rs` が `apply_language` を呼ぶのは
+// アプリを作ったあと）。文言にせず種類で持ち、知らせるときに `Display` で
+// `crate::i18n` から引く（Issue #505）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadFailure {
+    // 空のファイル（0 バイトか空白だけ）。保存の途中で止まったときの形（Issue #317）
+    Blank,
+    // 読めない・TOML として解釈できない。中身は OS か toml の理由（1 行）
+    Unreadable(String),
+    // 設定ファイルの置き場所が分からない（`crate::config_path` の理由）
+    LocationUnavailable(String),
+}
+
+impl fmt::Display for LoadFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LoadFailure::Blank => f.write_str(Text::SettingsFileBlank.get()),
+            LoadFailure::Unreadable(source) => f.write_str(source),
+            LoadFailure::LocationUnavailable(source) => {
+                f.write_str(&i18n::settings_location_unknown(source))
+            }
+        }
+    }
+}
+
+// 設定ファイルをどう読めたか。起動時に既定値を書き戻してよいかの判断と、
+// 読めなかったことを利用者へ知らせる文言（`failure`）に使う。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadOutcome {
     // 読み込めた。初回起動などでファイルがまだ無く、既定値を返した場合も含む
     Loaded,
     // 読み込めなかったので既定値で起動した。読めなかったファイルは退避済みか、
-    // そもそも存在しなかった。どちらもディスクに壊れたファイルは残っていない
-    FellBackToDefaults,
-    // 読み込めず、退避もできなかった。読めなかったファイルがそのまま残っている
-    BrokenFileLeftBehind,
+    // そもそも存在しなかった。どちらもディスクに壊れたファイルは残っていない。
+    // `backup` は退避先（元のファイルが無かったときは None）
+    FellBackToDefaults {
+        reason: LoadFailure,
+        backup: Option<PathBuf>,
+    },
+    // 読み込めず、退避もできなかった。読めなかったファイルがそのまま残っている。
+    // `path` は残っているファイル（置き場所が分からなかったときは None）
+    BrokenFileLeftBehind {
+        reason: LoadFailure,
+        path: Option<PathBuf>,
+    },
 }
 
 impl LoadOutcome {
@@ -28,8 +66,31 @@ impl LoadOutcome {
     // 退避できなかった場合だけ false になる。読めなかったファイルがディスクに
     // 残っているため、ここで書き戻すとユーザーが設定を取り戻す最後の手段が消える。
     // 書き戻さなければ壊れたファイルは手元に残り、次回以降も退避を試みられる。
-    pub fn may_write_defaults_on_startup(self) -> bool {
-        !matches!(self, LoadOutcome::BrokenFileLeftBehind)
+    pub fn may_write_defaults_on_startup(&self) -> bool {
+        !matches!(self, LoadOutcome::BrokenFileLeftBehind { .. })
+    }
+
+    // 利用者へ知らせる失敗。読み込めたなら None。
+    //
+    // 起動後に `report_error(ErrorSource::Settings, ..)` でトーストと「接続状態」タブへ
+    // 出す（`app::settings_store` の `report_startup_settings`、Issue #505）。文言は
+    // `SettingsError` の `Display` が出す
+    pub fn failure(&self) -> Option<SettingsError> {
+        match self {
+            LoadOutcome::Loaded => None,
+            LoadOutcome::FellBackToDefaults { reason, backup } => {
+                Some(SettingsError::LoadFellBackToDefaults {
+                    reason: reason.clone(),
+                    backup: backup.clone(),
+                })
+            }
+            LoadOutcome::BrokenFileLeftBehind { reason, path } => {
+                Some(SettingsError::LoadFailedFileKept {
+                    reason: reason.clone(),
+                    path: path.clone(),
+                })
+            }
+        }
     }
 }
 
@@ -54,9 +115,9 @@ pub struct AutoSavePolicy {
 
 impl AutoSavePolicy {
     // 設定の読み込み結果から初期状態を決める。
-    pub fn from_load_outcome(outcome: LoadOutcome) -> Self {
+    pub fn from_load_outcome(outcome: &LoadOutcome) -> Self {
         Self {
-            allowed: !matches!(outcome, LoadOutcome::BrokenFileLeftBehind),
+            allowed: !matches!(outcome, LoadOutcome::BrokenFileLeftBehind { .. }),
         }
     }
 
@@ -80,10 +141,17 @@ impl AutoSavePolicy {
 //
 // load() 自体は設定ファイルの置き場所（既定は %AppData%）を直接読み書きするためテストできない。
 // 判断の部分だけをこの関数に切り出して、退避が失敗した場合を含めて検証する。
-fn outcome_from_backup(backup: std::io::Result<Option<PathBuf>>) -> LoadOutcome {
+fn outcome_from_backup(
+    reason: LoadFailure,
+    path: &Path,
+    backup: std::io::Result<Option<PathBuf>>,
+) -> LoadOutcome {
     match backup {
-        Ok(_) => LoadOutcome::FellBackToDefaults,
-        Err(_) => LoadOutcome::BrokenFileLeftBehind,
+        Ok(backup) => LoadOutcome::FellBackToDefaults { reason, backup },
+        Err(_) => LoadOutcome::BrokenFileLeftBehind {
+            reason,
+            path: Some(path.to_path_buf()),
+        },
     }
 }
 
@@ -173,7 +241,11 @@ impl AppSettings {
                     "設定ファイルの置き場所が分からないため既定値で起動する: {}",
                     e
                 );
-                return (Self::default(), LoadOutcome::BrokenFileLeftBehind);
+                let outcome = LoadOutcome::BrokenFileLeftBehind {
+                    reason: LoadFailure::LocationUnavailable(e),
+                    path: None,
+                };
+                return (Self::default(), outcome);
             }
         };
         Self::load_from(&path)
@@ -189,15 +261,18 @@ impl AppSettings {
             // （`save` が親のフォルダも作る）。confy 0.6 はここで既定値の
             // ファイルを書いていた
             Ok(None) => (Self::default(), LoadOutcome::Loaded),
-            Err(e) => {
-                error!("設定ファイルを読み込めないため既定値で起動する: {}", e);
+            Err(reason) => {
+                error!(
+                    "設定ファイルを読み込めないため既定値で起動する: {}",
+                    log_reason(&reason)
+                );
 
                 // 読み込みに失敗した設定ファイルは、既定値で起動する前に退避する。
                 // 黙って上書きすると、ユーザーが自分の設定を取り戻す手段が無くなる。
                 //
-                // 失敗したという事実は LoadOutcome として呼び出し側へ渡し、
-                // 理由はログに残す。ここは起動直後で UI がまだ無いため、
-                // ユーザーへ伝える手段がログしかない。
+                // 失敗したという事実と理由・退避先は LoadOutcome として呼び出し側へ
+                // 渡す。ここは起動直後で UI がまだ無いため、利用者へ知らせるのは
+                // アプリを作って画面の言語を決めたあと（`report_startup_settings`、Issue #505）
                 let backup = backup_broken_config(path);
                 match &backup {
                     Ok(Some(backup_path)) => warn!(
@@ -212,7 +287,7 @@ impl AppSettings {
                         e
                     ),
                 }
-                (Self::default(), outcome_from_backup(backup))
+                (Self::default(), outcome_from_backup(reason, path, backup))
             }
         }
     }
@@ -248,29 +323,61 @@ impl AppSettings {
 
 // 設定ファイルを読む。ファイルが無ければ `Ok(None)`。
 //
-// 空のファイルと読めないファイルは `Err`（理由はログに出す文言）。呼び出し側が
-// 退避して既定値で起動する。
-fn read_config_file(path: &Path) -> Result<Option<AppSettings>, String> {
+// 空のファイルと読めないファイルは `Err`。呼び出し側が退避して既定値で起動する。
+fn read_config_file(path: &Path) -> Result<Option<AppSettings>, LoadFailure> {
     let contents = match std::fs::read(path) {
         Ok(contents) => contents,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.to_string()),
+        Err(e) => return Err(LoadFailure::Unreadable(e.to_string())),
     };
     if is_blank_config(&contents) {
-        return Err("設定ファイルが空（0 バイトか空白だけ）".to_string());
+        return Err(LoadFailure::Blank);
     }
-    let contents = String::from_utf8(contents).map_err(|e| e.to_string())?;
-    parse_settings(&contents).map(Some)
+    let contents =
+        String::from_utf8(contents).map_err(|e| LoadFailure::Unreadable(e.to_string()))?;
+    parse_settings(&contents)
+        .map(Some)
+        .map_err(LoadFailure::Unreadable)
+}
+
+// ログに出す理由。ログの文言は多言語にしない（`docs/design/i18n.md`）ので、
+// `Display`（画面向け）を通さない。
+fn log_reason(reason: &LoadFailure) -> String {
+    match reason {
+        LoadFailure::Blank => "設定ファイルが空（0 バイトか空白だけ）".to_string(),
+        LoadFailure::Unreadable(source) | LoadFailure::LocationUnavailable(source) => {
+            source.clone()
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::hotkey::HotkeyAction;
+    use crate::i18n::{with_language, Language};
     use crate::settings::testing::has_own_temp_file;
     use crate::settings::testing::{FULL_CONFIG, LEGACY_CONFIG};
     use std::fs;
     use tempfile::tempdir;
+
+    const CONFIG: &str = r"C:\config\default-config.toml";
+
+    // 退避できずに壊れたファイルが残った読み込み結果
+    fn broken_file_left_behind() -> LoadOutcome {
+        LoadOutcome::BrokenFileLeftBehind {
+            reason: LoadFailure::Unreadable("bad toml".into()),
+            path: Some(PathBuf::from(CONFIG)),
+        }
+    }
+
+    // 退避して既定値で起動した読み込み結果
+    fn fell_back_to_defaults() -> LoadOutcome {
+        LoadOutcome::FellBackToDefaults {
+            reason: LoadFailure::Blank,
+            backup: Some(PathBuf::from(format!("{CONFIG}.bak"))),
+        }
+    }
 
     #[test]
     fn backup_broken_config_moves_file_and_returns_path() {
@@ -318,9 +425,15 @@ mod tests {
         // 取り戻す最後の手段が消える。
         let failed = Err(std::io::Error::other("退避に失敗した"));
 
-        let outcome = outcome_from_backup(failed);
+        let outcome = outcome_from_backup(LoadFailure::Blank, Path::new(CONFIG), failed);
 
-        assert_eq!(outcome, LoadOutcome::BrokenFileLeftBehind);
+        assert_eq!(
+            outcome,
+            LoadOutcome::BrokenFileLeftBehind {
+                reason: LoadFailure::Blank,
+                path: Some(PathBuf::from(CONFIG)),
+            }
+        );
         assert!(!outcome.may_write_defaults_on_startup());
     }
 
@@ -330,9 +443,15 @@ mod tests {
         // 既定値を書き戻してよい。
         let backed_up = Ok(Some(PathBuf::from("default-config.toml.bak")));
 
-        let outcome = outcome_from_backup(backed_up);
+        let outcome = outcome_from_backup(LoadFailure::Blank, Path::new(CONFIG), backed_up);
 
-        assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
+        assert_eq!(
+            outcome,
+            LoadOutcome::FellBackToDefaults {
+                reason: LoadFailure::Blank,
+                backup: Some(PathBuf::from("default-config.toml.bak")),
+            }
+        );
         assert!(outcome.may_write_defaults_on_startup());
     }
 
@@ -342,38 +461,103 @@ mod tests {
         // 潰す相手がいないので、既定値を書き戻してよい。
         let nothing = Ok(None);
 
-        let outcome = outcome_from_backup(nothing);
+        let outcome = outcome_from_backup(LoadFailure::Blank, Path::new(CONFIG), nothing);
 
-        assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
+        assert!(matches!(
+            outcome,
+            LoadOutcome::FellBackToDefaults { backup: None, .. }
+        ));
         assert!(outcome.may_write_defaults_on_startup());
+    }
+
+    #[test]
+    fn load_outcome_loaded_has_nothing_to_report() {
+        assert_eq!(LoadOutcome::Loaded.failure(), None);
+    }
+
+    #[test]
+    fn load_outcome_failure_names_the_backup_file() {
+        // Issue #505。退避して既定値で起動したことを、退避先と一緒に知らせる
+        let outcome = LoadOutcome::FellBackToDefaults {
+            reason: LoadFailure::Blank,
+            backup: Some(PathBuf::from(r"C:\config\default-config.toml.bak")),
+        };
+
+        let message = with_language(Language::Japanese, || {
+            outcome.failure().expect("知らせること").to_string()
+        });
+
+        assert!(
+            message.contains(r"C:\config\default-config.toml.bak"),
+            "{message}"
+        );
+        assert!(message.contains("既定値"), "{message}");
+        assert!(message.contains("空"), "{message}");
+    }
+
+    #[test]
+    fn load_outcome_failure_left_behind_says_autosave_is_stopped() {
+        // 退避できなかったときは、自動保存を止めたことと再開の手段を知らせる
+        let outcome = broken_file_left_behind();
+
+        let message = with_language(Language::English, || {
+            outcome.failure().expect("知らせること").to_string()
+        });
+
+        assert!(message.contains(CONFIG), "{message}");
+        assert!(message.contains("Auto-save stopped"), "{message}");
+        assert!(message.contains("bad toml"), "{message}");
+    }
+
+    #[test]
+    fn load_outcome_failure_without_backup_or_path_is_still_reported() {
+        // 元のファイルが無かった・置き場所が分からない場合も文言を作れる
+        let fell_back = LoadOutcome::FellBackToDefaults {
+            reason: LoadFailure::Unreadable("denied".into()),
+            backup: None,
+        };
+        let unknown = LoadOutcome::BrokenFileLeftBehind {
+            reason: LoadFailure::LocationUnavailable("no appdata".into()),
+            path: None,
+        };
+
+        let (fell_back, unknown) = with_language(Language::Japanese, || {
+            (
+                fell_back.failure().expect("知らせること").to_string(),
+                unknown.failure().expect("知らせること").to_string(),
+            )
+        });
+
+        assert!(fell_back.contains("denied"), "{fell_back}");
+        assert!(unknown.contains("no appdata"), "{unknown}");
     }
 
     #[test]
     fn auto_save_policy_broken_file_left_behind_blocks_autosave() {
         // 退避できなかった場合。ウィンドウを動かすか終了するだけで
         // 壊れたファイルが既定値で潰れるのを防ぐため、自動保存を止める
-        let policy = AutoSavePolicy::from_load_outcome(LoadOutcome::BrokenFileLeftBehind);
+        let policy = AutoSavePolicy::from_load_outcome(&broken_file_left_behind());
 
         assert!(!policy.is_allowed());
     }
 
     #[test]
     fn auto_save_policy_loaded_allows_autosave() {
-        assert!(AutoSavePolicy::from_load_outcome(LoadOutcome::Loaded).is_allowed());
+        assert!(AutoSavePolicy::from_load_outcome(&LoadOutcome::Loaded).is_allowed());
     }
 
     #[test]
     fn auto_save_policy_fell_back_to_defaults_allows_autosave() {
         // 退避できていれば元の内容は .bak に残っている。守る相手がいないので
         // ウィンドウ位置や音量を通常どおり保存してよい
-        assert!(AutoSavePolicy::from_load_outcome(LoadOutcome::FellBackToDefaults).is_allowed());
+        assert!(AutoSavePolicy::from_load_outcome(&fell_back_to_defaults()).is_allowed());
     }
 
     #[test]
     fn auto_save_policy_successful_explicit_save_unblocks_autosave() {
         // 設定画面の「適用」「OK」で保存できた時点で、壊れたファイルは
         // ユーザーの意思で置き換わっている。以降は自動保存を止めない
-        let mut policy = AutoSavePolicy::from_load_outcome(LoadOutcome::BrokenFileLeftBehind);
+        let mut policy = AutoSavePolicy::from_load_outcome(&broken_file_left_behind());
 
         policy.note_explicit_save(true);
 
@@ -384,7 +568,7 @@ mod tests {
     fn auto_save_policy_failed_explicit_save_keeps_autosave_blocked() {
         // 保存に失敗した場合は壊れたファイルがまだ残っているため、
         // 止めたままにする
-        let mut policy = AutoSavePolicy::from_load_outcome(LoadOutcome::BrokenFileLeftBehind);
+        let mut policy = AutoSavePolicy::from_load_outcome(&broken_file_left_behind());
 
         policy.note_explicit_save(false);
 
@@ -396,7 +580,7 @@ mod tests {
         // もともと許可されている状態は、保存の失敗で止まらない。
         // 一時的な書き込み失敗で以降の保存が全部止まると、
         // 復旧したあとも設定が残らなくなる
-        let mut policy = AutoSavePolicy::from_load_outcome(LoadOutcome::Loaded);
+        let mut policy = AutoSavePolicy::from_load_outcome(&LoadOutcome::Loaded);
 
         policy.note_explicit_save(false);
 
@@ -445,7 +629,14 @@ mod tests {
 
         let (settings, outcome) = AppSettings::load_from(&path);
 
-        assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
+        // 理由と退避先を持ち帰る。起動後に利用者へ知らせるため（Issue #505）
+        assert_eq!(
+            outcome,
+            LoadOutcome::FellBackToDefaults {
+                reason: LoadFailure::Blank,
+                backup: Some(dir.path().join("default-config.toml.bak")),
+            }
+        );
         assert!(dir.path().join("default-config.toml.bak").exists());
         assert!(!path.exists(), "空のファイルが元の場所に残っている");
         assert_eq!(
@@ -462,7 +653,7 @@ mod tests {
 
         let (_, outcome) = AppSettings::load_from(&path);
 
-        assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
+        assert!(matches!(outcome, LoadOutcome::FellBackToDefaults { .. }));
         assert!(dir.path().join("default-config.toml.bak").exists());
     }
 
@@ -515,7 +706,7 @@ mod tests {
 
         let (_, outcome) = AppSettings::load_from(&path);
 
-        assert_eq!(outcome, LoadOutcome::FellBackToDefaults);
+        assert!(matches!(outcome, LoadOutcome::FellBackToDefaults { .. }));
         assert!(dir.path().join("default-config.toml.bak").exists());
     }
 

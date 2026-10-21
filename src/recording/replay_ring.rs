@@ -36,6 +36,11 @@ pub(super) struct EncodedRing {
     discarded_gops: u64,
     /// 上限の大きさを超えたのにキーフレームが 1 つしか無く、映像を空にした回数
     overflows: u64,
+    /// `trim` / `cap_bytes` がキーフレーム（GOP の先頭）の時刻を集める作業域。`trim` は
+    /// 数 ms ごとに呼ばれるので、毎回 `Vec` を確保しないよう使い回す
+    gop_starts: Vec<i64>,
+    /// `cap_bytes` が GOP ごとの大きさを集める作業域。`gop_starts` と同じ並び
+    gop_bytes: Vec<usize>,
 }
 
 /// 上限の大きさ（`ring_byte_limit`）を超えたときに映像をどう切るか。
@@ -95,10 +100,11 @@ impl EncodedRing {
     /// 音声の境界が進まずに溜まり続けるため。書き出すのは「いま − N 秒」（`keep_from` より新しい）
     /// 以降のキーフレームからなので、それより古い音声は使わない。
     pub(super) fn trim(&mut self, keep_from: i64) {
-        let keyframes: Vec<i64> = self.keyframes().collect();
-        let drop = gops_to_drop(&keyframes, keep_from);
+        self.gop_starts.clear();
+        self.gop_starts.extend(keyframe_times(&self.video));
+        let drop = gops_to_drop(&self.gop_starts, keep_from);
         if drop > 0 {
-            let first_kept = keyframes[drop];
+            let first_kept = self.gop_starts[drop];
             while self
                 .video
                 .front()
@@ -126,20 +132,23 @@ impl EncodedRing {
         if self.bytes <= limit {
             return ByteTrim::Keep;
         }
-        let mut gops: Vec<(i64, usize)> = Vec::new();
+        self.gop_starts.clear();
+        self.gop_bytes.clear();
         for sample in &self.video {
-            match gops.last_mut() {
-                Some((_, bytes)) if !sample.keyframe => *bytes += sample.data.len(),
-                _ => gops.push((sample.pts, sample.data.len())),
+            match self.gop_bytes.last_mut() {
+                Some(bytes) if !sample.keyframe => *bytes += sample.data.len(),
+                _ => {
+                    self.gop_starts.push(sample.pts);
+                    self.gop_bytes.push(sample.data.len());
+                }
             }
         }
-        let video_bytes: usize = gops.iter().map(|&(_, bytes)| bytes).sum();
-        let sizes: Vec<usize> = gops.iter().map(|&(_, bytes)| bytes).collect();
-        let decision = trim_for_bytes(&sizes, self.bytes - video_bytes, limit);
+        let video_bytes: usize = self.gop_bytes.iter().sum();
+        let decision = trim_for_bytes(&self.gop_bytes, self.bytes - video_bytes, limit);
         match decision {
             ByteTrim::Keep => {}
             ByteTrim::DropGops(drop) => {
-                let first_kept = gops[drop].0;
+                let first_kept = self.gop_starts[drop];
                 while self
                     .video
                     .front()
@@ -246,10 +255,7 @@ impl EncodedRing {
     }
 
     fn keyframes(&self) -> impl Iterator<Item = i64> + '_ {
-        self.video
-            .iter()
-            .filter(|sample| sample.keyframe)
-            .map(|sample| sample.pts)
+        keyframe_times(&self.video)
     }
 
     fn pop_video(&mut self) {
@@ -257,6 +263,15 @@ impl EncodedRing {
             self.bytes -= sample.data.len();
         }
     }
+}
+
+/// 映像のサンプルのうちキーフレームの時刻（時刻の順）。`EncodedRing` のフィールドを
+/// 別々に借りられるよう、メソッドではなく関数にしてある（`trim` が作業域へ集める）。
+fn keyframe_times(video: &VecDeque<EncodedSample>) -> impl Iterator<Item = i64> + '_ {
+    video
+        .iter()
+        .filter(|sample| sample.keyframe)
+        .map(|sample| sample.pts)
 }
 
 /// 持っておく境界（リプレイバッファの基準からの 100ns）。`now` から「設定の秒数 + 1 GOP」前。
