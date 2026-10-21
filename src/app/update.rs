@@ -107,8 +107,8 @@ pub(super) struct UpdateState {
     tx: Sender<UpdateCheckResult>,
     rx: Receiver<UpdateCheckResult>,
     // 確認・適用・後片付けのスレッド。ハンドルは持っておくが、**終了時に join しない。**
-    // 確認の最中に閉じても待たずに終わってよい（効果音・スクリーンショットの
-    // 保存スレッドとは違う。docs/design/update.md）
+    // 確認の最中に閉じても待たずに終わってよい（スクリーンショットの保存スレッドとは
+    // 違い、効果音の読み込みスレッドと同じ。docs/design/update.md）
     threads: Vec<JoinHandle<()>>,
     // 「その他」タブに出す確認の状態
     status: UpdateStatus,
