@@ -93,6 +93,12 @@ fn is_recoverable_stream_error(kind: cpal::ErrorKind) -> bool {
 /// あれば回数だけ数える（「接続状態」タブへ出す、Issue #377）。取りこぼしの
 /// たびに届きうるうえ、WASAPI ではデータのコールバックと同じ音声スレッドから呼ばれる
 /// ため、そこでロックやアロケーションをしたくない。出力は数えない（`None`）。
+///
+/// **`Xrun` 以外はここでログへ出す。** 「cpal のコールバックでロックも
+/// アロケーションもしない」の例外として認めている（`docs/design/audio.md` の
+/// 「エラーのコールバックのログ」）。届くのはストリームの寿命に数回までで、致命的な
+/// ものはストリームが止まるところなので音への影響が無い。文言の中身（HRESULT など）は
+/// cpal が作った `cpal::Error` にしか無く、Atomic の旗へ移すと失われる。
 pub(super) fn handle_stream_error(
     direction: &str,
     e: &cpal::Error,
