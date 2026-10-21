@@ -494,6 +494,11 @@ impl CaptureCardViewer {
         // ウィンドウサイズと位置を監視して設定に記録する（書き出しはデバウンス）
         let viewport = ctx.input(|i| i.viewport().clone());
         self.record_window_geometry(&viewport);
+        // 表示の観測値の 5 分の要約（#501）に、最小化を挟んだ窓だと印を付ける。
+        // 最小化中は update() が 1 秒ごとにしか回らず、その窓の数は比べられないため
+        if viewport.minimized == Some(true) {
+            self.display_latency.note_minimized();
+        }
 
         // メインUI
         if self.is_fullscreen {

@@ -60,6 +60,15 @@ pub struct DisplaySummaryLog {
     pub idle_passes: u64,
     /// 描画の CPU 時間。`update()` が 1 回も来ていなければ `None`
     pub frame_time: Option<LatencySummary>,
+    /// この窓の間フルスクリーンだったか。窓はフルスクリーンの出入りで区切るので、
+    /// 1 つの窓の中でモードは変わらない（`cut_summary`）
+    pub fullscreen: bool,
+    /// フルスクリーンの出入りで区切った窓か（5 分に届く前に出した）
+    pub cut_by_mode_change: bool,
+    /// 窓の中に最小化が挟まったか。最小化中は `update()` が 1 秒ごとにしか回らず、
+    /// 取り込むたびに約 1 秒ぶんの世代が飛ぶので、枚/秒・上書き・新着なしの `update()` が
+    /// 大きく外れる。値は捨てずに印だけ付ける
+    pub minimized: bool,
 }
 
 impl DisplaySummaryLog {
@@ -122,13 +131,66 @@ pub struct DisplayLatency {
     summary_skipped_frames: u64,
     summary_idle_passes: u64,
     summary_frame_time: Accumulator,
+    summary_minimized: bool,
+    // いまフルスクリーンか。窓の始まりのモードとして要約に載せる。アプリはウィンドウ表示で
+    // 起動するので既定は偽
+    fullscreen: bool,
 }
 
 impl DisplayLatency {
-    /// 新着が無いまま `update()` が回ったことを数える。ログにだけ出す
+    /// 新着が無いまま `update()` が回ったことを数える。ログにだけ出す。
+    /// 5 分の要約には、窓が始まってから（1 枚目を取り込んでから）の分だけ数える
     pub fn note_idle_pass(&mut self) {
         self.log_idle_passes += 1;
-        self.summary_idle_passes += 1;
+        if self.summary_started.is_some() {
+            self.summary_idle_passes += 1;
+        }
+    }
+
+    /// 最小化している間の `update()` で呼ぶ。5 分の要約の窓に印を付ける
+    pub fn note_minimized(&mut self) {
+        if self.summary_started.is_some() {
+            self.summary_minimized = true;
+        }
+    }
+
+    /// フルスクリーンの出入り（#501）。それまでの窓を要約にして返し（取り込んだフレームが
+    /// 無ければ `None`）、`now` から新しいモードの窓を始める。入り直しの前後を比べるため、
+    /// 切り替えをまたいだ窓を作らない
+    pub fn cut_summary(&mut self, now: Instant, fullscreen: bool) -> Option<DisplaySummaryLog> {
+        let log = self
+            .summary_started
+            .and_then(|started| self.finish_summary(now, started, true));
+        if self.summary_started.is_some() {
+            // まだ 1 枚も取り込んでいなければ、窓は 1 枚目の `record` で始まる
+            self.summary_started = Some(now);
+        }
+        self.fullscreen = fullscreen;
+        log
+    }
+
+    /// 窓の集計を要約にして、次の窓のために数を空にする。`summary_started` は呼び出し側が置く
+    fn finish_summary(
+        &mut self,
+        now: Instant,
+        started: Instant,
+        cut_by_mode_change: bool,
+    ) -> Option<DisplaySummaryLog> {
+        let latency = std::mem::take(&mut self.summary).summary();
+        let skipped_frames = std::mem::take(&mut self.summary_skipped_frames);
+        let idle_passes = std::mem::take(&mut self.summary_idle_passes);
+        let frame_time = std::mem::take(&mut self.summary_frame_time).summary();
+        let minimized = std::mem::take(&mut self.summary_minimized);
+        Some(DisplaySummaryLog {
+            latency: latency?,
+            elapsed: now.saturating_duration_since(started),
+            skipped_frames,
+            idle_passes,
+            frame_time,
+            fullscreen: self.fullscreen,
+            cut_by_mode_change,
+            minimized,
+        })
     }
 
     /// 直前のフレームの描画の CPU 時間（eframe の `cpu_usage`）を数える。5 分の要約にだけ出す。
@@ -144,21 +206,12 @@ impl DisplayLatency {
     /// 次の窓を始める。`record` の直後に呼ぶ（窓の始まりは `record` が置く）
     pub fn take_summary(&mut self, now: Instant) -> Option<DisplaySummaryLog> {
         let started = self.summary_started?;
-        let elapsed = now.saturating_duration_since(started);
-        if elapsed < DISPLAY_SUMMARY_LOG_INTERVAL {
+        if now.saturating_duration_since(started) < DISPLAY_SUMMARY_LOG_INTERVAL {
             return None;
         }
-        let latency = self.summary.summary()?;
-        let log = DisplaySummaryLog {
-            latency,
-            elapsed,
-            skipped_frames: std::mem::take(&mut self.summary_skipped_frames),
-            idle_passes: std::mem::take(&mut self.summary_idle_passes),
-            frame_time: std::mem::take(&mut self.summary_frame_time).summary(),
-        };
-        self.summary = Accumulator::default();
+        let log = self.finish_summary(now, started, false);
         self.summary_started = Some(now);
-        Some(log)
+        log
     }
 
     /// テクスチャへ取り込んだ時刻 `at` と、その遅れ `latency` を記録する。
@@ -191,6 +244,7 @@ impl DisplayLatency {
             self.summary_skipped_frames = 0;
             self.summary_idle_passes = 0;
             self.summary_frame_time = Accumulator::default();
+            self.summary_minimized = false;
         }
         while let Some(&(oldest, _)) = self.recent.front() {
             if at.saturating_duration_since(oldest) > DISPLAY_LATENCY_WINDOW {
@@ -493,7 +547,102 @@ mod tests {
             skipped_frames: 0,
             idle_passes: 0,
             frame_time: None,
+            fullscreen: false,
+            cut_by_mode_change: false,
+            minimized: false,
         };
         assert_eq!(summary.frames_per_second(), 0.0);
+    }
+
+    #[test]
+    fn cut_summary_splits_the_window_at_a_fullscreen_change() {
+        // 入り直しの前後を比べる（#501）ので、切り替えをまたいだ窓を作らない
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        latency.record(base, ms(2), 1);
+        latency.note_idle_pass();
+        latency.note_frame_time(ms(4));
+        latency.record(base + ms(20_000), ms(4), 2);
+
+        let before = latency
+            .cut_summary(base + ms(25_000), true)
+            .expect("取り込んだフレームがあるので出す");
+        assert!(!before.fullscreen, "切り替える前のモード");
+        assert!(before.cut_by_mode_change);
+        assert_eq!(before.elapsed, ms(25_000));
+        assert_eq!(before.latency.samples, 2);
+        assert_eq!(before.skipped_frames, 3);
+        assert_eq!(before.idle_passes, 1);
+        assert_eq!(before.frame_time.map(|t| t.samples), Some(1));
+
+        // 新しい窓は切り替えた時刻から数え、前の窓の数を持ち越さない
+        for i in 1..=15u64 {
+            latency.record(base + ms(25_000 + i * 20_000), ms(1), 0);
+        }
+        assert_eq!(latency.take_summary(base + ms(324_999)), None);
+        let after = latency
+            .take_summary(base + ms(325_000))
+            .expect("切り替えてから 5 分");
+        assert!(after.fullscreen, "切り替えたあとのモード");
+        assert!(!after.cut_by_mode_change);
+        assert_eq!(after.elapsed, ms(300_000));
+        assert_eq!(after.latency.samples, 15);
+        assert_eq!(after.skipped_frames, 0);
+        assert_eq!(after.idle_passes, 0);
+        assert_eq!(after.frame_time, None);
+    }
+
+    #[test]
+    fn cut_summary_before_any_frame_only_switches_the_mode() {
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        assert_eq!(latency.cut_summary(base, true), None);
+
+        // 窓は 1 枚目の取り込みで始まり、モードは切り替えたあとのもの
+        for i in 0..16u64 {
+            latency.record(base + ms(10_000 + i * 20_000), ms(1), 0);
+        }
+        let summary = latency
+            .take_summary(base + ms(310_000))
+            .expect("1 枚目から 5 分");
+        assert!(summary.fullscreen);
+        assert_eq!(summary.elapsed, ms(300_000));
+    }
+
+    #[test]
+    fn idle_passes_before_the_first_frame_are_not_in_the_summary() {
+        // 起動してから映像が届くまでの update() を最初の窓に混ぜない
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        for _ in 0..5 {
+            latency.note_idle_pass();
+        }
+        latency.record(base, ms(1), 0);
+        latency.note_idle_pass();
+        let summary = latency
+            .cut_summary(base + ms(1_000), true)
+            .expect("1 枚取り込んだ");
+        assert_eq!(summary.idle_passes, 1);
+    }
+
+    #[test]
+    fn summary_marks_a_window_that_contained_a_minimize() {
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        latency.note_minimized(); // 窓の始まる前は印を付けない
+        latency.record(base, ms(1), 0);
+        let clean = latency.cut_summary(base + ms(1_000), false).expect("1 枚");
+        assert!(!clean.minimized);
+
+        latency.record(base + ms(2_000), ms(1), 0);
+        latency.note_minimized();
+        latency.record(base + ms(3_000), ms(1), 60);
+        let marked = latency.cut_summary(base + ms(4_000), true).expect("2 枚");
+        assert!(marked.minimized);
+
+        // 次の窓へ印を持ち越さない
+        latency.record(base + ms(5_000), ms(1), 0);
+        let next = latency.cut_summary(base + ms(6_000), false).expect("1 枚");
+        assert!(!next.minimized);
     }
 }

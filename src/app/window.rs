@@ -4,6 +4,7 @@
 //! リサイズ、大きさのリセット、フルスクリーンの切り替え。起動時の位置と
 //! 大きさの判定は `crate::platform`。
 
+use super::view::log_display_summary;
 use super::CaptureCardViewer;
 use crate::i18n::Text;
 use crate::overlay::OverlayContent;
@@ -382,7 +383,15 @@ impl CaptureCardViewer {
             self.is_fullscreen = false;
         }
         // 切り替えた時刻をログに残す（#501）。フルスクリーンの出入りで描画の面（swapchain）が
-        // 作り直されるので、表示の観測値（5 分の要約）の変化と突き合わせるため
+        // 作り直されるので、表示の観測値（5 分の要約）の変化と突き合わせるため。
+        // 要約の窓もここで区切り、それまでの分を先に出す。切り替えをまたいだ窓は前後が混ざり、
+        // 入り直しの前後を比べられない
+        if let Some(summary) = self
+            .display_latency
+            .cut_summary(Instant::now(), self.is_fullscreen)
+        {
+            log_display_summary(&summary);
+        }
         info!(
             "{}",
             if self.is_fullscreen {
