@@ -11,6 +11,7 @@ use crate::settings::{
     VideoConvertSetting, DEFAULT_CHANNELS, DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS,
     MAX_VIDEO_ADJUSTMENT, MIN_BUFFER_MS, MIN_VIDEO_ADJUSTMENT,
 };
+use crate::video::DeviceCapabilities;
 use eframe::egui;
 use log::debug;
 
@@ -34,6 +35,23 @@ fn video_adjustment_slider(ui: &mut egui::Ui, value: &mut i32, label: &str, hint
             .clamping(egui::SliderClamping::Always),
     )
     .on_hover_text(hint);
+}
+
+/// 解像度のコンボに出す選択肢。`format` に対応する解像度を重複なく、画素数の大きい順に並べる。
+///
+/// 画素数は `u64` で比べる。`u32` 同士の掛け算では 65536x65536 を超えると桁あふれし、
+/// debug ビルドでは panic、release ビルドでは並びが乱れる（#510）。デバイスが返す値を
+/// そのまま使うので、ありえない大きさでも描画を止めない。画素数が同じものは幅の大きい順
+/// （能力一覧の順序に依らず並びを固定する）
+fn resolution_choices(caps: &DeviceCapabilities, format: &str) -> Vec<(u32, u32)> {
+    let mut resolutions: Vec<(u32, u32)> = caps
+        .iter()
+        .filter(|capability| capability.name == format)
+        .flat_map(|capability| capability.modes.iter().map(|mode| mode.resolution()))
+        .collect();
+    resolutions.sort_by_key(|&(w, h)| std::cmp::Reverse((u64::from(w) * u64::from(h), w, h)));
+    resolutions.dedup();
+    resolutions
 }
 
 pub(super) fn show_device_settings_tab(
@@ -254,27 +272,7 @@ pub(super) fn show_device_settings_tab(
                 .show_ui(ui, |ui| {
                     if let Some(caps) = capabilities.ready(&selected_key) {
                         if let Some(current_format) = &settings.video.format {
-                            // 現在のフォーマットに対応する解像度一覧
-                            let mut unique_resolutions =
-                                std::collections::HashSet::<(u32, u32)>::new();
-                            for capability in caps {
-                                if &capability.name == current_format {
-                                    for mode in &capability.modes {
-                                        unique_resolutions.insert(mode.resolution());
-                                    }
-                                }
-                            }
-
-                            // ソートして表示
-                            let mut sorted_resolutions: Vec<_> =
-                                unique_resolutions.into_iter().collect();
-                            sorted_resolutions.sort_by(|a, b| {
-                                let size_a = a.0 * a.1;
-                                let size_b = b.0 * b.1;
-                                size_b.cmp(&size_a)
-                            });
-
-                            for (w, h) in sorted_resolutions {
+                            for (w, h) in resolution_choices(caps, current_format) {
                                 if ui
                                     .selectable_value(
                                         &mut settings.video.resolution,
@@ -752,4 +750,50 @@ pub(super) fn show_device_settings_tab(
             ui.add(egui::Slider::new(&mut settings.ui.volume, 0.0..=200.0).suffix("%"));
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::video::capabilities::FormatCapability;
+    use crate::video::VideoMode;
+
+    #[test]
+    fn resolution_choices_sorts_by_pixels_without_overflow() {
+        // 65536x65536 と u32::MAX x 2 は u32 の画素数が桁あふれする大きさ（#510）。panic せず画素数の順に並ぶ
+        let caps: DeviceCapabilities = vec![
+            FormatCapability::new(
+                "YUY2",
+                vec![
+                    VideoMode::new(1280, 720, 60),
+                    VideoMode::new(65536, 65536, 30),
+                    VideoMode::new(1920, 1080, 30),
+                    VideoMode::new(1920, 1080, 60),
+                    VideoMode::new(u32::MAX, 2, 30),
+                ],
+            ),
+            FormatCapability::new("MJPEG", vec![VideoMode::new(3840, 2160, 30)]),
+        ];
+
+        assert_eq!(
+            resolution_choices(&caps, "YUY2"),
+            vec![(u32::MAX, 2), (65536, 65536), (1920, 1080), (1280, 720)]
+        );
+    }
+
+    #[test]
+    fn resolution_choices_orders_equal_pixels_by_width() {
+        // 1280x720 と 720x1280 は画素数が同じ。幅の大きいほうを先にして並びを固定する
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "NV12",
+            vec![VideoMode::new(720, 1280, 30), VideoMode::new(1280, 720, 30)],
+        )];
+
+        assert_eq!(
+            resolution_choices(&caps, "NV12"),
+            vec![(1280, 720), (720, 1280)]
+        );
+        assert!(resolution_choices(&caps, "YUY2").is_empty());
+    }
 }
