@@ -268,7 +268,12 @@ impl HotkeyManager {
     ///
     /// 外したものは続く登録で `HookUnavailable` として記録し直される。
     /// 移したあとは、`recover_listener` がリスナーを作り直すまで毎回の登録が
-    /// そこで失敗する。止まった時刻を作り直しの基準として残す（#508）。
+    /// そこで失敗する（#508）。
+    ///
+    /// 動いていた長さはリスナーが止まった時刻で測る。拾った時刻（`now`）で測ると、
+    /// 一時停止中（`apply` が何もしない間）に止まったときに長く動いたと見なされ、
+    /// 作り直しの回数を数え直してしまう。作り直しまでの間隔は拾った時刻から数え、
+    /// 失敗を一度は画面に出す。
     fn take_listener_failure(&mut self, now: Instant) {
         if self.hook_error.is_some() {
             return;
@@ -282,15 +287,14 @@ impl HotkeyManager {
                 None
             }
         };
-        let Some(failure) = failure else {
+        let Some((failure, stopped_at)) = failure else {
             return;
         };
 
         self.hook_error = Some(failure);
-        let ran_for = self
-            .recovery
-            .started_at
-            .map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
+        let ran_for = self.recovery.started_at.map_or(Duration::ZERO, |at| {
+            stopped_at.saturating_duration_since(at)
+        });
         self.recovery.restarts = restarts_after_failure(self.recovery.restarts, ran_for);
         self.recovery.failed_at = Some(now);
         let actions: Vec<HotkeyAction> = self.registered.keys().copied().collect();
@@ -659,7 +663,7 @@ mod tests {
             .state
             .lock()
             .expect("ロックが毒されていないこと")
-            .listener_failure = Some(failure.clone());
+            .listener_failure = Some((failure.clone(), Instant::now()));
         manager.apply(&desired);
 
         assert!(manager.registered.is_empty());

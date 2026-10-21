@@ -531,9 +531,12 @@ mod tests {
         assert_eq!(restarts_after_failure(0, Duration::ZERO), 0);
     }
 
-    /// 動いているリスナーを止め、`WaitFailed` で終わったのと同じ状態にする。
+    /// 動いているリスナーを止め、`stopped_at` に `WaitFailed` で終わったのと同じ状態にする。
     /// 返すのは書き込んだ失敗の理由
-    fn stop_listener_with_failure(manager: &mut HotkeyManager) -> KeyboardHookError {
+    fn stop_listener_with_failure(
+        manager: &mut HotkeyManager,
+        stopped_at: Instant,
+    ) -> KeyboardHookError {
         manager.listener_shutdown.store(true, Ordering::Release);
         if let Some(handle) = manager.listener.take() {
             handle.join().expect("リスナーがパニックしていないこと");
@@ -544,7 +547,7 @@ mod tests {
             .state
             .lock()
             .expect("ロックが毒されていないこと")
-            .listener_failure = Some(failure.clone());
+            .listener_failure = Some((failure.clone(), stopped_at));
         failure
     }
 
@@ -562,7 +565,7 @@ mod tests {
         let desired = screenshot_on_f5();
         let start = Instant::now();
         manager.apply_at(&desired, start);
-        let failure = stop_listener_with_failure(&mut manager);
+        let failure = stop_listener_with_failure(&mut manager, start);
 
         manager.apply_at(&desired, start);
         assert_eq!(manager.hook_error, Some(failure));
@@ -596,11 +599,14 @@ mod tests {
         let start = Instant::now();
         manager.recovery.restarts = LISTENER_RESTART_LIMIT;
         manager.recovery.started_at = Some(start);
-        let failure = stop_listener_with_failure(&mut manager);
+        let failure = stop_listener_with_failure(&mut manager, start);
 
-        // 動き始めてすぐ止まったので、回数は数え直さない
-        manager.apply_at(&desired, start);
-        manager.apply_at(&desired, start + LISTENER_RESTART_INTERVAL * 10);
+        // 動き始めてすぐ止まったので、回数は数え直さない。拾うのが遅れても
+        // （ホットキー入力ダイアログで一時停止していた間など）、動いていた長さは
+        // 止まった時刻で測る
+        let picked_up = start + LISTENER_STABLE_PERIOD * 2;
+        manager.apply_at(&desired, picked_up);
+        manager.apply_at(&desired, picked_up + LISTENER_RESTART_INTERVAL * 10);
 
         assert!(manager.listener.is_none(), "上限を超えて作り直した");
         assert_eq!(manager.recovery.restarts, LISTENER_RESTART_LIMIT);
@@ -622,9 +628,38 @@ mod tests {
             return;
         }
         manager.hook_error = Some(wait_failed());
+        let running = manager.listener.as_ref().map(|handle| handle.thread().id());
 
         manager.apply_at(&BTreeMap::new(), Instant::now() + LISTENER_RESTART_INTERVAL);
 
         assert_eq!(manager.recovery.restarts, 0);
+        assert_eq!(
+            manager.listener.as_ref().map(|handle| handle.thread().id()),
+            running,
+            "動いているリスナーを差し替えた"
+        );
+    }
+
+    #[test]
+    fn restarted_listener_shares_the_same_listener_state() {
+        // 作り直しても共有状態は同じものを渡す。ウィンドウの状態や再描画の窓口を
+        // UI スレッドが書き直さなくても、新しいリスナーがそのまま使える
+        let mut manager = HotkeyManager::new();
+        manager.hook_error = None;
+        manager.set_window_state(true, false, false);
+        manager.set_only_when_focused(true);
+        let shared = Arc::clone(&manager.state);
+        let start = Instant::now();
+        stop_listener_with_failure(&mut manager, start);
+
+        manager.apply_at(&BTreeMap::new(), start);
+        manager.apply_at(&BTreeMap::new(), start + LISTENER_RESTART_INTERVAL);
+
+        assert_eq!(manager.recovery.restarts, 1);
+        assert!(Arc::ptr_eq(&shared, &manager.state));
+        let state = manager.state.lock().expect("ロックが毒されていないこと");
+        assert!(state.minimized);
+        assert!(!state.focused);
+        assert!(state.only_when_focused);
     }
 }
