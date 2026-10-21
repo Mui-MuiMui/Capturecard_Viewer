@@ -20,7 +20,7 @@ use super::capability::{
     show_audio_capability_progress, show_choice_note, show_video_capability_progress,
     VideoCapabilityCache, VideoCapabilityKey,
 };
-use super::video_mode::select_default_video_mode;
+use super::video_mode::{fps_choices, resolution_choices, select_default_video_mode};
 use super::{warning_label, AudioCapabilityCaches, CapabilityEvent, DeviceLists, SettingsEvent};
 
 /// 映像調整のスライダー 1 本。明るさ・コントラスト・彩度で見た目を揃える。
@@ -34,6 +34,51 @@ fn video_adjustment_slider(ui: &mut egui::Ui, value: &mut i32, label: &str, hint
             .clamping(egui::SliderClamping::Always),
     )
     .on_hover_text(hint);
+}
+
+/// コンボの一覧に `(値, 表示)` の選択肢を並べ、押された項目の値を `value` へ入れる。
+///
+/// Id・見出し・閉じているときの表示は呼び出し側が作った `combo` が持つ。Id は固定の
+/// 値を渡し、表示文字列から作らない（`docs/design/i18n.md`）。書き換えるのはドラフトの
+/// `value` だけで、起きたことは呼び出し側が `SettingsEvent` で返す。
+///
+/// 返すのはコンボの `Response` と、項目が押されたか。**押した項目がいまの値と同じでも
+/// 真になる。** フォーマット・解像度は押し直すとその下の選択を入れ直すため
+fn choice_combo<T: PartialEq, S: Into<egui::WidgetText>>(
+    ui: &mut egui::Ui,
+    combo: egui::ComboBox,
+    value: &mut T,
+    choices: impl IntoIterator<Item = (T, S)>,
+) -> (egui::Response, bool) {
+    let mut clicked = false;
+    let response = combo
+        .show_ui(ui, |ui| {
+            for (choice, text) in choices {
+                clicked |= ui.selectable_value(value, choice, text).clicked();
+            }
+        })
+        .response;
+    (response, clicked)
+}
+
+/// 見出し・コンボ・説明の 1 行。選択肢が設定の列挙（`ALL` と `label`）で決まるものに使う
+fn enum_combo_row<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    label: &str,
+    id_salt: &str,
+    value: &mut T,
+    all: impl IntoIterator<Item = T>,
+    label_of: fn(T) -> &'static str,
+    hint: &str,
+) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let combo = egui::ComboBox::from_id_salt(id_salt).selected_text(label_of(*value));
+        let choices = all.into_iter().map(|choice| (choice, label_of(choice)));
+        choice_combo(ui, combo, value, choices)
+            .0
+            .on_hover_text(hint);
+    });
 }
 
 pub(super) fn show_device_settings_tab(
@@ -62,64 +107,53 @@ pub(super) fn show_device_settings_tab(
 
         // Id は表示文字列から作らない。言語を切り替えると Id が変わり、
         // 開いていた一覧の状態が引き継がれないため（docs/design/i18n.md）
-        egui::ComboBox::new("video_device_combo", Text::VideoDevice.get())
+        let video_combo = egui::ComboBox::new("video_device_combo", Text::VideoDevice.get())
             .selected_text(if current_device.is_empty() {
                 Text::SelectDevice.get()
             } else {
                 &current_device
-            })
-            .show_ui(ui, |ui| {
-                for (name, description) in devices.video {
-                    let display_text = if description.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{} ({})", name, description)
-                    };
-                    if ui
-                        .selectable_label(
-                            settings.video.device_name.as_ref() == Some(name),
-                            display_text,
-                        )
-                        .clicked()
-                        && settings.video.device_name.as_ref() != Some(name)
-                    {
-                        settings.video.device_name = Some(name.clone());
-                    }
-                }
             });
+        let video_choices = devices.video.iter().map(|(name, description)| {
+            let display_text = if description.is_empty() {
+                name.clone()
+            } else {
+                format!("{} ({})", name, description)
+            };
+            (Some(name.clone()), display_text)
+        });
+        choice_combo(
+            ui,
+            video_combo,
+            &mut settings.video.device_name,
+            video_choices,
+        );
 
         // 映像の開き方（#237）。両方に出るデバイスを DirectShow で開くための
         // 切り替え。変えたら他の映像設定と同じく「適用」で開き直す
         // （`DeviceConfig` の差分判定に載っている）
-        ui.horizontal(|ui| {
-            ui.label(Text::VideoBackendLabel.get());
-            egui::ComboBox::from_id_salt("video_backend_combo")
-                .selected_text(settings.video.backend.label())
-                .show_ui(ui, |ui| {
-                    for backend in VideoBackendSetting::ALL {
-                        ui.selectable_value(&mut settings.video.backend, backend, backend.label());
-                    }
-                })
-                .response
-                .on_hover_text(Text::VideoBackendHint.get());
-        });
+        enum_combo_row(
+            ui,
+            Text::VideoBackendLabel.get(),
+            "video_backend_combo",
+            &mut settings.video.backend,
+            VideoBackendSetting::ALL,
+            VideoBackendSetting::label,
+            Text::VideoBackendHint.get(),
+        );
         if settings.video.backend != VideoBackendSetting::Auto {
             warning_label(ui, Text::VideoBackendNotice.get());
         }
 
         // YUY2 → RGB の変換の場所（#456）。デバイスは開き直さず、「適用」で次のフレームから効く
-        ui.horizontal(|ui| {
-            ui.label(Text::VideoConvertLabel.get());
-            egui::ComboBox::from_id_salt("video_convert_combo")
-                .selected_text(settings.video.convert.label())
-                .show_ui(ui, |ui| {
-                    for convert in VideoConvertSetting::ALL {
-                        ui.selectable_value(&mut settings.video.convert, convert, convert.label());
-                    }
-                })
-                .response
-                .on_hover_text(Text::VideoConvertHint.get());
-        });
+        enum_combo_row(
+            ui,
+            Text::VideoConvertLabel.get(),
+            "video_convert_combo",
+            &mut settings.video.convert,
+            VideoConvertSetting::ALL,
+            VideoConvertSetting::label,
+            Text::VideoConvertHint.get(),
+        );
 
         // 選択後のデバイス名と開き方。この下の能力参照はすべてこちらを使う。
         // 切り替えたフレームで切り替え前のキーを見ると、1 フレームだけ前の
@@ -178,52 +212,30 @@ pub(super) fn show_device_settings_tab(
         }
 
         // フォーマット選択（フォーマットが起点）
-        let mut format_changed = false;
-        ui.horizontal(|ui| {
-            ui.label(Text::FormatLabel.get());
-            let current_format = settings
-                .video
-                .format
-                .clone()
-                .unwrap_or_else(|| "YUY2".to_string());
-
-            egui::ComboBox::from_id_salt("format_combo")
-                .selected_text(&current_format)
-                .show_ui(ui, |ui| {
-                    // キャッシュからフォーマット一覧を取得
-                    if let Some(caps) = capabilities.ready(&selected_key) {
-                        for capability in caps {
-                            if ui
-                                .selectable_value(
-                                    &mut settings.video.format,
-                                    Some(capability.name.clone()),
-                                    &capability.name,
-                                )
-                                .clicked()
-                            {
-                                format_changed = true;
-                            }
-                        }
-                    } else {
-                        // キャッシュがない場合はデフォルト
-                        ui.selectable_value(
-                            &mut settings.video.format,
-                            Some("YUY2".to_string()),
-                            "YUY2",
-                        );
-                        ui.selectable_value(
-                            &mut settings.video.format,
-                            Some("MJPEG".to_string()),
-                            "MJPEG",
-                        );
-                        ui.selectable_value(
-                            &mut settings.video.format,
-                            Some("RGB24".to_string()),
-                            "RGB24",
-                        );
-                    }
-                });
-        });
+        // 既定の一覧から選んで押しても、下の入れ直しはキャッシュが無ければ何もしない
+        let video_caps = capabilities.ready(&selected_key);
+        let format_changed = ui
+            .horizontal(|ui| {
+                ui.label(Text::FormatLabel.get());
+                let current_format = settings
+                    .video
+                    .format
+                    .clone()
+                    .unwrap_or_else(|| "YUY2".to_string());
+                let combo =
+                    egui::ComboBox::from_id_salt("format_combo").selected_text(&current_format);
+                // キャッシュがない場合はデフォルト
+                let names: Vec<String> = match video_caps {
+                    Some(caps) => caps
+                        .iter()
+                        .map(|capability| capability.name.clone())
+                        .collect(),
+                    None => ["YUY2", "MJPEG", "RGB24"].map(String::from).into(),
+                };
+                let choices = names.into_iter().map(|name| (Some(name.clone()), name));
+                choice_combo(ui, combo, &mut settings.video.format, choices).1
+            })
+            .inner;
 
         // フォーマット変更時に解像度をリセット
         if format_changed {
@@ -244,69 +256,28 @@ pub(super) fn show_device_settings_tab(
         }
 
         // 解像度選択（フォーマットに応じて動的に変更）
-        let mut resolution_changed = false;
-        ui.horizontal(|ui| {
-            ui.label(Text::ResolutionLabel.get());
-            let current_resolution = settings.video.resolution.unwrap_or((1280, 720));
-
-            egui::ComboBox::from_id_salt("resolution_combo")
-                .selected_text(format!("{}x{}", current_resolution.0, current_resolution.1))
-                .show_ui(ui, |ui| {
-                    if let Some(caps) = capabilities.ready(&selected_key) {
-                        if let Some(current_format) = &settings.video.format {
-                            // 現在のフォーマットに対応する解像度一覧
-                            let mut unique_resolutions =
-                                std::collections::HashSet::<(u32, u32)>::new();
-                            for capability in caps {
-                                if &capability.name == current_format {
-                                    for mode in &capability.modes {
-                                        unique_resolutions.insert(mode.resolution());
-                                    }
-                                }
-                            }
-
-                            // ソートして表示
-                            let mut sorted_resolutions: Vec<_> =
-                                unique_resolutions.into_iter().collect();
-                            sorted_resolutions.sort_by(|a, b| {
-                                let size_a = a.0 * a.1;
-                                let size_b = b.0 * b.1;
-                                size_b.cmp(&size_a)
-                            });
-
-                            for (w, h) in sorted_resolutions {
-                                if ui
-                                    .selectable_value(
-                                        &mut settings.video.resolution,
-                                        Some((w, h)),
-                                        format!("{}x{}", w, h),
-                                    )
-                                    .clicked()
-                                {
-                                    resolution_changed = true;
-                                }
-                            }
-                        }
-                    } else {
-                        // デフォルトの解像度
-                        ui.selectable_value(
-                            &mut settings.video.resolution,
-                            Some((1920, 1080)),
-                            "1920x1080",
-                        );
-                        ui.selectable_value(
-                            &mut settings.video.resolution,
-                            Some((1280, 720)),
-                            "1280x720",
-                        );
-                        ui.selectable_value(
-                            &mut settings.video.resolution,
-                            Some((640, 480)),
-                            "640x480",
-                        );
-                    }
-                });
-        });
+        let resolution_changed = ui
+            .horizontal(|ui| {
+                ui.label(Text::ResolutionLabel.get());
+                let current_resolution = settings.video.resolution.unwrap_or((1280, 720));
+                let combo = egui::ComboBox::from_id_salt("resolution_combo")
+                    .selected_text(format!("{}x{}", current_resolution.0, current_resolution.1));
+                let resolutions = match video_caps {
+                    Some(caps) => settings
+                        .video
+                        .format
+                        .as_deref()
+                        .map(|format| resolution_choices(caps, format))
+                        .unwrap_or_default(),
+                    // デフォルトの解像度
+                    None => vec![(1920, 1080), (1280, 720), (640, 480)],
+                };
+                let choices = resolutions
+                    .into_iter()
+                    .map(|(w, h)| (Some((w, h)), format!("{}x{}", w, h)));
+                choice_combo(ui, combo, &mut settings.video.resolution, choices).1
+            })
+            .inner;
 
         // 解像度変更時にFPSをリセット
         if resolution_changed {
@@ -335,75 +306,46 @@ pub(super) fn show_device_settings_tab(
             ui.label(Text::FrameRateLabel.get());
             let current_fps = settings.video.fps.unwrap_or(30);
 
-            egui::ComboBox::from_id_salt("fps_combo")
-                .selected_text(format!("{} fps", current_fps))
-                .show_ui(ui, |ui| {
-                    if let Some(caps) = capabilities.ready(&selected_key) {
-                        if let Some(current_format) = &settings.video.format {
-                            if let Some((w, h)) = settings.video.resolution {
-                                // 現在のフォーマットと解像度に対応するFPS一覧
-                                let mut available_fps = Vec::new();
-                                for capability in caps {
-                                    if &capability.name == current_format {
-                                        for mode in &capability.modes {
-                                            if mode.resolution() == (w, h) {
-                                                available_fps.push(mode.fps);
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // 重複を削除してソート
-                                available_fps.sort();
-                                available_fps.dedup();
-                                available_fps.reverse(); // 大きい順
-
-                                for fps in available_fps {
-                                    ui.selectable_value(
-                                        &mut settings.video.fps,
-                                        Some(fps),
-                                        format!("{} fps", fps),
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        // デフォルトのFPS
-                        ui.selectable_value(&mut settings.video.fps, Some(30), "30 fps");
-                        ui.selectable_value(&mut settings.video.fps, Some(60), "60 fps");
-                    }
-                });
+            let combo = egui::ComboBox::from_id_salt("fps_combo")
+                .selected_text(format!("{} fps", current_fps));
+            let fps_list = match video_caps {
+                // 現在のフォーマットと解像度に対応するFPS一覧
+                Some(caps) => match (settings.video.format.as_deref(), settings.video.resolution) {
+                    (Some(format), Some(resolution)) => fps_choices(caps, format, resolution),
+                    _ => Vec::new(),
+                },
+                // デフォルトのFPS
+                None => vec![30, 60],
+            };
+            let choices = fps_list
+                .into_iter()
+                .map(|fps| (Some(fps), format!("{} fps", fps)));
+            choice_combo(ui, combo, &mut settings.video.fps, choices);
         });
 
         // 色空間の選択。デバイスは入力信号の色空間を通知してこないので、
         // 通常は解像度から推定する（自動）。推定が外れる機種のために固定できる
-        ui.horizontal(|ui| {
-            ui.label(Text::ColorSpaceLabel.get());
-            egui::ComboBox::from_id_salt("color_space_combo")
-                .selected_text(settings.video.color_space.label())
-                .show_ui(ui, |ui| {
-                    for space in ColorSpace::ALL {
-                        ui.selectable_value(&mut settings.video.color_space, space, space.label());
-                    }
-                })
-                .response
-                .on_hover_text(Text::ColorSpaceHint.get());
-        });
+        enum_combo_row(
+            ui,
+            Text::ColorSpaceLabel.get(),
+            "color_space_combo",
+            &mut settings.video.color_space,
+            ColorSpace::ALL,
+            ColorSpace::label,
+            Text::ColorSpaceHint.get(),
+        );
 
         // 輝度レンジの選択。フルレンジで出すかどうかはデバイス側の設定次第で、
         // 信号からも解像度からも判別できないため手で選ばせる
-        ui.horizontal(|ui| {
-            ui.label(Text::ColorRangeLabel.get());
-            egui::ComboBox::from_id_salt("color_range_combo")
-                .selected_text(settings.video.color_range.label())
-                .show_ui(ui, |ui| {
-                    for range in ColorRange::ALL {
-                        ui.selectable_value(&mut settings.video.color_range, range, range.label());
-                    }
-                })
-                .response
-                .on_hover_text(Text::ColorRangeHint.get());
-        });
+        enum_combo_row(
+            ui,
+            Text::ColorRangeLabel.get(),
+            "color_range_combo",
+            &mut settings.video.color_range,
+            ColorRange::ALL,
+            ColorRange::label,
+            Text::ColorRangeHint.get(),
+        );
 
         ui.add_space(5.0);
 
@@ -463,39 +405,32 @@ pub(super) fn show_device_settings_tab(
             .clone()
             .unwrap_or_default();
 
-        let mut output_changed = false;
-        egui::ComboBox::new("audio_output_device_combo", Text::AudioOutputDevice.get())
-            .selected_text(if current_output_device.is_empty() {
-                Text::DefaultDevice.get()
-            } else {
-                &current_output_device
-            })
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_value(
-                        &mut settings.audio.output_device_name,
-                        None,
-                        Text::DefaultDevice.get(),
-                    )
-                    .clicked()
-                    && !current_output_device.is_empty()
-                {
-                    output_changed = true;
-                }
-                for device_name in devices.output {
-                    if ui
-                        .selectable_value(
-                            &mut settings.audio.output_device_name,
-                            Some(device_name.clone()),
-                            device_name,
-                        )
-                        .clicked()
-                        && current_output_device != *device_name
-                    {
-                        output_changed = true;
-                    }
-                }
-            });
+        let output_combo =
+            egui::ComboBox::new("audio_output_device_combo", Text::AudioOutputDevice.get())
+                .selected_text(if current_output_device.is_empty() {
+                    Text::DefaultDevice.get()
+                } else {
+                    &current_output_device
+                });
+        let output_choices = std::iter::once((None, Text::DefaultDevice.get().to_string())).chain(
+            devices
+                .output
+                .iter()
+                .map(|device_name| (Some(device_name.clone()), device_name.clone())),
+        );
+        choice_combo(
+            ui,
+            output_combo,
+            &mut settings.audio.output_device_name,
+            output_choices,
+        );
+        // 既定（`None`）は空の名前と同じに数える
+        let output_changed = settings
+            .audio
+            .output_device_name
+            .as_deref()
+            .unwrap_or_default()
+            != current_output_device;
 
         // 選択後のデバイス名から作るキャッシュのキー。ビデオ側と同じく、
         // 切り替えたフレームで切り替え前の名前を見ると 1 フレームだけ
@@ -634,17 +569,13 @@ pub(super) fn show_device_settings_tab(
         ui.horizontal(|ui| {
             ui.label(Text::SampleRateLabel.get());
             let current_rate = settings.audio.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE);
-            egui::ComboBox::from_id_salt("sample_rate_combo")
-                .selected_text(format!("{} Hz", current_rate))
-                .show_ui(ui, |ui| {
-                    for rate in &rates.values {
-                        ui.selectable_value(
-                            &mut settings.audio.sample_rate,
-                            Some(*rate),
-                            format!("{} Hz", rate),
-                        );
-                    }
-                });
+            let combo = egui::ComboBox::from_id_salt("sample_rate_combo")
+                .selected_text(format!("{} Hz", current_rate));
+            let choices = rates
+                .values
+                .iter()
+                .map(|&rate| (Some(rate), format!("{} Hz", rate)));
+            choice_combo(ui, combo, &mut settings.audio.sample_rate, choices);
         });
         show_choice_note(ui, rates.source, Text::SampleRate.get());
         // 設定ファイルを手で書き換えた場合など、選択肢に無い値が残ることがある。
@@ -665,17 +596,13 @@ pub(super) fn show_device_settings_tab(
             // 選択肢が 1 つしか無いときは操作させない。開ける値が 1 つなのに
             // 選べると、選んだ値と実際の値が食い違う
             ui.add_enabled_ui(!single_channel_choice, |ui| {
-                egui::ComboBox::from_id_salt("channels_combo")
-                    .selected_text(channel_label(current_channels))
-                    .show_ui(ui, |ui| {
-                        for channels in &channel_choices.values {
-                            ui.selectable_value(
-                                &mut settings.audio.channels,
-                                Some(*channels),
-                                channel_label(*channels),
-                            );
-                        }
-                    });
+                let combo = egui::ComboBox::from_id_salt("channels_combo")
+                    .selected_text(channel_label(current_channels));
+                let choices = channel_choices
+                    .values
+                    .iter()
+                    .map(|&channels| (Some(channels), channel_label(channels)));
+                choice_combo(ui, combo, &mut settings.audio.channels, choices);
             });
         });
         if single_channel_choice && channel_choices.source != ChoiceSource::Fallback {
@@ -752,4 +679,125 @@ pub(super) fn show_device_settings_tab(
             ui.add(egui::Slider::new(&mut settings.ui.volume, 0.0..=200.0).suffix("%"));
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::ui::testing::{dialog_harness, DialogFixture};
+    use crate::ui::SettingsTab;
+    use crate::video::capabilities::FormatCapability;
+    use crate::video::{DeviceCapabilities, VideoMode};
+    use eframe::egui::accesskit::Role;
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+
+    /// 閉じているときの表示が `value` のコンボを開く。見出しを持たないコンボは表示で探す
+    fn open_combo(harness: &mut Harness<'_, DialogFixture>, value: &str) {
+        let combos: Vec<_> = harness
+            .get_all_by_role(Role::ComboBox)
+            .filter(|node| node.value().as_deref() == Some(value))
+            .collect();
+        assert_eq!(combos.len(), 1, "表示が {value} のコンボは 1 つのはず");
+        combos[0].click();
+        harness.run();
+    }
+
+    /// 「デバイス設定」タブを開き、「Capture Device」の能力に `caps` が届いた設定ダイアログ
+    fn device_tab(
+        draft: &AppSettings,
+        caps: DeviceCapabilities,
+    ) -> Harness<'static, DialogFixture> {
+        let mut fixture = DialogFixture::new(
+            draft,
+            SettingsTab::Device,
+            VideoPinChoice::selectable(None, None),
+            &[],
+        )
+        .with_video_devices(&["Capture Device"])
+        .with_output_devices(&["スピーカー"]);
+        let key = VideoCapabilityKey::new(Some("Capture Device"), VideoBackendSetting::Auto);
+        fixture.state.capabilities_mut().apply_result(key, Ok(caps));
+        let mut harness = dialog_harness(fixture);
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn choosing_format_and_resolution_reselects_the_settings_below() {
+        let caps: DeviceCapabilities = vec![
+            FormatCapability::new("YUY2", vec![VideoMode::new(1920, 1080, 60)]),
+            FormatCapability::new(
+                "MJPEG",
+                vec![
+                    VideoMode::new(1280, 720, 30),
+                    VideoMode::new(3840, 2160, 24),
+                    VideoMode::new(3840, 2160, 30),
+                ],
+            ),
+        ];
+        let mut draft = AppSettings::default();
+        draft.video.device_name = Some("Capture Device".to_string());
+        draft.video.format = Some("YUY2".to_string());
+        draft.video.resolution = Some((1920, 1080));
+        draft.video.fps = Some(60);
+        let mut harness = device_tab(&draft, caps);
+
+        // フォーマットを選ぶと、そのフォーマットの先頭の組み合わせへ入れ直す
+        open_combo(&mut harness, "YUY2");
+        harness.get_by_label("MJPEG").click();
+        harness.run();
+        let video = &harness.state().draft().video;
+        assert_eq!(video.format.as_deref(), Some("MJPEG"));
+        assert_eq!((video.resolution, video.fps), (Some((1280, 720)), Some(30)));
+
+        // 解像度を選ぶと、その解像度の先頭の FPS へ入れ直す
+        open_combo(&mut harness, "1280x720");
+        harness.get_by_label("3840x2160").click();
+        harness.run();
+        let video = &harness.state().draft().video;
+        assert_eq!(
+            (video.resolution, video.fps),
+            (Some((3840, 2160)), Some(24))
+        );
+
+        open_combo(&mut harness, "24 fps");
+        harness.get_by_label("30 fps").click();
+        harness.run();
+        assert_eq!(harness.state().draft().video.fps, Some(30));
+    }
+
+    #[test]
+    fn choosing_color_range_and_output_device_updates_the_draft() {
+        let mut harness = device_tab(&AppSettings::default(), Vec::new());
+
+        open_combo(&mut harness, ColorRange::Limited.label());
+        harness.get_by_label(ColorRange::Full.label()).click();
+        harness.run();
+        assert_eq!(harness.state().draft().video.color_range, ColorRange::Full);
+
+        // 出力デバイスを替えたら、届いた対応設定へ寄せ直すよう要求する
+        // 出力デバイスのコンボは 900x800 の画面の下に外れるので、見える位置まで送ってから押す
+        harness
+            .get_by_label(Text::AudioOutputDevice.get())
+            .scroll_to_me();
+        harness.run();
+        harness.get_by_label(Text::AudioOutputDevice.get()).click();
+        harness.run();
+        harness.get_by_label("スピーカー").click();
+        harness.run();
+        assert_eq!(
+            harness.state().draft().audio.output_device_name.as_deref(),
+            Some("スピーカー")
+        );
+        let speaker = audio::cache_key(Some("スピーカー"));
+        assert!(harness.state().events.iter().any(|event| matches!(
+            event,
+            SettingsEvent::Capability(CapabilityEvent::ExpectAudioDefaults(
+                AudioDirection::Output,
+                key,
+            )) if *key == speaker
+        )));
+    }
 }
