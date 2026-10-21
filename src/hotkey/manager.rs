@@ -368,6 +368,7 @@ impl Drop for HotkeyManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hotkey::HotkeyError;
 
     #[test]
     fn set_window_state_and_only_when_focused_reach_the_listener() {
@@ -528,5 +529,102 @@ mod tests {
         assert_eq!(restarts_after_failure(2, just_before), 2);
         assert_eq!(restarts_after_failure(2, LISTENER_STABLE_PERIOD), 0);
         assert_eq!(restarts_after_failure(0, Duration::ZERO), 0);
+    }
+
+    /// 動いているリスナーを止め、`WaitFailed` で終わったのと同じ状態にする。
+    /// 返すのは書き込んだ失敗の理由
+    fn stop_listener_with_failure(manager: &mut HotkeyManager) -> KeyboardHookError {
+        manager.listener_shutdown.store(true, Ordering::Release);
+        if let Some(handle) = manager.listener.take() {
+            handle.join().expect("リスナーがパニックしていないこと");
+        }
+        manager.listener_shutdown.store(false, Ordering::Release);
+        let failure = wait_failed();
+        manager
+            .state
+            .lock()
+            .expect("ロックが毒されていないこと")
+            .listener_failure = Some(failure.clone());
+        failure
+    }
+
+    fn screenshot_on_f5() -> BTreeMap<HotkeyAction, String> {
+        BTreeMap::from([(HotkeyAction::Screenshot, "F5".to_string())])
+    }
+
+    #[test]
+    fn apply_restarts_a_stopped_listener_after_the_interval() {
+        // 止まった直後は失敗として出し、間隔をおいた再適用でリスナーを作り直す。
+        // フックを付けられるかは環境次第なので、付けられたときは割り当てが戻り、
+        // 付けられなかったときは理由が失敗として残ることを確かめる
+        let mut manager = HotkeyManager::new();
+        manager.hook_error = None;
+        let desired = screenshot_on_f5();
+        let start = Instant::now();
+        manager.apply_at(&desired, start);
+        let failure = stop_listener_with_failure(&mut manager);
+
+        manager.apply_at(&desired, start);
+        assert_eq!(manager.hook_error, Some(failure));
+        assert!(manager.listener.is_none(), "間隔の前に作り直した");
+
+        manager.apply_at(&desired, start + LISTENER_RESTART_INTERVAL);
+
+        assert_eq!(manager.recovery.restarts, 1);
+        assert!(manager.listener.is_some());
+        match &manager.hook_error {
+            None => {
+                assert!(manager.registered.contains_key(&HotkeyAction::Screenshot));
+                assert!(manager.errors.is_empty());
+            }
+            Some(e) => assert_eq!(
+                manager
+                    .errors
+                    .get(&HotkeyAction::Screenshot)
+                    .map(|error| &error.reason),
+                Some(&HotkeyError::HookUnavailable(e.clone()))
+            ),
+        }
+    }
+
+    #[test]
+    fn apply_stops_restarting_at_the_limit() {
+        // 上限まで作り直したら、それ以上は作らない。失敗は残り続ける
+        let mut manager = HotkeyManager::new();
+        manager.hook_error = None;
+        let desired = screenshot_on_f5();
+        let start = Instant::now();
+        manager.recovery.restarts = LISTENER_RESTART_LIMIT;
+        manager.recovery.started_at = Some(start);
+        let failure = stop_listener_with_failure(&mut manager);
+
+        // 動き始めてすぐ止まったので、回数は数え直さない
+        manager.apply_at(&desired, start);
+        manager.apply_at(&desired, start + LISTENER_RESTART_INTERVAL * 10);
+
+        assert!(manager.listener.is_none(), "上限を超えて作り直した");
+        assert_eq!(manager.recovery.restarts, LISTENER_RESTART_LIMIT);
+        assert_eq!(
+            manager
+                .errors
+                .get(&HotkeyAction::Screenshot)
+                .map(|error| &error.reason),
+            Some(&HotkeyError::HookUnavailable(failure))
+        );
+    }
+
+    #[test]
+    fn apply_does_not_restart_a_listener_that_is_still_running() {
+        // 前のスレッドが動いている間は作らない。リスナーは 1 本だけ
+        let mut manager = HotkeyManager::new();
+        if manager.hook_error.is_some() {
+            // フックを付けられない環境ではリスナーがすぐ終わるので確かめられない
+            return;
+        }
+        manager.hook_error = Some(wait_failed());
+
+        manager.apply_at(&BTreeMap::new(), Instant::now() + LISTENER_RESTART_INTERVAL);
+
+        assert_eq!(manager.recovery.restarts, 0);
     }
 }
