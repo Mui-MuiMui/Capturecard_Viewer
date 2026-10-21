@@ -11,13 +11,16 @@
 
 use super::backend::CaptureRequest;
 use super::monitor::{decide_device_not_visible, should_log_enumeration, DeviceNotVisible};
-use super::retry::backoff_delay;
+use super::retry::{
+    backoff_delay, connect_attempt_log_level, connect_failure_log_level, enumeration_log_level,
+    enumeration_text, is_retry_log_milestone,
+};
 use super::worker::{DeviceConfig, DeviceEvent, VideoTarget};
 use super::worker_loop::WorkerState;
 use crate::audio::AudioDirection;
 use crate::i18n;
 use crate::settings::{AudioInputSource, VideoBackendSetting};
-use log::{debug, info, warn};
+use log::{debug, info, log, warn};
 use std::fmt::Display;
 use std::time::Instant;
 
@@ -34,21 +37,6 @@ pub(super) fn failure_message(not_visible: Option<&DeviceNotVisible>, reason: &s
 /// `None` で、そのときは開いているストリームを閉じて待つ（#334、音声の #304 と揃える）。
 fn selected_video_device(name: Option<&str>) -> Option<&str> {
     name.filter(|name| !name.is_empty())
-}
-
-/// 列挙の結果を 1 経路ぶんだけログへ出す。**台数と名前を必ず並べる。**
-/// 0 台なのか、名前が食い違っているのかをログだけで見分けるため。
-fn log_listing<E: Display>(trigger: &str, source: &str, result: &Result<Vec<String>, E>) {
-    match result {
-        Ok(names) => info!(
-            "デバイスの列挙（{}）: {}: {} 台 {:?}",
-            trigger,
-            source,
-            names.len(),
-            names
-        ),
-        Err(e) => warn!("デバイスを列挙できない（{}）: {}: {}", trigger, source, e),
-    }
 }
 
 impl WorkerState {
@@ -108,10 +96,15 @@ impl WorkerState {
         };
 
         let attempt = self.video_retry.attempts() + 1;
-        info!(
+        // 繋がらない間は毎回出さない（#506、`retry::is_retry_log_milestone`）
+        log!(
+            connect_attempt_log_level(attempt),
             "映像デバイスへの接続を試す（{} 回目）: {}（開き方: {:?}）",
-            attempt, device_name, backend
+            attempt,
+            device_name,
+            backend
         );
+        let started = Instant::now();
 
         let result = self.video.start_capture(&CaptureRequest {
             device_name: Some(device_name),
@@ -124,7 +117,13 @@ impl WorkerState {
 
         match result {
             Ok(()) => {
-                info!("映像デバイスに接続した");
+                // 何回目で繋がったかと、この試行にかかった時間は必ず残す。
+                // 「試す」の行は DEBUG に落ちていることがあるため（#506）
+                info!(
+                    "映像デバイスに接続した（{} 回目、{:.1} ms）",
+                    attempt,
+                    started.elapsed().as_secs_f32() * 1000.0
+                );
                 self.video_retry.record_success(now);
                 self.video_not_visible = None;
                 self.last_video_failure = None;
@@ -138,15 +137,23 @@ impl WorkerState {
                 self.resync_audio_after_video_recovery(config, recovered);
             }
             Err(e) => {
-                warn!("映像デバイスへの接続に失敗した（{} 回目）: {}", attempt, e);
+                // UI へは日本語の 1 行に落として渡す。`DeviceEvent` に種別を
+                // 載せても、いまの再試行は理由で戦略を変えないため
+                let reason = e.to_string();
+                // 同じ理由が続く間は節目の回だけ WARN にする（#506）。比べる相手は
+                // 直近の失敗の理由で、繋がったら消えるので、次の失敗の 1 回目は必ず出る
+                let reason_changed = self.last_video_failure.as_deref() != Some(reason.as_str());
+                log!(
+                    connect_failure_log_level(attempt, reason_changed),
+                    "映像デバイスへの接続に失敗した（{} 回目）: {}",
+                    attempt,
+                    reason
+                );
                 self.video_retry.record_failure(now);
                 // **開けなかったら、開いている相手は無い。** `start_capture` は開く前に
                 // 古いストリームを閉じている。前の設定を残すと、元へ戻したときに差分が
                 // 立たず、この失敗で伸びたバックオフを待ってから開くことになる（#311）
                 self.last_video_target = None;
-                // UI へは日本語の 1 行に落として渡す。`DeviceEvent` に種別を
-                // 載せても、いまの再試行は理由で戦略を変えないため
-                let reason = e.to_string();
                 self.emit(DeviceEvent::VideoFailed(failure_message(
                     self.video_not_visible.as_ref(),
                     &reason,
@@ -213,12 +220,34 @@ impl WorkerState {
         self.emit(DeviceEvent::VideoFailed(reason));
     }
 
+    /// 列挙の結果を 1 経路ぶんだけログへ出し、出したものを覚えておく。
+    fn log_listing<E: Display>(
+        &mut self,
+        milestone: bool,
+        trigger: &str,
+        source: &'static str,
+        result: &Result<Vec<String>, E>,
+    ) {
+        let (text, listed) = enumeration_text(result);
+        let changed = self.last_enumeration_listing.get(source) != Some(&text);
+        let level = enumeration_log_level(listed, milestone, changed);
+        let what = if listed {
+            "デバイスの列挙"
+        } else {
+            "デバイスを列挙できない"
+        };
+        log!(level, "{}（{}）: {}: {}", what, trigger, source, text);
+        self.last_enumeration_listing.insert(source, text);
+    }
+
     /// 列挙の結果をログへ出し、設定のデバイスが Windows 側にも見えていないかを
     /// 判定する（#236）。`tick` のたびに呼ばれ、出す回でなければ何もしない。
     ///
     /// 出すのは起動時の 1 回と、接続の失敗が節目（5 回目・10 回目・以後 10 回
     /// ごと、`monitor::is_enumeration_milestone`）に届いた回。Media Foundation /
     /// DirectShow / 音声入力 / 音声出力を 1 行ずつ、台数と名前を並べる。
+    /// INFO で出すのは起動時と、再試行のログの節目（`retry::is_retry_log_milestone`）と、
+    /// 前回出したものから変わった経路だけで、残りは DEBUG に落とす（#506）。
     ///
     /// **接続の試行とは切り離してある。** 再接続の前に列挙しない決まり
     /// （`docs/design/reconnect.md`）はそのままで、これは試行のあとに、ログと
@@ -251,17 +280,21 @@ impl WorkerState {
                 video_failures, audio_failures
             )
         };
+        // 列挙と判定はこれまでどおり 10 回ごとに行い、INFO で出すのは再試行の
+        // ログと同じ節目に絞る（#506）。起動時は前回の記録が無いので必ず出る
+        let milestone = (video_due && is_retry_log_milestone(video_failures))
+            || (audio_due && is_retry_log_milestone(audio_failures));
         self.startup_enumeration_pending = false;
         self.enumeration_logged_failures = (video_failures, audio_failures);
 
         let video = self.video.enumerate();
         for (source, result) in &video.sources {
-            log_listing(&trigger, source, result);
+            self.log_listing(milestone, &trigger, source, result);
         }
         let input = self.audio.enumerate_devices(AudioDirection::Input);
-        log_listing(&trigger, "音声入力", &input);
+        self.log_listing(milestone, &trigger, "音声入力", &input);
         let output = self.audio.enumerate_devices(AudioDirection::Output);
-        log_listing(&trigger, "音声出力", &output);
+        self.log_listing(milestone, &trigger, "音声出力", &output);
 
         let video_notice = decide_device_not_visible(
             video_failures,
@@ -508,6 +541,9 @@ mod tests {
             !state.startup_enumeration_pending,
             "起動時の列挙は最初の tick で済ませること"
         );
+        // 出した結果を経路ごとに覚え、次の回はそれと比べて DEBUG へ落とすか決める（#506）
+        let logged = state.last_enumeration_listing.get("音声入力");
+        assert_eq!(logged.map(String::as_str), Some("0 台 []"));
         for step in 1..5 {
             state.tick(base + Duration::from_secs(6) * step);
         }

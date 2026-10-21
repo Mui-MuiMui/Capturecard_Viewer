@@ -191,6 +191,9 @@ pub(super) struct WorkerState {
     /// 列挙をログへ出したときの失敗回数 `(映像, 音声)`。同じ回数のまま
     /// 何度も出さないための記録（`monitor::should_log_enumeration`）
     pub(super) enumeration_logged_failures: (u32, u32),
+    /// 経路ごとに、前回ログへ出した列挙の結果（台数と名前、または理由）。
+    /// 変わらない間は節目の回だけ INFO にするために持つ（#506）
+    pub(super) last_enumeration_listing: HashMap<&'static str, String>,
     /// 設定のデバイスが Windows 側にも見えていないか（#236）。列挙のたびに
     /// 判定し直し、接続できたら消す。失敗の理由に案内として添える
     pub(super) video_not_visible: Option<DeviceNotVisible>,
@@ -242,6 +245,7 @@ impl WorkerState {
             last_audio_counters_log: None,
             startup_enumeration_pending: false,
             enumeration_logged_failures: (0, 0),
+            last_enumeration_listing: HashMap::new(),
             video_not_visible: None,
             audio_not_visible: None,
             last_video_failure: None,
