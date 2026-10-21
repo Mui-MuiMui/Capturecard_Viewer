@@ -78,12 +78,14 @@ pub(super) struct ListenerState {
     /// ここへ届く（#206）。`focused` と同じく、フックの中で egui に
     /// 問い合わせずに UI スレッドが知っている値を書いておく。
     pub(super) typing: bool,
-    /// 動いていたリスナーが止まった理由。止まっていなければ `None`。
+    /// 動いていたリスナーが止まった理由と時刻。止まっていなければ `None`。
     ///
     /// リスナーはキー入力を待てなくなると終わる（フックも外れる）。ここに
     /// 書いておき、UI スレッドの `apply` が拾って失敗として画面に出す。
     /// 書かないと、効かなくなったのに登録済みのまま何も表示されない。
-    pub(super) listener_failure: Option<KeyboardHookError>,
+    /// 時刻は動いていた長さ（作り直しの回数を数え直すか、#508）を拾った時刻でなく
+    /// 止まった時刻で測るため。一時停止中は `apply` が拾わないので、拾った時刻だとずれる
+    pub(super) listener_failure: Option<(KeyboardHookError, Instant)>,
     /// 最小化中のアクションの実行先。
     pub(super) background: BackgroundHotkeyRunner,
     /// 押下を記録したあとに UI スレッドを起こす窓口。
@@ -347,7 +349,8 @@ pub(super) fn spawn_listener(
                 // UI スレッドの apply が拾い、HookUnavailable として画面に出す
                 match state.lock() {
                     Ok(mut state) => {
-                        state.listener_failure = Some(KeyboardHookError::WaitFailed(source))
+                        state.listener_failure =
+                            Some((KeyboardHookError::WaitFailed(source), Instant::now()))
                     }
                     Err(_) => {
                         warn!("ホットキーの共有状態のロックを取得できないので停止を伝えられない")
