@@ -17,7 +17,23 @@ use chrono::Local;
 use log::{debug, warn};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// 読めない効果音ファイルを自動で読み直すまでの最初の間隔（#507）。
+/// 2 秒ごとの適用より十分に長くし、読み込みスレッドを詰めて起こさない
+const SOUND_RETRY_INITIAL: Duration = Duration::from_secs(30);
+/// 自動で読み直す間隔の上限。失敗するたびに倍にしていき、ここで止める
+const SOUND_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
+
+/// 読めない効果音ファイルの自動の読み直しの予定。
+///
+/// `delay` は直前に使った間隔で、次に失敗したらこれの倍にする。`next_at` は
+/// 次に読み直す時刻。読み直しを始めたら `None` にし、結果を待つ。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SoundLoadRetry {
+    delay: Duration,
+    next_at: Option<Instant>,
+}
 
 /// 効果音のスレッドから UI スレッドへ返すもの。
 pub(super) enum SoundMessage {
@@ -112,10 +128,33 @@ impl CaptureCardViewer {
     /// 設定ダイアログの「適用」「OK」で呼ぶ。最後に適用した効果音ファイルを
     /// 読み込めていなければ、続く `apply_settings` で読み直させる。
     ///
-    /// 2 秒ごとの適用では読み直さない（#507）。ファイルを直した利用者が
-    /// 読み直させる契機はここだけ。設定を変えていなくても押せば読み直す。
+    /// 2 秒ごとの適用では読み直さない（#507）。ファイルを直した利用者がすぐに
+    /// 読み直させる契機。設定を変えていなくても押せば読み直す。自動の読み直しの
+    /// 間隔は最初（30 秒）からやり直す。
     pub(super) fn retry_failed_sound_load(&mut self) {
         if should_retry_sound_load(self.sound_load_failure.as_deref()) {
+            self.last_sound_file = None;
+            self.sound_load_retry = None;
+        }
+    }
+
+    /// 読めない効果音ファイルの自動の読み直しの時刻が来ていれば、続く適用で
+    /// 読み直させる。`apply_settings` が効果音の差分判定の前に呼ぶ。
+    ///
+    /// 間隔は 30 秒から失敗するたびに倍にし、5 分で止める（`next_sound_retry`）。
+    /// 起動直後にネットワークドライブがまだ繋がっていなかった場合などに、
+    /// 利用者が何もしなくても戻るようにするため。
+    pub(super) fn start_due_sound_retry(&mut self, now: Instant) {
+        let Some(retry) = self.sound_load_retry.as_mut() else {
+            return;
+        };
+        if is_sound_retry_due(retry.next_at, now) {
+            debug!(
+                "読めなかった効果音ファイルを読み直す（間隔 {:?}）",
+                retry.delay
+            );
+            // 結果が届くまでは次を予定しない
+            retry.next_at = None;
             self.last_sound_file = None;
         }
     }
@@ -202,6 +241,7 @@ impl CaptureCardViewer {
                     // （読めなかった記録が上書きしていることがあるため）。
                     // 報告済みの理由なので、トーストは出さない
                     self.sound_load_failure = None;
+                    self.sound_load_retry = None;
                     match self.sound_output_failure.clone() {
                         None => self.errors.clear(ErrorSource::ScreenshotSound),
                         Some(reason) => self.record_sound_failure_quietly(reason),
@@ -209,12 +249,22 @@ impl CaptureCardViewer {
                     return;
                 };
                 // **読めなくても適用済みのまま（`last_sound_file`）にする。** 2 秒ごとの
-                // 適用では読み直さず、読み直すのは設定を変えたときと、設定ダイアログの
-                // 「適用」「OK」だけ（`retry_failed_sound_load`、#507）。読めないファイルの
-                // 撮影時は内蔵音、デコードできないファイルは無音（docs/design/assets.md）
-                //
-                // 同じ理由が続く間は 1 度だけ報告する。「適用」を押し直して同じ理由で
-                // 読めなかったときは、トーストを出さず記録だけをその理由へ戻す
+                // 適用では読み直さず、読み直すのは設定を変えたとき、設定ダイアログの
+                // 「適用」「OK」（`retry_failed_sound_load`）、読めないファイルなら間隔を
+                // 延ばしながらの自動の読み直し（`start_due_sound_retry`）だけ（#507）。
+                // 読めないファイルの撮影時は内蔵音、デコードできないファイルは無音
+                // （docs/design/assets.md）
+                let now = Instant::now();
+                self.sound_load_retry =
+                    next_sound_retry(&e, self.sound_load_retry.map(|retry| retry.delay)).map(
+                        |delay| SoundLoadRetry {
+                            delay,
+                            next_at: Some(now + delay),
+                        },
+                    );
+
+                // 同じ理由が続く間は 1 度だけ報告する。自動の読み直しや「適用」の押し直しで
+                // 同じ理由で読めなかったときは、トーストを出さず記録だけをその理由へ戻す
                 let reason = e.to_string();
                 let report = should_report_sound_failure(
                     self.sound_load_failure.as_deref(),
@@ -288,6 +338,29 @@ fn should_report_sound_failure(previous: Option<&str>, current: &Option<String>)
 /// 読み込めなかったときだけ読み直す。読めているファイルを押すたびに読み直さない。
 fn should_retry_sound_load(load_failure: Option<&str>) -> bool {
     load_failure.is_some()
+}
+
+/// 適用の読み込みに失敗したあと、自動で読み直すまでの間隔を決める。
+///
+/// `previous` は直前の自動の読み直しで使った間隔（初めての失敗なら `None`）。
+/// 最初は 30 秒、失敗するたびに倍にして 5 分で止める。**デコードできない
+/// ファイルは自動では読み直さない（`None`）。** 中身を差し替えない限り結果が
+/// 変わらず、大きなファイルを数分ごとに読み直すだけになるため。こちらは
+/// 設定の変更か「適用」「OK」で読み直す。
+fn next_sound_retry(error: &ScreenshotError, previous: Option<Duration>) -> Option<Duration> {
+    if matches!(error, ScreenshotError::SoundFileUndecodable { .. }) {
+        return None;
+    }
+    Some(match previous {
+        None => SOUND_RETRY_INITIAL,
+        Some(delay) => (delay * 2).min(SOUND_RETRY_MAX),
+    })
+}
+
+/// 自動の読み直しの時刻が来たかを決める。`next_at` が `None`（読み直しの
+/// 結果を待っている）なら来ていない。
+fn is_sound_retry_due(next_at: Option<Instant>, now: Instant) -> bool {
+    next_at.is_some_and(|at| now >= at)
 }
 
 #[cfg(test)]
@@ -368,5 +441,80 @@ mod tests {
     fn should_retry_sound_load_after_success_returns_false() {
         // 読めているファイルは「適用」のたびに読み直さない
         assert!(!should_retry_sound_load(None));
+    }
+
+    fn unreadable() -> ScreenshotError {
+        ScreenshotError::SoundFileUnreadable {
+            path: PathBuf::from("Z:/sounds/SS.mp3"),
+            source: "network path not found".to_string(),
+        }
+    }
+
+    #[test]
+    fn next_sound_retry_first_failure_waits_30_seconds() {
+        assert_eq!(
+            next_sound_retry(&unreadable(), None),
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn next_sound_retry_doubles_after_each_failure() {
+        assert_eq!(
+            next_sound_retry(&unreadable(), Some(Duration::from_secs(30))),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            next_sound_retry(&unreadable(), Some(Duration::from_secs(120))),
+            Some(Duration::from_secs(240))
+        );
+    }
+
+    #[test]
+    fn next_sound_retry_stops_growing_at_5_minutes() {
+        // 240 秒の倍は 480 秒だが、上限の 5 分で止まる
+        assert_eq!(
+            next_sound_retry(&unreadable(), Some(Duration::from_secs(240))),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(
+            next_sound_retry(&unreadable(), Some(Duration::from_secs(300))),
+            Some(Duration::from_secs(300))
+        );
+    }
+
+    #[test]
+    fn next_sound_retry_first_interval_is_longer_than_the_apply_period() {
+        // 2 秒ごとの apply_settings で読み込みスレッドを詰めて起こさないこと
+        let first = next_sound_retry(&unreadable(), None).expect("読み直すこと");
+        assert!(first > Duration::from_secs(2));
+    }
+
+    #[test]
+    fn next_sound_retry_undecodable_file_is_not_retried_automatically() {
+        let error = ScreenshotError::SoundFileUndecodable {
+            path: PathBuf::from("C:/sounds/SS.mp3"),
+            source: "unrecognized format".to_string(),
+        };
+        assert_eq!(next_sound_retry(&error, None), None);
+    }
+
+    #[test]
+    fn is_sound_retry_due_before_the_time_returns_false() {
+        let now = Instant::now();
+        assert!(!is_sound_retry_due(Some(now + Duration::from_secs(1)), now));
+    }
+
+    #[test]
+    fn is_sound_retry_due_at_or_after_the_time_returns_true() {
+        let now = Instant::now();
+        assert!(is_sound_retry_due(Some(now), now));
+        assert!(is_sound_retry_due(Some(now), now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn is_sound_retry_due_while_waiting_for_the_result_returns_false() {
+        // 読み直しを始めて結果を待っている間は、2 秒ごとの適用で重ねて起こさない
+        assert!(!is_sound_retry_due(None, Instant::now()));
     }
 }

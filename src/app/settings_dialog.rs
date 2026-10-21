@@ -265,7 +265,7 @@ impl CaptureCardViewer {
             // 新しい言語で出る
             self.apply_language();
             // 読み込めなかった効果音ファイルは、設定を変えていなくても読み直す。
-            // 2 秒ごとの適用では読み直さないので、直したファイルを読ませる契機はここ（#507）
+            // 2 秒ごとの適用では読み直さないので、直したファイルをすぐ読ませる契機はここ（#507）
             self.retry_failed_sound_load();
             // 反映した内容でデバイスを開き直す
             self.apply_settings(false);
