@@ -123,9 +123,9 @@ fn main() -> Result<(), eframe::Error> {
             // 言語を書き換えてしまうため（#256）。`new()` は文言を作らないので、
             // 作った直後に決めても最初の描画から設定の言語で出る
             app.apply_language();
-            // 設定ファイルを読めなかったことを知らせる（#505）。文言を作るので、
-            // 画面の言語を決めたあとに呼ぶ
-            app.report_settings_load(&load_outcome);
+            // 起動時の書き戻しの失敗と、設定ファイルを読めなかったことを知らせる
+            // （#505）。文言を作るので、画面の言語を決めたあとに呼ぶ
+            app.report_startup_settings(&load_outcome);
             Ok(Box::new(app))
         }),
     );

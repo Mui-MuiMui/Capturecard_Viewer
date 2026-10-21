@@ -20,7 +20,9 @@
 
 - **設定を読むのは `main.rs` の 1 回だけ。** 読んだ設定と `LoadOutcome` を `CaptureCardViewer::new` へ渡す。アプリを作るときにもう一度読むと、1 回目で退避したあとは「ファイルが無い」を読んで `Loaded` になり、知らせる材料が消える（以前はそうなっていた）
 - `LoadOutcome` は理由（`LoadFailure`）と、退避先（`FellBackToDefaults`）または残したファイル（`BrokenFileLeftBehind`）を持つ。`LoadOutcome::failure` が `SettingsError::LoadFellBackToDefaults` / `LoadFailedFileKept` にし、文言はその `Display` が `crate::i18n` から引く。理由も種類で持つ（空のファイルは `LoadFailure::Blank`）。読むのは画面の言語を決める前なので、文言にするのは知らせるときにする
-- 知らせるのは `main.rs` が `apply_language` を呼んだ直後の `report_settings_load`。`new()` の中では文言を作らない（#256）
+- 読むのを 1 回にしたので、退避できなかったときにアプリを作るところでもう一度退避を試みることは無くなった。そのまま `BrokenFileLeftBehind` で自動保存を止め、次の起動で退避を試みる
+- 知らせるのは `main.rs` が `apply_language` を呼んだ直後の `report_startup_settings`。**`new()` の中では文言を作らない**（言語を決める前なので、英語の設定でも既定の日本語で出る。`new()` で決めないのは #256）。起動時の書き戻しも `new()` で保存するが、結果は型のまま `pending_startup_save` に預け、取り込む（失敗のログとトースト）のは `report_startup_settings` の中
+- 書き戻しの失敗と読み込みの知らせは同じ `ErrorSource::Settings` で、`ErrorCenter` は直近の 1 件しか持たない。後から出す読み込みの知らせが書き戻しの失敗の記録を上書きする（書き戻しの失敗はログに残り、保留として再試行される）
 - **トーストには優先度を付けない。** 後勝ちなので、直後に接続の失敗が届くと上書きされる（`docs/design/error-reporting.md`）。「接続状態」タブに残るのでそこで読み返せる。トーストは定型文と合わせて 60 文字で切れるので、文言は起きたことを先に書き、退避先と理由を後ろに置く
 - 退避できずに自動保存を止めた知らせは、「適用」「OK」で保存できて自動保存を再開したときに取り下げる（`errors.clear(ErrorSource::Settings)`）。退避して既定値で起動した知らせは、起きた時刻と一緒に残す
 - `AutoSavePolicy` と `may_write_defaults_on_startup` の判定は変えていない

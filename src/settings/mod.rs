@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use store::LoadFailure;
+// `SettingsError` のフィールドの型。外からは `app::settings_store` のテスト
+// （起動時の知らせの言語、#505）が読み込み結果を組み立てるのに使う
+pub(crate) use store::LoadFailure;
 
 mod audio;
 mod hotkeys;

@@ -38,7 +38,7 @@ mod worker_timers;
 use self::menu::MenuLayout;
 use self::screenshot::ScreenshotResult;
 use self::screenshot_sound::SoundMessage;
-use self::settings_store::{SaveFailureStreak, SaveTrigger};
+use self::settings_store::SaveFailureStreak;
 use self::update::UpdateState;
 use self::window::{needs_drag_move_guard, WindowRecordState};
 use self::worker::{DeviceSnapshot, DeviceWorker};
@@ -50,7 +50,9 @@ use crate::platform;
 use crate::recording::Recorder;
 use crate::repaint::RepaintWaker;
 use crate::screenshot_sound::ScreenshotManager;
-use crate::settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace, LoadOutcome};
+use crate::settings::{
+    AppSettings, AutoSavePolicy, ColorRange, ColorSpace, LoadOutcome, SettingsError,
+};
 use crate::status::ErrorCenter;
 use crate::ui;
 use crate::video::{DisplayLatency, GpuYuy2, SharedColorConversion, VideoAdjustments, VideoFrames};
@@ -151,6 +153,10 @@ pub struct CaptureCardViewer {
     // 保存の失敗が何回続いているか。再試行の間隔と、ログ・トーストの間引きに
     // 使う（`app::settings_store`）
     settings_save_failures: SaveFailureStreak,
+    // 起動時の書き戻しの結果。`new()` で保存し、取り込む（失敗ならログとトースト）のは
+    // 画面の言語を決めたあとの `report_startup_settings`。`new()` の中で文言を作ると、
+    // 英語の設定でも既定の日本語で出るため（#505）。取り込んだら None
+    pending_startup_save: Option<Result<(), SettingsError>>,
 
     // 映像表示関連
     video_texture: Option<egui::TextureHandle>,
@@ -235,7 +241,7 @@ impl CaptureCardViewer {
     /// 設定を読むのは `main.rs` の 1 回だけ。ここでもう一度読むと、1 回目で退避した
     /// ファイルが無いので「読めた」ことになり、読めなかったことを利用者へ知らせる
     /// 材料（理由・退避先）が失われる（Issue #505）。知らせるのは画面の言語を
-    /// 決めたあとの `report_settings_load`
+    /// 決めたあとの `report_startup_settings`
     pub fn new(loaded_settings: AppSettings, load_outcome: &LoadOutcome) -> Self {
         // OS の表示言語は起動時に 1 回だけ問い合わせて持っておく。
         //
@@ -317,6 +323,7 @@ impl CaptureCardViewer {
             settings_dirty_since: None,
             autosave: AutoSavePolicy::from_load_outcome(load_outcome),
             settings_save_failures: SaveFailureStreak::default(),
+            pending_startup_save: None,
             video_texture: None,
             gpu_yuy2: GpuYuy2::default(),
             video_image: None,
@@ -399,11 +406,10 @@ impl CaptureCardViewer {
                 warn!("起動時のデバイス自動選択で settings のロックを取得できない");
             }
         }
-        // ロックを放してから結果を取り込む。失敗したらログとトーストで知らせ、
-        // 保留として残して再試行させる（`app::settings_store`）
-        if let Some(result) = startup_save {
-            app.note_settings_save_result(result, SaveTrigger::Automatic);
-        }
+        // 結果は取り込まずに預ける。失敗したらログとトーストで知らせ、保留として
+        // 残して再試行させる（`app::settings_store`）が、トーストの文言を作るのは
+        // 画面の言語を決めたあと（`report_startup_settings`、#505）
+        app.pending_startup_save = startup_save;
 
         // 保存済みのビデオデバイスの能力を先に取りに行く。
         // 設定画面を開いた時点で選択肢が揃っているようにするためで、

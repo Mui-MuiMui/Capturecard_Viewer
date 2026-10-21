@@ -73,7 +73,7 @@ impl LoadOutcome {
     // 利用者へ知らせる失敗。読み込めたなら None。
     //
     // 起動後に `report_error(ErrorSource::Settings, ..)` でトーストと「接続状態」タブへ
-    // 出す（`app::settings_store` の `report_settings_load`、Issue #505）。文言は
+    // 出す（`app::settings_store` の `report_startup_settings`、Issue #505）。文言は
     // `SettingsError` の `Display` が出す
     pub fn failure(&self) -> Option<SettingsError> {
         match self {
@@ -272,7 +272,7 @@ impl AppSettings {
                 //
                 // 失敗したという事実と理由・退避先は LoadOutcome として呼び出し側へ
                 // 渡す。ここは起動直後で UI がまだ無いため、利用者へ知らせるのは
-                // アプリを作って画面の言語を決めたあと（`report_settings_load`、Issue #505）
+                // アプリを作って画面の言語を決めたあと（`report_startup_settings`、Issue #505）
                 let backup = backup_broken_config(path);
                 match &backup {
                     Ok(Some(backup_path)) => warn!(

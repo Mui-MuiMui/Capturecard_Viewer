@@ -114,21 +114,35 @@ fn save_retry_delay(consecutive_failures: u32) -> Duration {
         .min(SETTINGS_SAVE_MAX_RETRY)
 }
 
+/// 起動時に設定ファイルを読めなかったことを知らせる文言。読めたなら None。
+///
+/// その時点の画面の言語で作るので、言語を決めたあとに呼ぶ（`report_startup_settings`）。
+fn startup_load_message(outcome: &LoadOutcome) -> Option<String> {
+    outcome.failure().map(|failure| failure.to_string())
+}
+
 impl CaptureCardViewer {
-    /// 起動時に設定ファイルを読めなかったことを、トーストと「接続状態」タブで知らせる
-    /// （Issue #505）。読めたなら何もしない。
+    /// 起動時の設定の結果を取り込み、失敗をトーストと「接続状態」タブで知らせる
+    /// （Issue #505）。`new()` で預けた書き戻しの結果（`pending_startup_save`）を
+    /// 取り込み、そのあとで設定ファイルを読めなかったことを知らせる。読めて
+    /// 書き戻せたなら何も出さない。
     ///
-    /// 呼ぶのは `main.rs` が作って画面の言語を決めた直後の 1 回だけ。`new()` の中で
-    /// 呼ばないのは、文言を作るのが言語を決めたあとでなければならないため。
+    /// 呼ぶのは `main.rs` が作って画面の言語を決めた直後の 1 回だけ。**文言はここで
+    /// 初めて作る。** `new()` の中で作ると、英語の設定でも既定の日本語で出る。
     ///
+    /// 書き戻しの失敗と読み込みの知らせは同じ発生源（`ErrorSource::Settings`）で、
+    /// 直近の 1 件しか持たないので、後から出す読み込みの知らせが残る。
     /// トーストは後勝ちなので、直後に接続の失敗が届くと上書きされる
     /// （`docs/design/error-reporting.md`）。優先度は付けず、「接続状態」タブの
     /// 「設定ファイル」の枠に残ることで読み返せるようにしてある。退避できずに
     /// 自動保存を止めた知らせは、「適用」「OK」で保存できたときに取り下げる
     /// （`app::settings_dialog`）
-    pub fn report_settings_load(&mut self, outcome: &LoadOutcome) {
-        if let Some(failure) = outcome.failure() {
-            self.report_error(ErrorSource::Settings, failure.to_string());
+    pub fn report_startup_settings(&mut self, outcome: &LoadOutcome) {
+        if let Some(result) = self.pending_startup_save.take() {
+            self.note_settings_save_result(result, SaveTrigger::Automatic);
+        }
+        if let Some(message) = startup_load_message(outcome) {
+            self.report_error(ErrorSource::Settings, message);
         }
     }
 
@@ -268,6 +282,9 @@ impl CaptureCardViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::{with_language, Language};
+    use crate::settings::LoadFailure;
+    use std::path::PathBuf;
 
     #[test]
     fn should_flush_settings_no_pending_change_returns_false() {
@@ -439,5 +456,49 @@ mod tests {
         let mut streak = SaveFailureStreak::default();
 
         assert_eq!(streak.record_success(), None);
+    }
+
+    // ---- 起動時の知らせの言語（#505） ----
+    //
+    // 言語は `with_language` でこのスレッドだけ切り替える。`set_language` は
+    // プロセス全体を書き換え、同じプロセスの他のテストを巻き込む（#256）
+
+    #[test]
+    fn startup_load_message_uses_the_language_at_report_time() {
+        // 読み込みの結果は文言を持たず、知らせる時点の言語で作る。英語の設定なら英語
+        let outcome = LoadOutcome::FellBackToDefaults {
+            reason: LoadFailure::Blank,
+            backup: Some(PathBuf::from(r"C:\config\default-config.toml.bak")),
+        };
+
+        let english = with_language(Language::English, || startup_load_message(&outcome))
+            .expect("知らせること");
+        let japanese = with_language(Language::Japanese, || startup_load_message(&outcome))
+            .expect("知らせること");
+
+        assert!(english.contains("could not be read"), "{english}");
+        assert!(english.contains("the file is empty"), "{english}");
+        assert!(!japanese.contains("could not be read"), "{japanese}");
+        assert!(japanese.contains("既定値"), "{japanese}");
+    }
+
+    #[test]
+    fn startup_load_message_is_none_when_loaded() {
+        assert_eq!(startup_load_message(&LoadOutcome::Loaded), None);
+    }
+
+    #[test]
+    fn pending_startup_save_error_uses_the_language_at_report_time() {
+        // `new()` が預ける書き戻しの失敗も型のまま持ち、取り込む時点の言語で文言にする
+        let error = SettingsError::SaveFailed {
+            path: PathBuf::from(r"C:\config\default-config.toml"),
+            source: "access denied".to_string(),
+        };
+
+        let english = with_language(Language::English, || error.to_string());
+        let japanese = with_language(Language::Japanese, || error.to_string());
+
+        assert!(english.starts_with("Cannot write to"), "{english}");
+        assert!(japanese.contains("書き出せない"), "{japanese}");
     }
 }
