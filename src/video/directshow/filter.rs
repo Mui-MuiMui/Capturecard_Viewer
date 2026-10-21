@@ -54,7 +54,7 @@ use windows::Win32::System::Com::{
 
 use super::audio_pin::{pin_format_of, AudioStream};
 use super::media_type::{sample_format_of, OwnedMediaType, SampleFormat};
-use super::video_stream::VideoStream;
+use super::video_stream::{FormatChanges, VideoStream};
 use crate::audio::{AudioPinFeed, PinFormat};
 use crate::video::frame_sink::FrameSink;
 
@@ -685,9 +685,13 @@ pub(super) struct Renderer {
 }
 
 impl Renderer {
-    /// 映像のレンダラー。`sink` はストリーミングスレッドへ渡る
-    pub(super) fn video(sink: FrameSink) -> Self {
-        Self::new(MediaKind::Video, StreamState::Video(VideoStream::new(sink)))
+    /// 映像のレンダラー。`sink` はストリーミングスレッドへ渡る。形式が変わったことは
+    /// `changes` へ書く（ログはワーカーが出す）
+    pub(super) fn video(sink: FrameSink, changes: FormatChanges) -> Self {
+        Self::new(
+            MediaKind::Video,
+            StreamState::Video(VideoStream::new(sink, changes)),
+        )
     }
 
     /// 音声のレンダラー。受け取った PCM を `feed` へ、グラフの番号 `graph` を

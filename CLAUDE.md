@@ -73,7 +73,7 @@ cargo build --release
 | `src/video/directshow/stream_select.rs` | 対応形式の一覧から開く解像度と形式を選ぶ判定（`target_resolution` / `choose_candidate`）、fps の範囲と選択肢（`fps_range` / `fps_list` / `fps_choices`）、設定画面向けの並べ替え（`capabilities_from_candidates`）。純粋関数 |
 | `src/video/directshow/graph.rs` | DirectShow のフィルターグラフの組み立て・開始・停止・破棄（`CaptureGraph`） |
 | `src/video/directshow/filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`）。媒体を問わず、受け取る形式の判定と渡し先だけを映像と音声で分ける |
-| `src/video/directshow/video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
+| `src/video/directshow/video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す。流れの途中で形式が変わったことは `FormatChanges`（Atomic）へ書くだけで、ログはワーカーが `CaptureGraph::poll` で出す（#511） |
 | `src/video/directshow/audio_pin.rs` | 映像デバイスの音声ピン（#388）。列挙の時点での有無の判定（`probe_presence`、#409）、有無の記録、10ms の塊の提案と接続、`Run` が通らないときに外してやり直す（`run_with_fallback`）、`WAVEFORMATEX` の読み取り（`pin_format_from_wave`）、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
 | `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
 | `src/video/directshow/timestamp_probe.rs` | テストを含むビルドだけ（`#[cfg(test)]`）。`Receive` に届いたサンプルの到着時刻と `IMediaSample::GetTime` を Atomic の表へ書き、`#[ignore]` のテストが揺れを出す（#406）。グラフに基準時計を付けるかの切り替えもここ。`Receive` の時点のストリーム時刻も書き、打刻 → コールバックの遅れを測る（#476。集計の `report_lag` は Media Foundation の経路のテストも使う） |
