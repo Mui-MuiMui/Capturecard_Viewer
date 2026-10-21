@@ -172,7 +172,7 @@ pub fn update_downloading_percent(percent: u8) -> String {
 /// 大きさが分からないときのダウンロード中の量。`mib` は MiB 単位。
 pub fn update_downloading_amount(mib: f64) -> String {
     match language() {
-        Language::Japanese => format!("ダウンロード中... {mib:.1} MB"),
-        Language::English => format!("Downloading... {mib:.1} MB"),
+        Language::Japanese => format!("ダウンロード中... {mib:.1} MiB"),
+        Language::English => format!("Downloading... {mib:.1} MiB"),
     }
 }
