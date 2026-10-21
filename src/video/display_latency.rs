@@ -18,6 +18,11 @@ const DISPLAY_LATENCY_WINDOW: Duration = Duration::from_secs(1);
 /// ログへ出す間隔。音声の観測値のログ（`app::worker_audio_timers`）と揃える
 const DISPLAY_LATENCY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
+/// 既定のログレベル（INFO）で出す要約の間隔（#501）。30 秒ごとのログは `debug` なので、
+/// 利用者の手元のログには残らない。長時間動かしたときに表示の側の値が時間とともに
+/// 変わったかを、既定のログから追えるようにする。1 時間に 12 行
+const DISPLAY_SUMMARY_LOG_INTERVAL: Duration = Duration::from_secs(300);
+
 /// 遅れの集計。単位はミリ秒。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LatencySummary {
@@ -37,6 +42,35 @@ pub struct LatencyLog {
     pub skipped_frames: u64,
     /// 新着が無いまま回った `update()` の回数
     pub idle_passes: u64,
+}
+
+/// INFO で出す 5 分ぶんの要約（#501）。30 秒の `LatencyLog` と同じ数に、取り込んだ速さと
+/// 描画の CPU 時間を足したもの。
+///
+/// 描画の CPU 時間は eframe の `IntegrationInfo::cpu_usage`（`update()`・テッセレーション・
+/// 描画のコールバックを含み、swap / present の待ちを含まない）。**取り込みの速さが落ちて
+/// 上書きが増えたのに CPU 時間が変わらなければ、UI スレッドは CPU の外（present の待ち
+/// など）で止まっている**と読める
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DisplaySummaryLog {
+    pub latency: LatencySummary,
+    /// 窓の長さ。取り込んだ速さ（`frames_per_second`）の分母
+    pub elapsed: Duration,
+    pub skipped_frames: u64,
+    pub idle_passes: u64,
+    /// 描画の CPU 時間。`update()` が 1 回も来ていなければ `None`
+    pub frame_time: Option<LatencySummary>,
+}
+
+impl DisplaySummaryLog {
+    /// テクスチャへ取り込んだ速さ（枚/秒）。窓の長さが 0 なら 0
+    pub fn frames_per_second(&self) -> f32 {
+        let seconds = self.elapsed.as_secs_f32();
+        if seconds <= 0.0 {
+            return 0.0;
+        }
+        self.latency.samples as f32 / seconds
+    }
 }
 
 /// 統計 OSD と「接続状態」タブに出す行。取り込んだフレームが無ければ数値を出さない
@@ -82,12 +116,49 @@ pub struct DisplayLatency {
     log: Accumulator,
     log_skipped_frames: u64,
     log_idle_passes: u64,
+    // INFO で出す 5 分の要約（#501）の窓の始まりと、そこからの集計
+    summary_started: Option<Instant>,
+    summary: Accumulator,
+    summary_skipped_frames: u64,
+    summary_idle_passes: u64,
+    summary_frame_time: Accumulator,
 }
 
 impl DisplayLatency {
     /// 新着が無いまま `update()` が回ったことを数える。ログにだけ出す
     pub fn note_idle_pass(&mut self) {
         self.log_idle_passes += 1;
+        self.summary_idle_passes += 1;
+    }
+
+    /// 直前のフレームの描画の CPU 時間（eframe の `cpu_usage`）を数える。5 分の要約にだけ出す。
+    /// 映像を 1 枚も取り込んでいない間（窓が始まっていない間）は数えない
+    pub fn note_frame_time(&mut self, frame_time: Duration) {
+        if self.summary_started.is_some() {
+            self.summary_frame_time
+                .add(frame_time.as_secs_f32() * 1000.0);
+        }
+    }
+
+    /// 5 分の要約の窓が `DISPLAY_SUMMARY_LOG_INTERVAL` に達していれば、その集計を返して
+    /// 次の窓を始める。`record` の直後に呼ぶ（窓の始まりは `record` が置く）
+    pub fn take_summary(&mut self, now: Instant) -> Option<DisplaySummaryLog> {
+        let started = self.summary_started?;
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed < DISPLAY_SUMMARY_LOG_INTERVAL {
+            return None;
+        }
+        let latency = self.summary.summary()?;
+        let log = DisplaySummaryLog {
+            latency,
+            elapsed,
+            skipped_frames: std::mem::take(&mut self.summary_skipped_frames),
+            idle_passes: std::mem::take(&mut self.summary_idle_passes),
+            frame_time: std::mem::take(&mut self.summary_frame_time).summary(),
+        };
+        self.summary = Accumulator::default();
+        self.summary_started = Some(now);
+        Some(log)
     }
 
     /// テクスチャへ取り込んだ時刻 `at` と、その遅れ `latency` を記録する。
@@ -113,6 +184,13 @@ impl DisplayLatency {
             self.log_started = None;
             self.log_skipped_frames = 0;
             self.log_idle_passes = 0;
+            // 5 分の要約も同じ理由で張り直す。止まっていた間を窓に含めると、取り込んだ
+            // 速さが止まっていた時間のぶん低く出る
+            self.summary = Accumulator::default();
+            self.summary_started = None;
+            self.summary_skipped_frames = 0;
+            self.summary_idle_passes = 0;
+            self.summary_frame_time = Accumulator::default();
         }
         while let Some(&(oldest, _)) = self.recent.front() {
             if at.saturating_duration_since(oldest) > DISPLAY_LATENCY_WINDOW {
@@ -122,6 +200,10 @@ impl DisplayLatency {
             }
         }
         self.recent.push_back((at, ms));
+
+        self.summary_started.get_or_insert(at);
+        self.summary.add(ms);
+        self.summary_skipped_frames += skipped_frames;
 
         let started = *self.log_started.get_or_insert(at);
         self.log.add(ms);
@@ -316,5 +398,102 @@ mod tests {
             .expect("張り直してから 30 秒");
         assert_eq!(log.skipped_frames, 0);
         assert_eq!(log.idle_passes, 0);
+    }
+
+    #[test]
+    fn take_summary_before_any_frame_is_none() {
+        let mut latency = DisplayLatency::default();
+        latency.note_idle_pass();
+        latency.note_frame_time(ms(5));
+        assert_eq!(latency.take_summary(Instant::now()), None);
+    }
+
+    #[test]
+    fn take_summary_returns_once_per_five_minutes_with_rate_and_frame_time() {
+        // 長時間の劣化（#501）を INFO で追うための要約。窓は 5 分
+        // 20 秒ごとに 1 枚（30 秒以上空けると止まったとみなされて窓を張り直す）。
+        // 0 秒から 280 秒までの 15 枚は遅れ 2ms、上書き 1 枚ずつ
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        for i in 0..15u64 {
+            latency.record(base + ms(i * 20_000), ms(2), 1);
+        }
+        latency.note_frame_time(ms(4));
+        latency.note_idle_pass();
+        latency.note_frame_time(ms(8));
+        assert_eq!(
+            latency.take_summary(base + ms(299_999)),
+            None,
+            "5 分に届かない"
+        );
+
+        latency.record(base + ms(300_000), ms(18), 0);
+        let summary = latency
+            .take_summary(base + ms(300_000))
+            .expect("5 分に達したら出す");
+        assert_eq!(summary.latency.samples, 16);
+        assert!(
+            (summary.latency.average_ms - 3.0).abs() < 1e-3,
+            "{summary:?}"
+        );
+        assert!((summary.latency.max_ms - 18.0).abs() < 1e-3, "{summary:?}");
+        // 15 枚目まで 1 枚ずつ
+        assert_eq!(summary.skipped_frames, 15);
+        assert_eq!(summary.idle_passes, 1);
+        assert_eq!(summary.elapsed, ms(300_000));
+        let rate = summary.frames_per_second();
+        assert!((rate - 16.0 / 300.0).abs() < 1e-6, "{rate}");
+        let frame_time = summary.frame_time.expect("update() は 2 回来た");
+        assert_eq!(frame_time.samples, 2);
+        assert!((frame_time.average_ms - 6.0).abs() < 1e-3, "{frame_time:?}");
+        assert!((frame_time.max_ms - 8.0).abs() < 1e-3, "{frame_time:?}");
+
+        // 次の窓は出したところから数え直す。前の窓の数を持ち越さない
+        latency.record(base + ms(310_000), ms(1), 0);
+        let next = latency.take_summary(base + ms(600_000)).expect("次の 5 分");
+        assert_eq!(next.latency.samples, 1);
+        assert_eq!(next.skipped_frames, 0);
+        assert_eq!(next.idle_passes, 0);
+        assert_eq!(next.frame_time, None);
+    }
+
+    #[test]
+    fn take_summary_restarts_after_a_long_stall() {
+        // 映像が止まっていた間を窓に含めない。含めると取り込んだ速さが低く出る
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        latency.record(base, ms(50), 7);
+        latency.note_frame_time(ms(40));
+
+        // 再開してからは 20 秒ごとに 1 枚（0 秒から 300 秒までの 16 枚）
+        let resumed = base + ms(200_000);
+        for i in 0..15u64 {
+            latency.record(resumed + ms(i * 20_000), ms(2), 0);
+        }
+        assert_eq!(latency.take_summary(resumed + ms(299_999)), None);
+        latency.record(resumed + ms(300_000), ms(2), 0);
+        let summary = latency
+            .take_summary(resumed + ms(300_000))
+            .expect("張り直してから 5 分");
+        assert_eq!(summary.latency.samples, 16);
+        assert!((summary.latency.max_ms - 2.0).abs() < 1e-3, "{summary:?}");
+        assert_eq!(summary.skipped_frames, 0);
+        assert_eq!(summary.frame_time, None);
+    }
+
+    #[test]
+    fn frames_per_second_of_an_empty_window_is_zero() {
+        let summary = DisplaySummaryLog {
+            latency: LatencySummary {
+                average_ms: 1.0,
+                max_ms: 1.0,
+                samples: 1,
+            },
+            elapsed: Duration::ZERO,
+            skipped_frames: 0,
+            idle_passes: 0,
+            frame_time: None,
+        };
+        assert_eq!(summary.frames_per_second(), 0.0);
     }
 }

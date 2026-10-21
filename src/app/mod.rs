@@ -697,6 +697,10 @@ impl eframe::App for CaptureCardViewer {
         let frames = &self.frames;
         self.gpu_yuy2
             .tick(Instant::now(), frame_time, || frames.stats());
+        // 同じ描画時間を、表示の観測値の 5 分の要約（#501）にも数える
+        if let Some(frame_time) = frame_time {
+            self.display_latency.note_frame_time(frame_time);
+        }
         self.update(ui);
     }
 

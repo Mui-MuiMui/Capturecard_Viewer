@@ -381,6 +381,16 @@ impl CaptureCardViewer {
             ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
             self.is_fullscreen = false;
         }
+        // 切り替えた時刻をログに残す（#501）。フルスクリーンの出入りで描画の面（swapchain）が
+        // 作り直されるので、表示の観測値（5 分の要約）の変化と突き合わせるため
+        info!(
+            "{}",
+            if self.is_fullscreen {
+                "フルスクリーンにした"
+            } else {
+                "フルスクリーンを解除した"
+            }
+        );
 
         let text = if self.is_fullscreen {
             Text::FullscreenOn
