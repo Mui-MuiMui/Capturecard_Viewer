@@ -16,7 +16,7 @@
 //! | `draft.rs` | ドラフトの反映（`commit_draft`） |
 //! | `draft_import.rs` | 読み込みと初期化でドラフトを作る（`draft_from_imported` / `draft_from_defaults`） |
 //! | `preset.rs` | プリセットの保存・読み込み・削除（描画を含まない） |
-//! | `video_mode.rs` | デバイス切り替え時に選び直すビデオの既定値 |
+//! | `video_mode.rs` | デバイス切り替え時に選び直すビデオの既定値と、解像度・FPS のコンボに出す選択肢（`resolution_choices` / `fps_choices`） |
 //! | `device_tab.rs` | 「デバイス設定」タブ |
 //! | `screenshot_tab.rs` | 「スクリーンショット設定」タブ |
 //! | `recording_tab.rs` | 「録画」タブ |

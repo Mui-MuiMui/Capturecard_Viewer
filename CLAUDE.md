@@ -161,7 +161,7 @@ cargo build --release
 | `src/ui/draft_import.rs` | `draft_from_imported` / `draft_from_defaults`（読み込みと初期化でドラフトを作る）。`commit_draft` が反映する項目と揃える。描画を含まない |
 | `src/ui/preset.rs` | プリセットの保存・読み込み・削除と「（変更あり）」の判定。描画を含まない |
 | `src/ui/capability.rs` | `CapabilityCache`（デバイス能力の取得状態）と、そこから作る選択肢まわりの表示 |
-| `src/ui/video_mode.rs` | デバイスを切り替えたときに選び直すビデオの既定値（`select_default_video_mode`） |
+| `src/ui/video_mode.rs` | デバイスを切り替えたときに選び直すビデオの既定値（`select_default_video_mode`）と、解像度・FPS のコンボに出す選択肢（`resolution_choices` / `fps_choices`） |
 | `src/ui/device_tab.rs` | 「デバイス設定」タブの描画 |
 | `src/ui/audio_input.rs` | 「デバイス設定」タブの「オーディオ入力デバイス」のコンボボックス（先頭の映像デバイスの音声と WASAPI のデバイス）と、選べるか・項目名（`VideoPinChoice`、#394）。項目名は映像デバイスの名前で、「DirectShow」「音声ピン」の語を見せない（`video_pin_label`、#409） |
 | `src/ui/screenshot_tab.rs` | 「スクリーンショット設定」タブの描画 |

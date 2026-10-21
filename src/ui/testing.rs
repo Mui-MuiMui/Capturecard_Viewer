@@ -77,6 +77,12 @@ impl DialogFixture {
         self
     }
 
+    /// 音声の出力デバイスの一覧を差し替える
+    pub(super) fn with_output_devices(mut self, names: &[&str]) -> Self {
+        self.output_devices = names.iter().map(|name| name.to_string()).collect();
+        self
+    }
+
     /// 「接続状態」タブに渡す接続状態を差し替える
     pub(super) fn with_connection(mut self, connection: ConnectionStatus) -> Self {
         self.connection = connection;
