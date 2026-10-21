@@ -307,7 +307,9 @@ impl CaptureCardViewer {
                         // 受け取る（app::screenshot_sound）。**要求した時点で適用済みに
                         // する。** 結果を待ってからにすると、読み終わるまで 2 秒ごとに
                         // 同じファイルの読み込みを積み増してしまう。
-                        // 読めなかった場合は受け取った側が last を空にして読み直させる
+                        // 読めなかった場合も適用済みのままにし、2 秒ごとには読み直さない。
+                        // 読み直すのは設定が変わったときと、設定ダイアログの「適用」「OK」
+                        // だけ（`retry_failed_sound_load`、#507）
                         self.request_sound_apply(sf);
                         self.last_sound_file = Some(Some(sf.clone()));
                     }
@@ -318,6 +320,9 @@ impl CaptureCardViewer {
                         if let Ok(mut ss) = self.screenshot_manager.lock() {
                             ss.clear_sound();
                             self.last_sound_file = Some(None);
+                            // 読めなかったファイルはもう使わない。選び直したときに
+                            // 同じ理由でも改めて知らせる
+                            self.sound_load_failure = None;
                         } else {
                             warn!(
                                 "スクリーンショットの効果音の反映で screenshot_manager のロックを取得できない"

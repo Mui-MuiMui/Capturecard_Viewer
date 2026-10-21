@@ -4,11 +4,11 @@
 //! 要求ごとに起こすスレッドで行う。再生も 1 回ごとのスレッドで行う。
 //! UI スレッドは結果をチャネルで受け取り、反映と失敗の報告だけをする。
 //! スクリーンショットの保存スレッドと同じ流儀（`docs/design/threads.md`）。
+//! ただし保存スレッドと違い、読み込みスレッドは終了時に待たない。
 //!
 //! 大きなファイルや遅いドライブでは、読み込みとデコードの確認に時間がかかる。
 //! UI スレッドで行うと、適用やテスト再生の瞬間に描画が止まる（Issue #214）。
 
-use super::screenshot::drop_finished_threads;
 use super::CaptureCardViewer;
 use crate::screenshot::ScreenshotError;
 use crate::screenshot_sound;
@@ -87,7 +87,10 @@ impl CaptureCardViewer {
         // 映像が止まっている間は update() の間隔が広がっているので、届いたら起こす。
         // 起こさないとテスト再生の音が次の再描画まで鳴らない
         let waker = self.repaint_waker.clone();
-        let handle = std::thread::spawn(move || {
+        // **`JoinHandle` は持たず、終了時に待たない。** 読むだけで副作用が無く、
+        // ネットワークドライブ上のファイルは読み終わりが読めないため（#507。
+        // スクリーンショットの保存スレッドとは違う。docs/design/threads.md）
+        std::thread::spawn(move || {
             let (data, error) = screenshot_sound::load_sound_data(&path);
             // ログは受け取った UI スレッド側で出す（保存スレッドと同じ）
             if result_tx
@@ -104,11 +107,17 @@ impl CaptureCardViewer {
             }
             waker.wake();
         });
+    }
 
-        // ハンドルを持っておき、終了時に join する。溜め込まないよう、
-        // 積む前に終わった分を落とす
-        drop_finished_threads(&mut self.sound_load_threads);
-        self.sound_load_threads.push(handle);
+    /// 設定ダイアログの「適用」「OK」で呼ぶ。最後に適用した効果音ファイルを
+    /// 読み込めていなければ、続く `apply_settings` で読み直させる。
+    ///
+    /// 2 秒ごとの適用では読み直さない（#507）。ファイルを直した利用者が
+    /// 読み直させる契機はここだけ。設定を変えていなくても押せば読み直す。
+    pub(super) fn retry_failed_sound_load(&mut self) {
+        if should_retry_sound_load(self.sound_load_failure.as_deref()) {
+            self.last_sound_file = None;
+        }
     }
 
     /// 効果音を別スレッドで 1 回鳴らす。撮影とテスト再生の両方がここを通る。
@@ -149,7 +158,7 @@ impl CaptureCardViewer {
     /// なったときはまた知らせる。
     fn apply_sound_output(&mut self, outcome: Result<(), ScreenshotError>) {
         let reason = outcome.err().map(|e| e.to_string());
-        let report = should_report_sound_output(self.sound_output_failure.as_deref(), &reason);
+        let report = should_report_sound_failure(self.sound_output_failure.as_deref(), &reason);
         match &reason {
             Some(reason) if report => {
                 warn!("効果音を鳴らせない: {}", reason);
@@ -192,33 +201,33 @@ impl CaptureCardViewer {
                     // 出力先を開けない失敗が続いている間は、記録をその理由へ戻す
                     // （読めなかった記録が上書きしていることがあるため）。
                     // 報告済みの理由なので、トーストは出さない
+                    self.sound_load_failure = None;
                     match self.sound_output_failure.clone() {
                         None => self.errors.clear(ErrorSource::ScreenshotSound),
-                        Some(reason) => {
-                            let latest = self
-                                .errors
-                                .latest(ErrorSource::ScreenshotSound)
-                                .map(|recorded| recorded.message.as_str());
-                            if latest != Some(reason.as_str()) {
-                                self.errors.record(
-                                    ErrorSource::ScreenshotSound,
-                                    reason,
-                                    Instant::now(),
-                                    Local::now(),
-                                );
-                            }
-                        }
+                        Some(reason) => self.record_sound_failure_quietly(reason),
                     }
                     return;
                 };
-                warn!("効果音の適用: {}", e);
-                // ファイルがあるのに読めなかった場合は、次の適用タイミングで
-                // 読み直す。デコードできないファイルは読み直しても変わらないので
-                // 適用済みのまま（撮影時は無音。docs/design/assets.md）
-                if !matches!(e, ScreenshotError::SoundFileUndecodable { .. }) {
-                    self.last_sound_file = None;
+                // **読めなくても適用済みのまま（`last_sound_file`）にする。** 2 秒ごとの
+                // 適用では読み直さず、読み直すのは設定を変えたときと、設定ダイアログの
+                // 「適用」「OK」だけ（`retry_failed_sound_load`、#507）。読めないファイルの
+                // 撮影時は内蔵音、デコードできないファイルは無音（docs/design/assets.md）
+                //
+                // 同じ理由が続く間は 1 度だけ報告する。「適用」を押し直して同じ理由で
+                // 読めなかったときは、トーストを出さず記録だけをその理由へ戻す
+                let reason = e.to_string();
+                let report = should_report_sound_failure(
+                    self.sound_load_failure.as_deref(),
+                    &Some(reason.clone()),
+                );
+                self.sound_load_failure = Some(reason.clone());
+                if report {
+                    warn!("効果音の適用: {}", reason);
+                    self.report_error(ErrorSource::ScreenshotSound, reason);
+                } else {
+                    debug!("効果音の適用（報告済み）: {}", reason);
+                    self.record_sound_failure_quietly(reason);
                 }
-                self.report_error(ErrorSource::ScreenshotSound, e.to_string());
             }
             SoundLoadPurpose::TestPlay { id, volume } => {
                 let accepted = match self.screenshot_manager.lock() {
@@ -242,35 +251,43 @@ impl CaptureCardViewer {
         }
     }
 
-    /// 進行中の効果音の読み込みがすべて終わるまで待つ。終了時に呼ぶ。
+    /// 報告済みの理由を、トーストを出さずに「接続状態」タブの記録へ戻す。
     ///
-    /// 結果は取り込まない。終了中に反映しても撮影は起きず、テスト再生を
-    /// 鳴らしても閉じる途中で途切れるだけのため。
-    pub(super) fn join_sound_load_threads(&mut self) {
-        let handles = std::mem::take(&mut self.sound_load_threads);
-        if handles.is_empty() {
-            return;
-        }
-
-        debug!("効果音の読み込みスレッド {} 件を待つ", handles.len());
-        for handle in handles {
-            if handle.join().is_err() {
-                // release ビルドは panic = "abort" なのでここには来ない
-                warn!("効果音の読み込みスレッドがパニックした");
-            }
+    /// 記録は発生源ごとに 1 件なので、別の失敗（テスト再生で読めなかった別の
+    /// ファイルなど）が上書きしていることがある。既にその理由なら何もしない。
+    fn record_sound_failure_quietly(&mut self, reason: String) {
+        let latest = self
+            .errors
+            .latest(ErrorSource::ScreenshotSound)
+            .map(|recorded| recorded.message.as_str());
+        if latest != Some(reason.as_str()) {
+            self.errors.record(
+                ErrorSource::ScreenshotSound,
+                reason,
+                Instant::now(),
+                Local::now(),
+            );
         }
     }
 }
 
-/// 再生スレッドの結果を報告するかを決める。
+/// 効果音の失敗（再生の出力先・適用の読み込み）を報告するかを決める。
 ///
-/// `previous` は前回の再生で開けなかった理由（開けていれば `None`）、
-/// `current` は今回の結果。開けなかったうえで、前回と違う理由のときだけ報告する。
-fn should_report_sound_output(previous: Option<&str>, current: &Option<String>) -> bool {
+/// `previous` は前回の失敗の理由（成功していれば `None`）、`current` は今回の
+/// 結果。失敗したうえで、前回と違う理由のときだけ報告する。
+fn should_report_sound_failure(previous: Option<&str>, current: &Option<String>) -> bool {
     match current {
         Some(reason) => previous != Some(reason.as_str()),
         None => false,
     }
+}
+
+/// 設定ダイアログの「適用」「OK」で効果音ファイルを読み直すかを決める。
+///
+/// `load_failure` は最後の適用で読み込めなかった理由（読み込めていれば `None`）。
+/// 読み込めなかったときだけ読み直す。読めているファイルを押すたびに読み直さない。
+fn should_retry_sound_load(load_failure: Option<&str>) -> bool {
+    load_failure.is_some()
 }
 
 #[cfg(test)]
@@ -278,31 +295,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_report_sound_output_first_failure_is_reported() {
-        assert!(should_report_sound_output(None, &Some("NoDevice".into())));
+    fn should_report_sound_failure_first_failure_is_reported() {
+        assert!(should_report_sound_failure(None, &Some("NoDevice".into())));
     }
 
     #[test]
-    fn should_report_sound_output_same_failure_again_is_not_reported() {
+    fn should_report_sound_failure_same_failure_again_is_not_reported() {
         // 出力デバイスが無いまま撮り続けた場合。撮影のたびにトーストを出さない
-        assert!(!should_report_sound_output(
+        assert!(!should_report_sound_failure(
             Some("NoDevice"),
             &Some("NoDevice".into())
         ));
     }
 
     #[test]
-    fn should_report_sound_output_different_failure_is_reported() {
-        assert!(should_report_sound_output(
+    fn should_report_sound_failure_different_failure_is_reported() {
+        assert!(should_report_sound_failure(
             Some("NoDevice"),
             &Some("Busy".into())
         ));
     }
 
     #[test]
-    fn should_report_sound_output_success_is_never_reported() {
+    fn should_report_sound_failure_success_is_never_reported() {
         // 開けたときは報告しない。記録は落とすので、次に開けなくなったらまた知らせる
-        assert!(!should_report_sound_output(Some("NoDevice"), &None));
-        assert!(!should_report_sound_output(None, &None));
+        assert!(!should_report_sound_failure(Some("NoDevice"), &None));
+        assert!(!should_report_sound_failure(None, &None));
+    }
+
+    #[test]
+    fn should_report_sound_failure_same_load_failure_on_retry_is_not_reported() {
+        // 読めないファイルのまま「適用」を押し直した場合（#507）。
+        // 押すたびに同じトーストを出さない
+        let reason = ScreenshotError::SoundFileUnreadable {
+            path: PathBuf::from("Z:/sounds/SS.mp3"),
+            source: "network path not found".to_string(),
+        }
+        .to_string();
+        assert!(!should_report_sound_failure(
+            Some(reason.as_str()),
+            &Some(reason.clone())
+        ));
+    }
+
+    #[test]
+    fn should_report_sound_failure_load_failure_with_other_reason_is_reported() {
+        // 読めなかったファイルを壊れた（デコードできない）ものへ差し替えた場合
+        let path = PathBuf::from("Z:/sounds/SS.mp3");
+        let unreadable = ScreenshotError::SoundFileUnreadable {
+            path: path.clone(),
+            source: "network path not found".to_string(),
+        }
+        .to_string();
+        let undecodable = ScreenshotError::SoundFileUndecodable {
+            path,
+            source: "unrecognized format".to_string(),
+        }
+        .to_string();
+        assert!(should_report_sound_failure(
+            Some(unreadable.as_str()),
+            &Some(undecodable)
+        ));
+    }
+
+    #[test]
+    fn should_retry_sound_load_after_failure_returns_true() {
+        // 直したファイルを「適用」で読み直せること
+        assert!(should_retry_sound_load(Some("読めない")));
+    }
+
+    #[test]
+    fn should_retry_sound_load_after_success_returns_false() {
+        // 読めているファイルは「適用」のたびに読み直さない
+        assert!(!should_retry_sound_load(None));
     }
 }
