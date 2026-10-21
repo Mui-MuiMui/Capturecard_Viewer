@@ -66,7 +66,7 @@ pub use directshow::{
     display_name as directshow_display_name, friendly_name as directshow_friendly_name,
     DirectShowCapture,
 };
-pub use display_latency::{format_display_latency, DisplayLatency};
+pub use display_latency::{format_display_latency, DisplayLatency, DisplaySummaryLog};
 pub use fake::{FakeVideoCapture, FakeVideoOptions};
 pub use frame_buffer::{FrameStats, VideoFrame, VideoFrames};
 pub use frame_format::PixelFormat;
