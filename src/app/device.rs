@@ -313,7 +313,8 @@ impl CaptureCardViewer {
                         // 読めなかった場合も適用済みのままにし、2 秒ごとには読み直さない。
                         // 読み直すのは設定が変わったとき、設定ダイアログの「適用」「OK」
                         // （`retry_failed_sound_load`）、間隔を延ばしながらの自動の読み直し
-                        // （`start_due_sound_retry`）だけ（#507）
+                        // （`start_due_sound_retry`）だけ（#507）。パスが変わっていれば、
+                        // 前のパスの失敗の記録と読み直しの予定は request_sound_apply が捨てる
                         self.request_sound_apply(sf);
                         self.last_sound_file = Some(Some(sf.clone()));
                     }

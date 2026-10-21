@@ -35,6 +35,16 @@ pub(super) struct SoundLoadRetry {
     next_at: Option<Instant>,
 }
 
+/// 最後に適用した効果音ファイルを読み込めなかった記録。
+///
+/// `path` は設定の値（解決する前のパス）。設定のパスが変わったら記録と
+/// 自動の読み直しの予定を捨てるために持つ（`is_other_sound_path`）。
+#[derive(Debug, Clone)]
+pub(super) struct SoundLoadFailure {
+    path: PathBuf,
+    reason: String,
+}
+
 /// 効果音のスレッドから UI スレッドへ返すもの。
 pub(super) enum SoundMessage {
     /// 読み込みの結果（適用・テスト再生）
@@ -56,8 +66,9 @@ pub(super) struct SoundLoadResult {
 
 /// 何のための読み込みか。受け取った側の扱いがまったく違う。
 enum SoundLoadPurpose {
-    /// 撮影時に鳴らす音として反映する。`id` は `ScreenshotManager::begin_load` の番号
-    Apply { id: u64 },
+    /// 撮影時に鳴らす音として反映する。`id` は `ScreenshotManager::begin_load` の番号、
+    /// `path` は読み込んだ設定のパス
+    Apply { id: u64, path: PathBuf },
     /// その場で 1 回鳴らす。適用済みの音には触れない。
     /// `volume` はボタンを押した時点のドラフトの音量
     TestPlay { id: u64, volume: f32 },
@@ -78,7 +89,23 @@ impl CaptureCardViewer {
             warn!("効果音の適用で screenshot_manager のロックを取得できない");
             return;
         };
-        self.spawn_sound_load(path.to_path_buf(), SoundLoadPurpose::Apply { id });
+        // 前に読めなかったのが別のパスなら、その記録と自動の読み直しの予定を捨てる。
+        // 残すと新しいパスの最初の失敗が 30 秒からにならず、古い予定の時刻が
+        // 新しいパスの読み込み中に来て重ねて読み直す
+        if is_other_sound_path(
+            self.sound_load_failure.as_ref().map(|f| f.path.as_path()),
+            path,
+        ) {
+            self.sound_load_failure = None;
+            self.sound_load_retry = None;
+        }
+        self.spawn_sound_load(
+            path.to_path_buf(),
+            SoundLoadPurpose::Apply {
+                id,
+                path: path.to_path_buf(),
+            },
+        );
     }
 
     /// 設定画面の「テスト再生」の読み込みを始める。読み込めたら `volume` で鳴らす。
@@ -132,7 +159,7 @@ impl CaptureCardViewer {
     /// 読み直させる契機。設定を変えていなくても押せば読み直す。自動の読み直しの
     /// 間隔は最初（30 秒）からやり直す。
     pub(super) fn retry_failed_sound_load(&mut self) {
-        if should_retry_sound_load(self.sound_load_failure.as_deref()) {
+        if should_retry_sound_load(self.sound_load_failure_reason()) {
             self.last_sound_file = None;
             self.sound_load_retry = None;
         }
@@ -205,7 +232,13 @@ impl CaptureCardViewer {
             }
             Some(reason) => debug!("効果音を鳴らせない（報告済み）: {}", reason),
             None if self.sound_output_failure.is_some() => {
-                self.errors.clear(ErrorSource::ScreenshotSound);
+                // 適用した効果音ファイルを読めない失敗が残っていれば、記録をその理由へ
+                // 戻す（トーストは出さない）。消すと、自動では読み直さないデコードできない
+                // ファイルの失敗が「適用」まで「接続状態」タブから消えてしまう
+                match self.sound_load_failure_reason().map(str::to_owned) {
+                    Some(reason) => self.record_sound_failure_quietly(reason),
+                    None => self.errors.clear(ErrorSource::ScreenshotSound),
+                }
             }
             None => {}
         }
@@ -220,7 +253,7 @@ impl CaptureCardViewer {
         } = result;
 
         match purpose {
-            SoundLoadPurpose::Apply { id } => {
+            SoundLoadPurpose::Apply { id, path } => {
                 // report_error は self 全体を借りるので、ロックはここで離す
                 let accepted = match self.screenshot_manager.lock() {
                     Ok(mut ss) => ss.finish_load(id, data),
@@ -267,10 +300,13 @@ impl CaptureCardViewer {
                 // 同じ理由で読めなかったときは、トーストを出さず記録だけをその理由へ戻す
                 let reason = e.to_string();
                 let report = should_report_sound_failure(
-                    self.sound_load_failure.as_deref(),
+                    self.sound_load_failure_reason(),
                     &Some(reason.clone()),
                 );
-                self.sound_load_failure = Some(reason.clone());
+                self.sound_load_failure = Some(SoundLoadFailure {
+                    path,
+                    reason: reason.clone(),
+                });
                 if report {
                     warn!("効果音の適用: {}", reason);
                     self.report_error(ErrorSource::ScreenshotSound, reason);
@@ -299,6 +335,13 @@ impl CaptureCardViewer {
                 self.play_sound(data, volume);
             }
         }
+    }
+
+    /// 最後に適用した効果音ファイルを読み込めなかった理由。読み込めていれば `None`。
+    fn sound_load_failure_reason(&self) -> Option<&str> {
+        self.sound_load_failure
+            .as_ref()
+            .map(|failure| failure.reason.as_str())
     }
 
     /// 報告済みの理由を、トーストを出さずに「接続状態」タブの記録へ戻す。
@@ -355,6 +398,15 @@ fn next_sound_retry(error: &ScreenshotError, previous: Option<Duration>) -> Opti
         None => SOUND_RETRY_INITIAL,
         Some(delay) => (delay * 2).min(SOUND_RETRY_MAX),
     })
+}
+
+/// 適用しようとしているパスが、前に読めなかったパスと別かを決める。
+///
+/// `failed` は前に読めなかった設定のパス（読めていれば `None`）。別のパスなら
+/// 読めなかった記録と自動の読み直しの予定を捨てる。同じパスの読み直し
+/// （自動・「適用」）では捨てない。
+fn is_other_sound_path(failed: Option<&Path>, requested: &Path) -> bool {
+    failed.is_some_and(|failed| failed != requested)
 }
 
 /// 自動の読み直しの時刻が来たかを決める。`next_at` が `None`（読み直しの
@@ -510,6 +562,29 @@ mod tests {
         let now = Instant::now();
         assert!(is_sound_retry_due(Some(now), now));
         assert!(is_sound_retry_due(Some(now), now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn is_other_sound_path_changed_path_returns_true() {
+        // 読めなかったファイルから別のファイルへ選び直した場合。古い予定を残さない
+        assert!(is_other_sound_path(
+            Some(Path::new("Z:/sounds/old.mp3")),
+            Path::new("C:/sounds/new.mp3")
+        ));
+    }
+
+    #[test]
+    fn is_other_sound_path_same_path_returns_false() {
+        // 自動の読み直しや「適用」での読み直し。間隔を倍にしていくために予定を残す
+        assert!(!is_other_sound_path(
+            Some(Path::new("Z:/sounds/SS.mp3")),
+            Path::new("Z:/sounds/SS.mp3")
+        ));
+    }
+
+    #[test]
+    fn is_other_sound_path_without_failure_returns_false() {
+        assert!(!is_other_sound_path(None, Path::new("Z:/sounds/SS.mp3")));
     }
 
     #[test]

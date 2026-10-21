@@ -37,7 +37,7 @@ mod worker_timers;
 
 use self::menu::MenuLayout;
 use self::screenshot::ScreenshotResult;
-use self::screenshot_sound::{SoundLoadRetry, SoundMessage};
+use self::screenshot_sound::{SoundLoadFailure, SoundLoadRetry, SoundMessage};
 use self::settings_store::SaveFailureStreak;
 use self::update::UpdateState;
 use self::window::{needs_drag_move_guard, WindowRecordState};
@@ -113,7 +113,8 @@ pub struct CaptureCardViewer {
     // 読み込めていれば None。2 秒ごとの適用では読み直さず、設定ダイアログの
     // 「適用」「OK」と、読めないファイルなら間隔を延ばしながら自動で読み直す。
     // 同じ理由を報告し直さないためにも使う（#507）
-    sound_load_failure: Option<String>,
+    // 設定のパスも一緒に持ち、パスが変わったら捨てる
+    sound_load_failure: Option<SoundLoadFailure>,
     // 読めない効果音ファイルの自動の読み直しの予定。予定が無ければ None
     sound_load_retry: Option<SoundLoadRetry>,
 
