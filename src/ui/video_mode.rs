@@ -29,7 +29,7 @@ use crate::video::{DeviceCapabilities, VideoMode};
 /// **フォーマットだけを入れ直してはいけない。** 解像度と FPS が前のデバイスの
 /// 値のまま残ると、新しいデバイスが対応していない組み合わせが画面に出て、
 /// `start_capture` が `Closest` で寄せた実際の設定と表示が食い違う。
-pub fn select_default_video_mode(
+pub(super) fn select_default_video_mode(
     caps: &DeviceCapabilities,
     previous_resolution: Option<(u32, u32)>,
     previous_fps: Option<u32>,
@@ -105,7 +105,7 @@ fn video_mode_rank(
 /// debug ビルドでは panic、release ビルドでは並びが乱れる（#510）。デバイスが返す値を
 /// そのまま使うので、ありえない大きさでも描画を止めない。画素数が同じものは幅の大きい順
 /// （能力一覧の順序に依らず並びを固定する）
-pub fn resolution_choices(caps: &DeviceCapabilities, format: &str) -> Vec<(u32, u32)> {
+pub(super) fn resolution_choices(caps: &DeviceCapabilities, format: &str) -> Vec<(u32, u32)> {
     let mut resolutions: Vec<(u32, u32)> = caps
         .iter()
         .filter(|capability| capability.name == format)
@@ -117,7 +117,11 @@ pub fn resolution_choices(caps: &DeviceCapabilities, format: &str) -> Vec<(u32, 
 }
 
 /// FPS のコンボに出す選択肢。`format` と `resolution` に対応する FPS を重複なく、大きい順に並べる。
-pub fn fps_choices(caps: &DeviceCapabilities, format: &str, resolution: (u32, u32)) -> Vec<u32> {
+pub(super) fn fps_choices(
+    caps: &DeviceCapabilities,
+    format: &str,
+    resolution: (u32, u32),
+) -> Vec<u32> {
     let mut fps: Vec<u32> = caps
         .iter()
         .filter(|capability| capability.name == format)
