@@ -8,9 +8,11 @@ use super::placeholder::{show_video_placeholder, video_placeholder_text};
 use super::video_overlay::show_video_overlay;
 use super::CaptureCardViewer;
 use crate::status::{self, ErrorSource};
-use crate::video::{GpuContext, GpuYuy2, PixelFormat, VideoFrame, GPU_CONVERT_ENV};
+use crate::video::{
+    DisplaySummaryLog, GpuContext, GpuYuy2, PixelFormat, VideoFrame, GPU_CONVERT_ENV,
+};
 use eframe::egui;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -101,6 +103,47 @@ const VIDEO_TEXTURE_OPTIONS: egui::TextureOptions = egui::TextureOptions {
     mipmap_mode: None,
 };
 
+/// 表示の観測値の 5 分の要約（#501）をログへ出す。描画の CPU 時間は swap / present の
+/// 待ちを含まないので、上書きが増えたのにここが変わらなければ UI スレッドは CPU の外で
+/// 止まっている見込み（`docs/design/video-pipeline.md` の「表示までの遅れの計測」）。
+/// フルスクリーンの出入りで区切った窓（`window.rs` の `toggle_fullscreen`）もここから出す
+pub(super) fn log_display_summary(summary: &DisplaySummaryLog) {
+    let mode = if summary.fullscreen {
+        "フルスクリーン"
+    } else {
+        "ウィンドウ"
+    };
+    let cut = if summary.cut_by_mode_change {
+        "、フルスクリーンの切り替えで区切った"
+    } else {
+        ""
+    };
+    let minimized = if summary.minimized {
+        "。最小化を挟んだので、枚/秒・上書き・新着なしの update() は比べられない"
+    } else {
+        ""
+    };
+    let frame_time = summary.frame_time.map_or_else(
+        || "-".to_string(),
+        |t| format!("平均 {:.2}ms / 最大 {:.2}ms", t.average_ms, t.max_ms),
+    );
+    let s = summary.latency;
+    info!(
+        "表示の観測値（{:.0} 秒、{}{}）: 取り込み {} 枚（{:.1} 枚/秒）、取り込む前に上書き {} 枚、新着なしの update() {} 回、到着→テクスチャ更新 平均 {:.2}ms / 最大 {:.2}ms、描画の CPU 時間 {}{}",
+        summary.elapsed.as_secs_f32(),
+        mode,
+        cut,
+        s.samples,
+        summary.frames_per_second(),
+        summary.skipped_frames,
+        summary.idle_passes,
+        s.average_ms,
+        s.max_ms,
+        frame_time,
+        minimized
+    );
+}
+
 impl CaptureCardViewer {
     /// 新着フレームがあればテクスチャへ取り込む。取り込んだら `true`。
     ///
@@ -157,6 +200,11 @@ impl CaptureCardViewer {
                     "表示までの遅れ（到着→テクスチャ更新、30 秒）: 平均 {:.2}ms、最大 {:.2}ms、{} 枚（取り込む前に上書き {} 枚、新着なしの update() {} 回）",
                     s.average_ms, s.max_ms, s.samples, log.skipped_frames, log.idle_passes
                 );
+            }
+            // 同じ数の 5 分ぶんを INFO で出す（#501）。長時間動かしたときに表示の側が
+            // 時間とともに変わったかを、利用者の手元のログ（既定は INFO）から追うため
+            if let Some(summary) = self.display_latency.take_summary(now) {
+                log_display_summary(&summary);
             }
 
             return true;
