@@ -30,7 +30,7 @@ cargo build --release
 | `src/main.rs` | エントリポイント。ロガーの初期化、`NativeOptions` の組み立て、`run_native` だけ |
 | `src/platform.rs` | Windows 固有処理。日本語フォントの探索、埋め込みアイコンの読み込み、モニタの作業領域の列挙、保存されたウィンドウの大きさ・位置が使えるかの判定、OS の表示言語からの言語の推定、winit のイベント用のウィンドウへ届いた閉じる要求を本来のウィンドウへ回すフック（`redirect_misdirected_close`、#420） |
 | `src/com.rs` | COM（`ComApartment`、STA / MTA をモデル引数で選ぶ）と Media Foundation（`MfPlatform`）の初期化の RAII。DirectShow のバックエンドがデバイスワーカーで STA、録画スレッドが MTA で使う |
-| `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`Default`、1 フレームの処理 `update` の本体（描画と、その間に挟まる設定ダイアログ・ホットキー入力ダイアログの処理）、`eframe::App` 実装（`ui` が `update` を呼ぶ / `on_exit`） |
+| `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`main.rs` が読んだ設定から作る `new`、1 フレームの処理 `update` の本体（描画と、その間に挟まる設定ダイアログ・ホットキー入力ダイアログの処理）、`eframe::App` 実装（`ui` が `update` を呼ぶ / `on_exit`） |
 | `src/app/frame_cycle.rs` | `update` の前後。描画より前の結果の取り込みと起動直後の処理（`begin_frame`）、描画のあとの一時表示・設定の書き出し・次の再描画の予約・ホットキーのリスナーへのウィンドウの状態の受け渡し（`end_frame`）。呼び出しの順に意味がある |
 | `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、テクスチャの取り込みと表示までの遅れの計測（#455）、フェイクデバイスの帯 |
 | `src/app/stats_overlay.rs` | 統計 OSD（情報表示）。出す行の組み立て（`format_stats_lines`）と描画（`show_stats_overlay`） |
@@ -54,13 +54,13 @@ cargo build --release
 | `src/app/backend/fake.rs` | フェイクのバックエンド `FakeBackends`。`FakeVideoCapture` / `FakeAudioCapture` を trait に載せる実装と、環境変数（`CAPTURECARD_VIEWER_FAKE_DEVICES` / `CAPTURECARD_VIEWER_FAKE_SCENARIO`）の解釈 |
 | `src/app/monitor.rs` | 切断や既定デバイスの切り替え、列挙をログへ出す回と「Windows 側にも見えていない」の**判定**（純粋関数）。ワーカーが使う |
 | `src/app/monitor_audio_pin.rs` | 音声の入力が映像デバイスの音声ピンのときの**判定**（純粋関数）。開くか待つか（`decide_pin_readiness`）、映像の開き直しに合わせて音声を開き直すか（`should_resync_pin_audio`）、設定ダイアログで選べるか（基準はドラフトの映像デバイスで `draft_pin_choice`、#425。中身は `pin_choice`。列挙の時点の有無は `presence_of` で引く、#409）、初回の入力の既定を音声ピンにするか（`default_input_uses_pin`）。`monitor.rs` が 800 行に近いので分けた |
-| `src/app/retry.rs` | `ConnectRetry` とバックオフ。「いつ試してよいか」だけを持つ。ワーカーが持つ |
+| `src/app/retry.rs` | `ConnectRetry` とバックオフ。「いつ試してよいか」と、繋がらない間の試行・失敗・列挙のログをどの回に INFO / WARN で出すか（`is_retry_log_milestone`、#506。純粋関数）だけを持つ。ワーカーが持つ |
 | `src/app/capabilities.rs` | デバイス一覧のキャッシュと、デバイス能力・対応設定の取得要求（ワーカーへ流すところまで） |
 | `src/app/screenshot.rs` | 撮影、保存スレッドの管理、結果の取り込み |
 | `src/app/screenshot_sound.rs` | 効果音ファイルの読み込みスレッドの管理と結果の取り込み（適用・テスト再生）、効果音の再生と出力先を開けなかったときの報告 |
 | `src/app/recording.rs` | 録画の開始・停止（`toggle_recording`、右クリックメニューとホットキーが呼ぶ）とリプレイバッファの中身だけの保存（`save_replay`、#438）、リプレイバッファの設定を録画スレッドへ渡す（`sync_replay_buffer`、`apply_settings` が呼ぶ）、録画スレッドから届いた `RecordingEvent` の取り込み（ログ・トースト・`report_error`）、終了時の停止と `Finalize` の待ち合わせ、録画中の印と統計 OSD の録画の行。フィールド（`recorder`）は `app/mod.rs` |
 | `src/app/settings_dialog.rs` | 設定ダイアログの操作の受け止め、インポート / エクスポート / 初期化、プリセットの適用 |
-| `src/app/settings_store.rs` | 設定のデバウンス保存と即時保存、保存の失敗が続くときの再試行の間隔（`save_retry_delay`）とログ・トーストの間引き（`SaveFailureStreak`） |
+| `src/app/settings_store.rs` | 設定のデバウンス保存と即時保存、保存の失敗が続くときの再試行の間隔（`save_retry_delay`）とログ・トーストの間引き（`SaveFailureStreak`）、起動時に設定ファイルを読めなかったことの知らせ（`report_startup_settings`、#505） |
 | `src/app/update.rs` | 更新の確認と適用のスレッドの管理と結果の取り込み（`UpdateState`）、通知ダイアログの操作、前回の更新の残りの後片付け、終了時の新しい exe の起動 |
 | `src/app/hotkeys.rs` | ホットキーの適用と、押されたときのアクションの実行 |
 | `src/app/audio_control.rs` | 音量とミュートの操作、その OSD |
@@ -123,9 +123,9 @@ cargo build --release
 | `src/recording/encoder_setup.rs` | `EncoderMft` を作るときだけ使う補助。エンコーダ MFT の列挙（`enumerate`）、候補を先頭から開く（`open_first`）、H.264 / AAC の入出力の形の組み立て（`configure_video` / `configure_audio`）、ストリームの番号（`stream_ids`） |
 | `src/recording/passthrough.rs` | エンコードなしの Sink Writer `PassthroughWriter`（入力 = 出力の H.264 / AAC を MP4 へまとめるだけ） |
 | `src/recording/bitstream.rs` | H.264 の Annex B の読み取り（IDR か、SPS / PPS）と、AAC の `MF_MT_USER_DATA` の予備の組み立て。純粋関数 |
-| `src/recording/writer.rs` | Media Foundation の Sink Writer（`IMFSinkWriter`）の組み立て（H.264 と AAC の 2 ストリーム）と NV12 / 16bit PCM の書き込み、`Finalize`、エンコーダの遅れ（`backlog`）、使っているエンコーダの名前（`encoder_info`） |
+| `src/recording/writer.rs` | Media Foundation の Sink Writer（`IMFSinkWriter`）の組み立て（H.264 と AAC の 2 ストリーム）と NV12 / 16bit PCM の書き込み、`Finalize`、エンコーダの遅れ（`backlog`）、使っているエンコーダの名前（`encoder_info`）。システムメモリのサンプル（`memory_sample`）と 16bit PCM のサンプル（`pcm_sample`）はリプレイバッファのエンコーダも使う |
 | `src/recording/sample_pool.rs` | Sink Writer とエンコーダ MFT へ渡す NV12 のサンプルの使い回し `SamplePool`。サンプルとバッファの参照が手元の分だけに戻ったものだけを次に使う。判定（`slot_state`）は純粋関数 |
-| `src/recording/convert.rs` | RGB → NV12 の画素変換（BT.709 / BT.601 リミテッド、色差は 2x2 の平均）。純粋関数 |
+| `src/recording/convert.rs` | RGB → NV12 の画素変換（BT.709 / BT.601 リミテッド、色差は 2x2 の平均）。純粋関数。リングから取ったフレームを NV12 へ直して `Arc` を手放す `frame_to_nv12` と、書く大きさ（`recording_size`）も置く（①②と③で共有、#504） |
 | `src/recording/pts.rs` | 映像の PTS（受け取った時刻 − 録画の開始、単調増加）と、音声の PTS の計算（出力フレーム数 → 100ns、`AudioTap` の時刻と累計からの逆算、途切れたときの揃え方、無音で埋める先、ドリフトの測定）と、ドリフトの補正の判定（`decide_drift_correction` と、ずれの窓と基準の `DriftCorrector`、#288）、映像と音声のずれの補正（受け取った時刻に足す `offset_audio_time`、#404）。純粋関数 |
 | `src/recording/audio.rs` | 音声トラック `AudioTrack`（録画スレッドの中だけ）。`AudioTap` のリングから取り出し、録画用の `PassthroughConverter` で 48kHz 2ch へ寄せて 16bit PCM にし、PTS を付けた塊にする。開き直し・溢れ・音声が来ない間の揃え方、ドリフトの補正（ずれを測り、録画用の変換器のレート比を動かす。飛んだら揃え直す）と、停止時のドリフトのログ |
 | `src/recording/file_name.rs` | ファイル名の書式の検め（chrono の `Item::Error`、Windows で使えない文字、末尾の空白・ピリオド、予約デバイス名）と、同じ名前があるときの `_2` `_3` … |

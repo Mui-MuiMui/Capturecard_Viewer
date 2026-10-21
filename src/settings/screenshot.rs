@@ -1,6 +1,7 @@
 //! スクリーンショットの設定（[screenshot]）。出力先・保存形式・JPEG 品質の
 //! 選択肢と serde の補助、保存先の既定値、保存するファイルのパスの決め方。
 
+use super::ui::{MAX_VOLUME, MIN_VOLUME};
 use super::AppSettings;
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ pub struct ScreenshotSettings {
     #[serde(deserialize_with = "deserialize_jpeg_quality")]
     pub jpeg_quality: u8,
     pub sound_file: Option<PathBuf>,
+    #[serde(deserialize_with = "deserialize_sound_volume")]
     pub sound_volume: f32,
     // 旧版のホットキー設定。**読むだけで、保存では書き出さない。**
     //
@@ -131,6 +133,9 @@ pub const MAX_JPEG_QUALITY: u8 = 100;
 // 一致で判定する（docs/design/assets.md）
 pub const DEFAULT_SOUND_FILE: &str = "sound/SS.mp3";
 
+// 効果音の音量の既定値（%、等倍）。`Default` と読み込みの補助の両方が使う（#505）
+const DEFAULT_SOUND_VOLUME: f32 = 100.0;
+
 // 設定ファイルの format に知らない値が書かれていても、設定全体を失わせない。
 // ここでエラーを返すと TOML のパースがファイル単位で失敗し、保存形式と
 // 無関係な項目まで既定値へ戻ってしまう。
@@ -190,6 +195,32 @@ where
     }
     // clamp 済みなので u8 に収まる
     Ok(clamped as u8)
+}
+
+// 効果音の音量も `[ui] volume`（`ui::deserialize_volume`）と同じく NaN・無限大と範囲外を
+// 受け取らない（#505）。`nan` は再生側の `clamp` を素通りして `Player::set_volume` へ
+// 渡っていた。範囲は設定画面のスライダーと同じ 0〜200%。
+fn deserialize_sound_volume<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = f32::deserialize(deserializer)?;
+    if !raw.is_finite() {
+        warn!(
+            "設定の効果音の音量 {} は数値として扱えないので {}% として扱う",
+            raw, DEFAULT_SOUND_VOLUME
+        );
+        return Ok(DEFAULT_SOUND_VOLUME);
+    }
+
+    let clamped = raw.clamp(MIN_VOLUME, MAX_VOLUME);
+    if clamped != raw {
+        warn!(
+            "設定の効果音の音量 {} は範囲外なので {} として扱う",
+            raw, clamped
+        );
+    }
+    Ok(clamped)
 }
 
 // 設定ファイルに書かれた文字列から出力先を決める。
@@ -290,7 +321,7 @@ impl Default for ScreenshotSettings {
             // 見つからなければ埋め込みの既定音へ倒す。
             // None は「効果音を鳴らさない」の意味なので、既定値には使えない
             sound_file: Some(PathBuf::from(DEFAULT_SOUND_FILE)),
-            sound_volume: 100.0,
+            sound_volume: DEFAULT_SOUND_VOLUME,
             // 既定は「旧版の項目が無い」。既定のホットキーは
             // default_hotkeys() が持つ
             legacy_hotkey: None,
@@ -739,5 +770,31 @@ mod tests {
         );
         assert_eq!(screenshot_format_from_str(""), None);
         assert_eq!(screenshot_format_from_str("bmp"), None);
+    }
+
+    // 効果音の音量を書き換えた設定ファイルを読む
+    fn sound_volume_read_as(value: &str) -> f32 {
+        let config = FULL_CONFIG.replace("sound_volume = 50.0", &format!("sound_volume = {value}"));
+        let settings: AppSettings = toml::from_str(&config).expect("読めなければならない");
+        // 他の項目は失われない
+        assert_eq!(settings.ui.volume, 80.0);
+        settings.screenshot.sound_volume
+    }
+
+    #[test]
+    fn app_settings_non_finite_sound_volume_falls_back_to_default() {
+        // Issue #505。NaN のまま再生側の clamp を素通りしていた
+        assert_eq!(sound_volume_read_as("nan"), DEFAULT_SOUND_VOLUME);
+        assert_eq!(sound_volume_read_as("inf"), DEFAULT_SOUND_VOLUME);
+        assert_eq!(sound_volume_read_as("-inf"), DEFAULT_SOUND_VOLUME);
+    }
+
+    #[test]
+    fn app_settings_sound_volume_is_clamped_to_the_slider_range() {
+        assert_eq!(sound_volume_read_as("1000.0"), MAX_VOLUME);
+        assert_eq!(sound_volume_read_as("-10.0"), MIN_VOLUME);
+        // 境界はそのまま
+        assert_eq!(sound_volume_read_as("200.0"), 200.0);
+        assert_eq!(sound_volume_read_as("0.0"), 0.0);
     }
 }

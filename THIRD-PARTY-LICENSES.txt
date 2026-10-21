@@ -27,9 +27,9 @@ file at the root of the repository.
 1. LICENSE OVERVIEW
 ================================================================================
 
-  MIT (MIT License): 223
-  Apache-2.0 (Apache License 2.0): 19
+  MIT (MIT License): 217
   Unicode-3.0 (Unicode License v3): 19
+  Apache-2.0 (Apache License 2.0): 18
   MPL-2.0 (Mozilla Public License 2.0): 12
   Zlib (zlib License): 5
   BSD-3-Clause (BSD 3-Clause "New" or "Revised" License): 4
@@ -72,7 +72,7 @@ allocator-api2 0.2.21
   License: MIT OR Apache-2.0
   Repository: https://github.com/zakarumych/allocator-api2
 
-arboard 3.6.1
+arboard 3.7.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/1Password/arboard
 
@@ -132,11 +132,11 @@ bytes 1.12.1
   License: MIT
   Repository: https://github.com/tokio-rs/bytes
 
-cc 1.4.6
+cc 1.9.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang/cc-rs
 
-cfg-if 1.0.4
+cfg-if 1.0.5
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang/cfg-if
 
@@ -168,10 +168,6 @@ core_detect 1.0.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/thomcc/core_detect
 
-cpal 0.17.3
-  License: Apache-2.0
-  Repository: https://github.com/RustAudio/cpal
-
 cpal 0.18.2
   License: Apache-2.0
   Repository: https://github.com/RustAudio/cpal
@@ -180,7 +176,7 @@ cpufeatures 0.3.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/RustCrypto/utils
 
-crc32fast 1.5.2
+crc32fast 1.5.3
   License: MIT OR Apache-2.0
   Repository: https://github.com/srijs/rust-crc32fast
 
@@ -256,7 +252,7 @@ egui_glow 0.36.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/emilk/egui/tree/main/crates/egui_glow
 
-either 1.18.0
+either 1.19.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/rayon-rs/either
 
@@ -264,11 +260,11 @@ emath 0.36.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/emilk/egui/tree/main/crates/emath
 
-embed-resource 3.0.11
+embed-resource 3.0.12
   License: MIT
   Repository: https://github.com/nabijaczleweli/rust-embed-resource
 
-encoding_rs 0.8.41
+encoding_rs 0.8.42
   License: (Apache-2.0 OR MIT) AND BSD-3-Clause
   Repository: https://github.com/hsivonen/encoding_rs
 
@@ -280,7 +276,7 @@ epaint_default_fonts 0.36.2
   License: (MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0
   Repository: https://github.com/emilk/egui/tree/main/crates/epaint_default_fonts
 
-equivalent 1.0.2
+equivalent 1.0.3
   License: Apache-2.0 OR MIT
   Repository: https://github.com/indexmap-rs/equivalent
 
@@ -304,7 +300,7 @@ fearless_simd 0.4.1
   License: Apache-2.0 OR MIT
   Repository: https://github.com/linebender/fearless_simd
 
-find-msvc-tools 0.1.12
+find-msvc-tools 0.1.15
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang/cc-rs
 
@@ -320,7 +316,7 @@ foldhash 0.2.0
   License: Zlib
   Repository: https://github.com/orlp/foldhash
 
-font-types 0.12.5
+font-types 0.12.7
   License: MIT OR Apache-2.0
   Repository: https://github.com/googlefonts/fontations
 
@@ -468,11 +464,11 @@ kurbo 0.13.1
   License: Apache-2.0 OR MIT
   Repository: https://github.com/linebender/kurbo
 
-lazy_static 1.5.0
+lazy_static 1.5.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang-nursery/lazy-static.rs
 
-libc 0.2.189
+libc 0.2.191
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang/libc
 
@@ -492,7 +488,7 @@ litemap 0.8.3
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-litrs 1.0.0
+litrs 1.0.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/LukasKalbertodt/litrs
 
@@ -527,14 +523,6 @@ mozjpeg 0.10.13
 mozjpeg-sys 2.2.3
   License: IJG AND Zlib AND BSD-3-Clause
   Repository: https://github.com/kornelski/mozjpeg-sys.git
-
-multiversion 0.9.0
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/calebzulawski/multiversion
-
-multiversion-macros 0.9.0
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/calebzulawski/multiversion
 
 multiversion_no_op 1.0.0
   License: Apache-2.0 OR MIT
@@ -692,11 +680,11 @@ rgb 0.8.53
   License: MIT
   Repository: https://github.com/kornelski/rust-rgb
 
-ringbuf 0.5.2
+ringbuf 0.5.3
   License: MIT OR Apache-2.0
   Repository: https://github.com/agerasev/ringbuf.git
 
-rodio 0.22.2
+rodio 0.23.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/RustAudio/rodio
 
@@ -720,7 +708,7 @@ rustversion 1.0.23
   License: MIT OR Apache-2.0
   Repository: https://github.com/dtolnay/rustversion
 
-schannel 0.1.29
+schannel 0.1.30
   License: MIT
   Repository: https://github.com/steffengy/schannel-rs
 
@@ -748,15 +736,15 @@ serde_derive 1.0.229
   License: MIT OR Apache-2.0
   Repository: https://github.com/serde-rs/serde
 
-serde_json 1.0.151
+serde_json 1.0.154
   License: MIT OR Apache-2.0
   Repository: https://github.com/serde-rs/json
 
-serde_spanned 1.1.1
+serde_spanned 1.1.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
-sha2 0.11.0
+sha2 0.11.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/RustCrypto/hashes
 
@@ -776,7 +764,7 @@ skrifa 0.44.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/googlefonts/fontations
 
-smallvec 1.16.1
+smallvec 1.16.3
   License: MIT OR Apache-2.0
   Repository: https://github.com/servo/rust-smallvec
 
@@ -840,19 +828,19 @@ syn 2.0.119
   License: MIT OR Apache-2.0
   Repository: https://github.com/dtolnay/syn
 
-syn 3.0.5
+syn 3.0.9
   License: MIT OR Apache-2.0
   Repository: https://github.com/dtolnay/syn
 
-synstructure 0.13.2
+synstructure 0.14.0
   License: MIT
   Repository: https://github.com/mystor/synstructure
 
-thiserror 2.0.20
+thiserror 2.0.21
   License: MIT OR Apache-2.0
   Repository: https://github.com/dtolnay/thiserror
 
-thiserror-impl 2.0.20
+thiserror-impl 2.0.21
   License: MIT OR Apache-2.0
   Repository: https://github.com/dtolnay/thiserror
 
@@ -860,19 +848,19 @@ tinystr 0.8.4
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-toml 1.1.6+spec-1.1.0
+toml 1.1.8+spec-1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
-toml_datetime 1.1.1+spec-1.1.0
+toml_datetime 1.1.2+spec-1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
-toml_parser 1.1.3+spec-1.1.0
+toml_parser 1.1.5+spec-1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
-toml_writer 1.1.2+spec-1.1.0
+toml_writer 1.1.3+spec-1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
@@ -896,7 +884,7 @@ unicode-general-category 1.1.0
   License: Apache-2.0
   Repository: https://github.com/yeslogic/unicode-general-category
 
-unicode-ident 1.0.24
+unicode-ident 1.0.27
   License: (MIT OR Apache-2.0) AND Unicode-3.0
   Repository: https://github.com/dtolnay/unicode-ident
 
@@ -912,7 +900,7 @@ ureq 3.4.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/algesten/ureq
 
-ureq-proto 0.6.4
+ureq-proto 0.6.5
   License: MIT OR Apache-2.0
   Repository: https://github.com/algesten/ureq-proto
 
@@ -928,7 +916,7 @@ utf8_iter 1.0.4
   License: Apache-2.0 OR MIT
   Repository: https://github.com/hsivonen/utf8_iter
 
-uuid 1.26.1
+uuid 1.28.0
   License: Apache-2.0 OR MIT
   Repository: https://github.com/uuid-rs/uuid
 
@@ -960,7 +948,7 @@ webbrowser 1.2.4
   License: MIT OR Apache-2.0
   Repository: https://github.com/amodm/webbrowser-rs
 
-webpki-root-certs 1.0.9
+webpki-root-certs 1.0.10
   License: CDLA-Permissive-2.0
   Repository: https://github.com/rustls/webpki-roots
 
@@ -1036,23 +1024,11 @@ windows-sys 0.52.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/microsoft/windows-rs
 
-windows-sys 0.59.0
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/microsoft/windows-rs
-
-windows-sys 0.60.2
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/microsoft/windows-rs
-
 windows-sys 0.61.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/microsoft/windows-rs
 
 windows-targets 0.52.6
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/microsoft/windows-rs
-
-windows-targets 0.53.5
   License: MIT OR Apache-2.0
   Repository: https://github.com/microsoft/windows-rs
 
@@ -1064,10 +1040,6 @@ windows_x86_64_msvc 0.52.6
   License: MIT OR Apache-2.0
   Repository: https://github.com/microsoft/windows-rs
 
-windows_x86_64_msvc 0.53.1
-  License: MIT OR Apache-2.0
-  Repository: https://github.com/microsoft/windows-rs
-
 winit 0.30.13
   License: Apache-2.0
   Repository: https://github.com/rust-windowing/winit
@@ -1076,7 +1048,7 @@ winnow 1.0.4
   License: MIT
   Repository: https://github.com/winnow-rs/winnow
 
-winreg 0.55.0
+winreg 0.56.0
   License: MIT
   Repository: https://github.com/gentoo90/winreg-rs
 
@@ -1092,15 +1064,15 @@ yoke 0.8.3
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-yoke-derive 0.8.2
+yoke-derive 0.8.4
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-zerocopy 0.8.57
+zerocopy 0.8.63
   License: BSD-2-Clause OR Apache-2.0 OR MIT
   Repository: https://github.com/google/zerocopy
 
-zerocopy-derive 0.8.57
+zerocopy-derive 0.8.63
   License: BSD-2-Clause OR Apache-2.0 OR MIT
   Repository: https://github.com/google/zerocopy
 
@@ -1108,11 +1080,11 @@ zerofrom 0.1.8
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-zerofrom-derive 0.1.7
+zerofrom-derive 0.1.8
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-zeroize 1.9.0
+zeroize 1.9.1
   License: Apache-2.0 OR MIT
   Repository: https://github.com/RustCrypto/utils
 
@@ -1569,7 +1541,6 @@ Apache License 2.0 (Apache-2.0)
 ================================================================================
 Used by:
   - codespan-reporting 0.13.1
-  - cpal 0.17.3
   - cpal 0.18.2
   - self_cell 1.3.0
 
@@ -2634,7 +2605,7 @@ extern double getTime(void);
 BSD 3-Clause "New" or "Revised" License (BSD-3-Clause)
 ================================================================================
 Used by:
-  - encoding_rs 0.8.41
+  - encoding_rs 0.8.42
 
 // Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
 //
@@ -2696,7 +2667,7 @@ pub(crate) static GB18030_2022_OVERRIDE_BYTES: [[u8; 2]; 18] = [
 BSD 3-Clause "New" or "Revised" License (BSD-3-Clause)
 ================================================================================
 Used by:
-  - encoding_rs 0.8.41
+  - encoding_rs 0.8.42
 
 Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
 
@@ -2776,7 +2747,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 Community Data License Agreement Permissive 2.0 (CDLA-Permissive-2.0)
 ================================================================================
 Used by:
-  - webpki-root-certs 1.0.9
+  - webpki-root-certs 1.0.10
 
 # Community Data License Agreement - Permissive - Version 2.0
 
@@ -2946,39 +2917,6 @@ The `cfg_aliases!` macro uses a lot of the code from [`tectonic_cfg_support::tar
 MIT License (MIT)
 ================================================================================
 Used by:
-  - lazy_static 1.5.0
-
-Copyright (c) 2010 The Rust Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
   - euclid 0.22.14
 
 Copyright (c) 2012-2013 Mozilla Foundation
@@ -3080,9 +3018,9 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - cc 1.4.6
-  - cfg-if 1.0.4
-  - find-msvc-tools 0.1.12
+  - cc 1.9.0
+  - cfg-if 1.0.5
+  - find-msvc-tools 0.1.15
   - jobserver 0.1.35
 
 Copyright (c) 2014 Alex Crichton
@@ -3189,7 +3127,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - uuid 1.26.1
+  - uuid 1.28.0
 
 Copyright (c) 2014 The Rust Project Developers
 Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
@@ -3256,7 +3194,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - either 1.18.0
+  - either 1.19.0
   - itertools 0.15.0
 
 Copyright (c) 2015
@@ -3290,7 +3228,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - winreg 0.55.0
+  - winreg 0.56.0
 
 Copyright (c) 2015 Igor Shaula
 
@@ -3417,7 +3355,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - schannel 0.1.29
+  - schannel 0.1.30
 
 Copyright (c) 2015 steffengy
 
@@ -3653,7 +3591,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - equivalent 1.0.2
+  - equivalent 1.0.3
 
 Copyright (c) 2016--2023
 
@@ -3719,7 +3657,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - sha2 0.11.0
+  - sha2 0.11.1
 
 Copyright (c) 2016-2026 The RustCrypto Project Developers
 Copyright (c) 2016 Artyom Pavlov
@@ -3989,7 +3927,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - smallvec 1.16.1
+  - smallvec 1.16.3
 
 Copyright (c) 2018 The Servo Project Developers
 
@@ -4150,7 +4088,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - zeroize 1.9.0
+  - zeroize 1.9.1
 
 Copyright (c) 2018-2026 The RustCrypto Project Developers
 
@@ -4217,7 +4155,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - ringbuf 0.5.2
+  - ringbuf 0.5.3
 
 Copyright (c) 2019 Alexey Gerasev
 
@@ -4283,7 +4221,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - font-types 0.12.5
+  - font-types 0.12.7
   - read-fonts 0.41.0
   - skrifa 0.44.0
 
@@ -4379,7 +4317,7 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - litrs 1.0.0
+  - litrs 1.0.1
 
 Copyright (c) 2020 Project Developers
 
@@ -4752,11 +4690,11 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - serde_spanned 1.1.1
-  - toml 1.1.6+spec-1.1.0
-  - toml_datetime 1.1.1+spec-1.1.0
-  - toml_parser 1.1.3+spec-1.1.0
-  - toml_writer 1.1.2+spec-1.1.0
+  - serde_spanned 1.1.2
+  - toml 1.1.8+spec-1.1.0
+  - toml_datetime 1.1.2+spec-1.1.0
+  - toml_parser 1.1.5+spec-1.1.0
+  - toml_writer 1.1.3+spec-1.1.0
 
 Copyright (c) Individual contributors
 
@@ -4783,7 +4721,7 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - rodio 0.22.2
+  - rodio 0.23.0
 
 Copyright (c) The Rodio Project Contributors
 
@@ -4816,7 +4754,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - libc 0.2.189
+  - libc 0.2.191
 
 Copyright (c) The Rust Project Developers
 
@@ -4915,7 +4853,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - synstructure 0.13.2
+  - synstructure 0.14.0
 
 Copyright 2016 Nika Layzell
 
@@ -4950,22 +4888,6 @@ FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
 OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
 WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-================================================================================
-Used by:
-  - multiversion-macros 0.9.0
-  - multiversion 0.9.0
-
-Copyright 2019 Caleb Zulawski
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ================================================================================
@@ -5033,7 +4955,7 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - ureq-proto 0.6.4
+  - ureq-proto 0.6.5
 
 Copyright 2022 Martin Algesten
 
@@ -5048,8 +4970,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 MIT License (MIT)
 ================================================================================
 Used by:
-  - zerocopy-derive 0.8.57
-  - zerocopy 0.8.57
+  - zerocopy-derive 0.8.63
+  - zerocopy 0.8.63
 
 Copyright 2023 The Fuchsia Authors
 
@@ -5083,7 +5005,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - encoding_rs 0.8.41
+  - encoding_rs 0.8.42
   - multiversion_no_op 1.0.0
   - utf8_iter 1.0.4
 
@@ -5191,7 +5113,7 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - crc32fast 1.5.2
+  - crc32fast 1.5.3
 
 MIT License
 
@@ -5400,7 +5322,7 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - arboard 3.6.1
+  - arboard 3.7.0
 
 MIT License
 
@@ -5550,15 +5472,11 @@ Used by:
   - windows-result 0.4.1
   - windows-strings 0.5.1
   - windows-sys 0.52.0
-  - windows-sys 0.59.0
-  - windows-sys 0.60.2
   - windows-sys 0.61.2
   - windows-targets 0.52.6
-  - windows-targets 0.53.5
   - windows-threading 0.2.1
   - windows 0.62.2
   - windows_x86_64_msvc 0.52.6
-  - windows_x86_64_msvc 0.53.1
 
 MIT License
 
@@ -5833,6 +5751,7 @@ Used by:
   - adler2 2.0.1
   - displaydoc 0.2.7
   - itoa 1.0.18
+  - lazy_static 1.5.1
   - once_cell 1.21.4
   - paste 1.0.15
   - pin-project-lite 0.2.17
@@ -5844,13 +5763,13 @@ Used by:
   - serde 1.0.229
   - serde_core 1.0.229
   - serde_derive 1.0.229
-  - serde_json 1.0.151
+  - serde_json 1.0.154
   - smol_str 0.2.2
   - syn 2.0.119
-  - syn 3.0.5
-  - thiserror-impl 2.0.20
-  - thiserror 2.0.20
-  - unicode-ident 1.0.24
+  - syn 3.0.9
+  - thiserror-impl 2.0.21
+  - thiserror 2.0.21
+  - unicode-ident 1.0.27
   - utf8-zero 0.8.1
   - zmij 1.0.23
 
@@ -6179,7 +6098,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - embed-resource 3.0.11
+  - embed-resource 3.0.12
 
 The MIT License (MIT)
 
@@ -7365,7 +7284,7 @@ DEALINGS IN THE FONT SOFTWARE.
 Unicode License v3 (Unicode-3.0)
 ================================================================================
 Used by:
-  - unicode-ident 1.0.24
+  - unicode-ident 1.0.27
 
 UNICODE LICENSE V3
 
@@ -7423,9 +7342,9 @@ Used by:
   - potential_utf 0.1.6
   - tinystr 0.8.4
   - writeable 0.6.4
-  - yoke-derive 0.8.2
+  - yoke-derive 0.8.4
   - yoke 0.8.3
-  - zerofrom-derive 0.1.7
+  - zerofrom-derive 0.1.8
   - zerofrom 0.1.8
   - zerotrie 0.2.5
   - zerovec-derive 0.11.6

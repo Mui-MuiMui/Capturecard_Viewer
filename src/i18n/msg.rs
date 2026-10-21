@@ -174,6 +174,52 @@ pub fn settings_location_unavailable(source: impl Display) -> String {
     }
 }
 
+/// 起動時に読めなかった理由のうち、設定ファイルの置き場所が分からないもの（#505）。
+pub fn settings_location_unknown(source: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("置き場所が分からない: {source}"),
+        Language::English => format!("cannot determine its location: {source}"),
+    }
+}
+
+/// 起動時に設定ファイルを読めず、退避して既定値で起動した（#505）。
+///
+/// トーストは定型文（「設定ファイルを読み書きできません」）と合わせて 60 文字で切れる。
+/// 読めなかったことは定型文が言うので繰り返さず、起きたこと（初期化した）を先頭の
+/// 短い 1 文にし、退避先と理由はそのあとへ回す（全文は「接続状態」タブに出る）。
+/// 英語は定型文が長く、残りは 20 文字ほどしかない。
+pub fn settings_load_fell_back(reason: impl Display, backup: Option<impl Display>) -> String {
+    match (language(), backup) {
+        (Language::Japanese, Some(backup)) => {
+            format!("既定値に初期化した。元のファイルは {backup} へ退避（{reason}）")
+        }
+        (Language::Japanese, None) => format!("既定値に初期化した（{reason}）"),
+        (Language::English, Some(backup)) => {
+            format!("Reset to defaults. Original moved to {backup} ({reason})")
+        }
+        (Language::English, None) => format!("Reset to defaults ({reason})"),
+    }
+}
+
+/// 起動時に設定ファイルを読めず、退避もできなかったので自動保存を止めた（#505）。
+/// 文言の組み立て方は `settings_load_fell_back` と同じ。
+pub fn settings_load_file_kept(reason: impl Display, path: Option<impl Display>) -> String {
+    match (language(), path) {
+        (Language::Japanese, Some(path)) => format!(
+            "既定値で起動し、自動保存を止めた。「適用」か「OK」で保存すると再開する。残したファイル: {path}（{reason}）"
+        ),
+        (Language::Japanese, None) => format!(
+            "既定値で起動し、自動保存を止めた。「適用」か「OK」で保存すると再開する（{reason}）"
+        ),
+        (Language::English, Some(path)) => format!(
+            "Auto-save stopped. Defaults in use; save with Apply or OK to resume. File kept: {path} ({reason})"
+        ),
+        (Language::English, None) => format!(
+            "Auto-save stopped. Defaults in use; save with Apply or OK to resume ({reason})"
+        ),
+    }
+}
+
 // ---- 「ホットキー」タブと入力ダイアログ（ui/hotkeys_tab.rs / ui/hotkey_capture.rs） ----
 
 /// 同じキーが割り当てられたアクション名を並べた警告。

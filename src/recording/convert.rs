@@ -5,6 +5,13 @@
 //! メディアタイプに付ける（`writer.rs`）。画面で色空間やレンジを直していても、
 //! 直した結果の RGB から作るのでファイルは画面と同じ見た目になる
 //! （`docs/design/recording.md` の「映像は変換後の RGB を `Arc` のまま渡す」）。
+//!
+//! リングから取ったフレームを NV12 へ直して手放す `frame_to_nv12` も置く。①②の経路
+//! （`super::session`）と③の経路（`super::replay`）が共有する。
+
+use std::sync::Arc;
+
+use crate::video::VideoFrame;
 
 /// RGB → YCbCr の係数。65536 倍の固定小数点（`>> 16` で戻す）。
 ///
@@ -149,9 +156,40 @@ fn chroma(row: &[i32; 3], sum: [i32; 3]) -> u8 {
     (128 + value).clamp(0, 255) as u8
 }
 
+/// 録画へ書く大きさ（`even_size`）。どちらかが 0 になるフレームは書けないので `None`。
+pub(super) fn recording_size(frame: &VideoFrame) -> Option<(usize, usize)> {
+    let (width, height) = even_size(frame.width, frame.height);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// リングから取ったフレームを NV12 へ直し、**`Arc` を手放す。** `size` は
+/// `recording_size` の結果。画素が足りなければ `false`（`FrameSink` が作るフレームでは起きない）。
+///
+/// `Arc` を値で受け取るので、戻った時点で手放してある。リングの中の `Arc` は `FrameSink` の
+/// Vec の回収を妨げるので、Sink Writer やエンコーダへ渡す・作るのはこのあとにする
+/// （`docs/design/recording.md` の「リング」、#504）。`rgb` は YUY2 のまま積まれた
+/// フレームを RGB にする作業域、`nv12` は書き出し先。どちらも使い回す。
+pub(super) fn frame_to_nv12(
+    frame: Arc<VideoFrame>,
+    (width, height): (usize, usize),
+    rgb: &mut Vec<u8>,
+    nv12: &mut Vec<u8>,
+) -> bool {
+    rgb_to_nv12(
+        frame.rgb(rgb),
+        frame.width,
+        frame.height,
+        width,
+        height,
+        Nv12Matrix::for_size(width, height),
+        nv12,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::video::PixelFormat;
 
     /// 75% のカラーバー（白・黄・シアン・緑・マゼンタ・赤・青・黒）の RGB
     const BARS_RGB: [[u8; 3]; 8] = [
@@ -363,5 +401,57 @@ mod tests {
     fn nv12_len_is_one_and_a_half_bytes_per_pixel() {
         assert_eq!(nv12_len(1920, 1080), 3_110_400);
         assert_eq!(nv12_len(2, 2), 6);
+    }
+
+    fn rgb_frame(width: usize, height: usize, data: Vec<u8>) -> VideoFrame {
+        VideoFrame {
+            width,
+            height,
+            data,
+            format: PixelFormat::Rgb24,
+        }
+    }
+
+    #[test]
+    fn recording_size_rounds_down_to_even_and_rejects_zero() {
+        assert_eq!(recording_size(&rgb_frame(5, 3, Vec::new())), Some((4, 2)));
+        assert_eq!(recording_size(&rgb_frame(1, 4, Vec::new())), None);
+        assert_eq!(recording_size(&rgb_frame(4, 1, Vec::new())), None);
+    }
+
+    /// 戻った時点で `Arc` を手放している（リングの枠を塞いだまま Sink Writer やエンコーダを
+    /// 作らない、#504）。変換の結果は `rgb_to_nv12` を直接呼んだのと同じ
+    #[test]
+    fn frame_to_nv12_converts_and_releases_the_frame() {
+        let frame = Arc::new(rgb_frame(3, 2, vec![191; 18]));
+        let weak = Arc::downgrade(&frame);
+        let size = recording_size(&frame).unwrap();
+        let (mut rgb, mut nv12) = (Vec::new(), Vec::new());
+
+        assert!(frame_to_nv12(frame, size, &mut rgb, &mut nv12));
+        assert!(weak.upgrade().is_none());
+
+        let mut expected = Vec::new();
+        assert!(rgb_to_nv12(
+            &[191; 18],
+            3,
+            2,
+            2,
+            2,
+            Nv12Matrix::Bt601,
+            &mut expected
+        ));
+        assert_eq!(nv12, expected);
+    }
+
+    /// 画素が足りないフレームも、変換せずに手放す
+    #[test]
+    fn frame_to_nv12_releases_a_short_frame_without_converting() {
+        let frame = Arc::new(rgb_frame(4, 2, vec![0; 12]));
+        let weak = Arc::downgrade(&frame);
+        let (mut rgb, mut nv12) = (Vec::new(), Vec::new());
+
+        assert!(!frame_to_nv12(frame, (4, 2), &mut rgb, &mut nv12));
+        assert!(weak.upgrade().is_none());
     }
 }

@@ -174,7 +174,7 @@ impl CaptureCardViewer {
     ///
     /// **ここで `save()` を直接呼ばない。** 壊れた設定ファイルが残っている
     /// 場合に書き戻しを止める判断は `mark_settings_dirty` が持っている
-    /// （`AutoSavePolicy`）。以前は `CaptureCardViewer::default` が
+    /// （`AutoSavePolicy`）。以前は `CaptureCardViewer::new` が
     /// `may_write_defaults_on_startup()` で同じ判断をしていた。
     ///
     /// 入力を「映像デバイスの音声」に決めたときは、その場で設定をワーカーへ送り直す

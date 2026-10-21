@@ -9,7 +9,7 @@
 //! トーストを間引く（`SaveFailureStreak`、Issue #317）。
 
 use super::CaptureCardViewer;
-use crate::settings::SettingsError;
+use crate::settings::{LoadOutcome, SettingsError};
 use crate::status::ErrorSource;
 use eframe::egui;
 use log::{debug, error, info, trace, warn};
@@ -114,7 +114,41 @@ fn save_retry_delay(consecutive_failures: u32) -> Duration {
         .min(SETTINGS_SAVE_MAX_RETRY)
 }
 
+/// 起動時に設定ファイルを読めなかったことを知らせる文言。読めたなら None。
+///
+/// その時点の画面の言語で作るので、言語を決めたあとに呼ぶ（`report_startup_settings`）。
+fn startup_load_message(outcome: &LoadOutcome) -> Option<String> {
+    outcome.failure().map(|failure| failure.to_string())
+}
+
 impl CaptureCardViewer {
+    /// 起動時の設定の結果を取り込み、失敗をトーストと「接続状態」タブで知らせる
+    /// （Issue #505）。`new()` で預けた書き戻しの結果（`pending_startup_save`）を
+    /// 取り込み、そのあとで設定ファイルを読めなかったことを知らせる。読めて
+    /// 書き戻せたなら何も出さない。
+    ///
+    /// 呼ぶのは `main.rs` が作って画面の言語を決めた直後の 1 回だけ。**文言はここで
+    /// 初めて作る。** `new()` の中で作ると、英語の設定でも既定の日本語で出る。
+    ///
+    /// 書き戻しの失敗と読み込みの知らせは同じ発生源（`ErrorSource::Settings`）で、
+    /// `ErrorCenter` は直近の 1 件しか持たないので、後から出す読み込みの知らせが残る。
+    /// 読み込みの知らせは `settings_load_notice` にも残し、あとの保存の成功
+    /// （`errors.clear`）や次の失敗では消さない。トーストは後勝ちなので、直後に接続の失敗が届くと上書きされる
+    /// （`docs/design/error-reporting.md`）。優先度は付けず、「接続状態」タブの
+    /// 「設定ファイル」の枠に残ることで読み返せるようにしてある。退避できずに
+    /// 自動保存を止めた知らせは、「適用」「OK」で保存できたときに取り下げる
+    /// （`app::settings_dialog`）
+    pub fn report_startup_settings(&mut self, outcome: &LoadOutcome) {
+        if let Some(result) = self.pending_startup_save.take() {
+            self.note_settings_save_result(result, SaveTrigger::Automatic);
+        }
+        if let Some(message) = startup_load_message(outcome) {
+            self.report_error(ErrorSource::Settings, message);
+            // 保存の成功（`errors.clear`）や次の失敗で消えないよう、別に残す
+            self.settings_load_notice = self.errors.latest(ErrorSource::Settings).cloned();
+        }
+    }
+
     /// 設定に未保存の変更があることを記録する。
     /// 実際の書き出しは `flush_settings_if_due` がまとめて行う。
     pub(super) fn mark_settings_dirty(&mut self) {
@@ -160,7 +194,7 @@ impl CaptureCardViewer {
 
     /// 保存の結果を取り込む。書き出せたかを返す。
     ///
-    /// 起動時の書き戻し（`app/mod.rs` の `CaptureCardViewer::default`）も
+    /// 起動時の書き戻し（`app/mod.rs` の `CaptureCardViewer::new`）も
     /// `SaveTrigger::Automatic` でここを通す。そちらは settings のロックを
     /// 握ったまま保存するため、`save_settings_automatically` を呼べない。
     pub(super) fn note_settings_save_result(
@@ -251,6 +285,9 @@ impl CaptureCardViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::{with_language, Language};
+    use crate::settings::LoadFailure;
+    use std::path::PathBuf;
 
     #[test]
     fn should_flush_settings_no_pending_change_returns_false() {
@@ -422,5 +459,84 @@ mod tests {
         let mut streak = SaveFailureStreak::default();
 
         assert_eq!(streak.record_success(), None);
+    }
+
+    // ---- 起動時の知らせの言語（#505） ----
+    //
+    // 言語は `with_language` でこのスレッドだけ切り替える。`set_language` は
+    // プロセス全体を書き換え、同じプロセスの他のテストを巻き込む（#256）
+
+    #[test]
+    fn startup_load_message_uses_the_language_at_report_time() {
+        // 読み込みの結果は文言を持たず、知らせる時点の言語で作る。英語の設定なら英語
+        let outcome = LoadOutcome::FellBackToDefaults {
+            reason: LoadFailure::Blank,
+            backup: Some(PathBuf::from(r"C:\config\default-config.toml.bak")),
+        };
+
+        let english = with_language(Language::English, || startup_load_message(&outcome))
+            .expect("知らせること");
+        let japanese = with_language(Language::Japanese, || startup_load_message(&outcome))
+            .expect("知らせること");
+
+        assert!(english.contains("Reset to defaults"), "{english}");
+        assert!(english.contains("the file is empty"), "{english}");
+        assert!(!japanese.contains("Reset to defaults"), "{japanese}");
+        assert!(japanese.contains("既定値"), "{japanese}");
+    }
+
+    #[test]
+    fn startup_load_message_gist_fits_in_the_toast() {
+        // トーストは定型文と合わせて 60 文字で切れる。退避先のパスが長くても、
+        // 初期化した / 自動保存を止めた、は切れずに読めること
+        let backup = PathBuf::from(
+            r"C:\Users\someone\AppData\Roaming\capturecard_viewer\config\default-config.toml.bak",
+        );
+        let fell_back = LoadOutcome::FellBackToDefaults {
+            reason: LoadFailure::Unreadable("TOML parse error at line 1, column 5".into()),
+            backup: Some(backup.clone()),
+        };
+        let kept = LoadOutcome::BrokenFileLeftBehind {
+            reason: LoadFailure::Unreadable("TOML parse error at line 1, column 5".into()),
+            path: Some(backup),
+        };
+        let toast = |outcome: &LoadOutcome| {
+            let message = startup_load_message(outcome).expect("知らせること");
+            crate::status::truncate(
+                &crate::status::format_message(ErrorSource::Settings, &message),
+                crate::status::TOAST_MESSAGE_LIMIT,
+            )
+        };
+
+        let cases = [
+            (Language::Japanese, &fell_back, "既定値に初期化した"),
+            (Language::Japanese, &kept, "自動保存を止めた"),
+            (Language::English, &fell_back, "Reset to defaults"),
+            (Language::English, &kept, "Auto-save stopped"),
+        ];
+        for (language, outcome, gist) in cases {
+            let text = with_language(language, || toast(outcome));
+            assert!(text.contains(gist), "{text}");
+        }
+    }
+
+    #[test]
+    fn startup_load_message_is_none_when_loaded() {
+        assert_eq!(startup_load_message(&LoadOutcome::Loaded), None);
+    }
+
+    #[test]
+    fn pending_startup_save_error_uses_the_language_at_report_time() {
+        // `new()` が預ける書き戻しの失敗も型のまま持ち、取り込む時点の言語で文言にする
+        let error = SettingsError::SaveFailed {
+            path: PathBuf::from(r"C:\config\default-config.toml"),
+            source: "access denied".to_string(),
+        };
+
+        let english = with_language(Language::English, || error.to_string());
+        let japanese = with_language(Language::Japanese, || error.to_string());
+
+        assert!(english.starts_with("Cannot write to"), "{english}");
+        assert!(japanese.contains("書き出せない"), "{japanese}");
     }
 }
