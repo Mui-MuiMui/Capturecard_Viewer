@@ -296,7 +296,7 @@ fn status_badge(ui: &mut egui::Ui, text: &str, kind: NoticeKind) {
 /// 「接続状態」を最後に置き、既定は「デバイス設定」のままにしてある。
 /// ダイアログを開く主な目的は設定の変更で、状態の確認は調べたいときだけ
 /// だからで、先頭に置くと毎回そこを通ることになる。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SettingsTab {
     #[default]
     Device,
@@ -453,8 +453,12 @@ pub fn show_settings_dialog(
             // ここでタブの中身を高さいっぱいに広げてしまうと、上のボタン列の
             // 予約が効いていても、タブによってはスクロール領域自体が必要
             // 以上に大きく残る。`auto_shrink` で中身が少ないタブでは
-            // 領域自体を縮める
+            // 領域自体を縮める。
+            // Id はタブごとに分ける。id_salt が無いと親の Id と "scroll_area" から
+            // 作られ、どのタブでも同じになる。スクロール位置がタブ間で共有され、
+            // 長いタブを下へ送ったあと別のタブへ移ると、先頭が隠れたまま開く（#531）
             egui::ScrollArea::vertical()
+                .id_salt(("settings_tab_scroll", selected_tab))
                 .auto_shrink([false, true])
                 .show(ui, |ui| match selected_tab {
                     SettingsTab::Device => show_device_settings_tab(
@@ -635,5 +639,54 @@ mod tests {
         ];
 
         assert_eq!(BTreeSet::from(symbols).len(), symbols.len());
+    }
+
+    // ---- ウィジェットのテスト（egui_kittest、#419） ----
+
+    #[test]
+    fn scroll_position_is_kept_per_tab() {
+        use crate::ui::testing::{dialog_harness, DialogFixture};
+        use egui_kittest::kittest::Queryable;
+
+        // 「録画」タブを下までスクロールしてから「デバイス設定」タブへ移る。
+        // ScrollArea の Id が同じだと、移った先も同じだけ下へずれて見出しが隠れる（#531）
+        let mut harness = dialog_harness(DialogFixture::new(
+            &AppSettings::default(),
+            SettingsTab::Recording,
+            VideoPinChoice::default(),
+            &[],
+        ));
+        harness.run();
+        // タブの見出し（ボタンと同じ文言の 2 つ目）の上端と、タブの並びの下端
+        let heading_top = |harness: &egui_kittest::Harness<'_, DialogFixture>, label: &str| {
+            let nodes: Vec<_> = harness.get_all_by_label(label).collect();
+            let tab_bottom = nodes[0].rect().bottom();
+            (nodes[1].rect().top(), tab_bottom)
+        };
+        for _ in 0..20 {
+            harness
+                .get_by_label(Text::RecordingTabHint.get())
+                .scroll_down();
+            harness.run();
+        }
+        let (recording_top, tab_bottom) = heading_top(&harness, Text::TabRecording.get());
+        assert!(
+            recording_top < tab_bottom,
+            "録画タブがスクロールされているはず（見出し {recording_top}、タブ {tab_bottom}）"
+        );
+
+        harness.state_mut().state.select_tab(SettingsTab::Device);
+        harness.run();
+        let (device_top, tab_bottom) = heading_top(&harness, Text::TabDevice.get());
+        assert!(
+            device_top >= tab_bottom,
+            "デバイス設定タブは先頭から見えるはず（見出し {device_top}、タブ {tab_bottom}）"
+        );
+
+        // 戻ると、録画タブのスクロール位置は残っている
+        harness.state_mut().state.select_tab(SettingsTab::Recording);
+        harness.run();
+        let (back_top, _) = heading_top(&harness, Text::TabRecording.get());
+        assert_eq!(back_top, recording_top);
     }
 }
