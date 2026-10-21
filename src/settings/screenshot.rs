@@ -1,6 +1,7 @@
 //! スクリーンショットの設定（[screenshot]）。出力先・保存形式・JPEG 品質の
 //! 選択肢と serde の補助、保存先の既定値、保存するファイルのパスの決め方。
 
+use super::ui::{DEFAULT_VOLUME, MAX_VOLUME, MIN_VOLUME};
 use super::AppSettings;
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ pub struct ScreenshotSettings {
     #[serde(deserialize_with = "deserialize_jpeg_quality")]
     pub jpeg_quality: u8,
     pub sound_file: Option<PathBuf>,
+    #[serde(deserialize_with = "deserialize_sound_volume")]
     pub sound_volume: f32,
     // 旧版のホットキー設定。**読むだけで、保存では書き出さない。**
     //
@@ -190,6 +192,33 @@ where
     }
     // clamp 済みなので u8 に収まる
     Ok(clamped as u8)
+}
+
+// 効果音の音量も `[ui] volume` と同じく、NaN・無限大と範囲外をそのまま受け取らない
+// （`ui::deserialize_volume` と同じ形、Issue #505）。設定ファイルに `nan` と書かれると
+// 再生側の `clamp` を素通りして NaN のまま `Player::set_volume` へ渡っていた。
+// 範囲は設定画面のスライダーと同じ 0〜200%。
+fn deserialize_sound_volume<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = f32::deserialize(deserializer)?;
+    if !raw.is_finite() {
+        warn!(
+            "設定の効果音の音量 {} は数値として扱えないので {}% として扱う",
+            raw, DEFAULT_VOLUME
+        );
+        return Ok(DEFAULT_VOLUME);
+    }
+
+    let clamped = raw.clamp(MIN_VOLUME, MAX_VOLUME);
+    if clamped != raw {
+        warn!(
+            "設定の効果音の音量 {} は範囲外なので {} として扱う",
+            raw, clamped
+        );
+    }
+    Ok(clamped)
 }
 
 // 設定ファイルに書かれた文字列から出力先を決める。
@@ -739,5 +768,50 @@ mod tests {
         );
         assert_eq!(screenshot_format_from_str(""), None);
         assert_eq!(screenshot_format_from_str("bmp"), None);
+    }
+
+    #[test]
+    fn app_settings_nan_sound_volume_falls_back_to_default() {
+        let config = FULL_CONFIG.replace("sound_volume = 50.0", "sound_volume = nan");
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("NaN の効果音の音量でも読めなければならない");
+
+        assert_eq!(settings.screenshot.sound_volume, DEFAULT_VOLUME);
+        assert_eq!(settings.ui.volume, 80.0);
+    }
+
+    #[test]
+    fn app_settings_infinite_sound_volume_falls_back_to_default() {
+        let config = FULL_CONFIG.replace("sound_volume = 50.0", "sound_volume = inf");
+
+        let settings: AppSettings =
+            toml::from_str(&config).expect("無限大の効果音の音量でも読めなければならない");
+
+        assert_eq!(settings.screenshot.sound_volume, DEFAULT_VOLUME);
+    }
+
+    #[test]
+    fn app_settings_out_of_range_sound_volume_is_clamped() {
+        let above = FULL_CONFIG.replace("sound_volume = 50.0", "sound_volume = 1000.0");
+        let below = FULL_CONFIG.replace("sound_volume = 50.0", "sound_volume = -10.0");
+
+        let above: AppSettings = toml::from_str(&above).expect("範囲外でも読めなければならない");
+        let below: AppSettings = toml::from_str(&below).expect("範囲外でも読めなければならない");
+
+        assert_eq!(above.screenshot.sound_volume, MAX_VOLUME);
+        assert_eq!(below.screenshot.sound_volume, MIN_VOLUME);
+    }
+
+    #[test]
+    fn app_settings_sound_volume_at_the_bounds_is_kept() {
+        let upper = FULL_CONFIG.replace("sound_volume = 50.0", "sound_volume = 200.0");
+        let lower = FULL_CONFIG.replace("sound_volume = 50.0", "sound_volume = 0.0");
+
+        let upper: AppSettings = toml::from_str(&upper).expect("上限は読めなければならない");
+        let lower: AppSettings = toml::from_str(&lower).expect("下限は読めなければならない");
+
+        assert_eq!(upper.screenshot.sound_volume, 200.0);
+        assert_eq!(lower.screenshot.sound_volume, 0.0);
     }
 }
