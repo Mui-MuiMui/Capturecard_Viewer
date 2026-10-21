@@ -60,7 +60,7 @@ cargo build --release
 | `src/app/screenshot_sound.rs` | 効果音ファイルの読み込みスレッドの管理と結果の取り込み（適用・テスト再生）、効果音の再生と出力先を開けなかったときの報告 |
 | `src/app/recording.rs` | 録画の開始・停止（`toggle_recording`、右クリックメニューとホットキーが呼ぶ）とリプレイバッファの中身だけの保存（`save_replay`、#438）、リプレイバッファの設定を録画スレッドへ渡す（`sync_replay_buffer`、`apply_settings` が呼ぶ）、録画スレッドから届いた `RecordingEvent` の取り込み（ログ・トースト・`report_error`）、終了時の停止と `Finalize` の待ち合わせ、録画中の印と統計 OSD の録画の行。フィールド（`recorder`）は `app/mod.rs` |
 | `src/app/settings_dialog.rs` | 設定ダイアログの操作の受け止め、インポート / エクスポート / 初期化、プリセットの適用 |
-| `src/app/settings_store.rs` | 設定のデバウンス保存と即時保存、保存の失敗が続くときの再試行の間隔（`save_retry_delay`）とログ・トーストの間引き（`SaveFailureStreak`） |
+| `src/app/settings_store.rs` | 設定のデバウンス保存と即時保存、保存の失敗が続くときの再試行の間隔（`save_retry_delay`）とログ・トーストの間引き（`SaveFailureStreak`）、起動時に設定ファイルを読めなかったことの知らせ（`report_settings_load`、#505） |
 | `src/app/update.rs` | 更新の確認と適用のスレッドの管理と結果の取り込み（`UpdateState`）、通知ダイアログの操作、前回の更新の残りの後片付け、終了時の新しい exe の起動 |
 | `src/app/hotkeys.rs` | ホットキーの適用と、押されたときのアクションの実行 |
 | `src/app/audio_control.rs` | 音量とミュートの操作、その OSD |

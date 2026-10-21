@@ -77,6 +77,12 @@ impl DialogFixture {
         self
     }
 
+    /// 「接続状態」タブに渡す接続状態を差し替える
+    pub(super) fn with_connection(mut self, connection: ConnectionStatus) -> Self {
+        self.connection = connection;
+        self
+    }
+
     /// 描画の前に毎回、ドラフトから映像デバイスの音声を選べるかを作り直す（#425）
     pub(super) fn with_pin_for_draft(mut self, pin: fn(&AppSettings) -> VideoPinChoice) -> Self {
         self.pin_for_draft = Some(pin);

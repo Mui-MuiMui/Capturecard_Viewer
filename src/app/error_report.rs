@@ -160,6 +160,7 @@ impl CaptureCardViewer {
             video,
             audio,
             screenshot_sound_error: self.status_error(ErrorSource::ScreenshotSound),
+            settings_error: self.status_error(ErrorSource::Settings),
         }
     }
 

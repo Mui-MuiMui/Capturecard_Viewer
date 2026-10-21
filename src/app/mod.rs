@@ -50,7 +50,7 @@ use crate::platform;
 use crate::recording::Recorder;
 use crate::repaint::RepaintWaker;
 use crate::screenshot_sound::ScreenshotManager;
-use crate::settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace};
+use crate::settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace, LoadOutcome};
 use crate::status::ErrorCenter;
 use crate::ui;
 use crate::video::{DisplayLatency, GpuYuy2, SharedColorConversion, VideoAdjustments, VideoFrames};
@@ -229,13 +229,18 @@ pub struct CaptureCardViewer {
     os_language: Language,
 }
 
-impl Default for CaptureCardViewer {
-    fn default() -> Self {
-        let (loaded_settings, load_outcome) = AppSettings::load();
+impl CaptureCardViewer {
+    /// `main.rs` が読み込んだ設定と、その読み込み結果からアプリを作る。
+    ///
+    /// 設定を読むのは `main.rs` の 1 回だけ。ここでもう一度読むと、1 回目で退避した
+    /// ファイルが無いので「読めた」ことになり、読めなかったことを利用者へ知らせる
+    /// 材料（理由・退避先）が失われる（Issue #505）。知らせるのは画面の言語を
+    /// 決めたあとの `report_settings_load`
+    pub fn new(loaded_settings: AppSettings, load_outcome: &LoadOutcome) -> Self {
         // OS の表示言語は起動時に 1 回だけ問い合わせて持っておく。
         //
         // **ここでは `i18n::set_language` を呼ばない。** 言語はプロセス全体で
-        // 共有されるので、`default()` で書き換えると、これを作るテストが
+        // 共有されるので、`new()` で書き換えると、これを作るテストが
         // 同じプロセスの他のテスト（文言を照合するもの）を巻き込む（#256）。
         // 画面の言語を決めるのは起動経路（`main.rs` が作った直後に呼ぶ
         // `apply_language`）

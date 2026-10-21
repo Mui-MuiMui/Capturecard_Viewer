@@ -375,6 +375,12 @@ pub struct ConnectionStatus {
     /// 繋ぎっぱなしのデバイスではないので接続中・未接続の見出しは持たない。
     /// 失敗が無ければ `None` で、タブにも枠を出さない（Issue #356）
     pub screenshot_sound_error: Option<(String, String)>,
+    /// 設定ファイルの直近の失敗（起動時に読めなかった・保存できないなど）。
+    /// `(整形済みの文言, 発生時刻)`。
+    ///
+    /// 起動時に読めなかった知らせ（Issue #505）はトーストが接続の失敗に
+    /// 上書きされうるので、ここに残す。失敗が無ければ `None` で枠を出さない
+    pub settings_error: Option<(String, String)>,
 }
 
 /// フェイクデバイスで動いているときに出す知らせ。実機なら `None`。

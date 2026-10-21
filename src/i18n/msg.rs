@@ -174,6 +174,51 @@ pub fn settings_location_unavailable(source: impl Display) -> String {
     }
 }
 
+/// 起動時に読めなかった理由のうち、設定ファイルの置き場所が分からないもの（#505）。
+pub fn settings_location_unknown(source: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("置き場所が分からない: {source}"),
+        Language::English => format!("cannot determine its location: {source}"),
+    }
+}
+
+/// 起動時に設定ファイルを読めず、退避して既定値で起動した（#505）。
+///
+/// トーストは定型文と合わせて 60 文字で切れるので、起きたことを先に書き、
+/// 退避先と理由は後ろへ回す（全文は「接続状態」タブに出る）。
+pub fn settings_load_fell_back(reason: impl Display, backup: Option<impl Display>) -> String {
+    match (language(), backup) {
+        (Language::Japanese, Some(backup)) => format!(
+            "読み込めないので既定値で起動した。元のファイルは {backup} へ退避した（{reason}）"
+        ),
+        (Language::Japanese, None) => format!("読み込めないので既定値で起動した（{reason}）"),
+        (Language::English, Some(backup)) => format!(
+            "could not be read, so the defaults are used. The original file was moved to {backup} ({reason})"
+        ),
+        (Language::English, None) => {
+            format!("could not be read, so the defaults are used ({reason})")
+        }
+    }
+}
+
+/// 起動時に設定ファイルを読めず、退避もできなかったので自動保存を止めた（#505）。
+pub fn settings_load_file_kept(reason: impl Display, path: Option<impl Display>) -> String {
+    match (language(), path) {
+        (Language::Japanese, Some(path)) => format!(
+            "読み込めず退避もできないので、既定値で起動して自動保存を止めた。設定画面の「適用」か「OK」で保存すると再開する。残したファイル: {path}（{reason}）"
+        ),
+        (Language::Japanese, None) => format!(
+            "読み込めないので、既定値で起動して自動保存を止めた。設定画面の「適用」か「OK」で保存すると再開する（{reason}）"
+        ),
+        (Language::English, Some(path)) => format!(
+            "could not be read or moved aside, so the defaults are used and settings are not saved automatically. Save with Apply or OK in the settings dialog to resume. File kept: {path} ({reason})"
+        ),
+        (Language::English, None) => format!(
+            "could not be read, so the defaults are used and settings are not saved automatically. Save with Apply or OK in the settings dialog to resume ({reason})"
+        ),
+    }
+}
+
 // ---- 「ホットキー」タブと入力ダイアログ（ui/hotkeys_tab.rs / ui/hotkey_capture.rs） ----
 
 /// 同じキーが割り当てられたアクション名を並べた警告。

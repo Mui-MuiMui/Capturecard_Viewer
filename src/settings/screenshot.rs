@@ -770,48 +770,29 @@ mod tests {
         assert_eq!(screenshot_format_from_str("bmp"), None);
     }
 
-    #[test]
-    fn app_settings_nan_sound_volume_falls_back_to_default() {
-        let config = FULL_CONFIG.replace("sound_volume = 50.0", "sound_volume = nan");
-
-        let settings: AppSettings =
-            toml::from_str(&config).expect("NaN の効果音の音量でも読めなければならない");
-
-        assert_eq!(settings.screenshot.sound_volume, DEFAULT_VOLUME);
+    // 効果音の音量を書き換えた設定ファイルを読む
+    fn sound_volume_read_as(value: &str) -> f32 {
+        let config = FULL_CONFIG.replace("sound_volume = 50.0", &format!("sound_volume = {value}"));
+        let settings: AppSettings = toml::from_str(&config).expect("読めなければならない");
+        // 他の項目は失われない
         assert_eq!(settings.ui.volume, 80.0);
+        settings.screenshot.sound_volume
     }
 
     #[test]
-    fn app_settings_infinite_sound_volume_falls_back_to_default() {
-        let config = FULL_CONFIG.replace("sound_volume = 50.0", "sound_volume = inf");
-
-        let settings: AppSettings =
-            toml::from_str(&config).expect("無限大の効果音の音量でも読めなければならない");
-
-        assert_eq!(settings.screenshot.sound_volume, DEFAULT_VOLUME);
+    fn app_settings_non_finite_sound_volume_falls_back_to_default() {
+        // Issue #505。NaN のまま再生側の clamp を素通りしていた
+        assert_eq!(sound_volume_read_as("nan"), DEFAULT_VOLUME);
+        assert_eq!(sound_volume_read_as("inf"), DEFAULT_VOLUME);
+        assert_eq!(sound_volume_read_as("-inf"), DEFAULT_VOLUME);
     }
 
     #[test]
-    fn app_settings_out_of_range_sound_volume_is_clamped() {
-        let above = FULL_CONFIG.replace("sound_volume = 50.0", "sound_volume = 1000.0");
-        let below = FULL_CONFIG.replace("sound_volume = 50.0", "sound_volume = -10.0");
-
-        let above: AppSettings = toml::from_str(&above).expect("範囲外でも読めなければならない");
-        let below: AppSettings = toml::from_str(&below).expect("範囲外でも読めなければならない");
-
-        assert_eq!(above.screenshot.sound_volume, MAX_VOLUME);
-        assert_eq!(below.screenshot.sound_volume, MIN_VOLUME);
-    }
-
-    #[test]
-    fn app_settings_sound_volume_at_the_bounds_is_kept() {
-        let upper = FULL_CONFIG.replace("sound_volume = 50.0", "sound_volume = 200.0");
-        let lower = FULL_CONFIG.replace("sound_volume = 50.0", "sound_volume = 0.0");
-
-        let upper: AppSettings = toml::from_str(&upper).expect("上限は読めなければならない");
-        let lower: AppSettings = toml::from_str(&lower).expect("下限は読めなければならない");
-
-        assert_eq!(upper.screenshot.sound_volume, 200.0);
-        assert_eq!(lower.screenshot.sound_volume, 0.0);
+    fn app_settings_sound_volume_is_clamped_to_the_slider_range() {
+        assert_eq!(sound_volume_read_as("1000.0"), MAX_VOLUME);
+        assert_eq!(sound_volume_read_as("-10.0"), MIN_VOLUME);
+        // 境界はそのまま
+        assert_eq!(sound_volume_read_as("200.0"), 200.0);
+        assert_eq!(sound_volume_read_as("0.0"), 0.0);
     }
 }

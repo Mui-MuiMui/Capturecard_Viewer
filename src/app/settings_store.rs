@@ -9,7 +9,7 @@
 //! トーストを間引く（`SaveFailureStreak`、Issue #317）。
 
 use super::CaptureCardViewer;
-use crate::settings::SettingsError;
+use crate::settings::{LoadOutcome, SettingsError};
 use crate::status::ErrorSource;
 use eframe::egui;
 use log::{debug, error, info, trace, warn};
@@ -115,6 +115,23 @@ fn save_retry_delay(consecutive_failures: u32) -> Duration {
 }
 
 impl CaptureCardViewer {
+    /// 起動時に設定ファイルを読めなかったことを、トーストと「接続状態」タブで知らせる
+    /// （Issue #505）。読めたなら何もしない。
+    ///
+    /// 呼ぶのは `main.rs` が作って画面の言語を決めた直後の 1 回だけ。`new()` の中で
+    /// 呼ばないのは、文言を作るのが言語を決めたあとでなければならないため。
+    ///
+    /// トーストは後勝ちなので、直後に接続の失敗が届くと上書きされる
+    /// （`docs/design/error-reporting.md`）。優先度は付けず、「接続状態」タブの
+    /// 「設定ファイル」の枠に残ることで読み返せるようにしてある。退避できずに
+    /// 自動保存を止めた知らせは、「適用」「OK」で保存できたときに取り下げる
+    /// （`app::settings_dialog`）
+    pub fn report_settings_load(&mut self, outcome: &LoadOutcome) {
+        if let Some(failure) = outcome.failure() {
+            self.report_error(ErrorSource::Settings, failure.to_string());
+        }
+    }
+
     /// 設定に未保存の変更があることを記録する。
     /// 実際の書き出しは `flush_settings_if_due` がまとめて行う。
     pub(super) fn mark_settings_dirty(&mut self) {
@@ -160,7 +177,7 @@ impl CaptureCardViewer {
 
     /// 保存の結果を取り込む。書き出せたかを返す。
     ///
-    /// 起動時の書き戻し（`app/mod.rs` の `CaptureCardViewer::default`）も
+    /// 起動時の書き戻し（`app/mod.rs` の `CaptureCardViewer::new`）も
     /// `SaveTrigger::Automatic` でここを通す。そちらは settings のロックを
     /// 握ったまま保存するため、`save_settings_automatically` を呼べない。
     pub(super) fn note_settings_save_result(

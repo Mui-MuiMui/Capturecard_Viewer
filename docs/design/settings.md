@@ -12,7 +12,19 @@
 
 **空のファイル（0 バイトか空白だけ）も読めなかったものとして退避する**（Issue #317）。全ての構造体に `#[serde(default)]` があるため空の文字列は TOML として読めてしまい、退避されないまま全設定（プリセット・ホットキー・デバイス名）が黙って既定値に戻っていた。保存の途中で止まったファイルがこの形になる。
 
-`load()` は `(AppSettings, LoadOutcome)` を返す。`LoadOutcome` は退避まで含めて成功したかを表し、**退避できなかった場合に起動時の書き戻しを止めるためにある。** 退避に失敗すると読めなかったファイルがディスクに残るので、そこへ既定値を `save()` すると証跡ごと潰れる。`CaptureCardViewer::default` の起動時保存は `may_write_defaults_on_startup()` で守ってあるので、**起動経路に `save()` を足すときは同じ判断を通すこと。** 設定ダイアログからの明示的な保存は、ユーザーの意思なので抑止していない。
+`load()` は `(AppSettings, LoadOutcome)` を返す。`LoadOutcome` は退避まで含めて成功したかを表し、**退避できなかった場合に起動時の書き戻しを止めるためにある。** 退避に失敗すると読めなかったファイルがディスクに残るので、そこへ既定値を `save()` すると証跡ごと潰れる。`CaptureCardViewer::new` の起動時保存は `may_write_defaults_on_startup()` で守ってあるので、**起動経路に `save()` を足すときは同じ判断を通すこと。** 設定ダイアログからの明示的な保存は、ユーザーの意思なので抑止していない。
+
+### 読めなかったことを利用者へ知らせる（Issue #505）
+
+以前は読めなかったこと・退避したこと・自動保存を止めたことをログにしか残さず、利用者は設定が初期化されたことにも、ウィンドウ位置や音量が保存されなくなったことにも気づけなかった。いまは起動後に `report_error(ErrorSource::Settings, ..)` でトーストと設定ダイアログの「接続状態」タブ（「設定ファイル」の枠）へ出す。
+
+- **設定を読むのは `main.rs` の 1 回だけ。** 読んだ設定と `LoadOutcome` を `CaptureCardViewer::new` へ渡す。アプリを作るときにもう一度読むと、1 回目で退避したあとは「ファイルが無い」を読んで `Loaded` になり、知らせる材料が消える（以前はそうなっていた）
+- `LoadOutcome` は理由（`LoadFailure`）と、退避先（`FellBackToDefaults`）または残したファイル（`BrokenFileLeftBehind`）を持つ。`LoadOutcome::failure` が `SettingsError::LoadFellBackToDefaults` / `LoadFailedFileKept` にし、文言はその `Display` が `crate::i18n` から引く。理由も種類で持つ（空のファイルは `LoadFailure::Blank`）。読むのは画面の言語を決める前なので、文言にするのは知らせるときにする
+- 知らせるのは `main.rs` が `apply_language` を呼んだ直後の `report_settings_load`。`new()` の中では文言を作らない（#256）
+- **トーストには優先度を付けない。** 後勝ちなので、直後に接続の失敗が届くと上書きされる（`docs/design/error-reporting.md`）。「接続状態」タブに残るのでそこで読み返せる。トーストは定型文と合わせて 60 文字で切れるので、文言は起きたことを先に書き、退避先と理由を後ろに置く
+- 退避できずに自動保存を止めた知らせは、「適用」「OK」で保存できて自動保存を再開したときに取り下げる（`errors.clear(ErrorSource::Settings)`）。退避して既定値で起動した知らせは、起きた時刻と一緒に残す
+- `AutoSavePolicy` と `may_write_defaults_on_startup` の判定は変えていない
+
 ## 置き場所の差し替え
 
 設定ファイルの置き場所は既定で `%AppData%\capturecard_viewer\config\default-config.toml`（`dirs::config_dir()` の下。1.2.x まで使っていた confy 0.6 と同じ場所で、ずらすと既存の設定ファイルを見失う。`docs/DEPENDENCIES.md` の第 3 段）。環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` にフォルダを指定すると、`<フォルダ>\default-config.toml` を使い、ログもそのフォルダの `logs\` に出す（`src/config_path.rs`、Issue #290）。複数のエージェントが並行してアプリを起動したとき、全員が同じ `%AppData%` の設定ファイルを読み書きして退避と復元が交差し、設定が壊れたため足した。開発者向けで、設定ファイルには保存しない。

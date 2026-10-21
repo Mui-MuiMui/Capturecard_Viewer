@@ -97,7 +97,7 @@ impl CaptureCardViewer {
     /// 開閉の状態は保たれる（`docs/design/i18n.md`）。
     ///
     /// 呼ぶのは、設定ダイアログの「適用」「OK」と、起動時に `main.rs` が
-    /// `CaptureCardViewer` を作った直後の 2 か所だけ。`default()` からは呼ばない
+    /// `CaptureCardViewer` を作った直後の 2 か所だけ。`new()` からは呼ばない
     /// （テストで作ったときにプロセス全体の言語を書き換えないため。#256）。
     pub(crate) fn apply_language(&self) {
         let setting = match self.settings.lock() {
@@ -278,7 +278,13 @@ impl CaptureCardViewer {
             let saved = self.save_settings_now();
             // 明示的な保存が通ったなら、守るべき壊れたファイルはもう無い。
             // 以降はウィンドウ位置や音量の自動保存も通常どおり行う
+            let was_blocked = !self.autosave.is_allowed();
             self.autosave.note_explicit_save(saved);
+            // 起動時に出した「自動保存を止めた」の知らせ（#505）を取り下げる。
+            // 再開した後も「接続状態」タブに残ると、まだ止まっているように読める
+            if was_blocked && self.autosave.is_allowed() {
+                self.errors.clear(ErrorSource::Settings);
+            }
         }
 
         if transition.close {
