@@ -161,11 +161,16 @@ impl AudioStream {
     /// サンプル 1 つを `AudioPinFeed` へ渡す。**ログも出さない**（確保が起きる）。
     pub(super) fn receive(&mut self, sample: &IMediaSample) {
         // 流れの途中で形式が変わると、そのサンプルに新しいメディアタイプが付いてくる。
-        // 差し込み先は差し込んだときの形式と比べて、食い違えば積まない
+        // 差し込み先は差し込んだときの形式と比べて、食い違えば積まない。変わったことは
+        // Atomic へ書くだけで、ログはワーカーが出す（`AudioPinFeed::log_format_changes`）
         if let Ok(pmt) = unsafe { sample.GetMediaType() } {
             if !pmt.is_null() {
-                self.format = unsafe { pin_format_of(&*pmt) };
+                let changed = unsafe { pin_format_of(&*pmt) };
                 unsafe { delete_media_type(pmt) };
+                if changed != self.format {
+                    self.feed.record_format_change(changed);
+                }
+                self.format = changed;
             }
         }
         let Some(format) = self.format else {

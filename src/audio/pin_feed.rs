@@ -210,6 +210,70 @@ struct FeedInner {
     sink: Mutex<Option<PinSink>>,
     /// いまのグラフで受け取った塊の最大のバイト数。0 はまだ受け取っていない
     observed_chunk_bytes: AtomicU32,
+    /// いまのグラフで、流れの途中で形式が変わった回数。`Receive` が足す
+    format_changes: AtomicU32,
+    /// 最後に変わった先の形式（`pack_pin_format`）。`Receive` が書く
+    format_latest: AtomicU64,
+    /// `format_changes` のうち、ワーカーがログへ出し終えたところ
+    format_changes_logged: AtomicU32,
+}
+
+/// 流れの途中で形式が変わったことを、ワーカーがどうログへ出すか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FormatChangeReport {
+    /// 繋いだときの形式と食い違う形式に変わった。その音声は捨てている
+    Mismatch(PinFormat),
+    /// 受け取れない形式に変わった。その音声は捨てている
+    Unsupported,
+    /// 繋いだときの形式に戻った。また積んでいる
+    Restored,
+}
+
+/// 最後に変わった先の形式と繋いだときの形式から、ログの出し方を決める。
+/// 繋いだ記録が無ければ食い違いとして扱う（差し込み先が無いので積んでいない）
+pub(super) fn format_change_report(
+    connected: Option<PinFormat>,
+    latest: Option<PinFormat>,
+) -> FormatChangeReport {
+    match latest {
+        None => FormatChangeReport::Unsupported,
+        Some(latest) if Some(latest) == connected => FormatChangeReport::Restored,
+        Some(latest) => FormatChangeReport::Mismatch(latest),
+    }
+}
+
+const PIN_FORMAT_PRESENT: u64 = 1 << 63;
+const PIN_FORMAT_F32: u64 = 1 << 62;
+
+/// 形式を 1 つの `u64` に詰める。`None`（受け取れない形式）は 0
+fn pack_pin_format(format: Option<PinFormat>) -> u64 {
+    let Some(format) = format else {
+        return 0;
+    };
+    let sample_type = match format.sample_type {
+        PinSampleType::I16 => 0,
+        PinSampleType::F32 => PIN_FORMAT_F32,
+    };
+    PIN_FORMAT_PRESENT
+        | sample_type
+        | (u64::from(format.channels) << 32)
+        | u64::from(format.sample_rate)
+}
+
+/// `pack_pin_format` の逆
+fn unpack_pin_format(packed: u64) -> Option<PinFormat> {
+    if packed & PIN_FORMAT_PRESENT == 0 {
+        return None;
+    }
+    Some(PinFormat {
+        sample_rate: (packed & 0xFFFF_FFFF) as u32,
+        channels: ((packed >> 32) & 0xFFFF) as u16,
+        sample_type: if packed & PIN_FORMAT_F32 != 0 {
+            PinSampleType::F32
+        } else {
+            PinSampleType::I16
+        },
+    })
 }
 
 /// 音声ピンの差し込み口。複製しても同じ中身を指す。
@@ -228,7 +292,68 @@ impl AudioPinFeed {
     pub fn begin_graph(&self) -> u64 {
         self.set_connection(None);
         self.inner.observed_chunk_bytes.store(0, Ordering::Relaxed);
+        // 数え直す。前のグラフの `Receive` はもう止まっている（グラフを捨ててから呼ぶ）
+        self.inner.format_changes.store(0, Ordering::Relaxed);
+        self.inner.format_changes_logged.store(0, Ordering::Relaxed);
+        self.inner.format_latest.store(0, Ordering::Relaxed);
         self.inner.graph.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// 流れの途中で音声ピンの形式が変わった。**音声ピンの `Receive` から呼ぶ。**
+    /// ロックも確保もせず、回数と新しい形式を Atomic へ書くだけ。ログはワーカーが
+    /// `log_format_changes` で出す
+    pub fn record_format_change(&self, format: Option<PinFormat>) {
+        self.inner
+            .format_latest
+            .store(pack_pin_format(format), Ordering::Relaxed);
+        self.inner.format_changes.fetch_add(1, Ordering::Release);
+    }
+
+    /// 前に読んだときから形式が変わっていれば、その回数と最後の形式。
+    /// 読んだところまでを出し終えたことにする。ワーカーだけが呼ぶ
+    pub(super) fn take_format_changes(&self) -> Option<(u32, Option<PinFormat>)> {
+        let count = self.inner.format_changes.load(Ordering::Acquire);
+        let logged = self
+            .inner
+            .format_changes_logged
+            .swap(count, Ordering::Relaxed);
+        if count == logged {
+            return None;
+        }
+        let latest = unpack_pin_format(self.inner.format_latest.load(Ordering::Relaxed));
+        Some((count.wrapping_sub(logged), latest))
+    }
+
+    /// 音声ピンの形式が流れの途中で変わっていたら、ログへ出す。**ワーカーの監視の
+    /// 周期で呼ぶ**（`video::directshow` の `link_state`）。
+    ///
+    /// 繋いだときと食い違う形式のサンプルは `push` が積まずに捨てるので、音が止まる。
+    /// `Receive` の中ではログを出せないので、ここで理由を残す
+    /// （`docs/design/directshow-audio.md` の「`Receive` の中でしないこと」）。
+    pub fn log_format_changes(&self) {
+        let Some((changes, latest)) = self.take_format_changes() else {
+            return;
+        };
+        let connected = self.connection().map(|connection| connection.format);
+        let connected_text = connected.map_or_else(|| "不明".to_string(), PinFormat::summary);
+        match format_change_report(connected, latest) {
+            FormatChangeReport::Mismatch(format) => log::warn!(
+                "音声ピンの形式が繋いだときの形式（{}）から {} に変わったので、その音声を捨てている（前回の確認から {} 回）",
+                connected_text,
+                format.summary(),
+                changes
+            ),
+            FormatChangeReport::Unsupported => log::warn!(
+                "音声ピンの形式が受け取れない形式に変わったので、その音声を捨てている（繋いだときの形式: {}、前回の確認から {} 回）",
+                connected_text,
+                changes
+            ),
+            FormatChangeReport::Restored => log::info!(
+                "音声ピンの形式が繋いだときの形式（{}）に戻った（前回の確認から {} 回）",
+                connected_text,
+                changes
+            ),
+        }
     }
 
     /// 音声ピンを繋いだことを書く。映像のバックエンドがグラフを動かしたあとに呼ぶ
@@ -499,6 +624,70 @@ mod tests {
         let mut read = [0.0f32; 8];
         let count = attachment.consumer.pop_slice(&mut read);
         assert_eq!(&read[..count], &[0.5, -0.5, 0.5, -0.5]);
+    }
+
+    #[test]
+    fn pack_pin_format_round_trips() {
+        let f32_mono = PinFormat {
+            sample_rate: 44_100,
+            channels: 1,
+            sample_type: PinSampleType::F32,
+        };
+        for format in [GC551, f32_mono] {
+            assert_eq!(
+                unpack_pin_format(pack_pin_format(Some(format))),
+                Some(format)
+            );
+        }
+        assert_eq!(pack_pin_format(None), 0);
+        assert_eq!(unpack_pin_format(0), None);
+    }
+
+    #[test]
+    fn take_format_changes_reports_only_new_changes() {
+        let feed = AudioPinFeed::new();
+        feed.begin_graph();
+        assert_eq!(feed.take_format_changes(), None);
+        let mono = PinFormat {
+            channels: 1,
+            ..GC551
+        };
+        feed.record_format_change(Some(mono));
+        feed.record_format_change(None);
+        // 周期の間に 2 回変わったら、回数と最後の形式を 1 度だけ返す
+        assert_eq!(feed.take_format_changes(), Some((2, None)));
+        assert_eq!(feed.take_format_changes(), None);
+        feed.record_format_change(Some(GC551));
+        assert_eq!(feed.take_format_changes(), Some((1, Some(GC551))));
+        // 次のグラフでは数え直す
+        feed.record_format_change(Some(mono));
+        feed.begin_graph();
+        assert_eq!(feed.take_format_changes(), None);
+    }
+
+    #[test]
+    fn format_change_report_compares_with_the_connected_format() {
+        let mono = PinFormat {
+            channels: 1,
+            ..GC551
+        };
+        assert_eq!(
+            format_change_report(Some(GC551), Some(mono)),
+            FormatChangeReport::Mismatch(mono)
+        );
+        assert_eq!(
+            format_change_report(Some(GC551), Some(GC551)),
+            FormatChangeReport::Restored
+        );
+        assert_eq!(
+            format_change_report(Some(GC551), None),
+            FormatChangeReport::Unsupported
+        );
+        // 繋いだ記録が無ければ積んでいないので、食い違いとして出す
+        assert_eq!(
+            format_change_report(None, Some(GC551)),
+            FormatChangeReport::Mismatch(GC551)
+        );
     }
 
     #[test]
