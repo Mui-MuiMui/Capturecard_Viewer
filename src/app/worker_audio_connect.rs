@@ -9,7 +9,7 @@
 
 use super::monitor::{decide_audio_fallback, should_resync_audio_after_video, AudioFallbackAction};
 use super::monitor_audio_pin::{decide_pin_readiness, waits_silently, PinReadiness, PinWait};
-use super::retry::backoff_delay;
+use super::retry::{backoff_delay, connect_attempt_log_level, connect_failure_log_level};
 use super::worker::{DeviceConfig, DeviceEvent};
 use super::worker_connect::failure_message;
 use super::worker_default_input::{input_is_undecided, DefaultInput};
@@ -17,7 +17,7 @@ use super::worker_loop::WorkerState;
 use crate::audio::{self, AudioDirection, AudioError};
 use crate::i18n;
 use crate::settings::AudioInputSource;
-use log::{debug, info, warn};
+use log::{debug, info, log, warn};
 use std::time::Instant;
 
 /// 音声を開いてよいだけの入力デバイスが設定に書かれているか（#304）。
@@ -108,16 +108,21 @@ impl WorkerState {
         };
         self.audio_pin_wait = None;
         let attempt = self.audio_retry.attempts() + 1;
+        // 繋がらない間は毎回出さない（#506、`retry::is_retry_log_milestone`）
+        let attempt_level = connect_attempt_log_level(attempt);
         match pin_graph {
-            Some(graph) => info!(
+            Some(graph) => log!(
+                attempt_level,
                 "音声デバイスへの接続を試す（{} 回目）- 入力: 映像デバイスの音声ピン（グラフ {}）、出力: {:?}、バッファ: {} ms",
                 attempt, graph, output_device_name, buffer_ms
             ),
-            None => info!(
+            None => log!(
+                attempt_level,
                 "音声デバイスへの接続を試す（{} 回目）- 入力: {:?}、出力: {:?}、バッファ: {} ms",
                 attempt, input_device_name, output_device_name, buffer_ms
             ),
         }
+        let started = Instant::now();
 
         // デバイスの列挙は実測で 300ms 前後かかる。設定値との突き合わせに要るのは
         // 最初の 1 回だけなので、再試行のたびには出さない
@@ -167,7 +172,13 @@ impl WorkerState {
 
         match result {
             Ok(()) => {
-                info!("音声デバイスに接続した");
+                // 何回目で繋がったかと、この試行にかかった時間は必ず残す。
+                // 「試す」の行は DEBUG に落ちていることがあるため（#506）
+                info!(
+                    "音声デバイスに接続した（{} 回目、{:.1} ms）",
+                    attempt,
+                    started.elapsed().as_secs_f32() * 1000.0
+                );
                 self.audio_retry.record_success(now);
                 self.audio_not_visible = None;
                 self.last_audio_failure = None;
@@ -184,7 +195,16 @@ impl WorkerState {
                 self.emit(DeviceEvent::AudioConnected);
             }
             Err(e) => {
-                warn!("音声デバイスへの接続に失敗した（{} 回目）: {}", attempt, e);
+                let reason = e.to_string();
+                // 同じ理由が続く間は節目の回だけ WARN にする（#506）。比べる相手は
+                // 直近の失敗の理由で、繋がったら消えるので、次の失敗の 1 回目は必ず出る
+                let reason_changed = self.last_audio_failure.as_deref() != Some(reason.as_str());
+                log!(
+                    connect_failure_log_level(attempt, reason_changed),
+                    "音声デバイスへの接続に失敗した（{} 回目）: {}",
+                    attempt,
+                    reason
+                );
                 // 失敗が続いていることを 1 度だけ記録する。倒す先が無いので、
                 // ここで開く相手が変わることはない
                 if decide_audio_fallback(attempt) == AudioFallbackAction::WarnAndRetry {
@@ -197,7 +217,6 @@ impl WorkerState {
                 // 映像と同じく、開く前に古いストリームを閉じているので記録も消す（#311）
                 self.last_audio_target = None;
                 // 映像と同じく、UI へは日本語の 1 行に落として渡す
-                let reason = e.to_string();
                 self.emit(DeviceEvent::AudioFailed(failure_message(
                     self.audio_not_visible.as_ref(),
                     &reason,

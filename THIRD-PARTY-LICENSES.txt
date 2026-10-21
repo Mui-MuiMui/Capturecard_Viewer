@@ -28,8 +28,8 @@ file at the root of the repository.
 ================================================================================
 
   MIT (MIT License): 217
-  Apache-2.0 (Apache License 2.0): 19
   Unicode-3.0 (Unicode License v3): 19
+  Apache-2.0 (Apache License 2.0): 18
   MPL-2.0 (Mozilla Public License 2.0): 12
   Zlib (zlib License): 5
   BSD-3-Clause (BSD 3-Clause "New" or "Revised" License): 4
@@ -167,10 +167,6 @@ const-oid 0.10.2
 core_detect 1.0.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/thomcc/core_detect
-
-cpal 0.17.3
-  License: Apache-2.0
-  Repository: https://github.com/RustAudio/cpal
 
 cpal 0.18.2
   License: Apache-2.0
@@ -688,7 +684,7 @@ ringbuf 0.5.3
   License: MIT OR Apache-2.0
   Repository: https://github.com/agerasev/ringbuf.git
 
-rodio 0.22.2
+rodio 0.23.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/RustAudio/rodio
 
@@ -1545,7 +1541,6 @@ Apache License 2.0 (Apache-2.0)
 ================================================================================
 Used by:
   - codespan-reporting 0.13.1
-  - cpal 0.17.3
   - cpal 0.18.2
   - self_cell 1.3.0
 
@@ -4726,7 +4721,7 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - rodio 0.22.2
+  - rodio 0.23.0
 
 Copyright (c) The Rodio Project Contributors
 

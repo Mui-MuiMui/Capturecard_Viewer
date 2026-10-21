@@ -54,7 +54,7 @@ cargo build --release
 | `src/app/backend/fake.rs` | フェイクのバックエンド `FakeBackends`。`FakeVideoCapture` / `FakeAudioCapture` を trait に載せる実装と、環境変数（`CAPTURECARD_VIEWER_FAKE_DEVICES` / `CAPTURECARD_VIEWER_FAKE_SCENARIO`）の解釈 |
 | `src/app/monitor.rs` | 切断や既定デバイスの切り替え、列挙をログへ出す回と「Windows 側にも見えていない」の**判定**（純粋関数）。ワーカーが使う |
 | `src/app/monitor_audio_pin.rs` | 音声の入力が映像デバイスの音声ピンのときの**判定**（純粋関数）。開くか待つか（`decide_pin_readiness`）、映像の開き直しに合わせて音声を開き直すか（`should_resync_pin_audio`）、設定ダイアログで選べるか（基準はドラフトの映像デバイスで `draft_pin_choice`、#425。中身は `pin_choice`。列挙の時点の有無は `presence_of` で引く、#409）、初回の入力の既定を音声ピンにするか（`default_input_uses_pin`）。`monitor.rs` が 800 行に近いので分けた |
-| `src/app/retry.rs` | `ConnectRetry` とバックオフ。「いつ試してよいか」だけを持つ。ワーカーが持つ |
+| `src/app/retry.rs` | `ConnectRetry` とバックオフ。「いつ試してよいか」と、繋がらない間の試行・失敗・列挙のログをどの回に INFO / WARN で出すか（`is_retry_log_milestone`、#506。純粋関数）だけを持つ。ワーカーが持つ |
 | `src/app/capabilities.rs` | デバイス一覧のキャッシュと、デバイス能力・対応設定の取得要求（ワーカーへ流すところまで） |
 | `src/app/screenshot.rs` | 撮影、保存スレッドの管理、結果の取り込み |
 | `src/app/screenshot_sound.rs` | 効果音ファイルの読み込みスレッドの管理と結果の取り込み（適用・テスト再生）、効果音の再生と出力先を開けなかったときの報告 |
