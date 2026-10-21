@@ -24,7 +24,7 @@ use log::{debug, info, warn};
 use ringbuf::traits::Consumer;
 
 use super::audio::{AudioChunk, AudioTrack};
-use super::convert::{even_size, rgb_to_nv12, Nv12Matrix};
+use super::convert::{frame_to_nv12, recording_size};
 use super::encoder::{EncodedSample, EncoderError, EncoderMft};
 use super::pts::{units_since, PtsClock, AUDIO_CHANNELS, UNITS_PER_SECOND};
 use super::recorder::{RecordingEvent, RecordingRequest, RecordingTelemetry};
@@ -37,7 +37,7 @@ use super::replay_save::{RecordingKind, SaveReplayBlock};
 use super::sample_pool::{SamplePool, SAMPLE_POOL_CAPACITY};
 use super::session::{check_disk, prepare_folder, MIN_AUDIO_CHUNK_FRAMES};
 use super::storage::{free_bytes, is_short, megabytes, replay_required_bytes};
-use super::writer::{memory_sample, WriterParams};
+use super::writer::{pcm_sample, WriterParams};
 use super::RecordingError;
 use crate::audio::AudioTap;
 use crate::video::{VideoTap, VideoTapConsumer, VIDEO_TAP_CAPACITY};
@@ -315,11 +315,10 @@ impl ReplayPipeline {
             let Some(pts) = self.clock.pts_for(received_at) else {
                 continue;
             };
-            let (width, height) = even_size(frame.width, frame.height);
-            if width == 0 || height == 0 {
+            let Some(even) = recording_size(&frame) else {
                 continue;
-            }
-            let size = (width as u32, height as u32);
+            };
+            let size = (even.0 as u32, even.1 as u32);
             // エンコーダを作り直す・作るときは、`Arc` を手放してからにする。作るのに
             // 時間がかかりうるので、その間リングの枠を塞いで `FrameSink` の Vec の回収を
             // 妨げないため（#504）。いまのエンコーダへ渡すときは、受け付けるかを先に見て、
@@ -329,17 +328,8 @@ impl ReplayPipeline {
                 self.note_video_skipped();
                 continue;
             }
-            let converted = rgb_to_nv12(
-                frame.rgb(&mut self.rgb),
-                frame.width,
-                frame.height,
-                width,
-                height,
-                Nv12Matrix::for_size(width, height),
-                &mut self.nv12,
-            );
             // **`Arc` は NV12 へ直したらすぐ手放す**（`FrameSink` の Vec の回収を妨げないため）
-            drop(frame);
+            let converted = frame_to_nv12(frame, even, &mut self.rgb, &mut self.nv12);
             if reopen {
                 if self.size != Some(size) {
                     self.change_size(size);
@@ -658,14 +648,7 @@ impl ReplayPipeline {
             let pts = chunk.pts + chunk.duration * start as i64 / frames as i64;
             let next = chunk.pts + chunk.duration * end as i64 / frames as i64;
             let samples = &chunk.samples[start * channels..end * channels];
-            // SAFETY: i16 の並びをそのままバイト列として読む（リトルエンディアンの PCM と同じ並び）
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    samples.as_ptr().cast::<u8>(),
-                    std::mem::size_of_val(samples),
-                )
-            };
-            let sample = memory_sample(bytes, pts, next - pts).map_err(|error| {
+            let sample = pcm_sample(samples, pts, next - pts).map_err(|error| {
                 RecordingError::EncoderUnavailable {
                     reason: error.to_string(),
                 }
