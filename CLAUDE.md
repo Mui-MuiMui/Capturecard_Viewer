@@ -135,7 +135,7 @@ cargo build --release
 | `src/hotkey/action.rs` | `HotkeyAction`（ホットキーを割り当てられる操作）と設定ファイル上の名前、溜まった押下の畳み方 |
 | `src/hotkey/parse.rs` | `HotkeyError` と、ホットキー文字列のパース |
 | `src/hotkey/egui_keys.rs` | egui のキー入力 → `KeyChord` の変換（`chord_from_egui` / `chord_from_egui_event`）と、`raw_input_hook` で egui へ渡す前にホットキーのキーを取り除く判定（`remove_hotkey_key_events`、#217、#418）。純粋関数 |
-| `src/hotkey/manager.rs` | `HotkeyManager` の本体（リスナーの起動と停止、ウィンドウ状態の受け渡し）と `BackgroundHotkeyRunner` |
+| `src/hotkey/manager.rs` | `HotkeyManager` の本体（リスナーの起動と停止、止まったリスナーの作り直しとその判定 `decide_listener_restart`（#508）、ウィンドウ状態の受け渡し）と `BackgroundHotkeyRunner` |
 | `src/hotkey/assignments.rs` | `HotkeyAssignmentError`、アクション別の登録（差分適用・一時停止と再開・試し登録）と押下の取り出し |
 | `src/hotkey/listener.rs` | リスナースレッドと共有状態 `ListenerState`、押下の照合とデバウンス |
 | `src/keyboard_hook.rs` | 低レベルキーボードフック（`WH_KEYBOARD_LL`）。キーを奪わずに押下を観測し、リスナースレッドのメッセージループへ渡す。前面でもフックが呼ばれるよう、winit が登録したキーボードの Raw Input を外す（`stop_raw_keyboard_input`） |

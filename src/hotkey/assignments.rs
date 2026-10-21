@@ -1,11 +1,13 @@
 use super::action::folded_repeats;
 use super::egui_keys::{chord_from_egui_event, remove_hotkey_key_events};
+use super::manager::restarts_after_failure;
 use super::parse::parse_hotkey;
 use super::{HotkeyAction, HotkeyError, HotkeyManager};
 use crate::keyboard_hook::KeyChord;
 use eframe::egui;
 use log::{debug, error, info, warn};
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 /// アクションに割り当てたキーを登録できなかった理由。
 ///
@@ -29,6 +31,11 @@ impl HotkeyManager {
     /// ときに再試行する。ログは理由が変わったときだけ出す（同じ失敗が
     /// 2 秒ごとに積もらないように）。
     pub fn apply(&mut self, desired: &BTreeMap<HotkeyAction, String>) {
+        self.apply_at(desired, Instant::now());
+    }
+
+    /// `apply` の本体。`now` はリスナーの作り直しの判定に使う（テストから時刻を渡す）。
+    pub(super) fn apply_at(&mut self, desired: &BTreeMap<HotkeyAction, String>, now: Instant) {
         // 一時停止中は何もしない。ホットキー入力ダイアログを開いている間に
         // 2 秒ごとの再適用が割り込むと、解除したはずのキーが登録し直されてしまう
         if self.paused {
@@ -38,7 +45,10 @@ impl HotkeyManager {
         // リスナーが途中で止まっていたら、フックを使えないのと同じ扱いにする。
         // 登録済みのものを外しておけば、下の登録で理由付きの失敗として記録され、
         // トーストと設定画面に出る
-        self.take_listener_failure();
+        self.take_listener_failure(now);
+        // 止まったリスナーは、間隔と回数の上限の範囲で作り直す（#508）。
+        // 作り直せたら下の登録で割り当てが元に戻る
+        self.recover_listener(now);
 
         // 解除するのは、割り当てが消えたアクションとキーが変わったアクション
         let stale: Vec<HotkeyAction> = self
@@ -257,8 +267,14 @@ impl HotkeyManager {
     /// 登録済みのものを外す。止まっていなければ何もしない。
     ///
     /// 外したものは続く登録で `HookUnavailable` として記録し直される。
-    /// 一度移したら `hook_error` が埋まるので、以降は毎回の登録がそこで失敗する。
-    fn take_listener_failure(&mut self) {
+    /// 移したあとは、`recover_listener` がリスナーを作り直すまで毎回の登録が
+    /// そこで失敗する（#508）。
+    ///
+    /// 動いていた長さはリスナーが止まった時刻で測る。拾った時刻（`now`）で測ると、
+    /// 一時停止中（`apply` が何もしない間）に止まったときに長く動いたと見なされ、
+    /// 作り直しの回数を数え直してしまう。作り直しまでの間隔は拾った時刻から数え、
+    /// 失敗を一度は画面に出す。
+    fn take_listener_failure(&mut self, now: Instant) {
         if self.hook_error.is_some() {
             return;
         }
@@ -271,11 +287,16 @@ impl HotkeyManager {
                 None
             }
         };
-        let Some(failure) = failure else {
+        let Some((failure, stopped_at)) = failure else {
             return;
         };
 
         self.hook_error = Some(failure);
+        let ran_for = self.recovery.started_at.map_or(Duration::ZERO, |at| {
+            stopped_at.saturating_duration_since(at)
+        });
+        self.recovery.restarts = restarts_after_failure(self.recovery.restarts, ran_for);
+        self.recovery.failed_at = Some(now);
         let actions: Vec<HotkeyAction> = self.registered.keys().copied().collect();
         for action in actions {
             self.unregister(action);
@@ -642,7 +663,7 @@ mod tests {
             .state
             .lock()
             .expect("ロックが毒されていないこと")
-            .listener_failure = Some(failure.clone());
+            .listener_failure = Some((failure.clone(), Instant::now()));
         manager.apply(&desired);
 
         assert!(manager.registered.is_empty());
