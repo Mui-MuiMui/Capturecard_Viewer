@@ -93,7 +93,7 @@ cargo build --release
 | `src/video/gpu_yuy2_gl.rs` | その GL の部分 `GlConverter`（glow で描くとき）。シェーダー（`src/video/shaders/` の GLSL）のコンパイル、YUY2 のアップロード、フレームバッファ経由で egui のテクスチャへ描く、起動時の自己診断（CPU の変換と全画素の突き合わせ）。`GpuFailure` と自己診断の入力・係数表は wgpu の版と共有 |
 | `src/video/gpu_yuy2_wgpu.rs` | その wgpu の部分 `WgpuConverter`（wgpu で描くとき、#492）。WGSL（`src/video/shaders/yuy2_to_rgb.wgsl`）のパイプライン、YUY2 のアップロード、自前のテクスチャへ描いて egui のテクスチャへ写す、起動時の自己診断、wgpu のエラーをエラースコープで捕まえる（`with_error_scope`） |
 | `src/video/gpu_watch.rs` | GPU で変換しているときの性能の見張り `SlowPaintWatch`（描画が到着間隔の 2 倍を 5 秒、猶予 3 秒）とソフトウェア描画の見分け（`is_software_renderer`）。判定だけの純粋関数 |
-| `src/video/display_latency.rs` | 表示までの遅れ（フレームの到着 → テクスチャの更新、#455）の集計 `DisplayLatency`。直近 1 秒の平均・最大と 30 秒ごとのログの窓。UI スレッドだけが持つ |
+| `src/video/display_latency.rs` | 表示までの遅れ（フレームの到着 → テクスチャの更新、#455）の集計 `DisplayLatency`。直近 1 秒の平均・最大と 30 秒ごとのログの窓、5 分ごとに INFO で出す表示の観測値の要約（`take_summary`。フルスクリーンの出入りで区切る `cut_summary`、#501）。UI スレッドだけが持つ |
 | `src/video/tap.rs` | 録画へ映像を回す差し込み口 `VideoTap`。録画中だけ、`FrameSink` が画面へ置いたのと同じ `Arc<VideoFrame>` を容量 3 のリングへ積む（待たない `try_lock`、満杯なら捨てて数える）。Vec の回収に失敗した回数も録画中だけ数える |
 | `src/audio/mod.rs` | 音声モジュールの入口。`ActiveAudio` / `AudioDirection` / `AudioError` と能力キャッシュのキー（`cache_key` / `device_name_from_key`）、外から使う経路（`crate::audio::...`）の `pub use` |
 | `src/audio/capabilities.rs` | デバイスの対応設定の取得（`query_capabilities`）と、設定画面に出す選択肢の組み立て（`selectable_*` / `ChoiceSource`） |
