@@ -191,6 +191,9 @@ pub(super) struct WorkerState {
     /// 列挙をログへ出したときの失敗回数 `(映像, 音声)`。同じ回数のまま
     /// 何度も出さないための記録（`monitor::should_log_enumeration`）
     pub(super) enumeration_logged_failures: (u32, u32),
+    /// 経路ごとに、前回ログへ出した列挙の結果（台数と名前、または理由）。
+    /// 変わらない間は節目の回だけ INFO にするために持つ（#506）
+    pub(super) last_enumeration_listing: HashMap<&'static str, String>,
     /// 設定のデバイスが Windows 側にも見えていないか（#236）。列挙のたびに
     /// 判定し直し、接続できたら消す。失敗の理由に案内として添える
     pub(super) video_not_visible: Option<DeviceNotVisible>,
@@ -242,6 +245,7 @@ impl WorkerState {
             last_audio_counters_log: None,
             startup_enumeration_pending: false,
             enumeration_logged_failures: (0, 0),
+            last_enumeration_listing: HashMap::new(),
             video_not_visible: None,
             audio_not_visible: None,
             last_video_failure: None,
@@ -397,6 +401,50 @@ pub(super) mod testing {
             ),
             auto_reconnect: false,
         }
+    }
+
+    /// テストのスレッドで出たログを、レベルと本文の組で取り出すロガー（#506）。
+    ///
+    /// ロガーはテストのバイナリ全体で 1 つしか登録できないので、記録する先を
+    /// スレッドごとに分ける。`capture_logs` の中のスレッドだけが記録し、
+    /// 並行して走る他のテストのログは混ざらない。
+    struct CaptureLogger;
+
+    thread_local! {
+        static CAPTURED: std::cell::RefCell<Option<Vec<(log::Level, String)>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    impl log::Log for CaptureLogger {
+        fn enabled(&self, _metadata: &log::Metadata) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record) {
+            CAPTURED.with(|captured| {
+                if let Some(lines) = captured.borrow_mut().as_mut() {
+                    lines.push((record.level(), record.args().to_string()));
+                }
+            });
+        }
+
+        fn flush(&self) {}
+    }
+
+    static CAPTURE_LOGGER: CaptureLogger = CaptureLogger;
+    static INSTALL_CAPTURE_LOGGER: std::sync::Once = std::sync::Once::new();
+
+    /// `f` を走らせ、その間にこのスレッドで出たログを全レベル分返す。
+    /// ワーカーの `tick` はテストのスレッドの上で回るので、そのまま拾える。
+    pub(in crate::app) fn capture_logs(f: impl FnOnce()) -> Vec<(log::Level, String)> {
+        INSTALL_CAPTURE_LOGGER.call_once(|| {
+            if log::set_logger(&CAPTURE_LOGGER).is_ok() {
+                log::set_max_level(log::LevelFilter::Trace);
+            }
+        });
+        CAPTURED.with(|captured| *captured.borrow_mut() = Some(Vec::new()));
+        f();
+        CAPTURED.with(|captured| captured.borrow_mut().take().unwrap_or_default())
     }
 }
 

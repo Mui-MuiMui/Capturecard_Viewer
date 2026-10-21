@@ -5,8 +5,11 @@
 //! 期限を見て、来ていれば 1 回だけ試す。実際にデバイスを開くのは
 //! `super::worker_connect`、途絶したかを判定するのは `super::monitor`
 //! （純粋関数だけを持ち、再試行の要求自体は呼び出し元の `super::worker_loop`
-//! が行う）。ここは「いつ試してよいか」だけを持つ。
+//! が行う）。ここは「いつ試してよいか」と、再試行のログをどの回に
+//! 目立たせるか（`is_retry_log_milestone`、#506）だけを持つ。
 
+use log::Level;
+use std::fmt::Display;
 use std::time::{Duration, Instant};
 
 /// 接続に失敗したあと、最初に待つ時間。
@@ -52,6 +55,82 @@ pub(super) fn backoff_delay(attempt: u32) -> Duration {
     match CONNECT_BACKOFF_BASE.checked_mul(1u32 << shift) {
         Some(delay) if delay < CONNECT_BACKOFF_MAX => delay,
         _ => CONNECT_BACKOFF_MAX,
+    }
+}
+
+/// 毎回 INFO / WARN で出す、失敗の続き始めの回数。0.2 + 0.4 + 0.8 秒の
+/// バックオフが伸びていく様子までは、1 回ずつログで追えるようにする
+const RETRY_LOG_EVERY_UNTIL: u32 = 3;
+
+/// ここまでは 10 回ごと、ここから先は 100 回ごとに出す境目
+const RETRY_LOG_SPARSE_FROM: u32 = 100;
+
+/// 連続 `attempt` 回目の接続の試行を、ログで目立たせる（INFO / WARN で出す）回か（#506）。
+///
+/// 1〜3 回目・5 回目・10 回目から 100 回目までは 10 回ごと・以後 100 回ごと。
+/// **毎回は出さない。** 再試行は最大 5 秒間隔で繋がるまで続くので、毎回だと
+/// 1 台につき 1 日 1.7 万回の試行と失敗がログに並ぶ。間隔が 5 秒で頭打ちに
+/// なってからは、10 回ごとで 50 秒に 1 度、100 回ごとで 8 分強に 1 度になる。
+///
+/// 列挙の節目（`monitor::is_enumeration_milestone`、5 回目・以後 10 回ごと）とは、
+/// 100 回目までは同じ回になる。同じ回に試行・失敗・列挙が並ぶので、読むときに
+/// 突き合わせやすい。100 回目より後は、列挙は 10 回ごとに行うが、こちらの節目は
+/// 100 回ごとになる。間の回の列挙のログは、結果が変わった経路だけ INFO で出る
+/// （`enumeration_log_level`）。
+/// 出さない回も捨てはせず、DEBUG で残す。0（まだ試していない）は対象外。
+pub(super) fn is_retry_log_milestone(attempt: u32) -> bool {
+    match attempt {
+        0 => false,
+        1..=RETRY_LOG_EVERY_UNTIL | 5 => true,
+        _ if attempt <= RETRY_LOG_SPARSE_FROM => attempt.is_multiple_of(10),
+        _ => attempt.is_multiple_of(RETRY_LOG_SPARSE_FROM),
+    }
+}
+
+/// 「接続を試す（N 回目）」を出すレベル。節目なら INFO、それ以外は DEBUG
+pub(super) fn connect_attempt_log_level(attempt: u32) -> Level {
+    if is_retry_log_milestone(attempt) {
+        Level::Info
+    } else {
+        Level::Debug
+    }
+}
+
+/// 「接続に失敗した（N 回目）」を出すレベル。節目か、理由が前回と変わったら
+/// WARN、それ以外は DEBUG。
+///
+/// **理由が変わった回は節目でなくても出す。** 「見つからない」から「使用中」へ
+/// 変わったなら、挿し直されたが別のアプリが掴んでいる、のように状況が動いている。
+/// 同じ理由が続く間の WARN を間引いても、調べるのに要る情報は落ちない。
+pub(super) fn connect_failure_log_level(attempt: u32, reason_changed: bool) -> Level {
+    if reason_changed || is_retry_log_milestone(attempt) {
+        Level::Warn
+    } else {
+        Level::Debug
+    }
+}
+
+/// 列挙の結果 1 経路ぶんを、ログに出す文言と、列挙できたかに直す。
+/// **台数と名前を必ず並べる。** 0 台なのか、名前が食い違っているのかを
+/// ログだけで見分けるため。前回出したものと比べるのにもこの文言を使う。
+pub(super) fn enumeration_text<E: Display>(result: &Result<Vec<String>, E>) -> (String, bool) {
+    match result {
+        Ok(names) => (format!("{} 台 {:?}", names.len(), names), true),
+        Err(e) => (e.to_string(), false),
+    }
+}
+
+/// 接続の失敗が続く間の列挙のログ 1 経路ぶんを出すレベル（#506）。再試行のログの
+/// 節目の回か、前回出したものから変わったときは INFO（列挙できなければ WARN）、
+/// それ以外は DEBUG。
+///
+/// **変わったら節目を待たずに出す。** 長く抜けていたボードを挿し直して OS 側に
+/// 戻ったのが、100 回ごとの節目まで（8 分強）ログから読めないと困るため。
+pub(super) fn enumeration_log_level(listed: bool, milestone: bool, changed: bool) -> Level {
+    match (milestone || changed, listed) {
+        (false, _) => Level::Debug,
+        (true, true) => Level::Info,
+        (true, false) => Level::Warn,
     }
 }
 
@@ -532,6 +611,63 @@ mod tests {
 
         // 0 秒、1 秒、2 秒の 3 回だけ
         assert_eq!(opened, 3);
+    }
+
+    #[test]
+    fn retry_log_milestones_follow_the_table() {
+        // 期待値は表としてベタ書きする（実装と同じ式で作ると、式が誤っていても通る）
+        let logged: Vec<u32> = (0..=320).filter(|&n| is_retry_log_milestone(n)).collect();
+        assert_eq!(
+            logged,
+            vec![1, 2, 3, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 200, 300]
+        );
+    }
+
+    #[test]
+    fn retry_log_milestones_do_not_overflow_on_huge_counts() {
+        // 失敗は繋がるまで数え続けるので、上限近くでもパニックしないこと
+        assert!(!is_retry_log_milestone(u32::MAX));
+        assert!(is_retry_log_milestone(4_294_967_200));
+    }
+
+    #[test]
+    fn connect_attempt_log_level_is_debug_between_milestones() {
+        assert_eq!(connect_attempt_log_level(1), Level::Info);
+        assert_eq!(connect_attempt_log_level(4), Level::Debug);
+        assert_eq!(connect_attempt_log_level(10), Level::Info);
+        assert_eq!(connect_attempt_log_level(150), Level::Debug);
+    }
+
+    #[test]
+    fn connect_failure_log_level_warns_when_the_reason_changes() {
+        assert_eq!(connect_failure_log_level(1, false), Level::Warn);
+        assert_eq!(connect_failure_log_level(4, false), Level::Debug);
+        // 節目でなくても、理由が変わったら出す
+        assert_eq!(connect_failure_log_level(4, true), Level::Warn);
+        assert_eq!(connect_failure_log_level(101, true), Level::Warn);
+        assert_eq!(connect_failure_log_level(101, false), Level::Debug);
+    }
+
+    #[test]
+    fn enumeration_log_level_is_debug_only_when_nothing_moved() {
+        // 節目でも変化でもない回は DEBUG。どちらかなら、列挙できたら INFO・できなければ WARN
+        assert_eq!(enumeration_log_level(true, false, false), Level::Debug);
+        assert_eq!(enumeration_log_level(false, false, false), Level::Debug);
+        assert_eq!(enumeration_log_level(true, true, false), Level::Info);
+        assert_eq!(enumeration_log_level(true, false, true), Level::Info);
+        assert_eq!(enumeration_log_level(false, true, false), Level::Warn);
+        assert_eq!(enumeration_log_level(false, false, true), Level::Warn);
+    }
+
+    #[test]
+    fn enumeration_text_shows_the_count_and_the_names() {
+        let listed: Result<Vec<String>, String> = Ok(vec!["A".to_string(), "B".to_string()]);
+        assert_eq!(
+            enumeration_text(&listed),
+            ("2 台 [\"A\", \"B\"]".to_string(), true)
+        );
+        let failed: Result<Vec<String>, String> = Err("失敗".to_string());
+        assert_eq!(enumeration_text(&failed), ("失敗".to_string(), false));
     }
 
     #[test]
