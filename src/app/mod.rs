@@ -37,7 +37,7 @@ mod worker_timers;
 
 use self::menu::MenuLayout;
 use self::screenshot::ScreenshotResult;
-use self::screenshot_sound::SoundMessage;
+use self::screenshot_sound::{SoundLoadFailure, SoundLoadRetry, SoundMessage};
 use self::settings_store::SaveFailureStreak;
 use self::update::UpdateState;
 use self::window::{needs_drag_move_guard, WindowRecordState};
@@ -109,6 +109,14 @@ pub struct CaptureCardViewer {
     // 前回の効果音の再生で出力先を開けなかった理由。開けていれば None。
     // 同じ理由を撮影のたびに報告しないために持つ（`app::screenshot_sound`）
     sound_output_failure: Option<String>,
+    // 最後に適用した効果音ファイルを読み込めなかった理由（読めない・デコードできない）。
+    // 読み込めていれば None。2 秒ごとの適用では読み直さず、設定ダイアログの
+    // 「適用」「OK」と、読めないファイルなら間隔を延ばしながら自動で読み直す。
+    // 同じ理由を報告し直さないためにも使う（#507）
+    // 設定のパスも一緒に持ち、パスが変わったら捨てる
+    sound_load_failure: Option<SoundLoadFailure>,
+    // 読めない効果音ファイルの自動の読み直しの予定。予定が無ければ None
+    sound_load_retry: Option<SoundLoadRetry>,
 
     // 発生源ごとの直近の失敗。トーストの間引きもここが判断する
     errors: ErrorCenter,
@@ -221,9 +229,6 @@ pub struct CaptureCardViewer {
     // このスレッドが行う。
     // 終了時に join して、書き出し途中の画像ファイルが残らないようにする
     screenshot_save_threads: Vec<JoinHandle<()>>,
-    // 進行中の効果音ファイルの読み込みスレッド。デバイスには触らないが、
-    // 保存スレッドと同じく切り離さず、終了時に join する
-    sound_load_threads: Vec<JoinHandle<()>>,
     // 更新の確認。結果のチャネル、確認のスレッド、「その他」タブに出す状態、
     // 起動時の通知ダイアログをまとめて持つ（`app::update`）
     update_check: UpdateState,
@@ -354,8 +359,9 @@ impl CaptureCardViewer {
             window_record: WindowRecordState::default(),
 
             screenshot_save_threads: Vec::new(),
-            sound_load_threads: Vec::new(),
             sound_output_failure: None,
+            sound_load_failure: None,
+            sound_load_retry: None,
             update_check: UpdateState::new(),
             recorder,
 
@@ -770,10 +776,9 @@ impl eframe::App for CaptureCardViewer {
         // ここで待たないと、main が返った時点でプロセスごと落ちて
         // 書きかけの画像ファイルがディスクに残る
         self.join_screenshot_save_threads();
-        // 効果音の読み込みも切り離さずに待つ。結果は使わない
-        self.join_sound_load_threads();
-        // 更新の確認と適用のスレッドは待たない。確認は副作用が無く、適用は
-        // 書きかけの `.new` を次の起動で消す（docs/design/update.md）
+        // 効果音の読み込みと、更新の確認・適用のスレッドは待たない。読み込みと確認は
+        // 副作用が無く（ネットワークドライブ上のファイルは読み終わりが読めない。#507）、
+        // 適用は書きかけの `.new` を次の起動で消す（docs/design/threads.md、docs/design/update.md）
 
         // 終了中に終わった保存の結果をログへ残す。**待ったあとに読むこと。**
         // 画面はもう出ないので通知はされないが、閉じる直前に撮った 1 枚が
