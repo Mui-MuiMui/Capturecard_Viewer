@@ -1,11 +1,13 @@
 use super::action::folded_repeats;
 use super::egui_keys::{chord_from_egui_event, remove_hotkey_key_events};
+use super::manager::restarts_after_failure;
 use super::parse::parse_hotkey;
 use super::{HotkeyAction, HotkeyError, HotkeyManager};
 use crate::keyboard_hook::KeyChord;
 use eframe::egui;
 use log::{debug, error, info, warn};
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 /// アクションに割り当てたキーを登録できなかった理由。
 ///
@@ -29,6 +31,11 @@ impl HotkeyManager {
     /// ときに再試行する。ログは理由が変わったときだけ出す（同じ失敗が
     /// 2 秒ごとに積もらないように）。
     pub fn apply(&mut self, desired: &BTreeMap<HotkeyAction, String>) {
+        self.apply_at(desired, Instant::now());
+    }
+
+    /// `apply` の本体。`now` はリスナーの作り直しの判定に使う（テストから時刻を渡す）。
+    fn apply_at(&mut self, desired: &BTreeMap<HotkeyAction, String>, now: Instant) {
         // 一時停止中は何もしない。ホットキー入力ダイアログを開いている間に
         // 2 秒ごとの再適用が割り込むと、解除したはずのキーが登録し直されてしまう
         if self.paused {
@@ -38,7 +45,10 @@ impl HotkeyManager {
         // リスナーが途中で止まっていたら、フックを使えないのと同じ扱いにする。
         // 登録済みのものを外しておけば、下の登録で理由付きの失敗として記録され、
         // トーストと設定画面に出る
-        self.take_listener_failure();
+        self.take_listener_failure(now);
+        // 止まったリスナーは、間隔と回数の上限の範囲で作り直す（#508）。
+        // 作り直せたら下の登録で割り当てが元に戻る
+        self.recover_listener(now);
 
         // 解除するのは、割り当てが消えたアクションとキーが変わったアクション
         let stale: Vec<HotkeyAction> = self
@@ -257,8 +267,9 @@ impl HotkeyManager {
     /// 登録済みのものを外す。止まっていなければ何もしない。
     ///
     /// 外したものは続く登録で `HookUnavailable` として記録し直される。
-    /// 一度移したら `hook_error` が埋まるので、以降は毎回の登録がそこで失敗する。
-    fn take_listener_failure(&mut self) {
+    /// 移したあとは、`recover_listener` がリスナーを作り直すまで毎回の登録が
+    /// そこで失敗する。止まった時刻を作り直しの基準として残す（#508）。
+    fn take_listener_failure(&mut self, now: Instant) {
         if self.hook_error.is_some() {
             return;
         }
@@ -276,6 +287,12 @@ impl HotkeyManager {
         };
 
         self.hook_error = Some(failure);
+        let ran_for = self
+            .recovery
+            .started_at
+            .map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
+        self.recovery.restarts = restarts_after_failure(self.recovery.restarts, ran_for);
+        self.recovery.failed_at = Some(now);
         let actions: Vec<HotkeyAction> = self.registered.keys().copied().collect();
         for action in actions {
             self.unregister(action);
@@ -314,7 +331,9 @@ impl HotkeyManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hotkey::manager::{LISTENER_RESTART_INTERVAL, LISTENER_RESTART_LIMIT};
     use crate::keyboard_hook::{KeyboardHookError, Modifiers};
+    use std::sync::atomic::Ordering;
 
     // テストで使う仮想キーコード。英字は ASCII の大文字と同じ値
     const VK_S: u32 = 0x53;
@@ -659,6 +678,99 @@ mod tests {
                 .map(|error| &error.reason),
             Some(&HotkeyError::HookUnavailable(failure))
         );
+    }
+
+    /// 動いているリスナーを止め、`WaitFailed` で終わったのと同じ状態にする。
+    /// 返すのは書き込んだ失敗の理由
+    fn stop_listener_with_failure(manager: &mut HotkeyManager) -> KeyboardHookError {
+        manager.listener_shutdown.store(true, Ordering::Release);
+        if let Some(handle) = manager.listener.take() {
+            handle.join().expect("リスナーがパニックしていないこと");
+        }
+        manager.listener_shutdown.store(false, Ordering::Release);
+        let failure = KeyboardHookError::WaitFailed("failed".to_string());
+        manager
+            .state
+            .lock()
+            .expect("ロックが毒されていないこと")
+            .listener_failure = Some(failure.clone());
+        failure
+    }
+
+    #[test]
+    fn apply_restarts_a_stopped_listener_after_the_interval() {
+        // 止まった直後は失敗として出し、間隔をおいた再適用でリスナーを作り直す（#508）。
+        // フックを付けられるかは環境次第なので、付けられたときは割り当てが戻り、
+        // 付けられなかったときは理由が失敗として残ることを確かめる
+        let mut manager = HotkeyManager::new();
+        manager.hook_error = None;
+        let desired = assignments(&[(HotkeyAction::Screenshot, "F5")]);
+        let start = Instant::now();
+        manager.apply_at(&desired, start);
+        let failure = stop_listener_with_failure(&mut manager);
+
+        manager.apply_at(&desired, start);
+        assert_eq!(manager.hook_error, Some(failure));
+        assert!(manager.listener.is_none(), "間隔の前に作り直した");
+
+        manager.apply_at(&desired, start + LISTENER_RESTART_INTERVAL);
+
+        assert_eq!(manager.recovery.restarts, 1);
+        assert!(manager.listener.is_some());
+        match &manager.hook_error {
+            None => {
+                assert!(manager.registered.contains_key(&HotkeyAction::Screenshot));
+                assert!(manager.errors.is_empty());
+            }
+            Some(e) => assert_eq!(
+                manager
+                    .errors
+                    .get(&HotkeyAction::Screenshot)
+                    .map(|error| &error.reason),
+                Some(&HotkeyError::HookUnavailable(e.clone()))
+            ),
+        }
+    }
+
+    #[test]
+    fn apply_stops_restarting_at_the_limit() {
+        // 上限まで作り直したら、それ以上は作らない。失敗は残り続ける
+        let mut manager = HotkeyManager::new();
+        manager.hook_error = None;
+        let desired = assignments(&[(HotkeyAction::Screenshot, "F5")]);
+        let start = Instant::now();
+        manager.recovery.restarts = LISTENER_RESTART_LIMIT;
+        manager.recovery.started_at = Some(start);
+        let failure = stop_listener_with_failure(&mut manager);
+
+        // 動き始めてすぐ止まったので、回数は数え直さない
+        manager.apply_at(&desired, start);
+        manager.apply_at(&desired, start + LISTENER_RESTART_INTERVAL * 10);
+
+        assert!(manager.listener.is_none(), "上限を超えて作り直した");
+        assert_eq!(manager.recovery.restarts, LISTENER_RESTART_LIMIT);
+        assert_eq!(
+            manager
+                .errors
+                .get(&HotkeyAction::Screenshot)
+                .map(|error| &error.reason),
+            Some(&HotkeyError::HookUnavailable(failure))
+        );
+    }
+
+    #[test]
+    fn apply_does_not_restart_a_listener_that_is_still_running() {
+        // 前のスレッドが動いている間は作らない。リスナーは 1 本だけ
+        let mut manager = HotkeyManager::new();
+        if manager.hook_error.is_some() {
+            // フックを付けられない環境ではリスナーがすぐ終わるので確かめられない
+            return;
+        }
+        manager.hook_error = Some(KeyboardHookError::WaitFailed("failed".to_string()));
+
+        manager.apply_at(&BTreeMap::new(), Instant::now() + LISTENER_RESTART_INTERVAL);
+
+        assert_eq!(manager.recovery.restarts, 0);
     }
 
     #[test]
