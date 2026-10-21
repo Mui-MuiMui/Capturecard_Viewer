@@ -320,18 +320,13 @@ impl ReplayPipeline {
                 continue;
             }
             let size = (width as u32, height as u32);
-            if self.size != Some(size) {
-                self.change_size(size);
-            }
-            if self.video_encoder.is_none() {
-                self.open_video_encoder(size)?;
-            }
-            let accepts = self.video_accepts_input()?;
-            if !accepts {
-                // エンコーダが追いつかない。表示は落とさず、録画（リング）だけがコマ落ちする
-                if let Some(recording) = self.recording.as_mut() {
-                    recording.note_skipped();
-                }
+            // エンコーダを作り直す・作るときは、`Arc` を手放してからにする。作るのに
+            // 時間がかかりうるので、その間リングの枠を塞いで `FrameSink` の Vec の回収を
+            // 妨げないため（#504）。いまのエンコーダへ渡すときは、受け付けるかを先に見て、
+            // 受け付けないなら NV12 へ直さずに捨てる
+            let reopen = self.size != Some(size) || self.video_encoder.is_none();
+            if !reopen && !self.video_accepts_input()? {
+                self.note_video_skipped();
                 continue;
             }
             let converted = rgb_to_nv12(
@@ -345,6 +340,18 @@ impl ReplayPipeline {
             );
             // **`Arc` は NV12 へ直したらすぐ手放す**（`FrameSink` の Vec の回収を妨げないため）
             drop(frame);
+            if reopen {
+                if self.size != Some(size) {
+                    self.change_size(size);
+                }
+                if self.video_encoder.is_none() {
+                    self.open_video_encoder(size)?;
+                }
+                if !self.video_accepts_input()? {
+                    self.note_video_skipped();
+                    continue;
+                }
+            }
             if converted {
                 self.force_keyframe_if_overdue(pts);
                 self.encode_video(pts)?;
@@ -360,6 +367,13 @@ impl ReplayPipeline {
         }
         self.take_video_output();
         Ok(())
+    }
+
+    /// エンコーダが追いつかない。表示は落とさず、録画（リング）だけがコマ落ちする
+    fn note_video_skipped(&mut self) {
+        if let Some(recording) = self.recording.as_mut() {
+            recording.note_skipped();
+        }
     }
 
     /// 映像のエンコーダがいま入力を受け取れるか。非同期型の失敗（`MEError`）はここで

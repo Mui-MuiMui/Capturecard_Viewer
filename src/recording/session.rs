@@ -245,17 +245,17 @@ impl Session {
             return Ok(());
         };
 
-        match &self.writer {
-            None => self.open_writer(size)?,
-            Some(writer) if writer.backlog() > MAX_ENCODER_BACKLOG => {
-                // エンコーダが追いつかない。表示は落とさず、録画だけがコマ落ちする
-                self.frames_skipped += 1;
-                self.telemetry
-                    .frames_skipped
-                    .store(self.frames_skipped, Ordering::Relaxed);
-                return Ok(());
-            }
-            Some(_) => {}
+        if self
+            .writer
+            .as_ref()
+            .is_some_and(|writer| writer.backlog() > MAX_ENCODER_BACKLOG)
+        {
+            // エンコーダが追いつかない。表示は落とさず、録画だけがコマ落ちする
+            self.frames_skipped += 1;
+            self.telemetry
+                .frames_skipped
+                .store(self.frames_skipped, Ordering::Relaxed);
+            return Ok(());
         }
 
         let matrix = Nv12Matrix::for_size(width, height);
@@ -269,6 +269,11 @@ impl Session {
             &mut self.nv12,
         );
         drop(frame);
+        // Sink Writer は `Arc` を手放してから作る。作るのに時間がかかりうるので、
+        // その間リングの枠を塞いで `FrameSink` の Vec の回収を妨げないため（#504）
+        if self.writer.is_none() {
+            self.open_writer(size)?;
+        }
         if !converted {
             // 画素が足りないフレーム。`FrameSink` が作るフレームでは起きない
             return Ok(());
