@@ -319,28 +319,34 @@ impl ReplayPipeline {
                 continue;
             };
             let size = (even.0 as u32, even.1 as u32);
-            // エンコーダを作り直す・作るときは、`Arc` を手放してからにする。作るのに
-            // 時間がかかりうるので、その間リングの枠を塞いで `FrameSink` の Vec の回収を
-            // 妨げないため（#504）。いまのエンコーダへ渡すときは、受け付けるかを先に見て、
-            // 受け付けないなら NV12 へ直さずに捨てる
+            // エンコーダを作る・作り直す（大きさの変化、問い合わせの失敗からのソフトウェアへの
+            // 作り直し）のは、`Arc` を手放してからにする。作るのに時間がかかりうるので、その間
+            // リングの枠を塞いで `FrameSink` の Vec の回収を妨げないため（#504）。いまの
+            // エンコーダへ渡すときは受け付けるかを先に問い、受け付けないなら NV12 へ直さずに捨てる
             let reopen = self.size != Some(size) || self.video_encoder.is_none();
-            if !reopen && !self.video_accepts_input()? {
+            let peeked = (!reopen).then(|| self.peek_video_accepts());
+            if matches!(peeked, Some(Ok(false))) {
                 self.note_video_skipped();
                 continue;
             }
             // **`Arc` は NV12 へ直したらすぐ手放す**（`FrameSink` の Vec の回収を妨げないため）
             let converted = frame_to_nv12(frame, even, &mut self.rgb, &mut self.nv12);
-            if reopen {
-                if self.size != Some(size) {
-                    self.change_size(size);
+            let accepts = match peeked {
+                Some(Ok(accepts)) => accepts,
+                Some(Err(error)) => self.recover_video_accepts(error)?,
+                None => {
+                    if self.size != Some(size) {
+                        self.change_size(size);
+                    }
+                    if self.video_encoder.is_none() {
+                        self.open_video_encoder(size)?;
+                    }
+                    self.video_accepts_input()?
                 }
-                if self.video_encoder.is_none() {
-                    self.open_video_encoder(size)?;
-                }
-                if !self.video_accepts_input()? {
-                    self.note_video_skipped();
-                    continue;
-                }
+            };
+            if !accepts {
+                self.note_video_skipped();
+                continue;
             }
             if converted {
                 self.force_keyframe_if_overdue(pts);
@@ -370,19 +376,30 @@ impl ReplayPipeline {
     /// 届くのが普通なので、ハードウェアで最初の 1 枚から失敗していればソフトウェアで作り直して
     /// 問い直す（#312）。
     fn video_accepts_input(&mut self) -> Result<bool, RecordingError> {
-        let Some(encoder) = self.video_encoder.as_mut() else {
-            return Ok(false);
-        };
-        match encoder.accepts_input() {
+        match self.peek_video_accepts() {
             Ok(accepts) => Ok(accepts),
-            Err(error) => {
-                let fall_back = should_fall_back(encoder.is_hardware(), encoder.has_produced());
-                self.fall_back_to_software(fall_back, error)?;
-                match self.video_encoder.as_mut() {
-                    Some(encoder) => encoder.accepts_input().map_err(encoder_error),
-                    None => Ok(false),
-                }
-            }
+            Err(error) => self.recover_video_accepts(error),
+        }
+    }
+
+    /// いまのエンコーダに受け付けるかを問うだけ。失敗しても作り直さない（`drain_video` が
+    /// `Arc` を手放してから `recover_video_accepts` を呼ぶため）。エンコーダが無ければ `false`。
+    fn peek_video_accepts(&mut self) -> Result<bool, EncoderError> {
+        self.video_encoder
+            .as_mut()
+            .map_or(Ok(false), EncoderMft::accepts_input)
+    }
+
+    /// `peek_video_accepts` の失敗を受けて、ソフトウェアで作り直して問い直すか、失敗として返す。
+    fn recover_video_accepts(&mut self, error: EncoderError) -> Result<bool, RecordingError> {
+        let fall_back = self
+            .video_encoder
+            .as_ref()
+            .is_some_and(|encoder| should_fall_back(encoder.is_hardware(), encoder.has_produced()));
+        self.fall_back_to_software(fall_back, error)?;
+        match self.video_encoder.as_mut() {
+            Some(encoder) => encoder.accepts_input().map_err(encoder_error),
+            None => Ok(false),
         }
     }
 
