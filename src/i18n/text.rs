@@ -68,6 +68,8 @@ texts! {
     HeadlineScreenshotSound { ja: "効果音を再生できません", en: "Cannot play the screenshot sound" },
     HeadlineHotkey { ja: "ホットキーを登録できません", en: "Cannot register the hotkey" },
     HeadlineSettings { ja: "設定ファイルを読み書きできません", en: "Cannot read or write the settings file" },
+    // 起動時に読めなかった理由のうち、空のファイル（#317、#505）
+    SettingsFileBlank { ja: "空のファイル（0 バイトか空白だけ）", en: "the file is empty" },
     HeadlineUpdate { ja: "更新できません", en: "Cannot update" },
     HeadlineRecording { ja: "録画できません", en: "Cannot record" },
 

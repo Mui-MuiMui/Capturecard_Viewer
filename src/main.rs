@@ -45,17 +45,14 @@ fn main() -> Result<(), eframe::Error> {
     // ログファイルも開けていない）ので、戻り値はここで捨てるしかない。
     let _ = logging::init();
 
-    // 設定から保存されたウィンドウの装飾・サイズ・位置を読み込む。
-    // ここでは読み込み結果（LoadOutcome）を使わない。既定値の書き戻しと
-    // 自動保存の可否は CaptureCardViewer::default 側だけで決めるため。
+    // 設定を読み込む。**読むのはここの 1 回だけ。** ウィンドウの装飾・サイズ・位置に
+    // 使ったあと、設定と読み込み結果（LoadOutcome）をそのまま CaptureCardViewer::new へ
+    // 渡す。既定値の書き戻しと自動保存の可否はそちらが LoadOutcome で決める。
     //
-    // 読み込みは default でもう一度走る。読めなかったファイルの error! と退避は
-    // こちらで先に起き、退避できたときは default 側が「ファイルが無い」を読んで
-    // Loaded になる（既定値で起動し、書き戻すのは同じ）。こちらで退避できなかった
-    // ときは default 側でもう一度退避を試みる（error! はその分 2 回出る）。
-    // そこでも退避できなければ BrokenFileLeftBehind で書き戻さず、そこで退避できれば
-    // FellBackToDefaults で書き戻す。どちらも default 側の結果どおりに正しく判定される。
-    let (settings, _) = AppSettings::load();
+    // 以前はアプリを作るときにもう一度読んでいた。ここで退避したあとは「ファイルが
+    // 無い」を読んで Loaded になり、読めなかったことを利用者へ知らせる材料
+    // （理由と退避先）が残らなかった（Issue #505）
+    let (settings, load_outcome) = AppSettings::load();
     let mut viewport_builder = egui::ViewportBuilder::default().with_icon(load_icon());
 
     // タイトルバーと枠の有無は最初のウィンドウ生成時に決める。
@@ -110,7 +107,7 @@ fn main() -> Result<(), eframe::Error> {
                 );
             }
             configure_japanese_font(&cc.egui_ctx);
-            let mut app = CaptureCardViewer::default();
+            let mut app = CaptureCardViewer::new(settings, &load_outcome);
             // 統計 OSD にどちらで描いているかを出す。wgpu のアダプターはここまでに選ばれている
             app.set_renderer_label(renderer.label());
             // YUY2 → RGB を GPU で行う準備（#456）。描画バックエンドのコンテキスト（GL が
@@ -122,10 +119,13 @@ fn main() -> Result<(), eframe::Error> {
             };
             app.init_gpu_yuy2(context);
             // 画面の言語を設定と OS の表示言語から決める。**起動経路で 1 回だけ。**
-            // `default()` の中では決めない。テストで作ったときにプロセス全体の
-            // 言語を書き換えてしまうため（#256）。`default()` は文言を作らないので、
+            // `new()` の中では決めない。テストで作ったときにプロセス全体の
+            // 言語を書き換えてしまうため（#256）。`new()` は文言を作らないので、
             // 作った直後に決めても最初の描画から設定の言語で出る
             app.apply_language();
+            // 起動時の書き戻しの失敗と、設定ファイルを読めなかったことを知らせる
+            // （#505）。文言を作るので、画面の言語を決めたあとに呼ぶ
+            app.report_startup_settings(&load_outcome);
             Ok(Box::new(app))
         }),
     );

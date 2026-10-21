@@ -375,6 +375,19 @@ pub struct ConnectionStatus {
     /// 繋ぎっぱなしのデバイスではないので接続中・未接続の見出しは持たない。
     /// 失敗が無ければ `None` で、タブにも枠を出さない（Issue #356）
     pub screenshot_sound_error: Option<(String, String)>,
+    /// 起動時に設定ファイルを読めなかった知らせ（初期化した / 自動保存を止めた、
+    /// Issue #505）。`(整形済みの文言, 発生時刻)`。
+    ///
+    /// `ErrorCenter` とは別に持つ。`ErrorSource::Settings` は直近の 1 件しか持たず、
+    /// あとの保存の失敗に上書きされ、保存の成功で消えるため。「設定が初期化された」
+    /// ことを後から読めるよう、自動保存を再開するまで残す
+    pub settings_load_notice: Option<(String, String)>,
+    /// 設定ファイルの直近の失敗（保存できない・書き出せないなど）。
+    /// `(整形済みの文言, 発生時刻)`。`settings_load_notice` と同じものなら `None`。
+    ///
+    /// トーストは接続の失敗に上書きされうるので、ここで読み返せるようにする。
+    /// 失敗も知らせも無ければ枠を出さない
+    pub settings_error: Option<(String, String)>,
 }
 
 /// フェイクデバイスで動いているときに出す知らせ。実機なら `None`。

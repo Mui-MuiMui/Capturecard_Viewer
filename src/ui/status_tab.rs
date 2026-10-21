@@ -44,19 +44,36 @@ pub(super) fn show_status_tab(ui: &mut egui::Ui, connection: &ConnectionStatus) 
     show_link_status(ui, Text::LinkAudio.get(), &connection.audio);
 
     // 効果音は繋ぎっぱなしのデバイスではないので、失敗が残っているときだけ枠を出す（#356）
-    if let Some((message, time)) = &connection.screenshot_sound_error {
-        ui.add_space(15.0);
-        ui.group(|ui| {
-            ui.strong(Text::LinkScreenshotSound.get());
-            ui.add_space(5.0);
-            warning_label(ui, message);
-            ui.label(i18n::error_time(time));
-        });
+    if let Some(error) = &connection.screenshot_sound_error {
+        show_recorded_errors(ui, Text::LinkScreenshotSound.get(), &[error]);
+    }
+    // 設定ファイルも同じ。起動時に読めなかった知らせ（#505）はトーストが
+    // 接続の失敗に上書きされうるので、ここで読み返せるようにする
+    let settings: Vec<_> = [&connection.settings_load_notice, &connection.settings_error]
+        .into_iter()
+        .flatten()
+        .collect();
+    if !settings.is_empty() {
+        show_recorded_errors(ui, Text::SettingsFile.get(), &settings);
     }
 
     ui.add_space(15.0);
     ui.label(Text::StatusReadOnlyHint.get());
     ui.label(Text::StatusLogHint.get());
+}
+
+/// 接続中・未接続の見出しを持たないもの（効果音・設定ファイル）の直近の失敗を
+/// 1 つの枠に描く。`errors` の各要素は `(整形済みの文言, 発生時刻)` で、上から並べる。
+fn show_recorded_errors(ui: &mut egui::Ui, title: &str, errors: &[&(String, String)]) {
+    ui.add_space(15.0);
+    ui.group(|ui| {
+        ui.strong(title);
+        for (message, time) in errors {
+            ui.add_space(5.0);
+            warning_label(ui, message);
+            ui.label(i18n::error_time(time));
+        }
+    });
 }
 
 /// 映像か音声、片方の接続状態を 1 つの枠に描く。
@@ -99,7 +116,11 @@ fn show_link_status(ui: &mut egui::Ui, title: &str, status: &LinkStatus) {
 mod tests {
     use super::*;
 
+    use crate::settings::AppSettings;
     use crate::status::LinkStatus;
+    use crate::ui::testing::{dialog_harness, DialogFixture};
+    use crate::ui::{SettingsTab, VideoPinChoice};
+    use egui_kittest::kittest::Queryable;
 
     // ---- 接続状態のバッジ ----
 
@@ -143,5 +164,61 @@ mod tests {
 
         assert_eq!(kind, NoticeKind::Success);
         assert_eq!(text, "● 接続中");
+    }
+
+    // ---- 設定ファイルの枠（#505） ----
+
+    fn status_tab_harness(
+        connection: ConnectionStatus,
+    ) -> egui_kittest::Harness<'static, DialogFixture> {
+        let fixture = DialogFixture::new(
+            &AppSettings::default(),
+            SettingsTab::Status,
+            VideoPinChoice::default(),
+            &[],
+        )
+        .with_connection(connection);
+        dialog_harness(fixture)
+    }
+
+    #[test]
+    fn status_tab_shows_the_settings_file_error() {
+        // 起動時に読めなかった知らせはトーストが上書きされうるので、ここで読み返せること
+        let message = "設定ファイルを読み書きできません: 既定値に初期化した";
+        let connection = ConnectionStatus {
+            settings_load_notice: Some((message.to_string(), "12:34:56".to_string())),
+            ..ConnectionStatus::default()
+        };
+
+        let harness = status_tab_harness(connection);
+
+        harness.get_by_label(Text::SettingsFile.get());
+        // 注意書きの記号が前に付く
+        harness.get_by_label(&format!("{} {message}", NoticeKind::Warning.symbol()));
+    }
+
+    #[test]
+    fn status_tab_keeps_the_load_notice_beside_a_later_settings_error() {
+        // 読み込みの知らせ（#505）は、あとの保存の失敗と並べて出し、上書きさせない
+        let notice = "設定ファイルを読み書きできません: 既定値に初期化した";
+        let error = "設定ファイルを読み書きできません: C:\\config へ書き出せない";
+        let connection = ConnectionStatus {
+            settings_load_notice: Some((notice.to_string(), "12:34:56".to_string())),
+            settings_error: Some((error.to_string(), "12:35:00".to_string())),
+            ..ConnectionStatus::default()
+        };
+
+        let harness = status_tab_harness(connection);
+
+        let symbol = NoticeKind::Warning.symbol();
+        harness.get_by_label(&format!("{symbol} {notice}"));
+        harness.get_by_label(&format!("{symbol} {error}"));
+    }
+
+    #[test]
+    fn status_tab_hides_the_settings_file_box_without_an_error() {
+        let harness = status_tab_harness(ConnectionStatus::default());
+
+        assert!(harness.query_by_label(Text::SettingsFile.get()).is_none());
     }
 }
