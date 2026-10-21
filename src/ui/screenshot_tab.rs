@@ -70,13 +70,17 @@ pub(super) fn show_screenshot_settings_tab(
 
             ui.horizontal(|ui| {
                 ui.label(Text::SaveFolderLabel.get());
+                // 書き戻すのは欄を編集したときだけ。毎フレーム書き戻すと、タブを
+                // 開いただけで UTF-16 として不正なパスが U+FFFD に置き換わる
+                // （「録画」タブの保存先と同じ形）
                 let mut folder_str = settings
                     .screenshot
                     .save_folder
                     .to_string_lossy()
                     .to_string();
-                ui.text_edit_singleline(&mut folder_str);
-                settings.screenshot.save_folder = std::path::PathBuf::from(folder_str);
+                if ui.text_edit_singleline(&mut folder_str).changed() {
+                    settings.screenshot.save_folder = PathBuf::from(folder_str);
+                }
 
                 if ui.button(Text::ButtonBrowse.get()).clicked() {
                     events.push(SettingsEvent::PickScreenshotFolder);
@@ -235,6 +239,32 @@ impl<'a> SoundChoice<'a> {
 mod tests {
     use super::*;
     use crate::settings::ScreenshotSettings;
+    use crate::ui::testing::{dialog_harness, DialogFixture};
+    use crate::ui::{SettingsTab, VideoPinChoice};
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    #[test]
+    fn opening_the_tab_keeps_a_save_folder_that_is_not_valid_unicode() {
+        // 対になっていないサロゲート（0xD800）を含むパス。to_string_lossy で U+FFFD に化ける
+        let folder = PathBuf::from(OsString::from_wide(&[
+            u16::from(b'C'),
+            u16::from(b':'),
+            u16::from(b'\\'),
+            0xD800,
+        ]));
+        let mut draft = AppSettings::default();
+        draft.screenshot.save_folder = folder.clone();
+        let mut harness = dialog_harness(DialogFixture::new(
+            &draft,
+            SettingsTab::Screenshot,
+            VideoPinChoice::default(),
+            &[],
+        ));
+        harness.run();
+        // 欄を編集していないので、開いて描いただけではパスを書き換えない
+        assert_eq!(harness.state().draft().screenshot.save_folder, folder);
+    }
 
     #[test]
     fn sound_choice_default_settings_is_default() {
