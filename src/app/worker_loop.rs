@@ -402,6 +402,50 @@ pub(super) mod testing {
             auto_reconnect: false,
         }
     }
+
+    /// テストのスレッドで出たログを、レベルと本文の組で取り出すロガー（#506）。
+    ///
+    /// ロガーはテストのバイナリ全体で 1 つしか登録できないので、記録する先を
+    /// スレッドごとに分ける。`capture_logs` の中のスレッドだけが記録し、
+    /// 並行して走る他のテストのログは混ざらない。
+    struct CaptureLogger;
+
+    thread_local! {
+        static CAPTURED: std::cell::RefCell<Option<Vec<(log::Level, String)>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    impl log::Log for CaptureLogger {
+        fn enabled(&self, _metadata: &log::Metadata) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record) {
+            CAPTURED.with(|captured| {
+                if let Some(lines) = captured.borrow_mut().as_mut() {
+                    lines.push((record.level(), record.args().to_string()));
+                }
+            });
+        }
+
+        fn flush(&self) {}
+    }
+
+    static CAPTURE_LOGGER: CaptureLogger = CaptureLogger;
+    static INSTALL_CAPTURE_LOGGER: std::sync::Once = std::sync::Once::new();
+
+    /// `f` を走らせ、その間にこのスレッドで出たログを全レベル分返す。
+    /// ワーカーの `tick` はテストのスレッドの上で回るので、そのまま拾える。
+    pub(in crate::app) fn capture_logs(f: impl FnOnce()) -> Vec<(log::Level, String)> {
+        INSTALL_CAPTURE_LOGGER.call_once(|| {
+            if log::set_logger(&CAPTURE_LOGGER).is_ok() {
+                log::set_max_level(log::LevelFilter::Trace);
+            }
+        });
+        CAPTURED.with(|captured| *captured.borrow_mut() = Some(Vec::new()));
+        f();
+        CAPTURED.with(|captured| captured.borrow_mut().take().unwrap_or_default())
+    }
 }
 
 #[cfg(test)]

@@ -419,8 +419,12 @@ impl WorkerState {
 #[cfg(test)]
 mod tests {
     use super::super::backend::mock::{MockAudioBackend, MockVideoBackend};
-    use super::super::worker_loop::testing::{apply_config, config_for, drain, mock_state};
+    use super::super::worker_loop::testing::{
+        apply_config, capture_logs, config_for, drain, mock_state,
+    };
     use super::*;
+    use crate::video::VideoError;
+    use log::Level;
     use std::time::Duration;
 
     // 「Windows 側にも見えていない」の案内（#236）。モックの列挙結果で
@@ -808,6 +812,85 @@ mod tests {
         );
         state.tick(Instant::now());
         assert!(resolved_resolutions(&drain(&events)).is_empty());
+    }
+
+    /// `needle` を含むログ行のレベルを、出た順に並べる。
+    fn levels_of(logs: &[(Level, String)], needle: &str) -> Vec<Level> {
+        logs.iter()
+            .filter(|(_, line)| line.contains(needle))
+            .map(|(level, _)| *level)
+            .collect()
+    }
+
+    #[test]
+    fn worker_logs_repeated_failures_at_debug_and_changes_loudly() {
+        // 繋がらないまま tick を回し、同じ理由の失敗は節目だけ WARN、理由が
+        // 変わった回は節目でなくても WARN、列挙は結果が変わった経路だけ節目の
+        // 外でも INFO になることを、ログのレベルで確かめる（#506）
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| {
+            state.failures_before_success = u32::MAX;
+            state.devices = vec![("Web カメラ".to_string(), String::new())];
+        });
+        let (mut state, _events) = mock_state(&video, &audio);
+        apply_config(
+            &mut state,
+            config_for(Some("キャプチャーボード"), None),
+            true,
+        );
+
+        let base = Instant::now();
+        let logs = capture_logs(|| {
+            for step in 0..120 {
+                let attempt = step + 1;
+                if attempt == 7 {
+                    // 「見つからない」から「開けない」へ理由が変わる
+                    video.with(|state| {
+                        state.failure = Some(VideoError::CameraOpenFailed {
+                            device: "キャプチャーボード".to_string(),
+                            source: "使用中".to_string(),
+                        })
+                    });
+                }
+                if attempt == 105 {
+                    // 101〜109 回目は節目ではないが、110 回目の列挙で結果が変わっている
+                    video.with(|state| {
+                        state
+                            .devices
+                            .push(("キャプチャーボード".to_string(), String::new()))
+                    });
+                }
+                state.tick(base + Duration::from_secs(6) * step);
+            }
+        });
+        assert_eq!(video.with(|state| state.start_calls), 120);
+
+        let failed = |n: u32| levels_of(&logs, &format!("接続に失敗した（{n} 回目）"));
+        assert_eq!(failed(1), vec![Level::Warn]);
+        assert_eq!(failed(4), vec![Level::Debug], "同じ理由が続く間は DEBUG");
+        assert_eq!(failed(5), vec![Level::Warn], "節目は WARN");
+        assert_eq!(failed(6), vec![Level::Debug]);
+        assert_eq!(failed(7), vec![Level::Warn], "理由が変わった回は WARN");
+        assert_eq!(failed(8), vec![Level::Debug]);
+        assert_eq!(failed(110), vec![Level::Debug]);
+        let tried = |n: u32| levels_of(&logs, &format!("接続を試す（{n} 回目）"));
+        assert_eq!(tried(4), vec![Level::Debug]);
+        assert_eq!(tried(10), vec![Level::Info]);
+
+        // 列挙は 10 回ごとに行い、100 回目より後は変わった経路だけ INFO。
+        // 経路はモックの映像（`list_devices`）と音声入力で見分ける
+        let listing = |n: u32, source: &str| {
+            levels_of(&logs, &format!("映像 {n} 回、音声 0 回）: {source}:"))
+        };
+        assert_eq!(listing(100, "list_devices"), vec![Level::Info], "節目");
+        assert_eq!(
+            listing(110, "list_devices"),
+            vec![Level::Info],
+            "結果が変わった"
+        );
+        assert_eq!(listing(110, "音声入力"), vec![Level::Debug], "変わらない");
+        assert_eq!(listing(120, "list_devices"), vec![Level::Debug]);
     }
 
     #[test]
