@@ -118,15 +118,6 @@ pub fn recovery_for(failed: SwapStep) -> Recovery {
     }
 }
 
-/// 差し替えを始めてよいか。元の名前に exe があるときだけ真。
-///
-/// 前回の差し替えが `ReplaceKeptNothing` で終わると、元の名前に exe が無く、
-/// 元の exe は `.old` にある。そこから再試行して最初の手順（`RemoveStaleOld`）へ
-/// 進むと元の exe を消してしまう（Issue #332）。
-pub fn may_swap(exe_exists: bool) -> bool {
-    exe_exists
-}
-
 /// `done` を試して `succeeded` だったとき、次に何をするか。
 ///
 /// **`.new` を消すのは、元の名前に元の exe があるときだけ。** `.old` を戻せなければ
@@ -148,10 +139,13 @@ pub fn next_recovery(done: Recovery, succeeded: bool) -> RecoveryNext {
 /// 途中で失敗したら `recovery_for` / `next_recovery` の手順で戻し、元の名前に何が
 /// 残ったかで `ApplyError::Replace` / `ReplaceKeptNew` / `ReplaceKeptNothing` を返す。
 ///
-/// 元の名前に exe が無ければ（`may_swap` が偽）、どの手順にも進まず
-/// `ReplaceKeptNothing` を返す。そのとき `.old` は元の exe かもしれないので消さない。
+/// 元の名前に exe が無ければ、どの手順にも進まず `ReplaceKeptNothing` を返す。
+/// 前回の差し替えが `ReplaceKeptNothing` で終わると、元の名前に exe が無く、
+/// 元の exe は `.old` にある。そこから再試行して最初の手順（`RemoveStaleOld`）へ
+/// 進むと元の exe を消してしまう（Issue #332）。なので `.old` は消さない。
+/// この分岐はファイルを使うテスト（`swap_in_without_the_exe_*`）で確かめている
 pub fn swap_in(paths: &ExePaths) -> Result<(), ApplyError> {
-    if !may_swap(paths.exe.exists()) {
+    if !paths.exe.exists() {
         warn!(
             "元の名前に exe が無いので差し替えない（{} と {} には触らない）",
             paths.old.display(),
@@ -309,12 +303,6 @@ mod tests {
         assert_eq!(paths.old, PathBuf::from(r"C:\tools\viewer.exe.old"));
         assert_eq!(paths.dir(), Path::new(r"C:\tools"));
         assert_eq!(ExePaths::for_exe(PathBuf::from(r"C:\")), None);
-    }
-
-    #[test]
-    fn may_swap_only_when_the_exe_is_in_place() {
-        assert!(may_swap(true));
-        assert!(!may_swap(false));
     }
 
     // ---- 差し替えの戻し方 ----
