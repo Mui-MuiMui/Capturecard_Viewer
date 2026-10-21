@@ -1,7 +1,7 @@
-//! デバイスを切り替えたときに選び直すビデオの既定値。
+//! デバイスを切り替えたときに選び直すビデオの既定値と、解像度・FPS のコンボに出す選択肢。
 //!
 //! 解像度と FPS は切り替え前の値に最も近い組み合わせを選ぶ
-//! （`docs/design/video-pipeline.md`）。
+//! （`docs/design/video-pipeline.md`）。どちらも描画を含まない純粋関数。
 
 use crate::video::{DeviceCapabilities, VideoMode};
 
@@ -97,6 +97,37 @@ fn video_mode_rank(
         std::cmp::Reverse(pixels),
         std::cmp::Reverse(mode.fps),
     )
+}
+
+/// 解像度のコンボに出す選択肢。`format` に対応する解像度を重複なく、画素数の大きい順に並べる。
+///
+/// 画素数は `u64` で比べる。`u32` 同士の掛け算では 65536x65536 を超えると桁あふれし、
+/// debug ビルドでは panic、release ビルドでは並びが乱れる（#510）。デバイスが返す値を
+/// そのまま使うので、ありえない大きさでも描画を止めない。画素数が同じものは幅の大きい順
+/// （能力一覧の順序に依らず並びを固定する）
+pub fn resolution_choices(caps: &DeviceCapabilities, format: &str) -> Vec<(u32, u32)> {
+    let mut resolutions: Vec<(u32, u32)> = caps
+        .iter()
+        .filter(|capability| capability.name == format)
+        .flat_map(|capability| capability.modes.iter().map(|mode| mode.resolution()))
+        .collect();
+    resolutions.sort_by_key(|&(w, h)| std::cmp::Reverse((u64::from(w) * u64::from(h), w, h)));
+    resolutions.dedup();
+    resolutions
+}
+
+/// FPS のコンボに出す選択肢。`format` と `resolution` に対応する FPS を重複なく、大きい順に並べる。
+pub fn fps_choices(caps: &DeviceCapabilities, format: &str, resolution: (u32, u32)) -> Vec<u32> {
+    let mut fps: Vec<u32> = caps
+        .iter()
+        .filter(|capability| capability.name == format)
+        .flat_map(|capability| capability.modes.iter())
+        .filter(|mode| mode.resolution() == resolution)
+        .map(|mode| mode.fps)
+        .collect();
+    fps.sort_unstable_by(|a, b| b.cmp(a));
+    fps.dedup();
+    fps
 }
 
 #[cfg(test)]
@@ -372,5 +403,60 @@ mod tests {
         ];
 
         assert_eq!(select_default_video_mode(&caps, None, None), None);
+    }
+
+    #[test]
+    fn resolution_choices_sorts_by_pixels_without_overflow() {
+        // 65536x65536 と u32::MAX x 2 は u32 の画素数が桁あふれする大きさ（#510）。
+        // panic せず画素数の順に並ぶ
+        let caps: DeviceCapabilities = vec![
+            FormatCapability::new(
+                "YUY2",
+                vec![
+                    VideoMode::new(1280, 720, 60),
+                    VideoMode::new(65536, 65536, 30),
+                    VideoMode::new(1920, 1080, 30),
+                    VideoMode::new(1920, 1080, 60),
+                    VideoMode::new(u32::MAX, 2, 30),
+                ],
+            ),
+            FormatCapability::new("MJPEG", vec![VideoMode::new(3840, 2160, 30)]),
+        ];
+
+        assert_eq!(
+            resolution_choices(&caps, "YUY2"),
+            vec![(u32::MAX, 2), (65536, 65536), (1920, 1080), (1280, 720)]
+        );
+    }
+
+    #[test]
+    fn resolution_choices_orders_equal_pixels_by_width() {
+        // 1280x720 と 720x1280 は画素数が同じ。幅の大きいほうを先にして並びを固定する
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "NV12",
+            vec![VideoMode::new(720, 1280, 30), VideoMode::new(1280, 720, 30)],
+        )];
+
+        assert_eq!(
+            resolution_choices(&caps, "NV12"),
+            vec![(1280, 720), (720, 1280)]
+        );
+        assert!(resolution_choices(&caps, "YUY2").is_empty());
+    }
+
+    #[test]
+    fn fps_choices_lists_unique_fps_of_the_resolution_in_descending_order() {
+        let caps: DeviceCapabilities = vec![FormatCapability::new(
+            "YUY2",
+            vec![
+                VideoMode::new(1920, 1080, 30),
+                VideoMode::new(1920, 1080, 60),
+                VideoMode::new(1920, 1080, 30),
+                VideoMode::new(1280, 720, 120),
+            ],
+        )];
+
+        assert_eq!(fps_choices(&caps, "YUY2", (1920, 1080)), vec![60, 30]);
+        assert!(fps_choices(&caps, "MJPEG", (1920, 1080)).is_empty());
     }
 }
