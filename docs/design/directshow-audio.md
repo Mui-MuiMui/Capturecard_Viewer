@@ -462,7 +462,7 @@ input_device_name = "Line (AVerMedia Live Gamer)"   # "video_pin" の間は使�
 | 待っている間は理由を出さない | 書き戻しが届くまでも理由を出さない。WASAPI の先頭に決めたときは往復を待たずにこの場の設定へ写して開き、書き戻す前の設定（入力なし）が届いたら決めた名前を引き継ぐ。`video_pin` に決めたときは、ワーカーは映像の接続対象を書き換えず、書き戻しが届いてから映像を開き直して音声を開く | 引き継がないと、書き戻す前の設定の差分で音声を閉じて「入力が選ばれていない」を出してしまう |
 | （書いていない） | 「音声ピンを繋ぐために映像を開き直すのを待っている」（`PinWait::NotConnected`）は、映像の開き直しがまだ済んでいない（設定の映像の接続対象と開いている相手が違う）間は理由を出さない（`monitor_audio_pin::waits_silently`） | 入力を切り替えた直後と初回の既定の直後は、映像の開き直しに「成功から 1 秒」の下限が掛かり、その間に音声の試行が先に来る。第 1 段では切り替えるたびに一瞬トーストが出ていた |
 | 選べるのは `audio_pin` が「無い」「対象外」以外 | そのとおり（「繋げなかった」も選べる）。判定は `monitor_audio_pin::pin_choice`、ダイアログへは `ui::VideoPinChoice` を `SettingsDialogState` に置いて `SettingsDialogView` の借用で渡す。`app` が観測値から毎フレーム作り直す（ダイアログを開いている間だけ） | 描画の中でデバイスへ問い合わせない（GUARDRAIL） |
-| 「デバイス設定」タブに項目を足す | コンボボックスは `src/ui/audio_input.rs` に出した | `device_tab.rs` が 800 行に近い |
+| 「デバイス設定」タブに項目を足す | コンボボックスは `src/ui/audio_input.rs` に出した | `device_tab.rs` に描画を詰め込まない（1 ファイル 800 行の目安） |
 | 統計 OSD に「（音声ピン）」 | `i18n::via_audio_pin`（引数を取る文字列）で添える | `Text` の表は前後の空白を許さないので、英語の " (audio pin)" を置けない |
 | フェイクの音声ピン | シナリオ `audio-pin`（引数なし）。`FakeVideoCapture::with_audio_pin` と `FakeAudioCapture::with_pin_feed` に同じ `AudioPinFeed` を渡し、映像のフェイクは繋ぐ指定で開くと `FakePinSource`（660Hz の正弦波を 48kHz 2ch 16bit、10ms ごと）を立てる | 実機と同じ形にして、`AudioCapture` と同じ差し込み方（番号の照合、出力を落とす前に抜く）をフェイクの音声でも通す |
 
