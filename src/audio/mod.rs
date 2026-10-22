@@ -26,6 +26,7 @@ mod capture;
 mod controls;
 mod convert;
 mod fake;
+mod fake_devices;
 mod fake_stream;
 mod passthrough_output;
 mod pin_feed;
