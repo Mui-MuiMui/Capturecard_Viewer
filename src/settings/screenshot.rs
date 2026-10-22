@@ -1,6 +1,7 @@
 //! スクリーンショットの設定（[screenshot]）。出力先・保存形式・JPEG 品質の
 //! 選択肢と serde の補助、保存先の既定値、保存するファイルのパスの決め方。
 
+use super::lenient;
 use super::ui::{MAX_VOLUME, MIN_VOLUME};
 use super::AppSettings;
 use log::warn;
@@ -136,6 +137,9 @@ pub const DEFAULT_SOUND_FILE: &str = "sound/SS.mp3";
 // 効果音の音量の既定値（%、等倍）。`Default` と読み込みの補助の両方が使う（#505）
 const DEFAULT_SOUND_VOLUME: f32 = 100.0;
 
+// JPEG 品質の既定値。`Default` と読み込みの補助の両方が使う
+const DEFAULT_JPEG_QUALITY: u8 = 90;
+
 // 設定ファイルの format に知らない値が書かれていても、設定全体を失わせない。
 // ここでエラーを返すと TOML のパースがファイル単位で失敗し、保存形式と
 // 無関係な項目まで既定値へ戻ってしまう。
@@ -146,14 +150,7 @@ fn deserialize_screenshot_format<'de, D>(deserializer: D) -> Result<ScreenshotFo
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = String::deserialize(deserializer)?;
-    Ok(screenshot_format_from_str(&raw).unwrap_or_else(|| {
-        warn!(
-            "設定の保存形式 \"{}\" を解釈できないので JPEG として扱う",
-            raw
-        );
-        ScreenshotFormat::default()
-    }))
+    lenient::choice(deserializer, "保存形式", "JPEG", screenshot_format_from_str)
 }
 
 // 設定ファイルの destination に知らない値が書かれていても、設定全体を失わせない。
@@ -164,14 +161,12 @@ fn deserialize_screenshot_destination<'de, D>(
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = String::deserialize(deserializer)?;
-    Ok(screenshot_destination_from_str(&raw).unwrap_or_else(|| {
-        warn!(
-            "設定の出力先 \"{}\" を解釈できないのでファイルへの保存として扱う",
-            raw
-        );
-        ScreenshotDestination::default()
-    }))
+    lenient::choice(
+        deserializer,
+        "出力先",
+        "ファイルへの保存",
+        screenshot_destination_from_str,
+    )
 }
 
 // 範囲外の品質が書かれていても、設定全体を失わせない。u8 のまま読むと
@@ -185,14 +180,15 @@ fn deserialize_jpeg_quality<'de, D>(deserializer: D) -> Result<u8, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = i64::deserialize(deserializer)?;
-    let clamped = raw.clamp(i64::from(MIN_JPEG_QUALITY), i64::from(MAX_JPEG_QUALITY));
-    if clamped != raw {
-        warn!(
-            "設定の JPEG 品質 {} は範囲外なので {} として扱う",
-            raw, clamped
-        );
-    }
+    const WHAT: &str = "JPEG 品質";
+    let raw = lenient::integer(deserializer, WHAT, i64::from(DEFAULT_JPEG_QUALITY))?;
+    let clamped = lenient::clamp_integer(
+        WHAT,
+        "",
+        raw,
+        i64::from(MIN_JPEG_QUALITY),
+        i64::from(MAX_JPEG_QUALITY),
+    );
     // clamp 済みなので u8 に収まる
     Ok(clamped as u8)
 }
@@ -204,23 +200,15 @@ fn deserialize_sound_volume<'de, D>(deserializer: D) -> Result<f32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = f32::deserialize(deserializer)?;
-    if !raw.is_finite() {
-        warn!(
-            "設定の効果音の音量 {} は数値として扱えないので {}% として扱う",
-            raw, DEFAULT_SOUND_VOLUME
-        );
-        return Ok(DEFAULT_SOUND_VOLUME);
-    }
-
-    let clamped = raw.clamp(MIN_VOLUME, MAX_VOLUME);
-    if clamped != raw {
-        warn!(
-            "設定の効果音の音量 {} は範囲外なので {} として扱う",
-            raw, clamped
-        );
-    }
-    Ok(clamped)
+    const WHAT: &str = "効果音の音量";
+    let raw = lenient::number(deserializer, WHAT, f64::from(DEFAULT_SOUND_VOLUME))?;
+    Ok(lenient::clamp_finite(
+        WHAT,
+        raw,
+        DEFAULT_SOUND_VOLUME,
+        MIN_VOLUME,
+        MAX_VOLUME,
+    ))
 }
 
 // 設定ファイルに書かれた文字列から出力先を決める。
@@ -314,7 +302,7 @@ impl Default for ScreenshotSettings {
             // なるが、それでも PNG よりはずっと小さい。
             // 品質を気にしない用途は既定のまま、跡を残したくない用途は
             // PNG を選ぶ、という切り分けにする
-            jpeg_quality: 90,
+            jpeg_quality: DEFAULT_JPEG_QUALITY,
             // 相対パスのまま既定値にしてある。既存ユーザーの設定ファイルにも
             // この値が保存されているため、変えると移行の前提が崩れる。
             // 解決は screenshot_sound::resolve_sound_path が exe の置き場所を基準に行い、

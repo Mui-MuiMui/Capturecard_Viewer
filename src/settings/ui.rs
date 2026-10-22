@@ -1,8 +1,8 @@
 //! ウィンドウ・音量・言語の設定（[ui]）と、更新の確認の設定（[update]）。
 //! 音量の範囲と言語の選択肢、それぞれの serde の補助。
 
+use super::lenient;
 use crate::i18n::{self, Text};
-use log::warn;
 use serde::{Deserialize, Serialize};
 
 // 画面に出す言語の設定。設定ファイルには language = "auto" / "ja" / "en" と書かれる。
@@ -56,11 +56,7 @@ fn deserialize_language<'de, D>(deserializer: D) -> Result<LanguageSetting, D::E
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = String::deserialize(deserializer)?;
-    Ok(language_setting_from_str(&raw).unwrap_or_else(|| {
-        warn!("設定の言語 \"{}\" を解釈できないので自動として扱う", raw);
-        LanguageSetting::default()
-    }))
+    lenient::choice(deserializer, "言語", "自動", language_setting_from_str)
 }
 
 fn language_setting_from_str(raw: &str) -> Option<LanguageSetting> {
@@ -95,20 +91,15 @@ fn deserialize_volume<'de, D>(deserializer: D) -> Result<f32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = f32::deserialize(deserializer)?;
-    if !raw.is_finite() {
-        warn!(
-            "設定の音量 {} は数値として扱えないので {}% として扱う",
-            raw, DEFAULT_VOLUME
-        );
-        return Ok(DEFAULT_VOLUME);
-    }
-
-    let clamped = raw.clamp(MIN_VOLUME, MAX_VOLUME);
-    if clamped != raw {
-        warn!("設定の音量 {} は範囲外なので {} として扱う", raw, clamped);
-    }
-    Ok(clamped)
+    const WHAT: &str = "音量";
+    let raw = lenient::number(deserializer, WHAT, f64::from(DEFAULT_VOLUME))?;
+    Ok(lenient::clamp_finite(
+        WHAT,
+        raw,
+        DEFAULT_VOLUME,
+        MIN_VOLUME,
+        MAX_VOLUME,
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

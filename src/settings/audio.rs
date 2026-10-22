@@ -1,7 +1,7 @@
 //! 音声の設定（[audio]）。サンプリングレートとチャンネル数の既定値、
 //! リングバッファの長さの範囲と、その serde の補助。
 
-use log::warn;
+use super::lenient;
 use serde::{Deserialize, Serialize};
 
 // PartialEq は VideoSettings と同じくプリセットとの一致判定で使う。
@@ -67,14 +67,15 @@ fn deserialize_buffer_ms<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = i64::deserialize(deserializer)?;
-    let clamped = raw.clamp(i64::from(MIN_BUFFER_MS), i64::from(MAX_BUFFER_MS));
-    if clamped != raw {
-        warn!(
-            "設定の音声バッファ長 {} ms は範囲外なので {} ms として扱う",
-            raw, clamped
-        );
-    }
+    const WHAT: &str = "音声バッファ長";
+    let raw = lenient::integer(deserializer, WHAT, i64::from(DEFAULT_BUFFER_MS))?;
+    let clamped = lenient::clamp_integer(
+        WHAT,
+        " ms",
+        raw,
+        i64::from(MIN_BUFFER_MS),
+        i64::from(MAX_BUFFER_MS),
+    );
     // clamp 済みなので u32 に収まる
     Ok(clamped as u32)
 }
@@ -101,14 +102,12 @@ fn deserialize_input_source<'de, D>(deserializer: D) -> Result<AudioInputSource,
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = String::deserialize(deserializer)?;
-    Ok(input_source_from_str(&raw).unwrap_or_else(|| {
-        warn!(
-            "設定の音声の入力の種類 \"{}\" を解釈できないので device として扱う",
-            raw
-        );
-        AudioInputSource::default()
-    }))
+    lenient::choice(
+        deserializer,
+        "音声の入力の種類",
+        "device",
+        input_source_from_str,
+    )
 }
 
 // 設定ファイルに書かれた文字列から入力の種類を決める。解釈できない場合は None。

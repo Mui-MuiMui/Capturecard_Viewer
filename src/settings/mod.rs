@@ -5,6 +5,7 @@
 //! serde の補助は子モジュールに分けてある（映像 `video`、音声 `audio`、
 //! スクリーンショット `screenshot`、録画 `recording`、UI と更新 `ui`、
 //! ホットキー `hotkeys`、プリセット `preset`、読み書き `store`、書き込み `write`、書き出し / 読み込み `transfer`）。
+//! 各セクションの serde の補助が共通で使う読み方は `lenient`。
 //!
 //! 外から使う経路（`crate::settings::...`）はここの `pub use` に集める。
 //! 外からテストでしか使わない項目は再輸出しない（誰も使わない `pub use` が
@@ -22,6 +23,7 @@ pub(crate) use store::LoadFailure;
 
 mod audio;
 mod hotkeys;
+mod lenient;
 mod preset;
 mod recording;
 mod screenshot;
