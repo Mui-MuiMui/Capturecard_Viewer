@@ -141,11 +141,25 @@ pub(super) fn capabilities_with_fallback(
     let Some(mf_name) = media_foundation_candidate(device_name, backend).filter(|_| empty) else {
         return result;
     };
+    // 直前の attempt_with_fallback が「DirectShow で…対応形式の取得に成功した」と出して
+    // いるので、成功は一覧が空だったことと、どちらの結果を使うかを続けて残す
     debug!(
-        "DirectShow では対応形式が空だったので Media Foundation で引く: {}",
+        "DirectShow での対応形式の取得は成功したが一覧が空だったので、Media Foundation で引き直す: {}",
         mf_name
     );
-    query(VideoRoute::MediaFoundation, Some(mf_name))
+    let second = query(VideoRoute::MediaFoundation, Some(mf_name));
+    match &second {
+        Ok(capabilities) => debug!(
+            "Media Foundation で引き直した対応形式を使う（{} 件）: {}",
+            capabilities.len(),
+            mf_name
+        ),
+        Err(e) => debug!(
+            "Media Foundation でも対応形式を引けなかったので、その失敗を返す: {}: {}",
+            mf_name, e
+        ),
+    }
+    second
 }
 
 /// 経路を決めて `attempt` を呼び、「自動」で DirectShow が開けなければ
