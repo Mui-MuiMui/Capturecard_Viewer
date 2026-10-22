@@ -196,15 +196,15 @@ eframe は **`update()` の中で要求された再描画しか予約しない�
 
 - **ここは上限であって下限ではない。** `overlay.rs` の OSD（消える時刻）、`flush_settings_if_due`（書き出す時刻）はそれぞれ自分で予約している。egui の `request_repaint_after` は同じフレームで要求された中の最短を採るので、互いに邪魔しない
 - 以前は `update_video_texture` が無条件に 16ms を予約しており、映像が来ていなくても 60fps で描き続けていた（Issue #98）。**映像の有無にかかわらず短い間隔で予約する形へ戻さないこと**
-- **egui は要求された遅延から 1 フレームぶん（`predicted_dt`。eframe は設定しないので既定の 1/60 秒）を引いてから予約する**（`egui::Context` の `request_repaint_after`）。16ms は 0ms に、250ms は約 233ms になる。テスト `egui_shortens_a_requested_delay_by_one_predicted_frame` がこの前提を固定している
+- **egui 0.37 は要求された遅延をそのまま予約する**（`egui::Context` の `request_repaint_after`、egui #8595）。0.36 までは 1 フレームぶん（`predicted_dt`。eframe は設定しないので既定の 1/60 秒）を引いてから予約しており、16ms は 0ms に、250ms は約 233ms になっていた（下の「到着で起こす形にした理由」はこの前提での話）。テスト `egui_schedules_a_requested_delay_as_is` がいまの前提を固定している
 
 映像フレームの取り込みは `RepaintWaker`（`repaint.rs`）が駆動する。`egui::Context` を 1 つだけ持ち、フレームコールバックスレッド・ホットキーのリスナースレッド・デバイスワーカーなどが複製を握っている。**フレームが届いたら、コールバックが `FrameBuffer` へ置いた直後に UI スレッドを起こし、その `update()` の先頭近くでテクスチャへ取り込む**（#459）。
 
 - **起こすのは最小化していない間ずっと**（`should_wake_on_event`）。映像が流れている間も起こす。止めると 250ms ごとにしか描かれない
 - 描いている最中に届いた通知は、その `update()` と描画が終わってから次の `update()` を 1 回呼ぶ。そのフレームを取り込む前に届いた通知なら次は「新着なし」になるが、取り込むのは `update()` の先頭近くなのでまれ。数は `debug` の 30 秒ごとのログ（下の「表示までの遅れの計測」）に「新着なしの update()」として出る
-- `WAKE_DELAY`（1ms）を `Duration::ZERO` にしないこと。egui は遅延ゼロの要求で `outstanding` を立て、1 回の通知で `update()` を 2 回回す。1ms なら `outstanding` は立たず、`predicted_dt` を引かれて 0ms で予約される
+- `WAKE_DELAY`（1ns）を `Duration::ZERO` にしないこと。egui は遅延ゼロの要求で `outstanding` を立て、1 回の通知で `update()` を 2 回回す（テスト `wake_delay_does_not_make_egui_paint_twice`）。**ミリ秒単位の値にもしないこと。** 0.36 までは 1ms でも `predicted_dt` を引かれて 0ms で予約されたが、0.37 では 1ms がそのまま予約され、eframe のイベントループが 1ms 待ってから描く（winit は Windows で高分解能のタイマーで待つので、待つのはほぼ 1ms）。その分だけ到着から表示までが遅れるので、0.37 へ上げたときに 1ms → 1ns に変えた（#514）
 - フレームコールバックは毎フレーム `request_repaint_after` を 1 回呼ぶ。中身は egui の `Context` の短いロック、eframe のイベントループの窓口（`EventLoopProxy`）のロック、winit のユーザーイベント 1 つ（Windows では `PostMessage`）で、画素には触らない。**「フレームコールバックでロックもアロケーションもしない」の例外はこの 1 回だけ**（#459 までも映像が止まっている間の 1 枚目で同じものを呼んでいた）。egui の `Context` のロックは UI スレッドが書き込み（`end_pass` や tessellate）で握っている間は待たされうるので、その間はこのフレームを録画へ回す処理と次のフレームの変換も遅れる。コールバック側でこの呼び出しに掛かる時間は測っていない。**`RepaintWaker::wake` の中へ処理を足さないこと**
-- **最小化中は起こさない。** eframe 0.36 は最小化中のウィンドウにも `update()`（このアプリの `App::ui`）を回す。最小化したウィンドウには `RedrawRequested` が届かないので、`eframe::native::run` が期限の来たウィンドウを `is_invisible_or_minimized` で拾い、`run_ui_and_paint` を直接呼ぶ。ただし間隔は 100ms（`INVISIBLE_WINDOW_REPAINT_INTERVAL`）より詰めず、他スレッドからの再描画要求も同じ下限へ丸める。画面には何も見えないので、起こしても見えない `update()` が最大で毎秒 10 回増えるだけになる。そのため最小化中は `should_wake_on_event` が偽を返し、`next_repaint_delay` は 1 秒を予約する（`src/repaint.rs`。最小化の判定は `src/app/mod.rs` の `viewport.minimized`）。**`update()` は止まらないが 1 秒ごとにしか来ない**ので、そこで動く処理（OSD の消滅、設定の遅延書き出しなど）は最大 1 秒遅れる。接続の再試行と切断の監視はデバイスワーカースレッドへ移したので影響を受けない（#133）。ホットキーのアクションも、画面が要らないもの（デバイス再接続・音量・ミュート）はリスナースレッドからワーカーへ流して実行する。画面が要るもの（フルスクリーン切替など）だけが復帰まで持ち越される（`docs/design/hotkeys.md` の「最小化中の扱い」）。最小化中に閉じる要求で終了しなかった問題（#420）は再描画とは別の原因で、`docs/design/window.md` に書いてある
+- **最小化中は起こさない。** eframe 0.36 / 0.37 は最小化中のウィンドウにも `update()`（このアプリの `App::ui`）を回す。最小化したウィンドウには `RedrawRequested` が届かないので、`eframe::native::run` が期限の来たウィンドウを `is_invisible_or_minimized` で拾い、`run_ui_and_paint` を直接呼ぶ。ただし間隔は 100ms（`INVISIBLE_WINDOW_REPAINT_INTERVAL`）より詰めず、他スレッドからの再描画要求も同じ下限へ丸める。画面には何も見えないので、起こしても見えない `update()` が最大で毎秒 10 回増えるだけになる。そのため最小化中は `should_wake_on_event` が偽を返し、`next_repaint_delay` は 1 秒を予約する（`src/repaint.rs`。最小化の判定は `src/app/mod.rs` の `viewport.minimized`）。**`update()` は止まらないが 1 秒ごとにしか来ない**ので、そこで動く処理（OSD の消滅、設定の遅延書き出しなど）は最大 1 秒遅れる。接続の再試行と切断の監視はデバイスワーカースレッドへ移したので影響を受けない（#133）。ホットキーのアクションも、画面が要らないもの（デバイス再接続・音量・ミュート）はリスナースレッドからワーカーへ流して実行する。画面が要るもの（フルスクリーン切替など）だけが復帰まで持ち越される（`docs/design/hotkeys.md` の「最小化中の扱い」）。最小化中に閉じる要求で終了しなかった問題（#420）は再描画とは別の原因で、`docs/design/window.md` に書いてある
 - 最小化から戻ったとき（`set_enabled` が偽から真へ変わったとき）は、その場で 1 回再描画を予約する。止めている間に届いたフレームの通知は捨てられているため
 - `Context` と結びつくのは最初の `update()`（`RepaintWaker::bind`）。**`RepaintWaker` は `VideoCapture::new` の引数で渡す。** フレームコールバックは `start_capture` の時点の複製を持つので、開いたあとに差し替える手段は用意していない
 - 渡し忘れても映像は止まらないが、250ms ごとにしか描かれない。既定の `RepaintWaker` は何もしない
@@ -213,7 +213,7 @@ eframe は **`update()` の中で要求された再描画しか予約しない�
 
 #459 までは、映像が流れている間（最後のフレームから 200ms 以内）は 16ms を予約し、`RepaintWaker` を止めていた。到着で起こす形を以前に試したとき、1080p60 で CPU が 66% → 85%（1 コアあたり）に増え、描いている最中に届いた通知が「新着なし」の `update()` をもう 1 回呼んでいたため（当時の形の詳細は残っていない）。
 
-ところが egui が `predicted_dt` を引くので、16ms の予約は実際には「描き終えたらすぐ次の `update()`」だった。`update()` の回る位相は描画（垂直同期で止まる swap）が決め、フレームの到着とは関係がない。届いたフレームは次の `update()` の始まりまで待たされ、描画が重い環境では取り込む前に次のフレームで上書きされていた。
+ところが egui（0.36 まで）が `predicted_dt` を引くので、16ms の予約は実際には「描き終えたらすぐ次の `update()`」だった。`update()` の回る位相は描画（垂直同期で止まる swap）が決め、フレームの到着とは関係がない。届いたフレームは次の `update()` の始まりまで待たされ、描画が重い環境では取り込む前に次のフレームで上書きされていた。
 
 フェイク 1080p60（VM、GPU なし、統計 OSD を表示。60 秒の計測を 16ms の予約で 7 回、到着で起こす形で 9 回）で比べた値。
 
@@ -297,7 +297,7 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 
 ### present mode と溜めるフレーム数
 
-eframe 0.36 の `WgpuConfiguration` の範囲（`SurfaceConfig`）で指定できた。
+eframe 0.36 の `WgpuConfiguration` の範囲（`SurfaceConfig`）で指定できた。0.37 でも同じ形で指定している。
 
 | 設定 | 値 | 理由 |
 |---|---|---|
@@ -307,7 +307,7 @@ eframe 0.36 の `WgpuConfiguration` の範囲（`SurfaceConfig`）で指定で�
 | シェーダーのコンパイラ | FXC | Windows に入っている `d3dcompiler_47.dll`。既定の Auto は PATH 上の `dxcompiler.dll` を拾いうるので固定する |
 
 - **Immediate（垂直同期を切る）は使わない。** ティアリングによる画質の低下が大きいので、ユーザーが却下した（#456 のコメント）
-- **Mailbox が使えないときに Fifo へ倒す形にはできなかった。** eframe 0.36 は present mode を起動前の `WgpuConfiguration` で決め、起動後に変える口（`Frame::set_wgpu_surface_config`）は `Frame` が持つ `RenderState` の複製を書き換えるだけで描画側へ届かない。wgpu は対応していない present mode を指定すると落ちる（Fifo への自動の切り替えは `AutoVsync` / `AutoNoVsync` にしか無い）。そこで **Mailbox を必ず出せる DX12 だけで wgpu を使い**、出せないときは glow へ倒す。wgpu-hal の DX12 は Mailbox と Fifo を常に対応一覧に載せる。アダプターを選ぶとき（`native_adapter_selector`）にもウィンドウの surface が Mailbox を出せるかを確かめ、出せないアダプターは選ばない
+- **Mailbox が使えないときに Fifo へ倒す形にはできなかった。** eframe 0.36 は present mode を起動前の `WgpuConfiguration` で決め、起動後に変える口（`Frame::set_wgpu_surface_config`）は `Frame` が持つ `RenderState` の複製を書き換えるだけで描画側へ届かなかった。0.37 で描画側へ届くようになった（eframe #8442。毎フレームの終わりに `Frame` の値を描画側へ渡し、値が変わったときだけ surface を構成し直す。`Frame` の値は起動時の `WgpuConfiguration` から始まるので、起動時の指定はそのまま効く）が、このアプリは起動後に変えないので形は変えていない（#514）。wgpu は対応していない present mode を指定すると落ちる（Fifo への自動の切り替えは `AutoVsync` / `AutoNoVsync` にしか無い）。そこで **Mailbox を必ず出せる DX12 だけで wgpu を使い**、出せないときは glow へ倒す。wgpu-hal の DX12 は Mailbox と Fifo を常に対応一覧に載せる。アダプターを選ぶとき（`native_adapter_selector`）にもウィンドウの surface が Mailbox を出せるかを確かめ、出せないアダプターは選ばない
 - **Mailbox は垂直同期で待たないので、描画の回数を垂直同期が抑えない。** 映像の取り込みは到着で起こす形（上の「再描画をいつ要求するか」）なので、普段は到着の回数（60fps なら毎秒 60 回）しか描かない。ただし egui が描き続けを要求する間（`ui.spinner()` を出している間、アニメーションの間）は、GPU が描ける限りの回数で回る。いまスピナーを出すのは、対応設定の取得中と更新の確認・適用中だけ
 
 ### glow を残す理由と、どちらで描くかの決め方
@@ -320,7 +320,7 @@ eframe 0.36 の `WgpuConfiguration` の範囲（`SurfaceConfig`）で指定で�
 
 - **glow は撮り比べのために残す。** 同じ exe で glow と wgpu を切り替えて測る（`docs/LATENCY.md`）。設定ファイルには入れない
 - **GPU の DX12 アダプターが無いときの逃げ道でもある。** 既定では WARP（Microsoft Basic Render Driver。画素を CPU で塗る）を選ばない。GPU の無い VM でも、VMware の OpenGL ドライバーなら glow は軽く動くため（下の表）
-- **どちらで描くかは `run_native` の前に決める。** winit のイベントループは 1 プロセスに 1 回しか作れないので、wgpu で起動に失敗してから glow で開き直すことはできない。起動の前に DX12 のインスタンスを作ってアダプターを列挙し、優先順位（外付け → 内蔵 → 仮想 → その他、WARP は明示したときだけ最後）の順にデバイスを作ってみて、最初に作れたアダプターを使う（`probe_dx12`、手元の VM で 60〜150ms）。eframe がアダプターを選ぶときもそのアダプターを優先する（`native_adapter_selector`）。**確認と eframe のアダプターは DXGI の LUID で突き合わせる**（#512）。PCI のベンダー ID とデバイス ID だけだと、同じ型の GPU の 2 枚挿しで 2 枚が同じ値になり、確認でデバイスを作れなかった 1 枚目を eframe が選びうるため。wgpu 30 の `AdapterInfo` に LUID は無く、`device_pci_bus_id` も DX12 では (ベンダー, デバイス) の一致する最初の表示アダプターの値なので見分けに使えない。wgpu-hal の DX12 のアダプター（`Adapter::as_hal`）から DXGI のアダプターを借りて `GetDesc1` で読む。LUID は再起動かドライバーの入れ直しまで変わらず、確認と eframe は同じプロセスで続けて列挙するので食い違わない。選んだアダプターの LUID と、確認と同じものかはログ（INFO「wgpu のアダプター: …」）に出る。**eframe / wgpu を上げるとき（eframe 0.37、#514 など）は `Adapter::as_hal` の形（戻り値・型引数の `hal::api::Dx12`）と wgpu-hal の `raw_adapter` が変わっていないかを確かめ、`AdapterInfo` に LUID が入っていればそちらへ移す。** API の形が変わればビルドで気づくが、`as_hal` が `None` を返すようになると LUID は黙って読めなくなり、見分け方が (ベンダー, デバイス) に戻る。上げたあとはログの LUID が「不明」になっていないことも確かめる。それでも描画の初期化に失敗したらウィンドウは出ずに終わり、ログに ERROR が残る。そのときは `CAPTURECARD_VIEWER_RENDERER=glow` で起動できる
+- **どちらで描くかは `run_native` の前に決める。** winit のイベントループは 1 プロセスに 1 回しか作れないので、wgpu で起動に失敗してから glow で開き直すことはできない。起動の前に DX12 のインスタンスを作ってアダプターを列挙し、優先順位（外付け → 内蔵 → 仮想 → その他、WARP は明示したときだけ最後）の順にデバイスを作ってみて、最初に作れたアダプターを使う（`probe_dx12`、手元の VM で 60〜150ms）。eframe がアダプターを選ぶときもそのアダプターを優先する（`native_adapter_selector`）。**確認と eframe のアダプターは DXGI の LUID で突き合わせる**（#512）。PCI のベンダー ID とデバイス ID だけだと、同じ型の GPU の 2 枚挿しで 2 枚が同じ値になり、確認でデバイスを作れなかった 1 枚目を eframe が選びうるため。wgpu 30 の `AdapterInfo` に LUID は無く、`device_pci_bus_id` も DX12 では (ベンダー, デバイス) の一致する最初の表示アダプターの値なので見分けに使えない。wgpu-hal の DX12 のアダプター（`Adapter::as_hal`）から DXGI のアダプターを借りて `GetDesc1` で読む。LUID は再起動かドライバーの入れ直しまで変わらず、確認と eframe は同じプロセスで続けて列挙するので食い違わない。選んだアダプターの LUID と、確認と同じものかはログ（INFO「wgpu のアダプター: …」）に出る。**eframe / wgpu を上げるとき（eframe 0.37、#514 など）は `Adapter::as_hal` の形（戻り値・型引数の `hal::api::Dx12`）と wgpu-hal の `raw_adapter` が変わっていないかを確かめ、`AdapterInfo` に LUID が入っていればそちらへ移す。** API の形が変わればビルドで気づくが、`as_hal` が `None` を返すようになると LUID は黙って読めなくなり、見分け方が (ベンダー, デバイス) に戻る。上げたあとはログの LUID が「不明」になっていないことも確かめる（eframe 0.37 では wgpu が 30 のままで形は変わらず、WARP の LUID が読めた。2026-10-22、#514）。それでも描画の初期化に失敗したらウィンドウは出ずに終わり、ログに ERROR が残る。そのときは `CAPTURECARD_VIEWER_RENDERER=glow` で起動できる
 - どちらで描いているかは統計 OSD の「描画」の行（「描画 wgpu Dx12 Mailbox / <アダプター名>」「描画 glow (OpenGL)」。アンダーランの行の次）とログで分かる
 
 ### GPU の無い VM での成立条件
@@ -352,7 +352,7 @@ DWM が合成を飛ばしてフリップモデルの swapchain を直接スキ�
 | 層 | 切り替えで変わるもの |
 |---|---|
 | アプリ | `toggle_fullscreen` は `ViewportCommand::Fullscreen` を送り、`is_fullscreen` と OSD を変えるだけ。映像のテクスチャ（大きさは映像で決まる）、GPU 変換の資源（映像の大きさごと、`gpu_yuy2_wgpu.rs` の `sized`）、`DisplayLatency`、`RepaintWaker`、`SlowPaintWatch`、`FrameBuffer` の世代番号はどれも作り直さない。描画の違いは余白（2px / 0）とドラッグの扱いだけ |
-| eframe / egui-wgpu | ウィンドウの大きさが変わるので `Painter::on_window_resized` が surface を構成し直す。DX12 では `ResizeBuffers` で swapchain のバッファを作り直し、`SetMaximumFrameLatency` と待ちのハンドル（frame latency waitable object）を取り直す。present mode（Mailbox）と溜めるフレーム数（1）は起動時の設定のまま（eframe 0.36 でも `RenderState::surface_config` は起動時の `WgpuConfiguration` から作られるので、起動時の指定は効いている。効かないのは起動後に変える `Frame::set_wgpu_surface_config` のほう） |
+| eframe / egui-wgpu | ウィンドウの大きさが変わるので `Painter::on_window_resized` が surface を構成し直す。DX12 では `ResizeBuffers` で swapchain のバッファを作り直し、`SetMaximumFrameLatency` と待ちのハンドル（frame latency waitable object）を取り直す。present mode（Mailbox）と溜めるフレーム数（1）は起動時の設定のまま（eframe 0.36 でも `RenderState::surface_config` は起動時の `WgpuConfiguration` から作られるので、起動時の指定は効いている。0.36 で効かなかったのは起動後に変える `Frame::set_wgpu_surface_config` のほうで、0.37 で直った） |
 | OS | DWM が独立フリップに載せるかを決め直す（上の「フルスクリーンで独立フリップが効く条件」） |
 
 **VM のフェイクでは劣化は再現しなかった**（2026-10-21〜22、この開発用の VM、glow、フェイク 1080p60 YUY2、GPU 変換、フルスクリーン、統計 OSD を表示、`CAPTURECARD_VIEWER_LOG=debug`）。

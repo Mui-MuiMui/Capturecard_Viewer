@@ -88,7 +88,7 @@ fn start_capture_opens_stream() {
 
 設定ダイアログと右クリックメニューの「項目が出る・押すとイベントが返る」は、`egui_kittest`（#419）で CI に載せる。AccessKit の木から項目を名前で探してクリックし、描画関数が返した `SettingsEvent` / `MenuAction` とドラフトを確かめる。区分は「ユニットテスト」と同じく CI で常時実行。
 
-- **版は egui と揃える**（`[dev-dependencies]` の `egui_kittest = "0.36"`）。egui を上げるときは一緒に上げる
+- **版は egui と揃える**（`[dev-dependencies]` の `egui_kittest = "0.37"`）。egui を上げるときは一緒に上げる
 - **既定のフィーチャは切ってある。** 画像の比較（`snapshot` / `wgpu`）は使わない。GPU の無い CI でも動き、増えるクレートは `egui_kittest` と `kittest` の 2 つだけ
 
 ### 書くもの
@@ -111,6 +111,9 @@ fn start_capture_opens_stream() {
 - テストは描画の対象と同じファイルの `mod tests` に置く（1 ファイル 1 つの決まりは同じ）
 - 項目は `get_by_label` で探して `click()` し、`harness.run()` で処理させる。灰色かは `node.accesskit_node().is_disabled()`、チェックの状態は `toggled()`、ラベルの文字は `Role::Label` の `value()` で見る（`Label` は既定の `get_by_label` では見つからない）
 - **クリックは押下と離しで別のフレームになる。** 「押したあとのフレームで何が返らないか」を見るときは、`events` を空にしてから `harness.step()` を 1 回回して見る
+- **egui_kittest 0.37 は、名前の無い入力のウィジェット（コンボ・スライダー・入力欄）があると `run()` で落ちる**（egui #8589）。テストを黙らせず（`with_accessibility_check(false)` にしない）、描画側で名前を付ける。見出しを横に `Label` で置くコンボと入力欄は `labelled_by(見出し.id)`、スライダーは `ui::name_slider`（理由はその関数のコメント）
+- **字形の無い文字でも落ちる**（0.37 の既定）。テストでは日本語のフォントを読まないので、`Harness::builder()` に `.allow_missing_glyphs()` を付けて豆腐で描かせる（`dialog_harness` などは付けてある）
+- 画面（900x800 など）の下に外れた項目は、`click()` の前に `scroll_to_me()` と `harness.run()` で見える位置へ送る。クリックは項目の中心の座標へ送るので、外れていると何も起きない
 
 ## 手動テスト
 

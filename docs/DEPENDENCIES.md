@@ -2,7 +2,7 @@
 
 現在の依存と、更新に向けた調査結果をまとめる。
 
-**バージョン情報は 2026-10-21 時点のもの**（#500 で `cargo update` と `rodio` 0.23 を入れた後）。「Cargo.lock」の列は `Cargo.lock` に載っている版、「最新」の列は同じ日に crates.io の API（`max_stable_version`）を引いた版。参照するときは日付を確認し、必要なら取り直すこと（下の「調査の再実行」）。
+**バージョン情報は 2026-10-21 時点のもの**（#500 で `cargo update` と `rodio` 0.23 を入れた後。`eframe` / `egui` の行だけは 2026-10-22 に 0.37 へ上げた後、#514）。「Cargo.lock」の列は `Cargo.lock` に載っている版、「最新」の列は同じ日に crates.io の API（`max_stable_version`）を引いた版。参照するときは日付を確認し、必要なら取り直すこと（下の「調査の再実行」）。
 
 ## 方針
 
@@ -49,10 +49,10 @@
 
 | クレート | 指定（`Cargo.toml`） | `Cargo.lock` | 最新 | 差 | 用途 |
 |---|---|---|---|---|---|
-| `eframe` | 0.36 | 0.36.2 | 0.37.0 | 後述 | ウィンドウとアプリの骨組み（第 4 段、#300）。描画は wgpu（DX12）と glow の両方を入れ、起動時に選ぶ（下の「`wgpu` は DX12 だけで入れる」） |
-| `wgpu` | 30 | 30.0.1 | 30.0.1 | 追随 | `eframe`（`egui-wgpu` 0.36）が使う wgpu に DX12 のバックエンドと WGSL を足すためだけに直接の依存へ入れる。版は `egui-wgpu` と揃える |
+| `eframe` | 0.37 | 0.37.0 | 0.37.0 | 追随 | ウィンドウとアプリの骨組み（第 4 段、#300。0.37 は #514）。描画は wgpu（DX12）と glow の両方を入れ、起動時に選ぶ（下の「`wgpu` は DX12 だけで入れる」） |
+| `wgpu` | 30 | 30.0.1 | 30.0.1 | 追随 | `eframe`（`egui-wgpu` 0.37）が使う wgpu に DX12 のバックエンドと WGSL を足すためだけに直接の依存へ入れる。版は `egui-wgpu` と揃える |
 | `pollster` | 1.0 | 1.0.1 | 1.0.1 | 追随 | wgpu の非同期の問い合わせを待つ（起動前の DX12 の確認 `src/renderer.rs`、GPU 変換の自己診断 `src/video/gpu_yuy2_wgpu.rs`）。`eframe` が wgpu のために使うものと同じ |
-| `egui` | 0.36 | 0.36.2 | 0.37.0 | 後述 | UI（同上）。`egui_kittest`（dev）も同じ版にそろえる |
+| `egui` | 0.37 | 0.37.0 | 0.37.0 | 追随 | UI（同上）。`egui_kittest`（dev）も同じ版にそろえる |
 | `nokhwa` | 0.10 | 0.10.11 | 0.10.11 | 追随 | 映像キャプチャ |
 | `cpal` | 0.18 | 0.18.2 | 0.18.2 | 追随 | 音声入出力。`realtime` フィーチャで音声スレッドの優先度を上げる（`docs/design/audio.md` の「cpal 0.18 で変わったこと」）。`rodio` 0.23 も同じ 0.18 を使う（下の「`cpal` 0.17 の重複は `rodio` 0.23 で消えた」） |
 | `toml` | 1.1 | 1.1.8+spec-1.1.0 | 1.1.8+spec-1.1.0 | 追随 | 設定ファイルの読み書き。`confy` 0.6 の代わり（第 3 段、#302） |
@@ -177,9 +177,22 @@ flowchart TD
 
 効果音の出力にも cpal 0.18 の WASAPI の振る舞い（出力をレート変換付きで開く、など。`docs/design/audio.md` の「cpal 0.18 で変わったこと」）が掛かるようになった。既定の出力デバイスで内蔵音を鳴らし終わる `#[ignore]` のテスト（`screenshot_sound::tests::play_blocking_plays_the_embedded_sound_on_the_default_output`）は 0.23 で通った。
 
-### `eframe` / `egui` 0.37 は別の Issue で上げる
+### `eframe` / `egui` 0.37（#514、2026-10-22）
 
-0.37.0（2026-10-15）が出ている。`Id::new` の非推奨、`egui_kittest` が accessible name の無い入力のウィジェットで落ちるようになった点、eframe の Windows の描画とウィンドウの復元の変更などがあり、描画とウィジェットの経路に広く効くので、0.x の minor の方針どおり単独で扱う（#514）。`egui-wgpu` 0.37 は `wgpu` 30、`eframe` 0.37 は `winit` 0.30 のままなので、直接の依存の `wgpu` / `winit` は変えずに済む見込み。
+0.36.2 → 0.37.0 を `egui_kittest` と一緒に上げた。`egui-wgpu` 0.37 は `wgpu` 30、`eframe` 0.37 は `winit` 0.30 のままで、直接の依存の `wgpu` / `winit` は変えていない。
+
+| 変えたこと | 中身 |
+|---|---|
+| フィーチャ | **`eframe` に `clipboard` を足した。** 0.36 までは入力欄のコピー・貼り付け（`egui-winit` の `arboard`）が常に入っていたが、0.37 で既定のフィーチャになった（eframe #8392）。`default-features = false` のままだと黙って消える。**`egui` に `monochrome_emoji_fonts` を足した。** 同梱の記号のフォント（NotoEmoji / emoji-icon-font）が `default_fonts` から分かれた。注意書きの「⚠」と右クリックメニューの「⏵」が頼っている（テスト `ui::tests::symbols_are_drawn_by_the_bundled_fonts`）。exe に入るフォントは 0.36 と同じ |
+| システムのフォント | 0.37 のネイティブの `eframe` は、足りない文字を OS のフォントから引く `egui_system_font_provider`（`fontique`）を `system_fonts` フィーチャで持つ。**入れていない。** 日本語のフォントは `src/platform.rs` が自分で探して入れ、記号は上の同梱のフォントで足りる。`NativeOptions::system_font_fallback` は `false` にした（フィーチャが無いと、字形の無い文字に当たったときに「system_fonts を有効にせよ」の INFO を出すだけのため） |
+| Id | `Id::new` が非推奨（`AsId` は削除）。`Id::unique` に置き換えた。返す値は同じなので、ウィンドウの位置や一覧の開閉の状態は変わらない（`docs/design/i18n.md`）。`ComboBox::from_id_salt` / `ComboBox::new` / `Panel` はそのまま通った |
+| 入力イベント | `Event::MouseWheel` に `source`（ホイールかトラックパッドか）が増えた。テストの組み立てだけ直した |
+| 再描画 | `request_repaint_after` が要求した遅延から `predicted_dt`（1/60 秒）を引かなくなった（egui #8595）。`RepaintWaker` の遅延を 1ms → 1ns にした。1ms のままだと、フレームが届いてから 1ms 待って描く（`docs/design/video-pipeline.md` の「再描画をいつ要求するか」） |
+| 描画 | `Frame::set_wgpu_surface_config` が描画側へ届くようになった（eframe #8442）が、present mode と溜めるフレーム数は起動時の `WgpuConfiguration` のまま変えない。wgpu は 30 のままで、LUID を読む `Adapter::as_hal::<Dx12>()` → `raw_adapter().GetDesc1()` も同じ形で通る（フェイクの映像で WARP の LUID が読めることをログで確かめた） |
+| 見た目 | ボタンの余白（`button_padding` 4x1 → 8x2）、クリック領域の高さ（`interact_size.y` 18 → 20）、ウィジェットの角の丸み（2 → 4）が大きくなった（egui #8617 / #8445）。設定ダイアログと右クリックメニューの 1 行が 2px 高い。元へ戻す設定は用意していない |
+| テスト | `egui_kittest` 0.37 は名前の無い入力のウィジェットと、字形の無い文字で `run()` を落とす（egui #8589）。見出しの横のコンボと入力欄を `labelled_by` で見出しへ結び、スライダーには見出しと同じ名前を付けた（`ui::name_slider`）。日本語のフォントを読まないテストは `allow_missing_glyphs()` で豆腐に描かせる。書き方は `.claude/skills/testing-conventions/SKILL.md` |
+
+ビルドに入るクレート（`x86_64-pc-windows-msvc`）は `unicode-properties`（MIT / Apache-2.0）が 1 つ増えただけで、他は版が上がっただけ（`accesskit` 系、`vello_common` / `vello_cpu` 0.2）。exe は 14,355,456 → 14,566,912 バイト（約 14.4MB → 約 14.6MB）。
 
 ### 第 3 段 — 設定
 
@@ -328,4 +341,4 @@ cargo audit
 - **本文は自動で出る。** egui 0.36 から crate のライセンスが SPDX License List の識別子 `Ubuntu-font-1.0` になり、cargo-about が本文を差し込む。`about.toml` の `accepted` も `LicenseRef-UFL-1.0` から `Ubuntu-font-1.0` に替えた
 - **著作権表示（Copyright 2011 Canonical Ltd.）は crate のメタデータに無い。** そのため `about.hbs` の末尾に、この 1 行だけの付録を手で書いている。出典は `Ubuntu-Light.ttf` のメタデータ
 
-egui 0.26 までは crate のライセンスが `LicenseRef-UFL-1.0` で、cargo-about 0.9.2 が本文を出せなかったため、付録に本文ごと書いていた。0.36 の同梱フォント（Ubuntu-Light / Hack / NotoEmoji）は 0.26 と同じファイルで、`UFL.txt` も改行コードしか違わない（2026-10-03 に確認）。付録は自動生成の対象外なので、**egui を更新したときは同梱フォントが変わっていないか確認すること。**
+egui 0.26 までは crate のライセンスが `LicenseRef-UFL-1.0` で、cargo-about 0.9.2 が本文を出せなかったため、付録に本文ごと書いていた。0.36 の同梱フォント（Ubuntu-Light / Hack / NotoEmoji）は 0.26 と同じファイルで、`UFL.txt` も改行コードしか違わない（2026-10-03 に確認）。0.37 の Ubuntu-Light / Hack / NotoEmoji / emoji-icon-font と `UFL.txt` / `OFL.txt` も 0.36 とバイト単位で同じで、増えたのは `egui-icons.ttf`（emoji-icon-font の 5 字の抜き出し、MIT）だけ（2026-10-22 に確認、#514）。付録は自動生成の対象外なので、**egui を更新したときは同梱フォントが変わっていないか確認すること。**
