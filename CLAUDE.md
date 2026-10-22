@@ -149,6 +149,7 @@ cargo build --release
 | `src/settings/recording.rs` | `[recording]`。ビットレート・リプレイバッファの長さ・映像と音声のずれの補正の範囲、保存先の既定値 |
 | `src/settings/ui.rs` | `[ui]`（音量・言語・ウィンドウ）と `[update]`。音量の範囲と言語の選択肢（`LanguageSetting`） |
 | `src/settings/hotkeys.rs` | `[hotkeys]` / `[hotkey_settings]`。既定の割り当て、旧版の `screenshot.hotkey` からの移行（`migrate_hotkeys`）、`AppSettings::hotkey` / `set_hotkey` |
+| `src/settings/lenient.rs` | 各セクションの `deserialize_*` が呼ぶ、1 項目が読めなくても設定全体を失わせない読み方の補助（文字列の選択肢 `choice`、整数 `integer` / `clamp_integer`、数値 `number` / `clamp_finite`） |
 | `src/settings/preset.rs` | `[[presets]]`。適用と一致の判定（`matches_preset` / `resolved_active_preset`）、名前の検証、読み込んだ一覧の整え方（`sanitize_presets`）、`AppSettings` のプリセット操作 |
 | `src/settings/store.rs` | 設定ファイルの読み込みと保存（`AppSettings::load` / `save`）、TOML の読み方と書き方（`parse_settings` / `serialize_settings`）、読めなかったファイル・空のファイルの退避、`LoadOutcome` / `AutoSavePolicy`。置き場所は `config_path` を呼ぶだけ |
 | `src/settings/write.rs` | 設定ファイルの書き込み。同じフォルダの一時ファイル（`<名前>.<乱数>.tmp`）へ書いて rename で置き換える（`write_atomically` / `replace_atomically`）。保存と書き出しで共通 |
@@ -204,7 +205,7 @@ cargo build --release
 
 `src/recording/` の子モジュールで**状態を持つのは `recorder.rs` の `Recorder`（UI スレッドの窓口）と、録画スレッドの中だけにあるもの（`recorder_loop.rs` の `Worker`、1 回の録画 `Session` / `ReplayRecording`、リプレイバッファ `ReplayPipeline` とそのリング `EncodedRing`、音声トラック `AudioTrack`、`SinkWriter` / `PassthroughWriter` / `EncoderMft`）だけ。** 変換・PTS・ファイル名・空き容量の判定、リングのどこから書くか・どこで捨てるかは純粋関数にする。**録画スレッドから `error!` を出さず、失敗は `RecordingEvent` で UI スレッドへ返す**（`docs/design/threads.md`）。外から使う経路は `recording/mod.rs` の `pub use` に集める。
 
-`src/settings/` の子モジュールは**セクションごとに分けてあるだけで、`AppSettings` の定義と `RawAppSettings` / `From` は `mod.rs` に置く。** セクションに項目を足すときは型を置いたファイルを、`AppSettings` に項目を足すときは `mod.rs` の 3 か所（`AppSettings` / `RawAppSettings` / `From`）を触る。serde の補助（`deserialize_*` / `*_from_str`）はそれを使う設定と同じファイルに置く。`AppSettings` のメソッドは関係するファイルがそれぞれ `impl AppSettings` を足す。外から使う経路（`crate::settings::...`）は `settings/mod.rs` の `pub use` に集め、外からテストでしか使わない項目は再輸出しない（`ui/mod.rs` と同じ理由。例外は `app::worker_loop` のテストが使う `DEFAULT_BUFFER_MS` で、`#[cfg(test)]` の `pub use` にしてある）。複数のファイルのテストが使う設定ファイルの例は `settings/testing.rs` に置く。
+`src/settings/` の子モジュールは**セクションごとに分けてあるだけで、`AppSettings` の定義と `RawAppSettings` / `From` は `mod.rs` に置く。** セクションに項目を足すときは型を置いたファイルを、`AppSettings` に項目を足すときは `mod.rs` の 3 か所（`AppSettings` / `RawAppSettings` / `From`）を触る。serde の補助（`deserialize_*` / `*_from_str`）はそれを使う設定と同じファイルに置き、共通の読み方は `lenient.rs` を呼ぶ。`AppSettings` のメソッドは関係するファイルがそれぞれ `impl AppSettings` を足す。外から使う経路（`crate::settings::...`）は `settings/mod.rs` の `pub use` に集め、外からテストでしか使わない項目は再輸出しない（`ui/mod.rs` と同じ理由。例外は `app::worker_loop` のテストが使う `DEFAULT_BUFFER_MS` で、`#[cfg(test)]` の `pub use` にしてある）。複数のファイルのテストが使う設定ファイルの例は `settings/testing.rs` に置く。
 
 ## 設計の理由はどこにあるか
 
