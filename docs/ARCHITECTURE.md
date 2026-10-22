@@ -65,7 +65,7 @@ flowchart TD
 | `platform` | Windows 固有処理（フォント、アイコン、モニタ情報） | 汎用ロジック |
 | `logging` | ログの初期化と出力先 | — |
 
-`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_commands.rs`（コマンドの受け口）/ `worker_connect.rs` / `worker_audio_connect.rs` / `worker_default_input.rs`（デバイス操作）/ `worker_timers.rs` / `worker_audio_timers.rs`（再試行・切断監視・既定デバイスの追従などタイマー駆動の監視）と、デバイスの入口の trait を持つ `backend/` で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
+`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_commands.rs`（コマンドの受け口）/ `worker_connect.rs` / `worker_enumeration.rs` / `worker_audio_connect.rs` / `worker_default_input.rs`（デバイス操作）/ `worker_timers.rs` / `worker_audio_timers.rs`（再試行・切断監視・既定デバイスの追従などタイマー駆動の監視）と、デバイスの入口の trait を持つ `backend/` で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
 
 ## 状態管理
 

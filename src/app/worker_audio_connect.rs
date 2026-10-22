@@ -11,8 +11,8 @@ use super::monitor::{decide_audio_fallback, should_resync_audio_after_video, Aud
 use super::monitor_audio_pin::{decide_pin_readiness, waits_silently, PinReadiness, PinWait};
 use super::retry::{backoff_delay, connect_attempt_log_level, connect_failure_log_level};
 use super::worker::{DeviceConfig, DeviceEvent};
-use super::worker_connect::failure_message;
 use super::worker_default_input::{input_is_undecided, DefaultInput};
+use super::worker_enumeration::failure_message;
 use super::worker_loop::WorkerState;
 use crate::audio::{self, AudioDirection, AudioError};
 use crate::i18n;

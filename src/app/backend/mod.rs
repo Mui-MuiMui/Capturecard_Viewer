@@ -89,7 +89,7 @@ pub(super) trait VideoBackend {
     }
 
     /// 経路ごとの列挙結果。**ログと「Windows 側にも見えていない」の判定専用**
-    /// （`super::worker_connect::log_device_enumeration`）。
+    /// （`super::worker_enumeration::log_device_enumeration`）。
     ///
     /// `list_devices` と違い、列挙に失敗した経路の理由を捨てない。既定は
     /// `list_devices` を 1 つの経路として返すだけで、失敗を区別できない

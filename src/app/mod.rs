@@ -32,6 +32,7 @@ mod worker_audio_timers;
 mod worker_commands;
 mod worker_connect;
 mod worker_default_input;
+mod worker_enumeration;
 mod worker_loop;
 mod worker_timers;
 
