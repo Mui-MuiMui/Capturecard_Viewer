@@ -11,13 +11,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// 差し替えの改名を試し直す間隔と、最初の 1 回を含めた回数（合わせて 1 秒ほど）。
+/// 差し替えの改名を試し直す間隔と、最初の 1 回を含めた回数。
 ///
+/// 待つのは**改名 1 回につき**最大 9 回 × 0.1 秒 = 0.9 秒。差し替えの改名は 2 回
+/// なので、両方が試し直しに入ると合わせて 1.8 秒ほどになる。
 /// ウイルス対策ソフトが書いたばかりの `.new` を走査している間などは、改名が
 /// 共有違反やアクセス拒否で一時的に失敗する。短く待てば通ることが多い。
 /// 適用のスレッドの中で待つので UI は止まらない。
 const RENAME_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const RENAME_ATTEMPTS: u32 = 10;
+
+// 改名 1 回あたりの待ちを 1 秒未満に保つ（定数を変えたときにビルドで気づく）
+const _: () = assert!(RENAME_RETRY_INTERVAL.as_millis() * (RENAME_ATTEMPTS as u128 - 1) < 1000);
 
 /// Win32 の `ERROR_ACCESS_DENIED` / `ERROR_SHARING_VIOLATION`。
 const ERROR_ACCESS_DENIED: i32 = 5;
@@ -481,8 +486,6 @@ mod tests {
 
         assert!(should_retry_rename(&sharing, RENAME_ATTEMPTS - 1));
         assert!(!should_retry_rename(&sharing, RENAME_ATTEMPTS));
-        // 待つのは合わせて 2 秒より短い
-        assert!(RENAME_RETRY_INTERVAL * (RENAME_ATTEMPTS - 1) < Duration::from_secs(2));
     }
 
     /// `path` を共有なし（ほかのプロセスに改名も読み書きもさせない）で開く。
@@ -529,9 +532,15 @@ mod tests {
         fs::write(&paths.exe, "old").unwrap();
         fs::write(&paths.new, "new").unwrap();
         let held = open_exclusively(&paths.new);
+        let old = paths.old.clone();
         let holder = std::thread::spawn(move || {
-            // 改名が何回か共有違反で失敗するだけの間、掴んでおく
-            std::thread::sleep(RENAME_RETRY_INTERVAL * 3);
+            // 元の exe が .old へ動いたら（= .new の改名に入ったら）すぐ手放す。
+            // 改名の 1 回目はほぼ同時なので共有違反で失敗し、試し直しで通る。
+            // 決まった時間で手放す形にしないのは、負荷の高い環境で手放すのが
+            // 遅れると試し直しの上限（0.9 秒）を越えて結果が変わるため
+            while !old.exists() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
             drop(held);
         });
 
