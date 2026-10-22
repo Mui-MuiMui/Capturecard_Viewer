@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use super::hotkey_keys::{
     build_hotkey_string, hotkey_key_name, is_clipboard_command_chord, is_clipboard_command_event,
 };
-use super::hotkeys_tab::normalize_hotkey;
+use super::hotkeys_tab::hotkey_chord;
 use super::{notice_label, status_badge, NoticeKind, SETTINGS_WINDOW_SCREEN_MARGIN};
 
 /// ホットキー入力ダイアログの入力状態。
@@ -132,12 +132,14 @@ fn judge_hotkey_capture(
     }
     match build_hotkey_string(modifiers, keys_down) {
         Some(candidate) => {
-            let normalized = normalize_hotkey(&candidate);
+            // 比べるのは登録と同じ解釈（別名を揃えた KeyChord）。build_hotkey_string は
+            // 解釈できる文字列しか作らないが、解釈できなければ何とも重ならない
+            let chord = hotkey_chord(&candidate);
             for (other_action, other_hotkey) in existing {
                 if *other_action == action {
                     continue;
                 }
-                if normalize_hotkey(other_hotkey) == normalized {
+                if chord.is_some() && hotkey_chord(other_hotkey) == chord {
                     return HotkeyCaptureJudgement::Duplicate {
                         hotkey: candidate,
                         other: *other_action,
@@ -622,6 +624,25 @@ mod tests {
             ),
             HotkeyCaptureJudgement::Duplicate {
                 hotkey: "Ctrl+Shift+A".to_string(),
+                other: HotkeyAction::ToggleFullscreen,
+            }
+        );
+    }
+
+    #[test]
+    fn judge_hotkey_capture_duplicate_check_treats_modifier_aliases_as_the_same_key() {
+        // 手で書き換えた設定の "Control+A" も、登録では Ctrl+A と同じキー（#531）
+        let existing = BTreeMap::from([(HotkeyAction::ToggleFullscreen, "Control+A".to_string())]);
+
+        assert_eq!(
+            judge_hotkey_capture(
+                &modifiers(true, false, false),
+                &[egui::Key::A],
+                HotkeyAction::Screenshot,
+                &existing
+            ),
+            HotkeyCaptureJudgement::Duplicate {
+                hotkey: "Ctrl+A".to_string(),
                 other: HotkeyAction::ToggleFullscreen,
             }
         );

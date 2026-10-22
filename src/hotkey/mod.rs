@@ -26,3 +26,5 @@ pub use action::HotkeyAction;
 pub use assignments::HotkeyAssignmentError;
 pub use manager::{BackgroundHotkeyRunner, HotkeyManager};
 pub use parse::HotkeyError;
+// 設定ダイアログの重複の判定が、登録と同じ解釈（別名を揃えた `KeyChord`）で比べるのに使う
+pub(crate) use parse::parse_hotkey;

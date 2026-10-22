@@ -1,8 +1,8 @@
 //! 映像の設定（[video]）。色空間・輝度レンジ・開き方の選択肢と、
 //! 映像調整（明るさ・コントラスト・彩度）の範囲、それぞれの serde の補助。
 
+use super::lenient;
 use crate::i18n::Text;
-use log::warn;
 use serde::{Deserialize, Serialize};
 
 // PartialEq はプリセットとの一致判定（matches_preset）で使う。
@@ -112,17 +112,13 @@ impl ColorRange {
 }
 
 // 設定ファイルの color_space に知らない値が書かれていても、設定全体を
-// 失わせない。ScreenshotFormat と同じ考え方で、ここでエラーを返すと
-// TOML のパースがファイル単位で失敗し、色空間と無関係な項目まで既定値へ戻る。
+// 失わせない（`lenient` の冒頭）。ここでエラーを返すと TOML のパースがファイル
+// 単位で失敗し、色空間と無関係な項目まで既定値へ戻る。
 fn deserialize_color_space<'de, D>(deserializer: D) -> Result<ColorSpace, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = String::deserialize(deserializer)?;
-    Ok(color_space_from_str(&raw).unwrap_or_else(|| {
-        warn!("設定の色空間 \"{}\" を解釈できないので自動として扱う", raw);
-        ColorSpace::default()
-    }))
+    lenient::choice(deserializer, "色空間", "自動", color_space_from_str)
 }
 
 // 設定ファイルの color_range も同じ扱いにする。
@@ -130,14 +126,7 @@ fn deserialize_color_range<'de, D>(deserializer: D) -> Result<ColorRange, D::Err
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = String::deserialize(deserializer)?;
-    Ok(color_range_from_str(&raw).unwrap_or_else(|| {
-        warn!(
-            "設定の色レンジ \"{}\" を解釈できないのでリミテッドとして扱う",
-            raw
-        );
-        ColorRange::default()
-    }))
+    lenient::choice(deserializer, "色レンジ", "リミテッド", color_range_from_str)
 }
 
 // 設定ファイルに書かれた文字列から色空間を決める。解釈できない場合は None。
@@ -204,14 +193,7 @@ fn deserialize_video_backend<'de, D>(deserializer: D) -> Result<VideoBackendSett
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = String::deserialize(deserializer)?;
-    Ok(video_backend_from_str(&raw).unwrap_or_else(|| {
-        warn!(
-            "設定の映像の開き方 \"{}\" を解釈できないので自動として扱う",
-            raw
-        );
-        VideoBackendSetting::default()
-    }))
+    lenient::choice(deserializer, "映像の開き方", "自動", video_backend_from_str)
 }
 
 // 設定ファイルに書かれた文字列から開き方を決める。解釈できない場合は None。
@@ -275,14 +257,7 @@ fn deserialize_video_convert<'de, D>(deserializer: D) -> Result<VideoConvertSett
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = String::deserialize(deserializer)?;
-    Ok(video_convert_from_str(&raw).unwrap_or_else(|| {
-        warn!(
-            "設定の映像の変換 \"{}\" を解釈できないので自動として扱う",
-            raw
-        );
-        VideoConvertSetting::default()
-    }))
+    lenient::choice(deserializer, "映像の変換", "自動", video_convert_from_str)
 }
 
 // 設定ファイルに書かれた文字列から変換の場所を決める。解釈できない場合は None。
@@ -305,23 +280,28 @@ pub const MIN_VIDEO_ADJUSTMENT: i32 = -100;
 pub const MAX_VIDEO_ADJUSTMENT: i32 = 100;
 
 // 範囲外の映像調整の値が書かれていても、設定全体を失わせない。
-// 考え方は deserialize_jpeg_quality と同じで、TOML の整数である i64 で
-// 受けてから -100〜100 へ丸める。i32 のまま読むと、手で書き換えられた
-// 巨大な値でパースがファイル単位で失敗し、無関係な項目まで既定値へ戻る。
+// TOML の整数である i64 で受けてから -100〜100 へ丸める（`lenient::integer`）。
+// i32 のまま読むと、手で書き換えられた巨大な値でパースがファイル単位で失敗し、
+// 無関係な項目まで既定値へ戻る。
 //
 // 項目名を引数で受けるのは、ログだけを見て「どのスライダーの値が
-// 丸められたか」を判別できるようにするため。
-fn clamp_video_adjustment(name: &str, raw: i64) -> i32 {
-    let clamped = raw.clamp(
+// 丸められたか」を判別できるようにするため。既定値は 3 つとも 0（無調整）。
+fn deserialize_video_adjustment<'de, D>(deserializer: D, what: &str) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = lenient::integer(deserializer, what, 0)?;
+    Ok(clamp_video_adjustment(what, raw))
+}
+
+fn clamp_video_adjustment(what: &str, raw: i64) -> i32 {
+    let clamped = lenient::clamp_integer(
+        what,
+        "",
+        raw,
         i64::from(MIN_VIDEO_ADJUSTMENT),
         i64::from(MAX_VIDEO_ADJUSTMENT),
     );
-    if clamped != raw {
-        warn!(
-            "設定の映像調整（{}）{} は範囲外なので {} として扱う",
-            name, raw, clamped
-        );
-    }
     // clamp 済みなので i32 に収まる
     clamped as i32
 }
@@ -330,30 +310,21 @@ fn deserialize_brightness<'de, D>(deserializer: D) -> Result<i32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(clamp_video_adjustment(
-        "明るさ",
-        i64::deserialize(deserializer)?,
-    ))
+    deserialize_video_adjustment(deserializer, "映像調整（明るさ）")
 }
 
 fn deserialize_contrast<'de, D>(deserializer: D) -> Result<i32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(clamp_video_adjustment(
-        "コントラスト",
-        i64::deserialize(deserializer)?,
-    ))
+    deserialize_video_adjustment(deserializer, "映像調整（コントラスト）")
 }
 
 fn deserialize_saturation<'de, D>(deserializer: D) -> Result<i32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(clamp_video_adjustment(
-        "彩度",
-        i64::deserialize(deserializer)?,
-    ))
+    deserialize_video_adjustment(deserializer, "映像調整（彩度）")
 }
 
 impl Default for VideoSettings {

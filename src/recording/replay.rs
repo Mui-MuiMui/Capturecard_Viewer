@@ -36,7 +36,7 @@ use super::replay_ring::{
 use super::replay_save::{RecordingKind, SaveReplayBlock};
 use super::sample_pool::{SamplePool, SAMPLE_POOL_CAPACITY};
 use super::session::{check_disk, prepare_folder, MIN_AUDIO_CHUNK_FRAMES};
-use super::storage::{free_bytes, is_short, megabytes, replay_required_bytes};
+use super::storage::{free_bytes, is_short, mebibytes, replay_required_bytes};
 use super::writer::{pcm_sample, WriterParams};
 use super::RecordingError;
 use crate::audio::AudioTap;
@@ -172,13 +172,13 @@ impl ReplayPipeline {
             let _ = self.events.send(kind.failed(error, None));
             return;
         }
-        // リングは始めてすぐまとめて書き出すので、書き切っても 500MB 残るかを先に見る（#313）
+        // リングは始めてすぐまとめて書き出すので、書き切っても 500MiB 残るかを先に見る（#313）
         let free = free_bytes(&request.folder);
         let required = replay_required_bytes(self.ring.bytes() as u64);
         if is_short(free, required) {
             let error = RecordingError::ReplayDiskShort {
-                free_mb: free.map(megabytes).unwrap_or(0),
-                required_mb: megabytes(required),
+                free_mib: free.map(mebibytes).unwrap_or(0),
+                required_mib: mebibytes(required),
             };
             let _ = self.events.send(kind.failed(error, None));
             return;

@@ -25,7 +25,7 @@ use super::file_name::unique_path;
 use super::pts::{units_from, PtsClock, AUDIO_SAMPLE_RATE};
 use super::recorder::{RecordingEvent, RecordingRequest, RecordingSummary, RecordingTelemetry};
 use super::replay_save::RecordingKind;
-use super::storage::{free_bytes, is_low, megabytes, DISK_CHECK_INTERVAL};
+use super::storage::{free_bytes, is_low, mebibytes, DISK_CHECK_INTERVAL};
 use super::writer::{SinkWriter, WriterError, WriterParams, WriterStage};
 use super::RecordingError;
 use crate::audio::AudioTap;
@@ -532,7 +532,7 @@ pub(super) fn check_disk(folder: &Path) -> Result<(), RecordingError> {
     let free = free_bytes(folder);
     if is_low(free) {
         return Err(RecordingError::DiskLow {
-            free_mb: free.map(megabytes).unwrap_or(0),
+            free_mib: free.map(mebibytes).unwrap_or(0),
         });
     }
     Ok(())
@@ -668,7 +668,7 @@ mod tests {
             to: (640, 480)
         }));
         assert!(finishes_audio_after(&RecordingError::DiskLow {
-            free_mb: 499
+            free_mib: 499
         }));
         // 書き込みに失敗したら書けない。Sink Writer を作れなかった失敗には書く先が無い
         let reason = || "理由".to_string();
