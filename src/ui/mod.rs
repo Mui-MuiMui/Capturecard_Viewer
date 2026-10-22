@@ -30,6 +30,7 @@
 
 mod audio_input;
 mod capability;
+mod capability_view;
 mod device_tab;
 mod draft;
 mod draft_import;

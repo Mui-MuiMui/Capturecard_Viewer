@@ -15,10 +15,10 @@ use eframe::egui;
 use log::debug;
 
 use super::audio_input::{show_audio_input_combo, VideoPinChoice};
-use super::capability::{
-    channel_label, out_of_range_note, should_reselect_video_defaults,
-    show_audio_capability_progress, show_choice_note, show_video_capability_progress,
-    VideoCapabilityCache, VideoCapabilityKey,
+use super::capability::{should_reselect_video_defaults, VideoCapabilityCache, VideoCapabilityKey};
+use super::capability_view::{
+    channel_label, out_of_range_note, show_audio_capability_progress, show_choice_note,
+    show_video_capability_progress,
 };
 use super::video_mode::{fps_choices, resolution_choices, select_default_video_mode};
 use super::{warning_label, AudioCapabilityCaches, CapabilityEvent, DeviceLists, SettingsEvent};
