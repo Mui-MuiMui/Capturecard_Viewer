@@ -659,9 +659,14 @@ mod tests {
         harness.run();
         // タブの見出し（ボタンと同じ文言の 2 つ目）の上端と、タブの並びの下端
         let heading_top = |harness: &egui_kittest::Harness<'_, DialogFixture>, label: &str| {
-            let nodes: Vec<_> = harness.get_all_by_label(label).collect();
-            let tab_bottom = nodes[0].rect().bottom();
-            (nodes[1].rect().top(), tab_bottom)
+            let mut nodes = harness.get_all_by_label(label);
+            let tab = nodes
+                .next()
+                .unwrap_or_else(|| panic!("「{label}」のタブのボタンがあるはず"));
+            let heading = nodes
+                .next()
+                .unwrap_or_else(|| panic!("「{label}」のタブの見出しがあるはず"));
+            (heading.rect().top(), tab.rect().bottom())
         };
         for _ in 0..20 {
             harness

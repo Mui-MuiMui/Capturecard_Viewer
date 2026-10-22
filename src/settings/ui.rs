@@ -95,6 +95,7 @@ where
     let raw = lenient::number(deserializer, WHAT, f64::from(DEFAULT_VOLUME))?;
     Ok(lenient::clamp_finite(
         WHAT,
+        "%",
         raw,
         DEFAULT_VOLUME,
         MIN_VOLUME,

@@ -12,6 +12,16 @@
 use log::warn;
 use serde::{Deserialize, Deserializer};
 
+/// ログの主語「設定の<項目名>」と、後ろに続く値との間の空白。項目名が
+/// 「映像調整（明るさ）」のように括弧で終わるときは空白を挟まない（以前の書式のまま）
+fn subject(what: &str) -> String {
+    if what.ends_with('）') {
+        format!("設定の{what}")
+    } else {
+        format!("設定の{what} ")
+    }
+}
+
 /// 文字列で書く選択肢（enum）を読む。
 ///
 /// 文字列でない値と、`parse` が解釈できない文字列は `T::default()` にする。
@@ -29,8 +39,8 @@ where
     let value = toml::Value::deserialize(deserializer)?;
     let Some(raw) = value.as_str() else {
         warn!(
-            "設定の{} {}（{}）は文字列ではないので「{}」として扱う",
-            what,
+            "{}{}（{}）は文字列ではないので「{}」として扱う",
+            subject(what),
             value,
             value.type_str(),
             fallback
@@ -39,8 +49,10 @@ where
     };
     Ok(parse(raw).unwrap_or_else(|| {
         warn!(
-            "設定の{} \"{}\" を解釈できないので「{}」として扱う",
-            what, raw, fallback
+            "{}\"{}\" を解釈できないので「{}」として扱う",
+            subject(what),
+            raw,
+            fallback
         );
         T::default()
     }))
@@ -60,8 +72,8 @@ where
         Some(raw) => Ok(raw),
         None => {
             warn!(
-                "設定の{} {}（{}）は整数ではないので既定の {} として扱う",
-                what,
+                "{}{}（{}）は整数ではないので既定の {} として扱う",
+                subject(what),
                 value,
                 value.type_str(),
                 default
@@ -85,8 +97,8 @@ where
         toml::Value::Integer(raw) => Ok(*raw as f64),
         _ => {
             warn!(
-                "設定の{} {}（{}）は数値ではないので既定の {} として扱う",
-                what,
+                "{}{}（{}）は数値ではないので既定の {} として扱う",
+                subject(what),
                 value,
                 value.type_str(),
                 default
@@ -101,31 +113,50 @@ pub(super) fn clamp_integer(what: &str, unit: &str, raw: i64, min: i64, max: i64
     let clamped = raw.clamp(min, max);
     if clamped != raw {
         warn!(
-            "設定の{} {}{} は範囲外なので {}{} として扱う",
-            what, raw, unit, clamped, unit
+            "{}{}{} は範囲外なので {}{} として扱う",
+            subject(what),
+            raw,
+            unit,
+            clamped,
+            unit
         );
     }
     clamped
 }
 
 /// 数値を f32 にして `min..=max` へ丸める。NaN・無限大（f32 に収まらない値を含む）は
-/// `default` にする。どちらも WARN を残す。
+/// `default` にする。どちらも WARN を残す。`unit` はログの単位（音量なら "%"）。
 ///
 /// NaN と無限大は clamp では落ちない（NaN.clamp(..) は NaN を返す）ため、先に倒す。
-pub(super) fn clamp_finite(what: &str, raw: f64, default: f32, min: f32, max: f32) -> f32 {
+pub(super) fn clamp_finite(
+    what: &str,
+    unit: &str,
+    raw: f64,
+    default: f32,
+    min: f32,
+    max: f32,
+) -> f32 {
     let raw = raw as f32;
     if !raw.is_finite() {
         warn!(
-            "設定の{} {} は数値として扱えないので {}% として扱う",
-            what, raw, default
+            "{}{}{} は数値として扱えないので {}{} として扱う",
+            subject(what),
+            raw,
+            unit,
+            default,
+            unit
         );
         return default;
     }
     let clamped = raw.clamp(min, max);
     if clamped != raw {
         warn!(
-            "設定の{} {} は範囲外なので {} として扱う",
-            what, raw, clamped
+            "{}{}{} は範囲外なので {}{} として扱う",
+            subject(what),
+            raw,
+            unit,
+            clamped,
+            unit
         );
     }
     clamped
@@ -151,12 +182,15 @@ mod tests {
 
     #[test]
     fn clamp_finite_falls_back_on_non_finite_values() {
-        assert_eq!(clamp_finite("量", 50.0, 100.0, 0.0, 200.0), 50.0);
-        assert_eq!(clamp_finite("量", 300.0, 100.0, 0.0, 200.0), 200.0);
-        assert_eq!(clamp_finite("量", f64::NAN, 100.0, 0.0, 200.0), 100.0);
-        assert_eq!(clamp_finite("量", f64::INFINITY, 100.0, 0.0, 200.0), 100.0);
+        assert_eq!(clamp_finite("量", "", 50.0, 100.0, 0.0, 200.0), 50.0);
+        assert_eq!(clamp_finite("量", "", 300.0, 100.0, 0.0, 200.0), 200.0);
+        assert_eq!(clamp_finite("量", "", f64::NAN, 100.0, 0.0, 200.0), 100.0);
+        assert_eq!(
+            clamp_finite("量", "", f64::INFINITY, 100.0, 0.0, 200.0),
+            100.0
+        );
         // f32 に収まらない値は無限大になるので既定値
-        assert_eq!(clamp_finite("量", 1e300, 100.0, 0.0, 200.0), 100.0);
+        assert_eq!(clamp_finite("量", "", 1e300, 100.0, 0.0, 200.0), 100.0);
     }
 
     // ---- 型の違う値（#531） ----
