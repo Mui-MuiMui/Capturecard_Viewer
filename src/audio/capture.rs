@@ -401,7 +401,7 @@ impl AudioCapture {
             tap: self.tap.clone(),
             dropped_frames: counters.dropped_frames,
             xruns: counters.xruns,
-            started: false,
+            stream: Default::default(),
         });
         Ok(())
     }
