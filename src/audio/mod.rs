@@ -156,7 +156,7 @@ impl AudioDirection {
 /// 伝えられない。
 ///
 /// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
-/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事。
+/// （`status::ErrorSource::headline`）との連結だけが `status/mod.rs` の仕事。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioError {
     /// デバイスの列挙に失敗した
