@@ -74,7 +74,7 @@ pub use video::{
 /// `LoadFailedFileKept`、`LoadOutcome::failure` が作る、Issue #505）。
 ///
 /// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
-/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事
+/// （`status::ErrorSource::headline`）との連結だけが `status/mod.rs` の仕事
 /// （`docs/design/error-reporting.md`）。文言に「設定ファイル」を付けないのは、
 /// 定型文が既に「設定ファイルを読み書きできません」で始まるため。
 #[derive(Debug, Clone, PartialEq, Eq)]

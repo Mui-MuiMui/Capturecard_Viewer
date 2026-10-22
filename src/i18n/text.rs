@@ -144,7 +144,7 @@ texts! {
     LanguageJapanese { ja: "日本語", en: "日本語" },
     LanguageEnglish { ja: "English", en: "English" },
 
-    // ---- 接続状態（status.rs） ----
+    // ---- 接続状態（status/connection.rs） ----
     VideoActualUnknown { ja: "（取得できない）", en: "(unavailable)" },
     ResampleIdentity { ja: "変換なし", en: "No conversion" },
     WaterLevelUnknown { ja: "不明", en: "unknown" },
