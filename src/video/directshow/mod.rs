@@ -391,15 +391,13 @@ impl DirectShowCapture {
 
     pub fn link_state(&self) -> VideoLinkState {
         self.log_first_pin_chunk();
+        self.pin_feed.log_format_changes();
         VideoLinkState {
             capturing: self.graph.is_some(),
             since_last_frame: self.frames.since_last_frame(),
-            // グラフのイベントをここで読む。ワーカーの監視の周期で呼ばれるので、
-            // そのまま EC_DEVICE_LOST を拾う周期になる
-            device_lost: self
-                .graph
-                .as_ref()
-                .is_some_and(|graph| graph.poll_device_lost()),
+            // グラフのイベントと形式の変化をここで読む。ワーカーの監視の周期で
+            // 呼ばれるので、EC_DEVICE_LOST を拾う・形式の変化をログへ出す周期になる
+            device_lost: self.graph.as_ref().is_some_and(|graph| graph.poll()),
         }
     }
 

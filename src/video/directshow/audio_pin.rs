@@ -161,21 +161,35 @@ impl AudioStream {
     /// サンプル 1 つを `AudioPinFeed` へ渡す。**ログも出さない**（確保が起きる）。
     pub(super) fn receive(&mut self, sample: &IMediaSample) {
         // 流れの途中で形式が変わると、そのサンプルに新しいメディアタイプが付いてくる。
-        // 差し込み先は差し込んだときの形式と比べて、食い違えば積まない
+        // 差し込み先は差し込んだときの形式と比べて、食い違えば積まない。変わったことは
+        // Atomic へ書くだけで、ログはワーカーが出す（`AudioPinFeed::log_format_changes`）
         if let Ok(pmt) = unsafe { sample.GetMediaType() } {
             if !pmt.is_null() {
-                self.format = unsafe { pin_format_of(&*pmt) };
+                let changed = unsafe { pin_format_of(&*pmt) };
                 unsafe { delete_media_type(pmt) };
+                if changed != self.format {
+                    self.feed.record_format_change(changed);
+                }
+                self.format = changed;
             }
         }
+        // `push` を呼ばずに塊を捨てるときは、捨てたことだけを Atomic で知らせる。
+        // 次の `push` が持ち越した端数を捨て、捨てた区間をまたいでつながない
         let Some(format) = self.format else {
+            self.feed.note_stream_break();
             return;
         };
         let Ok(data) = (unsafe { sample.GetPointer() }) else {
+            self.feed.note_stream_break();
             return;
         };
         let len = unsafe { sample.GetActualDataLength() };
-        if data.is_null() || len <= 0 {
+        if len <= 0 {
+            // 中身の無いサンプル。捨てる音が無いので端数はつながったまま
+            return;
+        }
+        if data.is_null() {
+            self.feed.note_stream_break();
             return;
         }
         let src = unsafe { std::slice::from_raw_parts(data, len as usize) };

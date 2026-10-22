@@ -19,7 +19,7 @@
 //!    外して 1 度だけやり直す）
 //!
 //! 動かしたあとは、グラフが積むイベント（`IMediaEventEx`）をワーカーの
-//! 監視の周期で読み（`CaptureGraph::poll_device_lost`）、デバイスが消えた
+//! 監視の周期で読み（`CaptureGraph::poll`）、デバイスが消えた
 //! 知らせ（`EC_DEVICE_LOST` など）を拾う。
 
 use std::cell::Cell;
@@ -46,6 +46,7 @@ use super::media_type::{
     delete_media_type, interval_within_caps, set_avg_time_per_frame, SampleFormat,
 };
 use super::stream_select::{choose_candidate, target_resolution};
+use super::video_stream::FormatChanges;
 use crate::video::elapsed_ms;
 use crate::video::frame_sink::FrameSink;
 
@@ -108,6 +109,11 @@ pub(super) struct CaptureGraph {
     /// 間などに下ろすと、次の周期で「繋がっている」に戻ってしまう。
     /// `link_state` が `&self` で読むので `Cell` にしてある（触るのはワーカーだけ）
     device_lost: Cell<bool>,
+    /// 映像の `Receive` が書く、流れの途中で形式が変わったことの控え
+    format_changes: FormatChanges,
+    /// `format_changes` の回数のうち、ログへ出し終えたところ。`Cell` なのは
+    /// `device_lost` と同じ理由
+    format_changes_logged: Cell<u32>,
     source: IBaseFilter,
     renderer: Renderer,
     /// 音声ピンの結果と、繋いでいれば音声のレンダラー（#388）
@@ -259,7 +265,8 @@ impl CaptureGraph {
         }
 
         let connect_start = Instant::now();
-        let renderer = Renderer::video(sink);
+        let format_changes = FormatChanges::default();
+        let renderer = Renderer::video(sink, format_changes.clone());
         let built = Self::connect(&graph, &builder, &source, &renderer);
         if let Err(e) = built {
             Self::tear_down(&graph, &source, &renderer.filter);
@@ -314,6 +321,8 @@ impl CaptureGraph {
             control,
             events,
             device_lost: Cell::new(false),
+            format_changes,
+            format_changes_logged: Cell::new(0),
             source,
             renderer,
             audio,
@@ -403,6 +412,49 @@ impl CaptureGraph {
     /// 開いている形式の名前（`ActiveVideo::format` に入れる）。
     pub(super) fn format_name(&self) -> &'static str {
         self.format.kind.name()
+    }
+
+    /// ワーカーの監視（`link_state`）の周期で呼ぶ入口。映像の形式が変わっていれば
+    /// ログへ出し（`log_format_change`）、デバイスが消えたかを返す
+    /// （`poll_device_lost`）。
+    pub(super) fn poll(&self) -> bool {
+        self.log_format_change();
+        self.poll_device_lost()
+    }
+
+    /// 映像の `Receive` が形式の変化を書いていたら、ログへ出す。
+    ///
+    /// `Receive` の中ではログを出せない（ロガーのロックと確保が起きる）ので、
+    /// 回数と最後の形式だけを `FormatChanges` に書かせ、ここで読む。周期の間に
+    /// 何度も変わったら、最後の形式と回数だけを 1 行で出す。
+    fn log_format_change(&self) {
+        let (count, latest) = self.format_changes.latest();
+        let logged = self.format_changes_logged.get();
+        if count == logged {
+            return;
+        }
+        self.format_changes_logged.set(count);
+        match latest {
+            Some(format) => log::info!(
+                "DirectShow のサンプルの形式が変わった: {} {}x{}{}、{}（前回の確認から {} 回）",
+                format.kind.name(),
+                format.width,
+                format.height,
+                if format.bottom_up {
+                    "（ボトムアップ）"
+                } else {
+                    ""
+                },
+                format
+                    .fps
+                    .map_or_else(|| "fps 不明".to_string(), |fps| format!("{}fps", fps)),
+                count.wrapping_sub(logged)
+            ),
+            None => log::warn!(
+                "DirectShow のサンプルの形式が受け取れない形式に変わったので、映像を捨てている（前回の確認から {} 回）",
+                count.wrapping_sub(logged)
+            ),
+        }
     }
 
     /// 積まれているグラフのイベントを待たずに読み、デバイスが消えたかを返す。
