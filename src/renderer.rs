@@ -131,10 +131,28 @@ fn adapter_id(adapter: &wgpu::Adapter, info: &wgpu::AdapterInfo) -> AdapterId {
     }
 }
 
-/// DX12 のアダプターの LUID。DX12 のアダプターでなければ `None`
+/// DX12 のアダプターの LUID。読めなければ `None`。
+///
+/// インスタンスは DX12 だけ（`dx12_instance_descriptor`）なので、読めないのは wgpu の
+/// `as_hal` の形が変わった（eframe / wgpu を上げた）ときくらいしか無い。そのときは黙って
+/// (ベンダー, デバイス) の見分け方へ戻るので、気づけるよう WARN を 1 回だけ出す
 fn dx12_adapter_luid(adapter: &wgpu::Adapter) -> Option<u64> {
+    let luid = read_dx12_luid(adapter);
+    if luid.is_none() {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            log::warn!(
+                "DX12 のアダプターの LUID を読めないので、ベンダー ID とデバイス ID だけで見分ける\
+                 （同じ型の GPU の 2 枚挿しでは見分けられない。wgpu の as_hal の形が変わっていないか確かめる）"
+            );
+        });
+    }
+    luid
+}
+
+fn read_dx12_luid(adapter: &wgpu::Adapter) -> Option<u64> {
     // SAFETY: wgpu-hal のアダプターを借りて記述を読むだけで、状態を変えない。
-    // 借りたものは この関数の中で手放す
+    // 借りたものはこの関数の中で手放す
     let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Dx12>() }?;
     // SAFETY: DXGI のアダプターは wgpu-hal が持っていて有効。`GetDesc1` は読むだけ
     let desc = unsafe { hal.raw_adapter().GetDesc1() }.ok()?;

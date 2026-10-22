@@ -523,7 +523,8 @@ impl DeleteGl for glow::Context {
 /// `return Err` で抜けても、作れた分を残さない。全部を手元に残すなら `disarm`、
 /// 1 つだけ残すなら `release` で外す。
 ///
-/// **GL のコンテキストが current の間（`unsafe fn` の中）だけ作る。** 落ちるときに消すので
+/// **GL のコンテキストが current の間（`unsafe fn` の中）だけ作る。** 落ちるときに GL の
+/// 資源を消すので、コンテキストが current でない所まで持ち出さない
 struct ResourceGuard<'a, D: DeleteGl> {
     gl: &'a D,
     created: Vec<GlResource>,

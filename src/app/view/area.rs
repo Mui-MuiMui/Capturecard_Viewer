@@ -222,6 +222,7 @@ mod tests {
         // 設定のロックを取れない
         let mut harness = area_harness(AreaProbe::new(None, false));
         assert!(!drag_inside(&mut harness));
+        assert!(harness.state().reads > 0);
         // リサイズの帯の上。設定も読まない
         let mut harness = area_harness(AreaProbe::new(Some(true), true));
         assert!(!drag_inside(&mut harness));
