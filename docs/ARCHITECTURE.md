@@ -22,7 +22,7 @@ Windows 10/11 専用であることは前提として受け入れる。移植性
 ```mermaid
 flowchart TD
     main["main.rs<br/>エントリポイントのみ"]
-    app["app<br/>AppState / eframe::App / イベント処理"]
+    app["app<br/>CaptureCardViewer / eframe::App / イベント処理"]
     ui["ui<br/>描画のみ"]
     settings["settings<br/>永続化"]
     hotkey["hotkey<br/>ホットキー"]
@@ -71,9 +71,9 @@ flowchart TD
 
 ### 単一の所有者
 
-アプリの状態は `AppState` 一つが所有する。**ファイルスコープの `static` に状態を置かない。** `static mut` は使わない。
+アプリの状態は `CaptureCardViewer` 一つが所有する。**ファイルスコープの `static` に状態を置かない。** `static mut` は使わない。
 
-設定ダイアログやホットキー入力ダイアログのような一時的な UI 状態も、`AppState` の下にぶら下げる。ダイアログを閉じたときに状態が残る、といった不整合を構造で防ぐ。
+設定ダイアログやホットキー入力ダイアログのような一時的な UI 状態も、`CaptureCardViewer` の下にぶら下げる。ダイアログを閉じたときに状態が残る、といった不整合を構造で防ぐ。
 
 ### UI は状態を持たない
 
@@ -380,7 +380,7 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 | 目指す姿 | 現状 | 対応するタスク |
 |---|---|---|
-| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `placeholder` / `video_overlay` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_commands` / `worker_connect` / `worker_audio_connect` / `worker_default_input` / `worker_timers` / `worker_audio_timers` / `backend` / `monitor` / `retry` / `capabilities` / `screenshot` / `screenshot_sound` / `recording` / `settings_dialog` / `settings_store` / `update` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
+| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `placeholder` / `video_overlay` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_commands` / `worker_connect` / `worker_enumeration` / `worker_audio_connect` / `worker_default_input` / `worker_timers` / `worker_audio_timers` / `backend` / `monitor` / `retry` / `capabilities` / `screenshot` / `screenshot_sound` / `recording` / `settings_dialog` / `settings_store` / `update` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
 | イベント駆動 | 2 秒ごとに設定を再適用するポーリング | apply_settings の 2 秒ごとの再登録 |
 | チャネルでの隔離 | UI と `device` ワーカーの間はコマンドとイベントを mpsc でやり取りする。**この境界で**チャネルを通さず共有するのは 4 つ（映像フレーム `VideoFrames`（録画へ回す `VideoTap` を含む）、色変換と映像調整 `SharedColorConversion`、音量・ミュート・パススルー `AudioControls`、録画へ回す音声 `AudioTap`）。数えるのは UI スレッドか録画スレッドがワーカーを通さずにデバイスのコールバックとやり取りする共有ハンドル（`BackendShared` に載せて渡すもの）で、`docs/design/device-worker.md` と `src/app/worker.rs` も同じ数え方。これとは別に観測値は `Arc<RwLock<DeviceSnapshot>>` に写して読む。`settings` や `screenshot_manager` のようにデバイスを跨がない共有はこの話の外 | 完了 |
 | UI をブロックしない | デバイスを開く・閉じる・列挙する処理も含めてワーカースレッドへ移した。スクリーンショットのエンコードは撮影ごとのスレッド。`update()` に残るブロッキングは `rfd` のファイルダイアログだけ | 完了 |
