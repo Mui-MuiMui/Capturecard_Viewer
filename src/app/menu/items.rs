@@ -110,8 +110,8 @@ fn volume_items(ui: &mut egui::Ui, view: &MenuView, actions: &mut Vec<MenuAction
     // スライダーが書き換えるのはスナップショットの複製。実際の反映は
     // `handle_menu_action` が `set_volume_from_ui` で行う（書き出しはデバウンス）
     let mut volume = view.volume;
-    let volume_response =
-        ui.add(egui::Slider::new(&mut volume, MIN_VOLUME..=MAX_VOLUME).suffix("%"));
+    let slider = egui::Slider::new(&mut volume, MIN_VOLUME..=MAX_VOLUME).suffix("%");
+    let volume_response = crate::ui::name_slider(ui.add(slider), Text::VolumeLabel.get());
     if volume_response.changed() {
         actions.push(MenuAction::SetVolume(volume));
     }
@@ -639,7 +639,9 @@ mod tests {
             view,
             actions: Vec::new(),
         };
+        // 日本語のフォントは読まず豆腐で描く（egui_kittest 0.37 の既定は字形が無いと panic）
         Harness::builder()
+            .allow_missing_glyphs()
             .with_size(egui::vec2(600.0, 600.0))
             .build_ui_state(
                 |ui, fixture: &mut MenuFixture| {

@@ -366,7 +366,8 @@ pub(crate) fn configure_japanese_font(ctx: &egui::Context) {
                     );
                     // 優先度のためにプロポーショナル・等幅フォントファミリーの先頭に挿入する。
                     // egui 既定の絵文字フォント等はそのまま残るため、Meiryo 等に無い記号は
-                    // 引き続きフォールバックで描画される
+                    // 引き続きフォールバックで描画される。egui 0.37 からは絵文字のフォントが
+                    // `monochrome_emoji_fonts` フィーチャに分かれたので、Cargo.toml で入れている
                     if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
                         fam.insert(0, "japanese".to_string());
                     }

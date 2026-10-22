@@ -16,10 +16,11 @@
 //! ように、もっと早く起きたい処理がそれぞれ勝手に予約してよい。ここが決めるのは
 //! あくまで上限で、他の予約を邪魔しない。
 //!
-//! **egui は要求された遅延から 1 フレームぶん（`predicted_dt`、eframe では 1/60 秒）を
-//! 引いてから予約する。** 16ms を要求すると 0ms になり、描き終えたらすぐ次の
-//! `update()` が来る。#459 までは映像が流れている間 16ms を要求して到着では起こさず、
-//! 実際には「垂直同期で止まる swap の直後に次の `update()`」の形で回っていた。
+//! **egui 0.37 から、要求した遅延はそのまま予約される**（egui #8595）。0.36 までは
+//! 1 フレームぶん（`predicted_dt`、eframe では 1/60 秒）を引いてから予約しており、
+//! 16ms を要求すると 0ms になって、描き終えたらすぐ次の `update()` が来ていた。
+//! #459 までは映像が流れている間 16ms を要求して到着では起こさず、実際には
+//! 「垂直同期で止まる swap の直後に次の `update()`」の形で回っていた。
 //! 到着からの待ちがその位相で決まり、0〜1 フレーム（平均で半フレーム）待っていた。
 
 use eframe::egui;
@@ -48,14 +49,18 @@ const IDLE_INTERVAL: Duration = Duration::from_millis(250);
 /// ここを伸ばしても途切れない。
 const MINIMIZED_INTERVAL: Duration = Duration::from_secs(1);
 
-/// `RepaintWaker` が要求する再描画の遅延。
+/// `RepaintWaker` が要求する再描画の遅延。ゼロではない最小の値（1ns）。
 ///
 /// **`Duration::ZERO` にしないこと。** egui は遅延ゼロの要求を受けると
 /// `outstanding` を立てて次のフレームも続けて描く（`egui::Context` の
 /// `request_repaint_after`）。1 回の通知で `update()` が 2 回走ってしまう。
-/// 1ms なら `outstanding` は立たず、`predicted_dt` を引かれて 0ms で予約されるので、
-/// 待たされることもない。
-const WAKE_DELAY: Duration = Duration::from_millis(1);
+/// ゼロでなければ `outstanding` は立たない。
+///
+/// **ミリ秒単位の値にもしないこと。** egui 0.36 までは `predicted_dt` を引かれて
+/// 0ms で予約されたので 1ms でよかったが、0.37 からは要求した遅延がそのまま
+/// 予約され（egui #8595）、1ms なら eframe のイベントループが 1ms 待ってから
+/// 描く。フレームの到着から表示までがその分だけ遅れる。
+const WAKE_DELAY: Duration = Duration::from_nanos(1);
 
 /// 次の再描画までの間隔を決めるための状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,8 +213,9 @@ mod tests {
     #[test]
     fn next_repaint_delay_when_shown_does_not_poll_at_the_video_rate() {
         // 60fps のポーリングへ戻すと、到着とは関係のない位相で update() が回り、
-        // 届いたフレームを次のポーリングまで待たせる。egui が 1 フレームぶん
-        // （1/60 秒）を引くので、2 フレームより短い間隔は実質ポーリングになる
+        // 届いたフレームを次のポーリングまで待たせる。egui 0.36 までは 1 フレームぶん
+        // （1/60 秒）を引いていたので、2 フレームより短い間隔は実質ポーリングだった。
+        // 0.37 では引かれないが、同じ余裕を残しておく
         assert!(
             next_repaint_delay(shown()) > Duration::from_millis(34),
             "映像の速さでポーリングしている: {:?}",
@@ -247,11 +253,11 @@ mod tests {
     }
 
     #[test]
-    fn egui_shortens_a_requested_delay_by_one_predicted_frame() {
-        // 間隔の決め方の前提（モジュールの先頭）。egui は要求された遅延から
-        // `predicted_dt`（既定 1/60 秒）を引く。16ms の要求は 0ms になり、
-        // 「16ms ごとのポーリング」は実際には「描き終えたらすぐ次」だった。
-        // egui を上げてここが落ちたら、間隔の決め方を見直すこと
+    fn egui_schedules_a_requested_delay_as_is() {
+        // 間隔の決め方の前提（モジュールの先頭）。egui 0.37 は要求された遅延を
+        // そのまま予約する（0.36 までは `predicted_dt` の 1/60 秒を引いていた。
+        // egui #8595）。egui を上げてここが落ちたら、間隔の決め方と `WAKE_DELAY` を
+        // 見直すこと
         let ctx = settled_context();
         let delay_for = |requested: Duration| {
             let output = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -265,13 +271,36 @@ mod tests {
             output.drop_without_applying_deltas();
             delay
         };
-        assert_eq!(delay_for(Duration::from_millis(16)), Duration::ZERO);
-        assert_eq!(delay_for(WAKE_DELAY), Duration::ZERO);
-        let idle = delay_for(Duration::from_millis(250));
-        assert!(
-            idle > Duration::from_millis(200) && idle < Duration::from_millis(250),
-            "{idle:?}"
+        assert_eq!(
+            delay_for(Duration::from_millis(16)),
+            Duration::from_millis(16)
         );
+        assert_eq!(
+            delay_for(Duration::from_millis(250)),
+            Duration::from_millis(250)
+        );
+        // 起こすときの遅延は 1ms より短い。ミリ秒単位だと、そのぶん待ってから描く
+        assert_eq!(delay_for(WAKE_DELAY), WAKE_DELAY);
+        assert!(WAKE_DELAY < Duration::from_millis(1), "{WAKE_DELAY:?}");
+    }
+
+    #[test]
+    fn wake_delay_does_not_make_egui_paint_twice() {
+        // 遅延ゼロの要求は `outstanding` を立て、次のフレームも続けて描かせる。
+        // 起こす要求 1 回で update() が 2 回走らないこと（`WAKE_DELAY` の説明）
+        let ctx = settled_context();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.ctx().request_repaint_after(WAKE_DELAY);
+        })
+        .drop_without_applying_deltas();
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let delay = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("ルートのビューポートがある")
+            .repaint_delay;
+        output.drop_without_applying_deltas();
+        assert_eq!(delay, Duration::MAX, "続けて描く要求が残っている");
     }
 
     #[test]

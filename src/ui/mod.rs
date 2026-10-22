@@ -292,6 +292,20 @@ fn status_badge(ui: &mut egui::Ui, text: &str, kind: NoticeKind) {
     });
 }
 
+/// 見出しを横に別の `Label` で置いたスライダーへ、見出しと同じ名前を付ける。
+///
+/// 名前の無い入力のウィジェットは読み上げで何の欄か分からない。egui_kittest 0.37 は
+/// そういうウィジェットがあるとテストを落とす（egui #8589）。コンボと入力欄は
+/// `labelled_by` で見出しへ結ぶが、**スライダーは名前そのものを入れる。** egui 0.37 の
+/// `Slider` は横の数値欄（`DragValue`）を本体の名前で呼ばせる（数値欄を本体へ
+/// `labelled_by` で結ぶ）ので、本体を `labelled_by` にすると本体の名前が空になり、
+/// 数値欄の名前も空になる。
+///
+/// 右クリックメニューの音量のスライダーも使う。
+pub(crate) fn name_slider(response: egui::Response, name: &str) -> egui::Response {
+    response.accessible_name(name)
+}
+
 /// 設定ダイアログのタブ。
 ///
 /// 並びはデバイス設定 / スクリーンショット設定 / 録画 / ホットキー / その他 / 接続状態。
@@ -390,7 +404,7 @@ pub fn show_settings_dialog(
     // Id は固定にする。タイトルから作ると、「適用」で言語を切り替えた直後に
     // 別のウィンドウとして扱われ、位置や大きさが初期値へ戻る（docs/design/i18n.md）
     egui::Window::new(Text::SettingsTitle.get())
-        .id(egui::Id::new("settings_dialog"))
+        .id(egui::Id::unique("settings_dialog"))
         .open(&mut window_open)
         .default_size([650.0, 500.0])
         .resizable(true)
@@ -641,6 +655,27 @@ mod tests {
         ];
 
         assert_eq!(BTreeSet::from(symbols).len(), symbols.len());
+    }
+
+    #[test]
+    fn symbols_are_drawn_by_the_bundled_fonts() {
+        // 注意書きの「⚠」と右クリックメニューのサブメニューの「⏵」は、日本語のフォントに
+        // 無いことがあり、egui が同梱する記号のフォントに頼っている（src/platform.rs）。
+        // egui 0.37 でそのフォントが `monochrome_emoji_fonts` フィーチャに分かれた。
+        // フィーチャが外れて豆腐になったら、ここが字形の無い文字で panic する。
+        // 「●」は同梱のフォントに無く、日本語のフォントが描く（0.36 までと同じ）ので入れない
+        let ctx = egui::Context::default();
+        ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Panic);
+        let text = [
+            NoticeKind::Warning.symbol(),
+            NoticeKind::Error.symbol(),
+            "⏵",
+        ]
+        .concat();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.label(text.as_str());
+        })
+        .drop_without_applying_deltas();
     }
 
     // ---- ウィジェットのテスト（egui_kittest、#419） ----

@@ -87,6 +87,11 @@ fn main() -> Result<(), eframe::Error> {
             use winit::platform::windows::EventLoopBuilderExtWindows;
             builder.with_msg_hook(redirect_misdirected_close);
         })),
+        // 足りない文字をシステムのフォントから引く仕組み（eframe 0.37 の
+        // `system_fonts` フィーチャ）は入れていない。日本語のフォントは
+        // `platform::configure_japanese_font` が自分で探して入れる。既定の true のままだと、
+        // フィーチャの無い代わりに「system_fonts を有効にせよ」という INFO をログへ出すだけ
+        system_font_fallback: false,
         ..Default::default()
     };
     // 描画のバックエンド（wgpu / glow、#492）を決める。**`run_native` より前に。**

@@ -19,7 +19,9 @@ use super::capability_view::{
     channel_label, out_of_range_note, show_audio_capability_progress, show_choice_note,
 };
 use super::device_tab::choice_combo;
-use super::{warning_label, AudioCapabilityCaches, CapabilityEvent, DeviceLists, SettingsEvent};
+use super::{
+    name_slider, warning_label, AudioCapabilityCaches, CapabilityEvent, DeviceLists, SettingsEvent,
+};
 
 /// オーディオ設定の枠の中身を描く。`ui.group` の中から呼ぶ
 pub(super) fn show_audio_settings(
@@ -207,7 +209,7 @@ pub(super) fn show_audio_settings(
 
     // サンプルレート
     ui.horizontal(|ui| {
-        ui.label(Text::SampleRateLabel.get());
+        let label = ui.label(Text::SampleRateLabel.get());
         let current_rate = settings.audio.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE);
         let combo = egui::ComboBox::from_id_salt("sample_rate_combo")
             .selected_text(format!("{} Hz", current_rate));
@@ -215,7 +217,9 @@ pub(super) fn show_audio_settings(
             .values
             .iter()
             .map(|&rate| (Some(rate), format!("{} Hz", rate)));
-        choice_combo(ui, combo, &mut settings.audio.sample_rate, choices);
+        choice_combo(ui, combo, &mut settings.audio.sample_rate, choices)
+            .0
+            .labelled_by(label.id);
     });
     show_choice_note(ui, rates.source, Text::SampleRate.get());
     // 設定ファイルを手で書き換えた場合など、選択肢に無い値が残ることがある。
@@ -231,7 +235,7 @@ pub(super) fn show_audio_settings(
     // チャンネル数
     let single_channel_choice = channel_choices.values.len() == 1;
     ui.horizontal(|ui| {
-        ui.label(Text::ChannelsLabel.get());
+        let label = ui.label(Text::ChannelsLabel.get());
         let current_channels = settings.audio.channels.unwrap_or(DEFAULT_CHANNELS);
         // 選択肢が 1 つしか無いときは操作させない。開ける値が 1 つなのに
         // 選べると、選んだ値と実際の値が食い違う
@@ -242,7 +246,9 @@ pub(super) fn show_audio_settings(
                 .values
                 .iter()
                 .map(|&channels| (Some(channels), channel_label(channels)));
-            choice_combo(ui, combo, &mut settings.audio.channels, choices);
+            choice_combo(ui, combo, &mut settings.audio.channels, choices)
+                .0
+                .labelled_by(label.id);
         });
     });
     if single_channel_choice && channel_choices.source != ChoiceSource::Fallback {
@@ -273,9 +279,12 @@ pub(super) fn show_audio_settings(
     // サンプリングレートやチャンネル数と同じ経路に乗せてある
     ui.horizontal(|ui| {
         ui.label(Text::AudioBufferLabel.get());
-        ui.add(
-            egui::Slider::new(&mut settings.audio.buffer_ms, MIN_BUFFER_MS..=MAX_BUFFER_MS)
-                .suffix(" ms"),
+        name_slider(
+            ui.add(
+                egui::Slider::new(&mut settings.audio.buffer_ms, MIN_BUFFER_MS..=MAX_BUFFER_MS)
+                    .suffix(" ms"),
+            ),
+            Text::AudioBufferLabel.get(),
         );
     });
     ui.label(Text::AudioBufferHint.get());

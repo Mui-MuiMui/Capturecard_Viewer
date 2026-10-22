@@ -208,6 +208,7 @@ mod tests {
             unit: egui::MouseWheelUnit::Line,
             delta: egui::vec2(0.0, y),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
             modifiers: egui::Modifiers {
                 shift,
                 ..Default::default()
