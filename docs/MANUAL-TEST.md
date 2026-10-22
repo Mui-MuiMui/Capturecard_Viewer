@@ -1059,7 +1059,7 @@ $hash = (Get-FileHash "$w\release\$exe" -Algorithm SHA256).Hash.ToLowerInvariant
 コマンドプロンプトで `set CAPTURECARD_VIEWER_UPDATE_API_URL=file:///C:/work/latest.json` をしてから `C:\work\app\capturecard_viewer.exe` を起動する。
 
 - [ ] 「新しいバージョン v9.9.9 があります」のダイアログで「更新する」を押すと、「更新しています」に変わって進み具合が出たあと、ウィンドウが閉じて新しい exe が起動する。起動した新しい exe でも同じ指定が効いているので、またダイアログが出る（「後で」で閉じてよい）
-- [ ] ログ（`%AppData%\capturecard_viewer\logs`）に「更新の exe を照合した」「exe を差し替えた」「新しい版を起動した」が並び、新しい方のログに「前回の更新の残りを消した」が出る。数秒後には `C:\work\app` に `capturecard_viewer.exe.old` も `.new` も無い
+- [ ] ログ（`%AppData%\capturecard_viewer\logs`）に「更新の exe を照合した」「exe を差し替えた」「新しい版を起動した」が並び、新しい方のログに「60 秒動いたら前の版 … を消す」と、その 60 秒ほど後に「前回の更新の残りを消した」が出る。起動の直後は `C:\work\app` に `capturecard_viewer.exe.old` が残っていて（`.new` は無い）、1 分ほどで消える。1 分たつ前に閉じると `.old` は残り、次の起動でまた 1 分たってから消える（#540）
 - [ ] 閉じる前に変えた設定（ウィンドウの位置や音量）が、起動した新しい exe に引き継がれている
 - [ ] `C:\work\SHA256SUMS.txt` の hash を 1 文字変えてからもう一度「更新する」を押すと、「ダウンロードした exe の SHA-256 が SHA256SUMS.txt と合わない」が出る。`C:\work\app\capturecard_viewer.exe` はそのままで（更新日時が変わらない）、`.new` は残らない
 - [ ] `SHA256SUMS.txt` の hash を大文字にしても、更新は通る
