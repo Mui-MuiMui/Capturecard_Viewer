@@ -301,9 +301,9 @@ pub(super) fn process_input_iter<T, I>(
     I: IntoIterator<Item = T>,
     I::IntoIter: ExactSizeIterator,
 {
-    // 丸ごとのフレームだけを扱う。cpal とフェイクは必ずフレームの倍数で渡すが、
-    // 音声ピンの塊はバイト数次第で半端なフレームが残りうる。半端を録画のリングへ
-    // 積むと、以降の録画のチャンネルの並びがずれる（左右が入れ替わる）ので捨てる
+    // 丸ごとのフレームだけを扱う。cpal とフェイクは必ずフレームの倍数で渡し、
+    // 音声ピンは塊の端数を次の塊へ持ち越してから渡す（`pin_feed::push`）。ここは
+    // その最後の守りで、半端を録画のリングへ積んで以降の左右が入れ替わるのを防ぐ
     let data = data.into_iter();
     let len = whole_frame_samples(data.len(), channels);
     let data = data.take(len);

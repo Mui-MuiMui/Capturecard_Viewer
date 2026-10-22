@@ -28,6 +28,10 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::capabilities::AudioCapabilities;
+use super::pin_stream::{
+    format_change_report, pack_pin_format, unpack_pin_format, FormatChangeReport, PinCarry,
+    PinStream,
+};
 use super::sample::i16_to_f32;
 use super::stream::{count_xrun, process_input_iter, AudioProducer};
 use super::tap::AudioTap;
@@ -57,6 +61,11 @@ impl PinFormat {
             PinSampleType::I16 => 2,
             PinSampleType::F32 => 4,
         }
+    }
+
+    /// 1 フレーム（全チャンネルの 1 サンプルずつ）のバイト数
+    pub(super) fn bytes_per_frame(self) -> usize {
+        usize::from(self.channels) * self.bytes_per_sample() as usize
     }
 
     /// 1 秒ぶんのバイト数。塊の長さの提案と換算に使う
@@ -195,9 +204,8 @@ pub(super) struct PinSink {
     pub(super) tap: AudioTap,
     pub(super) dropped_frames: Arc<AtomicU32>,
     pub(super) xruns: Arc<AtomicU32>,
-    /// 1 つでも積んだか。最初のサンプルには不連続の印が付くのがふつうなので、
-    /// それは取りこぼしに数えない
-    pub(super) started: bool,
+    /// 流れの状態。差し込むときは `Default::default()`（まだ何も受け取っていない）
+    pub(super) stream: PinStream,
 }
 
 #[derive(Default)]
@@ -216,64 +224,6 @@ struct FeedInner {
     format_latest: AtomicU64,
     /// `format_changes` のうち、ワーカーがログへ出し終えたところ
     format_changes_logged: AtomicU32,
-}
-
-/// 流れの途中で形式が変わったことを、ワーカーがどうログへ出すか。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FormatChangeReport {
-    /// 繋いだときの形式と食い違う形式に変わった。その音声は捨てている
-    Mismatch(PinFormat),
-    /// 受け取れない形式に変わった。その音声は捨てている
-    Unsupported,
-    /// 繋いだときの形式に戻った。また積んでいる
-    Restored,
-}
-
-/// 最後に変わった先の形式と繋いだときの形式から、ログの出し方を決める。
-/// 繋いだ記録が無ければ食い違いとして扱う（差し込み先が無いので積んでいない）
-pub(super) fn format_change_report(
-    connected: Option<PinFormat>,
-    latest: Option<PinFormat>,
-) -> FormatChangeReport {
-    match latest {
-        None => FormatChangeReport::Unsupported,
-        Some(latest) if Some(latest) == connected => FormatChangeReport::Restored,
-        Some(latest) => FormatChangeReport::Mismatch(latest),
-    }
-}
-
-const PIN_FORMAT_PRESENT: u64 = 1 << 63;
-const PIN_FORMAT_F32: u64 = 1 << 62;
-
-/// 形式を 1 つの `u64` に詰める。`None`（受け取れない形式）は 0
-fn pack_pin_format(format: Option<PinFormat>) -> u64 {
-    let Some(format) = format else {
-        return 0;
-    };
-    let sample_type = match format.sample_type {
-        PinSampleType::I16 => 0,
-        PinSampleType::F32 => PIN_FORMAT_F32,
-    };
-    PIN_FORMAT_PRESENT
-        | sample_type
-        | (u64::from(format.channels) << 32)
-        | u64::from(format.sample_rate)
-}
-
-/// `pack_pin_format` の逆
-fn unpack_pin_format(packed: u64) -> Option<PinFormat> {
-    if packed & PIN_FORMAT_PRESENT == 0 {
-        return None;
-    }
-    Some(PinFormat {
-        sample_rate: (packed & 0xFFFF_FFFF) as u32,
-        channels: ((packed >> 32) & 0xFFFF) as u16,
-        sample_type: if packed & PIN_FORMAT_F32 != 0 {
-            PinSampleType::F32
-        } else {
-            PinSampleType::I16
-        },
-    })
 }
 
 /// 音声ピンの差し込み口。複製しても同じ中身を指す。
@@ -335,8 +285,16 @@ impl AudioPinFeed {
             return;
         };
         let connected = self.connection().map(|connection| connection.format);
-        let connected_text = connected.map_or_else(|| "不明".to_string(), PinFormat::summary);
-        match format_change_report(connected, latest) {
+        let Some(report) = format_change_report(changes, connected, latest) else {
+            // 繋いだ記録が書かれる前（グラフを動かした直後）。比べる相手が無い
+            log::debug!(
+                "音声ピンの形式が繋いだ記録の前に変わった（前回の確認から {} 回）",
+                changes
+            );
+            return;
+        };
+        let connected_text = connected.map_or_else(String::new, PinFormat::summary);
+        match report {
             FormatChangeReport::Mismatch(format) => log::warn!(
                 "音声ピンの形式が繋いだときの形式（{}）から {} に変わったので、その音声を捨てている（前回の確認から {} 回）",
                 connected_text,
@@ -345,6 +303,11 @@ impl AudioPinFeed {
             ),
             FormatChangeReport::Unsupported => log::warn!(
                 "音声ピンの形式が受け取れない形式に変わったので、その音声を捨てている（繋いだときの形式: {}、前回の確認から {} 回）",
+                connected_text,
+                changes
+            ),
+            FormatChangeReport::RestoredAfterDetour => log::warn!(
+                "音声ピンの形式が途中で変わり、繋いだときの形式（{}）に戻った。変わっていた間の音声は捨てた（前回の確認から {} 回）",
                 connected_text,
                 changes
             ),
@@ -414,6 +377,10 @@ impl AudioPinFeed {
     /// 待たず、確保もしない。** 差し込み先が無い・使用中・グラフの番号か形式が
     /// 違うときは捨てる。`discontinuity` はサンプルの不連続の印で、取りこぼしとして
     /// 数える（「接続状態」タブの「入力の取りこぼし」）。
+    ///
+    /// **塊がフレームの途中で切れていたら、端数を次の塊へ持ち越す**（`PinCarry`）。
+    /// 次の塊の頭で 1 フレームに組み直してから積むので、塊の切れ目で左右がずれない。
+    /// 不連続の印が付いた塊・形式が食い違った塊では、持ち越した端数を捨てる。
     pub fn push(&self, graph: u64, format: PinFormat, data: &[u8], discontinuity: bool) {
         let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
         self.inner
@@ -425,13 +392,44 @@ impl AudioPinFeed {
         let Some(sink) = guard.as_mut() else {
             return;
         };
-        if sink.graph != graph || sink.format != format {
+        if sink.graph != graph {
             return;
         }
-        if discontinuity && sink.started {
+        if sink.format != format {
+            sink.stream.carry.clear();
+            return;
+        }
+        if discontinuity && sink.stream.started {
             count_xrun(&sink.xruns);
         }
-        sink.started = true;
+        if discontinuity {
+            sink.stream.carry.clear();
+        }
+        sink.stream.started = true;
+        let frame = format.bytes_per_frame();
+        let mut data = data;
+        if !sink.stream.carry.is_empty() {
+            let (joined, rest) = sink.stream.carry.fill(frame, data);
+            data = rest;
+            if !joined {
+                // この塊は全部端数に吸われた。まだ 1 フレームに揃わない
+                return;
+            }
+            let mut carried = PinCarry::default();
+            std::mem::swap(&mut carried, &mut sink.stream.carry);
+            Self::push_whole(sink, format, carried.bytes());
+        }
+        let whole = data.len() / frame.max(1) * frame;
+        let (head, tail) = data.split_at(whole);
+        Self::push_whole(sink, format, head);
+        sink.stream.carry.keep(tail, frame);
+    }
+
+    /// 丸ごとのフレームが並んだバイト列を、リングと録画の差し込み口へ積む。
+    fn push_whole(sink: &PinSink, format: PinFormat, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
         let channels = usize::from(format.channels);
         match format.sample_type {
             PinSampleType::I16 => process_input_iter(
@@ -507,7 +505,7 @@ mod tests {
             tap: AudioTap::new(),
             dropped_frames: Arc::new(AtomicU32::new(0)),
             xruns: xruns.clone(),
-            started: false,
+            stream: Default::default(),
         });
         (Arc::new(Mutex::new(consumer)), xruns)
     }
@@ -599,15 +597,18 @@ mod tests {
     }
 
     #[test]
-    fn push_keeps_the_recording_on_frame_boundaries() {
-        // 2ch 16bit の塊が 6 バイト（1.5 フレーム）でも、録画へは丸ごとの
-        // 1 フレームだけ積む。半端を積むと次の塊から左右が入れ替わる
+    fn push_carries_a_split_frame_into_the_next_chunk() {
+        // 連続した 2ch 16bit の流れを、フレームの途中（奇数のサンプル、サンプルの
+        // 途中のバイトも含む）で切って渡す。録画とパススルーの両方で、最後まで
+        // 左（正）と右（負）が入れ替わらずに全フレームが並ぶ
         use ringbuf::traits::Split;
+        const FRAMES: usize = 40;
         let feed = AudioPinFeed::new();
         let graph = feed.begin_graph();
-        let (producer, _consumer) = ringbuf::HeapRb::<f32>::new(64).split();
+        let (producer, consumer) = ringbuf::HeapRb::<f32>::new(FRAMES * 2).split();
+        let consumer = Mutex::new(consumer);
         let tap = AudioTap::new();
-        let mut attachment = tap.attach(16);
+        let mut attachment = tap.attach(FRAMES * 2);
         feed.attach(PinSink {
             graph,
             format: GC551,
@@ -615,32 +616,53 @@ mod tests {
             tap: tap.clone(),
             dropped_frames: Arc::new(AtomicU32::new(0)),
             xruns: Arc::new(AtomicU32::new(0)),
-            started: false,
+            stream: Default::default(),
         });
-        // 0.5, -0.5, 0.5（3 サンプル目は半端）
-        feed.push(graph, GC551, &[0x00, 0x40, 0x00, 0xC0, 0x00, 0x40], false);
-        // 次の塊は 1 フレーム（0.5, -0.5）
-        feed.push(graph, GC551, &[0x00, 0x40, 0x00, 0xC0], false);
-        let mut read = [0.0f32; 8];
-        let count = attachment.consumer.pop_slice(&mut read);
-        assert_eq!(&read[..count], &[0.5, -0.5, 0.5, -0.5]);
+        let mut expected = Vec::new();
+        let mut bytes = Vec::new();
+        for i in 0..FRAMES {
+            let value = 1000 + i as i16;
+            for sample in [value, -value] {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+                expected.push(i16_to_f32(sample));
+            }
+        }
+        // 6 バイト = 1.5 フレーム、3 バイト = サンプルの途中、など
+        let mut rest = bytes.as_slice();
+        for size in [6, 3, 7, 2, 1, 1, 10, 5].iter().cycle() {
+            if rest.is_empty() {
+                break;
+            }
+            let (chunk, tail) = rest.split_at((*size).min(rest.len()));
+            feed.push(graph, GC551, chunk, false);
+            rest = tail;
+        }
+
+        let mut recorded = vec![0.0f32; FRAMES * 2];
+        let count = attachment.consumer.pop_slice(&mut recorded);
+        assert_eq!(&recorded[..count], expected.as_slice());
+        assert_eq!(drain(&consumer), expected);
     }
 
     #[test]
-    fn pack_pin_format_round_trips() {
-        let f32_mono = PinFormat {
-            sample_rate: 44_100,
+    fn push_drops_the_carried_bytes_on_a_discontinuity_or_a_format_change() {
+        let feed = AudioPinFeed::new();
+        let graph = feed.begin_graph();
+        let (consumer, _) = attached(&feed, graph, GC551);
+        // 1 フレームに満たない 3 バイトは積まずに持ち越す
+        feed.push(graph, GC551, &[0x00, 0x40, 0x00], false);
+        // 不連続の印が付いたら、端数を足さずに新しいフレームから積む
+        feed.push(graph, GC551, &[0x00, 0xC0, 0x00, 0x40], true);
+        assert_eq!(drain(&consumer), vec![-0.5, 0.5]);
+        // 形式が食い違った塊を挟んでも、端数は捨てる
+        feed.push(graph, GC551, &[0x00, 0x40, 0x00], false);
+        let mono = PinFormat {
             channels: 1,
-            sample_type: PinSampleType::F32,
+            ..GC551
         };
-        for format in [GC551, f32_mono] {
-            assert_eq!(
-                unpack_pin_format(pack_pin_format(Some(format))),
-                Some(format)
-            );
-        }
-        assert_eq!(pack_pin_format(None), 0);
-        assert_eq!(unpack_pin_format(0), None);
+        feed.push(graph, mono, &[0x00, 0x40], false);
+        feed.push(graph, GC551, &[0x00, 0x40, 0x00, 0xC0], false);
+        assert_eq!(drain(&consumer), vec![0.5, -0.5]);
     }
 
     #[test]
@@ -663,31 +685,6 @@ mod tests {
         feed.record_format_change(Some(mono));
         feed.begin_graph();
         assert_eq!(feed.take_format_changes(), None);
-    }
-
-    #[test]
-    fn format_change_report_compares_with_the_connected_format() {
-        let mono = PinFormat {
-            channels: 1,
-            ..GC551
-        };
-        assert_eq!(
-            format_change_report(Some(GC551), Some(mono)),
-            FormatChangeReport::Mismatch(mono)
-        );
-        assert_eq!(
-            format_change_report(Some(GC551), Some(GC551)),
-            FormatChangeReport::Restored
-        );
-        assert_eq!(
-            format_change_report(Some(GC551), None),
-            FormatChangeReport::Unsupported
-        );
-        // 繋いだ記録が無ければ積んでいないので、食い違いとして出す
-        assert_eq!(
-            format_change_report(None, Some(GC551)),
-            FormatChangeReport::Mismatch(GC551)
-        );
     }
 
     #[test]
