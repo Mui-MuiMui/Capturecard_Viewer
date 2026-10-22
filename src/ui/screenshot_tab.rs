@@ -6,7 +6,7 @@
 use crate::i18n::Text;
 use crate::settings::{
     AppSettings, ScreenshotDestination, ScreenshotFormat, DEFAULT_SOUND_FILE, MAX_JPEG_QUALITY,
-    MIN_JPEG_QUALITY,
+    MAX_VOLUME, MIN_JPEG_QUALITY, MIN_VOLUME,
 };
 use eframe::egui;
 use std::path::{Path, PathBuf};
@@ -173,8 +173,11 @@ pub(super) fn show_screenshot_settings_tab(
             ui.horizontal(|ui| {
                 ui.label(Text::VolumeLabel.get());
                 ui.add(
-                    egui::Slider::new(&mut settings.screenshot.sound_volume, 0.0..=200.0)
-                        .suffix("%"),
+                    egui::Slider::new(
+                        &mut settings.screenshot.sound_volume,
+                        MIN_VOLUME..=MAX_VOLUME,
+                    )
+                    .suffix("%"),
                 );
             });
 
