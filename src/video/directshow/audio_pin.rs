@@ -173,14 +173,23 @@ impl AudioStream {
                 self.format = changed;
             }
         }
+        // `push` を呼ばずに塊を捨てるときは、捨てたことだけを Atomic で知らせる。
+        // 次の `push` が持ち越した端数を捨て、捨てた区間をまたいでつながない
         let Some(format) = self.format else {
+            self.feed.note_stream_break();
             return;
         };
         let Ok(data) = (unsafe { sample.GetPointer() }) else {
+            self.feed.note_stream_break();
             return;
         };
         let len = unsafe { sample.GetActualDataLength() };
-        if data.is_null() || len <= 0 {
+        if len <= 0 {
+            // 中身の無いサンプル。捨てる音が無いので端数はつながったまま
+            return;
+        }
+        if data.is_null() {
+            self.feed.note_stream_break();
             return;
         }
         let src = unsafe { std::slice::from_raw_parts(data, len as usize) };

@@ -2,11 +2,69 @@
 //!
 //! `pin_feed.rs` の `AudioPinFeed` が使う部品のうち、`Receive` のスレッドが触る
 //! 流れの状態（`PinStream` と、塊の切れ目の端数を持ち越す `PinCarry`）と、
-//! 形式の変化を Atomic へ詰める形（`pack_pin_format`）・ワーカーがログを
+//! 形式の変化と捨てた塊の数を `Receive` からワーカー・`push` へ渡す Atomic の控え
+//! （`StreamChanges`、形式は `pack_pin_format` で詰める）・ワーカーがログを
 //! どう出すかの判定（`format_change_report`、純粋関数）を置く。どれも
 //! **ロックもアロケーションもしない。**
 
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
 use super::pin_feed::{PinFormat, PinSampleType};
+
+/// 流れの途中での形式の変化と、`Receive` が `push` を呼ばずに捨てた塊の数。
+/// `AudioPinFeed` が 1 つ持つ。
+#[derive(Default)]
+pub(super) struct StreamChanges {
+    /// いまのグラフで、流れの途中で形式が変わった回数。`Receive` が足す
+    formats: AtomicU32,
+    /// 最後に変わった先の形式（`pack_pin_format`）。`Receive` が書く
+    latest: AtomicU64,
+    /// `formats` のうち、ワーカーがログへ出し終えたところ
+    logged: AtomicU32,
+    /// `Receive` が `push` を呼ばずに塊を捨てた回数（形式の変化を含む）。`push` は
+    /// 前に見た値と違えば、持ち越した端数を捨てる（捨てた区間をまたいでつながない）。
+    /// 数え直さない（単調に増える）
+    breaks: AtomicU32,
+}
+
+impl StreamChanges {
+    /// 形式の変化を数え直す。グラフを組む前に呼ぶ（前のグラフの `Receive` は止まっている）
+    pub(super) fn reset_formats(&self) {
+        self.formats.store(0, Ordering::Relaxed);
+        self.logged.store(0, Ordering::Relaxed);
+        self.latest.store(0, Ordering::Relaxed);
+    }
+
+    /// 形式が変わった。`Receive` から呼ぶ。端数もつながらなくなる
+    pub(super) fn record_format(&self, format: Option<PinFormat>) {
+        self.latest
+            .store(pack_pin_format(format), Ordering::Relaxed);
+        self.formats.fetch_add(1, Ordering::Release);
+        self.note_break();
+    }
+
+    /// `push` を呼ばずに塊を捨てた。`Receive` から呼ぶ
+    pub(super) fn note_break(&self) {
+        self.breaks.fetch_add(1, Ordering::Release);
+    }
+
+    /// 捨てた塊の数。`push` が前に見た値と比べる
+    pub(super) fn breaks(&self) -> u32 {
+        self.breaks.load(Ordering::Acquire)
+    }
+
+    /// 前に読んだときから形式が変わっていれば、その回数と最後の形式。
+    /// 読んだところまでを出し終えたことにする。ワーカーだけが呼ぶ
+    pub(super) fn take_formats(&self) -> Option<(u32, Option<PinFormat>)> {
+        let count = self.formats.load(Ordering::Acquire);
+        let logged = self.logged.swap(count, Ordering::Relaxed);
+        if count == logged {
+            return None;
+        }
+        let latest = unpack_pin_format(self.latest.load(Ordering::Relaxed));
+        Some((count.wrapping_sub(logged), latest))
+    }
+}
 
 /// 差し込み先ごとの、流れの状態。触るのは `push`（`Receive` のスレッド）だけ。
 #[derive(Default)]
@@ -16,6 +74,9 @@ pub(super) struct PinStream {
     pub(super) started: bool,
     /// 前の塊の終わりに残った、1 フレームに満たない端数
     pub(super) carry: PinCarry,
+    /// 前の `push` で見た `stream_breaks`（`AudioPinFeed`）。差し込んだ直後は 0 で、
+    /// 違っていても端数は空なので何も捨てない
+    pub(super) breaks_seen: u32,
 }
 
 /// 端数を持ち越せる 1 フレームの長さの上限（バイト）。16ch の f32 = 64 バイトまで。
@@ -187,6 +248,38 @@ mod tests {
         );
         // 繋いだ記録が無ければ比べる相手が無いので出さない
         assert_eq!(format_change_report(1, None, Some(GC551)), None);
+    }
+
+    #[test]
+    fn take_formats_reports_only_new_changes() {
+        let changes = StreamChanges::default();
+        assert_eq!(changes.take_formats(), None);
+        let mono = PinFormat {
+            channels: 1,
+            ..GC551
+        };
+        changes.record_format(Some(mono));
+        changes.record_format(None);
+        // 周期の間に 2 回変わったら、回数と最後の形式を 1 度だけ返す
+        assert_eq!(changes.take_formats(), Some((2, None)));
+        assert_eq!(changes.take_formats(), None);
+        changes.record_format(Some(GC551));
+        assert_eq!(changes.take_formats(), Some((1, Some(GC551))));
+        // 次のグラフでは数え直す
+        changes.record_format(Some(mono));
+        changes.reset_formats();
+        assert_eq!(changes.take_formats(), None);
+    }
+
+    #[test]
+    fn breaks_count_dropped_chunks_and_format_changes() {
+        let changes = StreamChanges::default();
+        changes.note_break();
+        changes.record_format(None);
+        assert_eq!(changes.breaks(), 2);
+        // 形式の数え直しでは減らさない（`push` が前に見た値と比べるため）
+        changes.reset_formats();
+        assert_eq!(changes.breaks(), 2);
     }
 
     #[test]
