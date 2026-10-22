@@ -8,7 +8,7 @@
 use chrono::Local;
 use eframe::egui;
 
-use super::{notice_label, warning_label, NoticeKind, SettingsEvent};
+use super::{name_slider, notice_label, warning_label, NoticeKind, SettingsEvent};
 use crate::i18n::{self, Text};
 use crate::recording::{render_file_name, RECORDING_EXTENSION};
 use crate::settings::{
@@ -33,9 +33,13 @@ pub(super) fn show_recording_settings_tab(
         ui.strong(Text::SaveLocation.get());
         ui.add_space(5.0);
         ui.horizontal(|ui| {
-            ui.label(Text::SaveFolderLabel.get());
+            let label = ui.label(Text::SaveFolderLabel.get());
             let mut folder = settings.recording.folder.to_string_lossy().to_string();
-            if ui.text_edit_singleline(&mut folder).changed() {
+            if ui
+                .text_edit_singleline(&mut folder)
+                .labelled_by(label.id)
+                .changed()
+            {
                 settings.recording.folder = std::path::PathBuf::from(folder);
             }
             if ui.button(Text::ButtonBrowse.get()).clicked() {
@@ -51,8 +55,9 @@ pub(super) fn show_recording_settings_tab(
         ui.strong(Text::RecordingFileNameGroup.get());
         ui.add_space(5.0);
         ui.horizontal(|ui| {
-            ui.label(Text::RecordingFileNameFormatLabel.get());
-            ui.text_edit_singleline(&mut settings.recording.file_name_format);
+            let label = ui.label(Text::RecordingFileNameFormatLabel.get());
+            ui.text_edit_singleline(&mut settings.recording.file_name_format)
+                .labelled_by(label.id);
         });
         match render_file_name(&settings.recording.file_name_format, &Local::now()) {
             Ok(name) => {
@@ -74,13 +79,16 @@ pub(super) fn show_recording_settings_tab(
         ui.add_space(5.0);
         ui.horizontal(|ui| {
             ui.label(Text::RecordingBitrateLabel.get());
-            ui.add(
-                egui::Slider::new(
-                    &mut settings.recording.video_bitrate_kbps,
-                    MIN_RECORDING_BITRATE_KBPS..=MAX_RECORDING_BITRATE_KBPS,
-                )
-                .logarithmic(true)
-                .suffix(" kbps"),
+            name_slider(
+                ui.add(
+                    egui::Slider::new(
+                        &mut settings.recording.video_bitrate_kbps,
+                        MIN_RECORDING_BITRATE_KBPS..=MAX_RECORDING_BITRATE_KBPS,
+                    )
+                    .logarithmic(true)
+                    .suffix(" kbps"),
+                ),
+                Text::RecordingBitrateLabel.get(),
             );
         });
         ui.checkbox(
@@ -103,7 +111,7 @@ pub(super) fn show_recording_settings_tab(
         );
         ui.add_enabled_ui(settings.recording.audio_enabled, |ui| {
             ui.horizontal(|ui| {
-                ui.label(Text::RecordingBitrateLabel.get());
+                let label = ui.label(Text::RecordingBitrateLabel.get());
                 // Id は表示文字列から作らない（`docs/design/i18n.md`）
                 egui::ComboBox::from_id_salt("recording_audio_bitrate")
                     .selected_text(format!("{} kbps", settings.recording.audio_bitrate_kbps))
@@ -115,17 +123,22 @@ pub(super) fn show_recording_settings_tab(
                                 format!("{kbps} kbps"),
                             );
                         }
-                    });
+                    })
+                    .response
+                    .labelled_by(label.id);
             });
             // 映像と音声のずれの補正（#404）。正なら音声を遅らせ、負なら早める
             ui.horizontal(|ui| {
                 ui.label(Text::RecordingAudioOffsetLabel.get());
-                ui.add(
-                    egui::Slider::new(
-                        &mut settings.recording.audio_offset_ms,
-                        MIN_RECORDING_AUDIO_OFFSET_MS..=MAX_RECORDING_AUDIO_OFFSET_MS,
-                    )
-                    .suffix(" ms"),
+                name_slider(
+                    ui.add(
+                        egui::Slider::new(
+                            &mut settings.recording.audio_offset_ms,
+                            MIN_RECORDING_AUDIO_OFFSET_MS..=MAX_RECORDING_AUDIO_OFFSET_MS,
+                        )
+                        .suffix(" ms"),
+                    ),
+                    Text::RecordingAudioOffsetLabel.get(),
                 );
             });
             ui.small(Text::RecordingAudioOffsetHint.get());
@@ -147,12 +160,15 @@ pub(super) fn show_recording_settings_tab(
         ui.add_enabled_ui(settings.recording.replay_enabled, |ui| {
             ui.horizontal(|ui| {
                 ui.label(Text::RecordingReplaySecondsLabel.get());
-                ui.add(
-                    egui::Slider::new(
-                        &mut settings.recording.replay_seconds,
-                        MIN_REPLAY_SECONDS..=MAX_REPLAY_SECONDS,
-                    )
-                    .suffix(" s"),
+                name_slider(
+                    ui.add(
+                        egui::Slider::new(
+                            &mut settings.recording.replay_seconds,
+                            MIN_REPLAY_SECONDS..=MAX_REPLAY_SECONDS,
+                        )
+                        .suffix(" s"),
+                    ),
+                    Text::RecordingReplaySecondsLabel.get(),
                 );
             });
             notice_label(

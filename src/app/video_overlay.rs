@@ -95,7 +95,7 @@ mod tests {
             if overlay {
                 show_video_overlay(
                     ctx,
-                    egui::Id::new("test_overlay"),
+                    egui::Id::unique("test_overlay"),
                     ctx.content_rect(),
                     egui::Align2::LEFT_TOP,
                     |ui| {
@@ -105,7 +105,7 @@ mod tests {
             }
             if dialog {
                 egui::Window::new("dialog")
-                    .id(egui::Id::new("test_dialog"))
+                    .id(egui::Id::unique("test_dialog"))
                     .fixed_pos(egui::pos2(0.0, 0.0))
                     .show(ctx, |ui| ui.label(DIALOG_TEXT));
             }
@@ -174,10 +174,15 @@ mod tests {
         let ctx = egui::Context::default();
         let mut placed = egui::Rect::NOTHING;
         ctx.run_ui(screen_input(), |ui| {
-            placed =
-                show_video_overlay(ui.ctx(), egui::Id::new("test_overlay"), area, align, |ui| {
+            placed = show_video_overlay(
+                ui.ctx(),
+                egui::Id::unique("test_overlay"),
+                area,
+                align,
+                |ui| {
                     ui.label(OVERLAY_TEXT);
-                });
+                },
+            );
         })
         .drop_without_applying_deltas();
         placed

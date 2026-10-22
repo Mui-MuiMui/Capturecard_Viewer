@@ -27,7 +27,7 @@ file at the root of the repository.
 1. LICENSE OVERVIEW
 ================================================================================
 
-  MIT (MIT License): 217
+  MIT (MIT License): 218
   Unicode-3.0 (Unicode License v3): 19
   Apache-2.0 (Apache License 2.0): 18
   MPL-2.0 (Mozilla Public License 2.0): 12
@@ -44,19 +44,19 @@ file at the root of the repository.
 2. CRATES
 ================================================================================
 
-accesskit 0.24.1
+accesskit 0.25.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/AccessKit/accesskit
 
-accesskit_consumer 0.35.0
+accesskit_consumer 0.39.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/AccessKit/accesskit
 
-accesskit_windows 0.32.1
+accesskit_windows 0.35.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/AccessKit/accesskit
 
-accesskit_winit 0.32.2
+accesskit_winit 0.34.1
   License: Apache-2.0
   Repository: https://github.com/AccessKit/accesskit
 
@@ -228,27 +228,27 @@ dunce 1.0.5
   License: CC0-1.0 OR MIT-0 OR Apache-2.0
   Repository: https://gitlab.com/kornelski/dunce
 
-ecolor 0.36.2
+ecolor 0.37.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/emilk/egui
 
-eframe 0.36.2
+eframe 0.37.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/emilk/egui/tree/main/crates/eframe
 
-egui 0.36.2
+egui 0.37.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/emilk/egui
 
-egui-wgpu 0.36.2
+egui-wgpu 0.37.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/emilk/egui/tree/main/crates/egui-wgpu
 
-egui-winit 0.36.2
+egui-winit 0.37.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/emilk/egui/tree/main/crates/egui-winit
 
-egui_glow 0.36.2
+egui_glow 0.37.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/emilk/egui/tree/main/crates/egui_glow
 
@@ -256,7 +256,7 @@ either 1.19.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/rayon-rs/either
 
-emath 0.36.2
+emath 0.37.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/emilk/egui/tree/main/crates/emath
 
@@ -268,11 +268,11 @@ encoding_rs 0.8.42
   License: (Apache-2.0 OR MIT) AND BSD-3-Clause
   Repository: https://github.com/hsivonen/encoding_rs
 
-epaint 0.36.2
+epaint 0.37.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/emilk/egui/tree/main/crates/epaint
 
-epaint_default_fonts 0.36.2
+epaint_default_fonts 0.37.0
   License: (MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0
   Repository: https://github.com/emilk/egui/tree/main/crates/epaint_default_fonts
 
@@ -888,6 +888,10 @@ unicode-ident 1.0.27
   License: (MIT OR Apache-2.0) AND Unicode-3.0
   Repository: https://github.com/dtolnay/unicode-ident
 
+unicode-properties 0.1.4
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/unicode-rs/unicode-properties
+
 unicode-segmentation 1.13.3
   License: MIT OR Apache-2.0
   Repository: https://github.com/unicode-rs/unicode-segmentation
@@ -920,11 +924,11 @@ uuid 1.28.0
   License: Apache-2.0 OR MIT
   Repository: https://github.com/uuid-rs/uuid
 
-vello_common 0.1.0
+vello_common 0.2.0
   License: Apache-2.0 OR MIT
   Repository: https://github.com/linebender/vello
 
-vello_cpu 0.1.0
+vello_cpu 0.2.0
   License: Apache-2.0 OR MIT
   Repository: https://github.com/linebender/vello
 
@@ -2380,7 +2384,7 @@ Apache License
 Apache License 2.0 (Apache-2.0)
 ================================================================================
 Used by:
-  - accesskit_winit 0.32.2
+  - accesskit_winit 0.34.1
   - dunce 1.0.5
   - gl_generator 0.14.0
   - khronos_api 3.1.0
@@ -3288,6 +3292,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
+  - unicode-properties 0.1.4
   - unicode-segmentation 1.13.3
   - unicode-width 0.2.2
 
@@ -4894,8 +4899,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - vello_common 0.1.0
-  - vello_cpu 0.1.0
+  - vello_common 0.2.0
+  - vello_cpu 0.2.0
 
 Copyright 2020 the Vello Authors
 
@@ -5067,7 +5072,7 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - epaint_default_fonts 0.36.2
+  - epaint_default_fonts 0.37.0
 
 MIT License
 
@@ -5445,20 +5450,20 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - accesskit 0.24.1
-  - accesskit_consumer 0.35.0
-  - accesskit_windows 0.32.1
+  - accesskit 0.25.1
+  - accesskit_consumer 0.39.1
+  - accesskit_windows 0.35.1
   - chrono 0.4.45
   - dasp_sample 0.11.0
   - dpi 0.1.2
-  - ecolor 0.36.2
-  - eframe 0.36.2
-  - egui-wgpu 0.36.2
-  - egui-winit 0.36.2
-  - egui 0.36.2
-  - egui_glow 0.36.2
-  - emath 0.36.2
-  - epaint 0.36.2
+  - ecolor 0.37.0
+  - eframe 0.37.0
+  - egui-wgpu 0.37.0
+  - egui-winit 0.37.0
+  - egui 0.37.0
+  - egui_glow 0.37.0
+  - emath 0.37.0
+  - epaint 0.37.0
   - libm 0.2.16
   - profiling 1.0.18
   - type-map 0.5.1
@@ -7080,7 +7085,7 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
 SIL Open Font License 1.1 (OFL-1.1)
 ================================================================================
 Used by:
-  - epaint_default_fonts 0.36.2
+  - epaint_default_fonts 0.37.0
 
 This Font Software is licensed under the SIL Open Font License,
 Version 1.1.
@@ -7180,7 +7185,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 Ubuntu Font Licence v1.0 (Ubuntu-font-1.0)
 ================================================================================
 Used by:
-  - epaint_default_fonts 0.36.2
+  - epaint_default_fonts 0.37.0
 
 -------------------------------
 UBUNTU FONT LICENCE Version 1.0

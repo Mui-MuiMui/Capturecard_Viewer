@@ -138,7 +138,7 @@ impl CaptureCardViewer {
         );
         let shown = show_video_overlay(
             ctx,
-            egui::Id::new("stats_overlay"),
+            egui::Id::unique("stats_overlay"),
             area,
             egui::Align2::LEFT_TOP,
             |ui| {

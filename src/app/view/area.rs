@@ -176,7 +176,10 @@ mod tests {
     }
 
     fn area_harness(probe: AreaProbe) -> Harness<'static, AreaProbe> {
+        // 日本語のフォントは読み込まず、字形の無い文字は豆腐で描く（0.36 までと同じ）。
+        // egui_kittest 0.37 は既定で字形の無い文字に当たると panic する
         Harness::builder()
+            .allow_missing_glyphs()
             .with_size(Vec2::new(240.0, 160.0))
             .build_ui_state(|ui, probe: &mut AreaProbe| probe.draw(ui), probe)
     }

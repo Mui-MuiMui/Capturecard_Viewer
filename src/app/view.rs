@@ -425,7 +425,7 @@ impl CaptureCardViewer {
         );
         show_video_overlay(
             ctx,
-            egui::Id::new("fake_devices_banner"),
+            egui::Id::unique("fake_devices_banner"),
             area,
             egui::Align2::CENTER_TOP,
             |ui| {

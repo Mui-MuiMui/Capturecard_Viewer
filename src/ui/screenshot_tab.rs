@@ -11,7 +11,7 @@ use crate::settings::{
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
-use super::SettingsEvent;
+use super::{name_slider, SettingsEvent};
 
 /// スクリーンショット設定タブを描画する。
 ///
@@ -69,7 +69,7 @@ pub(super) fn show_screenshot_settings_tab(
             ui.add_space(5.0);
 
             ui.horizontal(|ui| {
-                ui.label(Text::SaveFolderLabel.get());
+                let label = ui.label(Text::SaveFolderLabel.get());
                 // 書き戻すのは欄を編集したときだけ。毎フレーム書き戻すと、タブを
                 // 開いただけで UTF-16 として不正なパスが U+FFFD に置き換わる
                 // （「録画」タブの保存先と同じ形）
@@ -78,7 +78,11 @@ pub(super) fn show_screenshot_settings_tab(
                     .save_folder
                     .to_string_lossy()
                     .to_string();
-                if ui.text_edit_singleline(&mut folder_str).changed() {
+                if ui
+                    .text_edit_singleline(&mut folder_str)
+                    .labelled_by(label.id)
+                    .changed()
+                {
                     settings.screenshot.save_folder = PathBuf::from(folder_str);
                 }
 
@@ -113,12 +117,15 @@ pub(super) fn show_screenshot_settings_tab(
             let jpeg_selected = settings.screenshot.format == ScreenshotFormat::Jpeg;
             ui.horizontal(|ui| {
                 ui.label(Text::JpegQualityLabel.get());
-                ui.add_enabled(
-                    jpeg_selected,
-                    egui::Slider::new(
-                        &mut settings.screenshot.jpeg_quality,
-                        MIN_JPEG_QUALITY..=MAX_JPEG_QUALITY,
+                name_slider(
+                    ui.add_enabled(
+                        jpeg_selected,
+                        egui::Slider::new(
+                            &mut settings.screenshot.jpeg_quality,
+                            MIN_JPEG_QUALITY..=MAX_JPEG_QUALITY,
+                        ),
                     ),
+                    Text::JpegQualityLabel.get(),
                 );
             });
 
@@ -172,12 +179,15 @@ pub(super) fn show_screenshot_settings_tab(
         if let Some(sound_file) = settings.screenshot.sound_file.clone() {
             ui.horizontal(|ui| {
                 ui.label(Text::VolumeLabel.get());
-                ui.add(
-                    egui::Slider::new(
-                        &mut settings.screenshot.sound_volume,
-                        MIN_VOLUME..=MAX_VOLUME,
-                    )
-                    .suffix("%"),
+                name_slider(
+                    ui.add(
+                        egui::Slider::new(
+                            &mut settings.screenshot.sound_volume,
+                            MIN_VOLUME..=MAX_VOLUME,
+                        )
+                        .suffix("%"),
+                    ),
+                    Text::VolumeLabel.get(),
                 );
             });
 
