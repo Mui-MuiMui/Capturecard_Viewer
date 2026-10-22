@@ -10,7 +10,7 @@
 - 時間で動くデバイス処理を `update()` から駆動しない（理由: `docs/design/device-worker.md`）
 - `update()` の中でデバイスを開く・閉じる・列挙する・能力を問い合わせる処理を書かない（理由: `docs/design/device-worker.md`、`docs/ARCHITECTURE.md`）
 - `AudioCapture` はワーカースレッドの中で作る（理由: `docs/design/device-worker.md`）
-- ワーカー（`worker_loop` / `worker_commands` / `worker_connect` / `worker_audio_connect` / `worker_default_input` / `worker_timers` / `worker_audio_timers`）から `VideoCapture` / `AudioCapture` を名指しで呼ばない。`app::backend` の trait を通す。コールバックの経路には trait を挟まない（理由: `docs/design/device-worker.md`）
+- ワーカー（`worker_loop` / `worker_commands` / `worker_connect` / `worker_enumeration` / `worker_audio_connect` / `worker_default_input` / `worker_timers` / `worker_audio_timers`）から `VideoCapture` / `AudioCapture` を名指しで呼ばない。`app::backend` の trait を通す。コールバックの経路には trait を挟まない（理由: `docs/design/device-worker.md`）
 - デバイスに触る使い捨てのスレッドを新しく作らない（理由: `docs/design/threads.md`）
 - 新しく `Arc<Mutex<..>>` を足す前に「ワーカーへのコマンドで済まないか」を考える。要る場合もロックを握ったまま重い処理（デバイスの開き直し、画像のエンコード、ファイル I/O）をしない（理由: `docs/design/threads.md`）
 - cpal のコールバックスレッドから再接続を始めない。エラーの旗はストリームを開き直すたびに新しい `Arc` へ差し替える（理由: `docs/design/threads.md`）
@@ -77,7 +77,7 @@
 - `catch_unwind` を使わない（理由: `docs/design/logging.md`）
 - 失敗はログだけで終わらせず `report_error(ErrorSource::_, 理由)` を呼ぶ。接続に成功したら `errors.clear(..)` を呼ぶ（理由: `docs/design/error-reporting.md`）
 - `video/` / `audio/` / `recording/` / `screenshot.rs` / `hotkey/` / `settings/` の公開 API は `String` ではなく自分のエラー enum を返す（理由: `docs/design/error-reporting.md`）
-- エラー enum の文言はその型の `Display` から `crate::i18n` を呼んで出す。`status.rs` に発生源ごとの `match` を足さない（理由: `docs/design/error-reporting.md`）
+- エラー enum の文言はその型の `Display` から `crate::i18n` を呼んで出す。`status/mod.rs` に発生源ごとの `match` を足さない（理由: `docs/design/error-reporting.md`）
 - 画面に出す文字列をリテラルで書かない。`crate::i18n` の `Text` のキーか関数を通す。ログの文言は入れない（理由: `docs/design/i18n.md`）
 - カレントディレクトリ基準でファイルを解決する処理を新たに足さない（理由: `docs/design/assets.md`）
 - `src/app/` の子モジュールにフィールドや `static` を持たせない（理由: `CLAUDE.md` の「モジュール構成」）

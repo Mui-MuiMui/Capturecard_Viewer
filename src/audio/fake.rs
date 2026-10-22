@@ -18,7 +18,6 @@
 //! | Fake Audio Output 1 | 48kHz 2ch（入力と揃うので変換しない。ドリフト補正は動く） |
 //! | Fake Audio Output 2 | 44.1kHz 1ch（入力と揃わないので変換し、ドリフト補正も動く） |
 
-use cpal::{SampleFormat, SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange};
 use log::{info, warn};
 use ringbuf::traits::Split;
 use ringbuf::HeapRb;
@@ -34,26 +33,13 @@ use super::capture::{
 };
 use super::controls::AudioControls;
 use super::convert::PassthroughConverter;
+use super::fake_devices::{self, outputs, FakeDevice};
 use super::fake_stream::{spawn_named, DiscardOutput, SineInput};
 use super::pin_feed::{AudioPinFeed, PinSink};
 use super::resample::{ResampleStatus, ResampleTelemetry};
 use super::stream_config::{choose_passthrough_configs, resolve_ranges};
 use super::tap::AudioTap;
 use super::{ActiveAudio, AudioDirection, AudioError, AudioInputRoute};
-
-const INPUT_NAME_PREFIX: &str = "Fake Audio Input";
-const OUTPUT_NAME_PREFIX: &str = "Fake Audio Output";
-
-/// 入力デバイスの形。どの入力も同じ
-const INPUT_SAMPLE_RATE: u32 = 48_000;
-const INPUT_CHANNELS: u16 = 2;
-
-/// 出力デバイスの形。`(サンプリングレート, チャンネル数)`。
-/// 1 番は入力と揃い、2 番は揃わない（変換の経路を通すため。ドリフト補正はどちらにも掛かる）
-const OUTPUTS: [(u32, u16); 2] = [(48_000, 2), (44_100, 1)];
-
-/// 1 番の入力の正弦波の周波数。n 番はこの n 倍
-const BASE_FREQUENCY_HZ: f64 = 440.0;
 
 /// フェイクの音声デバイスの振る舞い。環境変数から組み立てる
 /// （`app::backend::fake`）。
@@ -66,38 +52,6 @@ pub struct FakeAudioOptions {
     /// 開いてからこの時間が経つと、ストリームのエラーを 1 回立てる
     /// （`take_stream_error` が真を返す）。開き直すと数え直す
     pub stream_error_after: Option<Duration>,
-}
-
-/// デバイス 1 台の形。
-#[derive(Debug, Clone, PartialEq)]
-struct FakeDevice {
-    name: String,
-    sample_rate: u32,
-    channels: u16,
-    /// 入力なら正弦波の周波数。出力では使わない
-    frequency_hz: f64,
-}
-
-impl FakeDevice {
-    /// 対応設定。実機の WASAPI 共有モードと同じく、既定の形 1 つだけを返す
-    fn configs(&self) -> Vec<SupportedStreamConfigRange> {
-        vec![SupportedStreamConfigRange::new(
-            self.channels,
-            self.sample_rate,
-            self.sample_rate,
-            SupportedBufferSize::Unknown,
-            SampleFormat::F32,
-        )]
-    }
-
-    fn default_config(&self) -> SupportedStreamConfig {
-        SupportedStreamConfig::new(
-            self.channels,
-            self.sample_rate,
-            SupportedBufferSize::Unknown,
-            SampleFormat::F32,
-        )
-    }
 }
 
 /// 開いているストリーム。入出力のスレッドと、それぞれを止める送り口。
@@ -482,14 +436,7 @@ impl FakeAudioCapture {
     }
 
     fn inputs(&self) -> Vec<FakeDevice> {
-        (1..=self.options.input_count)
-            .map(|index| FakeDevice {
-                name: format!("{INPUT_NAME_PREFIX} {index}"),
-                sample_rate: INPUT_SAMPLE_RATE,
-                channels: INPUT_CHANNELS,
-                frequency_hz: BASE_FREQUENCY_HZ * f64::from(index),
-            })
-            .collect()
+        fake_devices::inputs(self.options.input_count)
     }
 
     /// 名前でデバイスを引く。`None` なら既定（1 番）
@@ -498,23 +445,7 @@ impl FakeAudioCapture {
         direction: AudioDirection,
         device_name: Option<&str>,
     ) -> Result<FakeDevice, AudioError> {
-        let devices = match direction {
-            AudioDirection::Input => self.inputs(),
-            AudioDirection::Output => outputs(),
-        };
-        match device_name {
-            None => devices
-                .into_iter()
-                .next()
-                .ok_or(AudioError::NoDefaultDevice(direction)),
-            Some(name) => devices
-                .into_iter()
-                .find(|device| device.name == name)
-                .ok_or_else(|| AudioError::DeviceNotFound {
-                    direction,
-                    name: name.to_string(),
-                }),
-        }
+        fake_devices::find(self.options.input_count, direction, device_name)
     }
 }
 
@@ -524,22 +455,10 @@ impl Drop for FakeAudioCapture {
     }
 }
 
-fn outputs() -> Vec<FakeDevice> {
-    OUTPUTS
-        .iter()
-        .enumerate()
-        .map(|(slot, &(sample_rate, channels))| FakeDevice {
-            name: format!("{OUTPUT_NAME_PREFIX} {}", slot + 1),
-            sample_rate,
-            channels,
-            frequency_hz: 0.0,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::fake_devices::{INPUT_CHANNELS, INPUT_SAMPLE_RATE};
     use ringbuf::traits::Consumer;
 
     fn capture(input_count: u32, failures_before_success: u32) -> FakeAudioCapture {

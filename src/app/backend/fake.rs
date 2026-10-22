@@ -480,7 +480,7 @@ mod tests {
         // 送るのと同じ設定で開かせる。1 回目は失敗させ（fail:1）、
         // 再試行で繋がって実際にフレームが届くところまでを通す
         use crate::app::worker::{DeviceCommand, DeviceEvent, DeviceSnapshot};
-        use crate::app::worker_loop::testing::config_for;
+        use crate::app::worker_testing::config_for;
         use crate::audio::{AudioControls, AudioTap};
         use crate::repaint::RepaintWaker;
         use crate::video::{SharedColorConversion, VideoFrames};

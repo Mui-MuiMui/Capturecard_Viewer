@@ -88,7 +88,7 @@ use crate::i18n::{self, Text};
 /// nokhwa が漏れるので、文字列に落として持たせる。
 ///
 /// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
-/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事。
+/// （`status::ErrorSource::headline`）との連結だけが `status/mod.rs` の仕事。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VideoError {
     /// デバイスの列挙に失敗した

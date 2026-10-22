@@ -307,9 +307,7 @@ impl WorkerState {
 #[cfg(test)]
 mod tests {
     use super::super::backend::mock::{MockAudioBackend, MockVideoBackend};
-    use super::super::worker_loop::testing::{
-        apply_config, config_for, drain, mock_state, state_with,
-    };
+    use super::super::worker_testing::{apply_config, config_for, drain, mock_state, state_with};
     use super::*;
 
     // どのテストもモックのバックエンド（`super::super::backend::mock`）を載せ、

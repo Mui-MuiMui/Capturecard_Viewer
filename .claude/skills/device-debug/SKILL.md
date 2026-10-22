@@ -41,10 +41,11 @@ grep -E '\] capturecard_viewer(::| )' "$APPDATA/capturecard_viewer/logs/<ファ�
 | `app::worker_timers` | 映像の切断の検出、再接続の要求 |
 | `app::worker_audio_timers` | 音声ストリームのエラーによる再接続の要求、既定デバイスの切り替え、音声のリサンプル比の補正 |
 | `app::worker_connect` / `app::worker_audio_connect` | 接続の試行と成否、デバイス能力・対応設定の取得、既定デバイス名の確定（音声側は `worker_audio_connect`） |
+| `app::worker_enumeration` | 列挙のログ（起動時と接続の失敗の節目）、「Windows 側にも見えていない」の判定 |
 | `app::device` | 起動直後の設定適用（`app` 側）。接続そのものは出さない |
 | `video` / `audio` | デバイスを開く処理の中身（列挙、`Camera::new`、選んだ設定、ストリームのエラー） |
 
-**まず列挙のログで台数を見る。** 起動時と、接続の失敗が 5 回目・10 回目・以後 10 回ごとに、`app::worker_connect` が `デバイスの列挙（起動時）: Media Foundation: N 台 [..]` の形で Media Foundation / DirectShow / 音声入力 / 音声出力を 1 行ずつ出す（列挙そのものに失敗した経路は `デバイスを列挙できない` の WARN）。**100 回目より後は、`info` に出るのは 100 回ごとと、結果が前回から変わった経路だけ**（#506）。残りの回は `debug`。設定の名前が一覧に無ければアプリの問題ではない。**0 台なら OS 側を確認する。**
+**まず列挙のログで台数を見る。** 起動時と、接続の失敗が 5 回目・10 回目・以後 10 回ごとに、`app::worker_enumeration` が `デバイスの列挙（起動時）: Media Foundation: N 台 [..]` の形で Media Foundation / DirectShow / 音声入力 / 音声出力を 1 行ずつ出す（列挙そのものに失敗した経路は `デバイスを列挙できない` の WARN）。**100 回目より後は、`info` に出るのは 100 回ごとと、結果が前回から変わった経路だけ**（#506）。残りの回は `debug`。設定の名前が一覧に無ければアプリの問題ではない。**0 台なら OS 側を確認する。**
 
 ```powershell
 Get-PnpDevice -PresentOnly | Where-Object Class -in 'Camera','MEDIA'

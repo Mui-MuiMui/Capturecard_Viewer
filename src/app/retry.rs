@@ -9,7 +9,6 @@
 //! 目立たせるか（`is_retry_log_milestone`、#506）だけを持つ。
 
 use log::Level;
-use std::fmt::Display;
 use std::time::{Duration, Instant};
 
 /// 接続に失敗したあと、最初に待つ時間。
@@ -76,7 +75,7 @@ const RETRY_LOG_SPARSE_FROM: u32 = 100;
 /// 100 回目までは同じ回になる。同じ回に試行・失敗・列挙が並ぶので、読むときに
 /// 突き合わせやすい。100 回目より後は、列挙は 10 回ごとに行うが、こちらの節目は
 /// 100 回ごとになる。間の回の列挙のログは、結果が変わった経路だけ INFO で出る
-/// （`enumeration_log_level`）。
+/// （`worker_enumeration::enumeration_log_level`）。
 /// 出さない回も捨てはせず、DEBUG で残す。0（まだ試していない）は対象外。
 pub(super) fn is_retry_log_milestone(attempt: u32) -> bool {
     match attempt {
@@ -107,30 +106,6 @@ pub(super) fn connect_failure_log_level(attempt: u32, reason_changed: bool) -> L
         Level::Warn
     } else {
         Level::Debug
-    }
-}
-
-/// 列挙の結果 1 経路ぶんを、ログに出す文言と、列挙できたかに直す。
-/// **台数と名前を必ず並べる。** 0 台なのか、名前が食い違っているのかを
-/// ログだけで見分けるため。前回出したものと比べるのにもこの文言を使う。
-pub(super) fn enumeration_text<E: Display>(result: &Result<Vec<String>, E>) -> (String, bool) {
-    match result {
-        Ok(names) => (format!("{} 台 {:?}", names.len(), names), true),
-        Err(e) => (e.to_string(), false),
-    }
-}
-
-/// 接続の失敗が続く間の列挙のログ 1 経路ぶんを出すレベル（#506）。再試行のログの
-/// 節目の回か、前回出したものから変わったときは INFO（列挙できなければ WARN）、
-/// それ以外は DEBUG。
-///
-/// **変わったら節目を待たずに出す。** 長く抜けていたボードを挿し直して OS 側に
-/// 戻ったのが、100 回ごとの節目まで（8 分強）ログから読めないと困るため。
-pub(super) fn enumeration_log_level(listed: bool, milestone: bool, changed: bool) -> Level {
-    match (milestone || changed, listed) {
-        (false, _) => Level::Debug,
-        (true, true) => Level::Info,
-        (true, false) => Level::Warn,
     }
 }
 
@@ -646,28 +621,6 @@ mod tests {
         assert_eq!(connect_failure_log_level(4, true), Level::Warn);
         assert_eq!(connect_failure_log_level(101, true), Level::Warn);
         assert_eq!(connect_failure_log_level(101, false), Level::Debug);
-    }
-
-    #[test]
-    fn enumeration_log_level_is_debug_only_when_nothing_moved() {
-        // 節目でも変化でもない回は DEBUG。どちらかなら、列挙できたら INFO・できなければ WARN
-        assert_eq!(enumeration_log_level(true, false, false), Level::Debug);
-        assert_eq!(enumeration_log_level(false, false, false), Level::Debug);
-        assert_eq!(enumeration_log_level(true, true, false), Level::Info);
-        assert_eq!(enumeration_log_level(true, false, true), Level::Info);
-        assert_eq!(enumeration_log_level(false, true, false), Level::Warn);
-        assert_eq!(enumeration_log_level(false, false, true), Level::Warn);
-    }
-
-    #[test]
-    fn enumeration_text_shows_the_count_and_the_names() {
-        let listed: Result<Vec<String>, String> = Ok(vec!["A".to_string(), "B".to_string()]);
-        assert_eq!(
-            enumeration_text(&listed),
-            ("2 台 [\"A\", \"B\"]".to_string(), true)
-        );
-        let failed: Result<Vec<String>, String> = Err("失敗".to_string());
-        assert_eq!(enumeration_text(&failed), ("失敗".to_string(), false));
     }
 
     #[test]

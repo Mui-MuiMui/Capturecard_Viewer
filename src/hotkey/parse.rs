@@ -13,7 +13,7 @@ use std::fmt;
 /// 表示され、呼び出し側は「どの段で失敗したか」で処理を分けないため。
 ///
 /// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
-/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事
+/// （`status::ErrorSource::headline`）との連結だけが `status/mod.rs` の仕事
 /// （`docs/design/error-reporting.md`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HotkeyError {

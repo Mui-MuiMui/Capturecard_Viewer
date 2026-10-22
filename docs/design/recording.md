@@ -391,7 +391,7 @@ MF の時間の単位は 100ns。
 
 - **途中で止まったときの音声（①②の経路、#314）。** 大きさの変化と空き容量で止めるときは、Sink Writer がまだ書けるので、止めたとき（「音声（②）」）と同じく渡していない残りを渡し、映像の終わりまで無音で埋めてから閉じる。揃えないと、渡していない 1024 フレーム未満の残りが捨てられ、音声デバイスが無い間の無音は「いま − 200ms」までしか書いていないので、音声が映像より短くなる（フェイクの映像で 200ms ほど）。書き込みの失敗では揃えない。どの失敗で揃えるかは `session::finishes_audio_after`（純粋関数、`_` でまとめない）。揃えるのに失敗しても、利用者に知らせるのは最初の失敗の理由で、揃えられなかったことは `warn` に残す
 - **`ErrorSource::Recording` を新しく足す。** 通知は既存の `report_error(ErrorSource::Recording, 理由)` を通し、間引きもそのまま効かせる。録画を始められたら `errors.clear(ErrorSource::Recording)`（`docs/design/error-reporting.md`）
-- 理由は `src/recording/` の `RecordingError`（保存先、空き容量、書き込み、エンコーダ、大きさの変化、映像なし）で返し、文言はその `Display` から `crate::i18n` を呼んで出す。`status.rs` に発生源ごとの `match` を足さない（`GUARDRAIL.md`）
+- 理由は `src/recording/` の `RecordingError`（保存先、空き容量、書き込み、エンコーダ、大きさの変化、映像なし）で返し、文言はその `Display` から `crate::i18n` を呼んで出す。`status/mod.rs` に発生源ごとの `match` を足さない（`GUARDRAIL.md`）
 - 止めたとき（成功）は「保存した: ファイル名」をトーストで出す。スクリーンショットの保存と同じ扱い
 - 最小化中に起きた失敗は、復帰して `update()` が `RecordingEvent` を取り込んだときに出る。録画スレッド自身は最小化に関係なく止まる
 - N エディションの Windows（Media Feature Pack 無し）では MF の DLL が無い。nokhwa が既に MF を参照しているので、アプリ自体が起動しない見込み（未確認）。録画側で特別に扱うのは「MF はあるがエンコーダが無い」場合だけ
