@@ -105,12 +105,64 @@ pub fn parse_renderer(value: Option<&str>) -> RendererRequest {
     }
 }
 
-/// アダプターを見分ける値（PCI のベンダー ID とデバイス ID）。起動前の確認で
-/// デバイスまで作れたアダプターを、eframe が選ぶときにもう一度見つけるのに使う
-type AdapterId = (u32, u32);
+/// アダプターを見分ける値。起動前の確認でデバイスまで作れたアダプターを、eframe が
+/// 選ぶときにもう一度見つけるのに使う。
+///
+/// **DXGI の LUID（`DXGI_ADAPTER_DESC1::AdapterLuid`）で見分ける。** PCI のベンダー ID と
+/// デバイス ID だけだと、同じ型の GPU の 2 枚挿しで 2 枚が同じ値になり、確認でデバイスを
+/// 作れなかった 1 枚目を eframe が選びうる（#512）。wgpu 30 の `AdapterInfo` に LUID は無く、
+/// `device_pci_bus_id` も DX12 では (ベンダー, デバイス) の一致する最初の表示アダプターの
+/// 値を引くので 2 枚を見分けられない。そのため wgpu-hal の DX12 のアダプターから DXGI の
+/// アダプターを借りて読む。LUID はアダプターごとに一意で、再起動かドライバーの入れ直しまで
+/// 変わらない。起動前の確認と eframe は同じプロセスで数秒のうちに列挙するので食い違わない。
+/// 読めないとき（DX12 以外）は `None` で、ベンダー ID とデバイス ID だけで見分ける
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdapterId {
+    vendor: u32,
+    device: u32,
+    luid: Option<u64>,
+}
 
-fn adapter_id(info: &wgpu::AdapterInfo) -> AdapterId {
-    (info.vendor, info.device)
+fn adapter_id(adapter: &wgpu::Adapter, info: &wgpu::AdapterInfo) -> AdapterId {
+    AdapterId {
+        vendor: info.vendor,
+        device: info.device,
+        luid: dx12_adapter_luid(adapter),
+    }
+}
+
+/// DX12 のアダプターの LUID。読めなければ `None`。
+///
+/// インスタンスは DX12 だけ（`dx12_instance_descriptor`）なので、読めないのは wgpu の
+/// `as_hal` の形が変わった（eframe / wgpu を上げた）ときくらいしか無い。そのときは黙って
+/// (ベンダー, デバイス) の見分け方へ戻るので、気づけるよう WARN を 1 回だけ出す
+fn dx12_adapter_luid(adapter: &wgpu::Adapter) -> Option<u64> {
+    let luid = read_dx12_luid(adapter);
+    if luid.is_none() {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            log::warn!(
+                "DX12 のアダプターの LUID を読めないので、ベンダー ID とデバイス ID だけで見分ける\
+                 （同じ型の GPU の 2 枚挿しでは見分けられない。wgpu の as_hal の形が変わっていないか確かめる）"
+            );
+        });
+    }
+    luid
+}
+
+fn read_dx12_luid(adapter: &wgpu::Adapter) -> Option<u64> {
+    // SAFETY: wgpu-hal のアダプターを借りて記述を読むだけで、状態を変えない。
+    // 借りたものはこの関数の中で手放す
+    let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Dx12>() }?;
+    // SAFETY: DXGI のアダプターは wgpu-hal が持っていて有効。`GetDesc1` は読むだけ
+    let desc = unsafe { hal.raw_adapter().GetDesc1() }.ok()?;
+    let luid = desc.AdapterLuid;
+    Some(luid_value(luid.HighPart, luid.LowPart))
+}
+
+/// LUID の上位・下位を 1 つの値にする（`HighPart` は符号付きで来る）
+fn luid_value(high: i32, low: u32) -> u64 {
+    (u64::from(high.cast_unsigned()) << 32) | u64::from(low)
 }
 
 /// アダプターの候補。種類、名前がソフトウェア描画のものか、ウィンドウへ `PRESENT_MODE` で出せるか。
@@ -187,12 +239,12 @@ pub struct WgpuAdapter {
 }
 
 impl WgpuAdapter {
-    fn from_info(info: &wgpu::AdapterInfo) -> Self {
+    fn new(adapter: &wgpu::Adapter, info: &wgpu::AdapterInfo) -> Self {
         Self {
             name: info.name.clone(),
             backend: info.backend,
             device_type: info.device_type,
-            id: adapter_id(info),
+            id: adapter_id(adapter, info),
         }
     }
 }
@@ -296,7 +348,7 @@ fn probe_dx12(allow_software: bool) -> Result<(WgpuAdapter, u128), String> {
         .map(|adapter| {
             let info = adapter.get_info();
             Candidate {
-                id: adapter_id(&info),
+                id: adapter_id(adapter, &info),
                 device_type: info.device_type,
                 presentable: true,
                 software_name: is_software_renderer(&info.name),
@@ -332,7 +384,10 @@ fn probe_dx12(allow_software: bool) -> Result<(WgpuAdapter, u128), String> {
                         failures.join(" / ")
                     );
                 }
-                return Ok((WgpuAdapter::from_info(&info), started.elapsed().as_millis()));
+                return Ok((
+                    WgpuAdapter::new(adapter, &info),
+                    started.elapsed().as_millis(),
+                ));
             }
             Err(e) => failures.push(format!("{} でデバイスを作れない: {e}", info.name)),
         }
@@ -359,7 +414,7 @@ fn wgpu_configuration(
             .map(|adapter| {
                 let info = adapter.get_info();
                 Candidate {
-                    id: adapter_id(&info),
+                    id: adapter_id(adapter, &info),
                     device_type: info.device_type,
                     software_name: is_software_renderer(&info.name),
                     presentable: surface.is_none_or(|surface| {
@@ -378,15 +433,25 @@ fn wgpu_configuration(
             })?;
         let adapter = adapters[index].clone();
         let info = adapter.get_info();
+        let chosen = WgpuAdapter::new(&adapter, &info);
         log::info!(
-            "wgpu のアダプター: {} ({:?}, {:?}, ドライバー {} {})",
+            "wgpu のアダプター: {} ({:?}, {:?}, ドライバー {} {}, LUID {})。起動前の確認と{}",
             info.name,
             info.backend,
             info.device_type,
             info.driver,
-            info.driver_info
+            info.driver_info,
+            chosen
+                .id
+                .luid
+                .map_or_else(|| "不明".to_string(), |luid| format!("{luid:#x}")),
+            if chosen.id == preferred {
+                "同じ"
+            } else {
+                "違う（確認で作れたものをウィンドウへ出せない）"
+            }
         );
-        let _ = selected.set(WgpuAdapter::from_info(&info));
+        let _ = selected.set(chosen);
         Ok(adapter)
     }));
 
@@ -405,8 +470,17 @@ mod tests {
     use super::*;
     use wgpu::DeviceType;
 
+    /// LUID の読めないアダプターの見分け方（ベンダー ID とデバイス ID だけ）
+    fn pci(vendor: u32, device: u32) -> AdapterId {
+        AdapterId {
+            vendor,
+            device,
+            luid: None,
+        }
+    }
+
     fn candidate(device_type: DeviceType) -> Candidate {
-        candidate_with_id(device_type, (0, 0))
+        candidate_with_id(device_type, pci(0, 0))
     }
 
     fn candidate_with_id(device_type: DeviceType, id: AdapterId) -> Candidate {
@@ -534,10 +608,13 @@ mod tests {
     fn pick_adapter_prefers_the_adapter_the_probe_could_open() {
         // 起動前の確認で外付けの GPU のデバイスを作れず、内蔵の GPU で作れたときは、
         // eframe が選ぶときも内蔵の GPU にする
-        let discrete = candidate_with_id(DeviceType::DiscreteGpu, (0x10de, 1));
-        let integrated = candidate_with_id(DeviceType::IntegratedGpu, (0x8086, 2));
+        let discrete = candidate_with_id(DeviceType::DiscreteGpu, pci(0x10de, 1));
+        let integrated = candidate_with_id(DeviceType::IntegratedGpu, pci(0x8086, 2));
         let candidates = [discrete, integrated];
-        assert_eq!(pick_adapter(&candidates, false, Some((0x8086, 2))), Some(1));
+        assert_eq!(
+            pick_adapter(&candidates, false, Some(pci(0x8086, 2))),
+            Some(1)
+        );
         // 確認で使ったものが見つからない（ウィンドウへ出せない）ときは順位で選ぶ
         let unpresentable_integrated = Candidate {
             presentable: false,
@@ -547,13 +624,43 @@ mod tests {
             pick_adapter(
                 &[discrete, unpresentable_integrated],
                 false,
-                Some((0x8086, 2))
+                Some(pci(0x8086, 2))
             ),
             Some(0)
         );
         // 選ばない種類（WARP）を確認の結果として渡されても選ばない
-        let warp = candidate_with_id(DeviceType::Cpu, (0x1414, 0x8c));
-        assert_eq!(pick_adapter(&[warp], false, Some((0x1414, 0x8c))), None);
+        let warp = candidate_with_id(DeviceType::Cpu, pci(0x1414, 0x8c));
+        assert_eq!(pick_adapter(&[warp], false, Some(pci(0x1414, 0x8c))), None);
+    }
+
+    #[test]
+    fn pick_adapter_tells_twin_gpus_apart_by_luid() {
+        // 同じ型の GPU の 2 枚挿し。ベンダー ID とデバイス ID は同じで LUID だけが違う。
+        // 起動前の確認で 1 枚目のデバイスを作れず 2 枚目で作れたら、eframe も 2 枚目を選ぶ
+        let twin = |luid| AdapterId {
+            luid: Some(luid),
+            ..pci(0x10de, 0x2786)
+        };
+        let candidates = [
+            candidate_with_id(DeviceType::DiscreteGpu, twin(0x1_0000_0a00)),
+            candidate_with_id(DeviceType::DiscreteGpu, twin(0x1_0000_0b00)),
+        ];
+        assert_eq!(
+            pick_adapter(&candidates, false, Some(twin(0x1_0000_0b00))),
+            Some(1)
+        );
+        assert_eq!(
+            pick_adapter(&candidates, false, Some(twin(0x1_0000_0a00))),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn luid_value_joins_the_high_and_low_parts() {
+        assert_eq!(luid_value(0, 0x0000_d4f2), 0x0000_d4f2);
+        assert_eq!(luid_value(1, 0xffff_ffff), 0x1_ffff_ffff);
+        // HighPart は符号付き。負の値も符号拡張せず上位 32 ビットにそのまま入れる
+        assert_eq!(luid_value(-1, 0), 0xffff_ffff_0000_0000);
     }
 
     #[test]
@@ -562,7 +669,7 @@ mod tests {
             name: "Microsoft Basic Render Driver".to_string(),
             backend: wgpu::Backend::Dx12,
             device_type: DeviceType::Cpu,
-            id: (0x1414, 0x8c),
+            id: pci(0x1414, 0x8c),
         };
         assert_eq!(
             format_label(RendererKind::Wgpu, Some(&adapter)),

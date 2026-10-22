@@ -33,6 +33,7 @@ cargo build --release
 | `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`main.rs` が読んだ設定から作る `new`、1 フレームの処理 `update` の本体（描画と、その間に挟まる設定ダイアログ・ホットキー入力ダイアログの処理）、`eframe::App` 実装（`ui` が `update` を呼ぶ / `on_exit`） |
 | `src/app/frame_cycle.rs` | `update` の前後。描画より前の結果の取り込みと起動直後の処理（`begin_frame`）、描画のあとの一時表示・設定の書き出し・次の再描画の予約・ホットキーのリスナーへのウィンドウの状態の受け渡し（`end_frame`）。呼び出しの順に意味がある |
 | `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、テクスチャの取り込みと表示までの遅れの計測（#455）、フェイクデバイスの帯 |
+| `src/app/view/area.rs` | 映像エリアの置き場所と操作の判定（純粋関数と egui の応答だけ、#512）。縦横比を保つ大きさ（`calculate_aspect_ratio_size`）と映像を置く矩形（`video_rect`）、ドラッグでのウィンドウの移動（`drag_move`）、右クリックメニューを開く位置（`context_menu_request`）。矩形と右クリックはウィンドウ表示とフルスクリーンが共通に使い、ドラッグ移動はウィンドウ表示だけが使う。egui_kittest で単体に確かめる |
 | `src/app/stats_overlay.rs` | 統計 OSD（情報表示）。出す行の組み立て（`format_stats_lines`）と描画（`show_stats_overlay`） |
 | `src/app/placeholder.rs` | 映像が出ていないときのプレースホルダー。文言の決め方（`video_placeholder_text`）と映像エリアの中央への配置（`show_video_placeholder`） |
 | `src/app/video_overlay.rs` | 映像の上に常設で重ねる表示（統計 OSD・フェイクデバイスの帯・録画中の印）を、映像の上・設定ダイアログの下の層へ寄せて描く `show_video_overlay` |
@@ -184,7 +185,7 @@ cargo build --release
 | `src/update/checksum.rs` | `SHA256SUMS.txt` の行の読み方（`find_checksum`）と、大文字小文字を区別しない照合（`checksum_matches`） |
 | `src/update/overrides.rs` | 更新の確認を試すための環境変数（`CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` / `CAPTURECARD_VIEWER_UPDATE_API_URL`）の解釈（`CheckOverrides`） |
 | `src/overlay.rs` | 操作したときだけ数秒出て消える OSD（フルスクリーンの切り替え、音量、失敗や録画の保存のトーストなど）。期限と描画の `TransientOverlay` と、中身の `OverlayContent`（テキストだけ / バー付き）。常設の統計 OSD は `app/video_overlay.rs` の側 |
-| `src/renderer.rs` | 描画のバックエンド（wgpu の DX12 / glow）を起動前に決める（`configure`、#492）。環境変数 `CAPTURECARD_VIEWER_RENDERER` の解釈（`parse_renderer`）、DX12 のアダプターの確認（`probe_dx12`）と選び方（`pick_adapter`）、present mode（Mailbox）と溜めるフレーム数（1）、統計 OSD に出す説明（`RendererChoice::label`） |
+| `src/renderer.rs` | 描画のバックエンド（wgpu の DX12 / glow）を起動前に決める（`configure`、#492）。環境変数 `CAPTURECARD_VIEWER_RENDERER` の解釈（`parse_renderer`）、DX12 のアダプターの確認（`probe_dx12`）と選び方（`pick_adapter`。確認と eframe のアダプターは DXGI の LUID で突き合わせる、#512）、present mode（Mailbox）と溜めるフレーム数（1）、統計 OSD に出す説明（`RendererChoice::label`） |
 | `src/repaint.rs` | 次の再描画までの間隔の判定（`next_repaint_delay`）と、UI スレッド以外から再描画を促す窓口（`RepaintWaker`） |
 | `src/i18n/mod.rs` | 画面に出す文字列の入口。現在の言語（`Language` と `static LANGUAGE`）を持ち、`set_language` で切り替える。外から使う経路（`crate::i18n::...`）の `pub use` もここ |
 | `src/i18n/text.rs` | 引数を取らない文字列の表（`texts!` が `Text` のキーと言語ごとの `match` を作る） |
