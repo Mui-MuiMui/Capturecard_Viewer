@@ -30,7 +30,7 @@ pub(super) fn failure_message(not_visible: Option<&DeviceNotVisible>, reason: &s
 /// 列挙の結果 1 経路ぶんを、ログに出す文言と、列挙できたかに直す。
 /// **台数と名前を必ず並べる。** 0 台なのか、名前が食い違っているのかを
 /// ログだけで見分けるため。前回出したものと比べるのにもこの文言を使う。
-pub(super) fn enumeration_text<E: Display>(result: &Result<Vec<String>, E>) -> (String, bool) {
+fn enumeration_text<E: Display>(result: &Result<Vec<String>, E>) -> (String, bool) {
     match result {
         Ok(names) => (format!("{} 台 {:?}", names.len(), names), true),
         Err(e) => (e.to_string(), false),
@@ -43,7 +43,7 @@ pub(super) fn enumeration_text<E: Display>(result: &Result<Vec<String>, E>) -> (
 ///
 /// **変わったら節目を待たずに出す。** 長く抜けていたボードを挿し直して OS 側に
 /// 戻ったのが、100 回ごとの節目まで（8 分強）ログから読めないと困るため。
-pub(super) fn enumeration_log_level(listed: bool, milestone: bool, changed: bool) -> Level {
+fn enumeration_log_level(listed: bool, milestone: bool, changed: bool) -> Level {
     match (milestone || changed, listed) {
         (false, _) => Level::Debug,
         (true, true) => Level::Info,
@@ -202,7 +202,7 @@ impl WorkerState {
 #[cfg(test)]
 mod tests {
     use super::super::backend::mock::{MockAudioBackend, MockVideoBackend};
-    use super::super::worker_loop::testing::{apply_config, config_for, drain, mock_state};
+    use super::super::worker_testing::{apply_config, config_for, drain, mock_state};
     use super::*;
     use std::time::{Duration, Instant};
 
