@@ -112,7 +112,7 @@ flowchart LR
 | `src/video/directshow/video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
 | `src/video/directshow/audio_pin.rs` | 音声ピン（#388）。有無の記録、10ms の塊の提案と接続、`Run` が通らないときに外してやり直す、受け取った PCM を `AudioPinFeed` へ渡す |
 | `src/video/directshow/media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放 |
-| `src/app/backend/system.rs` | `SystemVideo`。Media Foundation と DirectShow を 1 つの `VideoBackend` に束ねる。経路の判定（`route_for` / `attempt_with_fallback` / `merge_video_devices`）は `system_route.rs` |
+| `src/app/backend/system.rs` | `SystemVideo`。Media Foundation と DirectShow を 1 つの `VideoBackend` に束ねる。経路の判定（`route_for` / `attempt_with_fallback`）は `system_route.rs`、一覧の突き合わせ（`merge_video_devices`）は `system_devices.rs` |
 
 #### 一覧と名前
 
