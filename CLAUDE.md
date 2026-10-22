@@ -71,7 +71,7 @@ cargo build --release
 | `src/video/directshow/mod.rs` | DirectShow の映像デバイス `DirectShowCapture`（列挙・能力・開く・閉じる・観測）と、表示名の「(DirectShow)」の付け外し |
 | `src/video/directshow/devices.rs` | DirectShow の列挙（`ICreateDevEnum`）と対応形式（`IAMStreamConfig::GetStreamCaps`）、いまの解像度（`GetFormat`）の読み取り |
 | `src/video/directshow/stream_select.rs` | 対応形式の一覧から開く解像度と形式を選ぶ判定（`target_resolution` / `choose_candidate`）、fps の範囲と選択肢（`fps_range` / `fps_list` / `fps_choices`）、設定画面向けの並べ替え（`capabilities_from_candidates`）。純粋関数 |
-| `src/video/directshow/graph.rs` | DirectShow のフィルターグラフの組み立て・開始・停止・破棄（`CaptureGraph`） |
+| `src/video/directshow/graph.rs` | DirectShow のフィルターグラフの組み立て・開始・停止・破棄（`CaptureGraph`）。ワーカーの監視の周期で呼ぶ `poll` がグラフのイベント（デバイスの喪失）を読み、映像の `Receive` が書いた形式の変化をログへ出す（#511） |
 | `src/video/directshow/filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`）。媒体を問わず、受け取る形式の判定と渡し先だけを映像と音声で分ける |
 | `src/video/directshow/video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す。流れの途中で形式が変わったことは `FormatChanges`（Atomic）へ書くだけで、ログはワーカーが `CaptureGraph::poll` で出す（#511） |
 | `src/video/directshow/audio_pin.rs` | 映像デバイスの音声ピン（#388）。列挙の時点での有無の判定（`probe_presence`、#409）、有無の記録、10ms の塊の提案と接続、`Run` が通らないときに外してやり直す（`run_with_fallback`）、`WAVEFORMATEX` の読み取り（`pin_format_from_wave`）、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
@@ -109,7 +109,8 @@ cargo build --release
 | `src/audio/fake.rs` | 実機なしで動くフェイクの音声デバイス `FakeAudioCapture`。デバイスの一覧と形、開く・閉じる、観測値、接続失敗・ストリームのエラーのシナリオ |
 | `src/audio/fake_stream.rs` | フェイクの音声デバイスが立てる入出力のスレッドの本体。正弦波の入力（`SineInput`）と書き込みを捨てる出力（`DiscardOutput`）、経過時間に合わせて回す `run_paced`、フェイクの映像デバイスの音声ピンへ正弦波を流す `FakePinSource`（#394） |
 | `src/audio/tap.rs` | 録画へ音声を回す差し込み口 `AudioTap`。録画中だけ、入力コールバックが f32 へ直した値を入力の形のまま 1 秒ぶんのリングへ積む（待たない `try_lock`、空きが足りなければそのコールバックの分を捨てて数える）。累計のサンプル数・最後に積んだ時刻・入力の形・開き直しの番号・途切れた位置を Atomic で持つ |
-| `src/audio/pin_feed.rs` | DirectShow の映像デバイスの音声ピンと `AudioCapture` をつなぐ差し込み口 `AudioPinFeed`（#388）。音声ピンの `Receive` が受け取った PCM を、グラフの番号が合うときだけ待たない `try_lock` で `process_input_iter` へ渡す。音声ピンの状態（`AudioPinState`）・形式（`PinFormat`）、塊の長さに合わせたリングの広げ方（`widened_buffer_ms`）もここ |
+| `src/audio/pin_feed.rs` | DirectShow の映像デバイスの音声ピンと `AudioCapture` をつなぐ差し込み口 `AudioPinFeed`（#388）。音声ピンの `Receive` が受け取った PCM を、グラフの番号が合うときだけ待たない `try_lock` で `process_input_iter` へ渡す。音声ピンの状態（`AudioPinState`）・形式（`PinFormat`）、塊の長さに合わせたリングの広げ方（`widened_buffer_ms`）もここ。塊がフレームの途中で切れていたら端数を次の塊へ持ち越す。流れの途中で形式が変わったことは `Receive` が Atomic へ書き、ワーカーが `log_format_changes` でログへ出す（#511） |
+| `src/audio/pin_stream.rs` | `pin_feed.rs` が使う、音声ピンの流れの状態（`PinStream`、端数を持ち越す固定長の `PinCarry`）と、形式の変化を 1 つの `AtomicU64` へ詰める形（`pack_pin_format`）・ログの出し方の判定（`format_change_report`、純粋関数） |
 | `src/recording/mod.rs` | 録画の入口。`RecordingError`（文言は `Display` から `crate::i18n`）、`EncoderInfo`、経過時間の書式（`format_elapsed`）、外から使う経路（`crate::recording::...`）の `pub use` |
 | `src/recording/recorder.rs` | 録画スレッドの窓口 `Recorder`（UI スレッドが 1 つ持つ）。録画かリプレイバッファが ON のときにスレッドを起こし、どちらも無くなったら止めて join する（スレッドは自分から抜けない）。`RecordingCommand` / `RecordingEvent` / `RecordingSummary` / `RecordingTelemetry`（録画中の値は録画を始めたときからの差） |
 | `src/recording/recorder_loop.rs` | 録画スレッドの本体。コマンドの受け口と、リプレイバッファを通すかの経路の切り替え（`ReplayState`）。差し込み口を使っている録画の間に変えられたリプレイバッファの設定を、録画が終わってから反映する |
