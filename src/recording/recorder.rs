@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 
 use log::{debug, warn};
 
-use super::audio::{AudioDriftCorrection, AudioStats};
+use super::audio_stats::{AudioDriftCorrection, AudioStats};
 use super::pts::{AUDIO_SAMPLE_RATE, UNITS_PER_SECOND};
 use super::replay_config::ReplayConfig;
 use super::replay_save::{save_replay_block, SaveReplayBlock};

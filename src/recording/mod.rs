@@ -31,6 +31,7 @@
 //! スレッドを作らない」には当たらない。
 
 mod audio;
+mod audio_stats;
 mod bitstream;
 mod convert;
 mod encoder;

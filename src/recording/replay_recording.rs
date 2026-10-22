@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use log::info;
 use windows::Win32::Media::MediaFoundation::IMFMediaType;
 
-use super::audio::AudioStats;
+use super::audio_stats::AudioStats;
 use super::encoder::EncodedSample;
 use super::file_name::unique_path;
 use super::passthrough::PassthroughWriter;
