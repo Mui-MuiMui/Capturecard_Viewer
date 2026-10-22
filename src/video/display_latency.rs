@@ -253,6 +253,9 @@ impl DisplayLatency {
             self.summary_idle_passes = 0;
             self.summary_frame_time = Accumulator::default();
             self.summary_minimized = false;
+            // 表示の速さ（`recent_rate`）も数え直す。再接続やデバイスの切り替えの直後は
+            // 窓が埋まっておらず、最小化から戻ったときと同じく 1 秒は数値を出さない
+            self.rate_started = None;
         }
         while let Some(&(oldest, _)) = self.recent.front() {
             if at.saturating_duration_since(oldest) > DISPLAY_LATENCY_WINDOW {
@@ -748,6 +751,22 @@ mod tests {
         let after = record_60fps(&mut latency, restored, 2);
         assert_eq!(
             latency.recent_rate(restored + ms(999)),
+            None,
+            "戻って 1 秒以内"
+        );
+        assert_eq!(latency.recent_rate(after), Some(60));
+    }
+
+    #[test]
+    fn recent_rate_starts_over_after_a_long_stall() {
+        // 30 秒以上止まったあとの再接続・デバイスの切り替えでも、戻って 1 秒は数値を出さない
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        let last = record_60fps(&mut latency, base, 2);
+        let resumed = last + ms(30_000);
+        let after = record_60fps(&mut latency, resumed, 2);
+        assert_eq!(
+            latency.recent_rate(resumed + ms(999)),
             None,
             "戻って 1 秒以内"
         );
