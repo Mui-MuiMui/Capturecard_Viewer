@@ -114,7 +114,7 @@ Turning on "Show stats" in the context menu (under View when collapsed) overlays
 
 | Item | Description |
 |---|---|
-| FPS | Effective frame rate derived from the average of the last 120 frame intervals. It is calculated from the frames that actually arrived, not queried from the device |
+| FPS | Effective frame rate derived from the average of the last 120 frame intervals. It is calculated from the frames that actually arrived, not queried from the device. The "shown" value at the end of the same line is how many frames were put on screen in the last second (frames/s). If "shown" drops while the arrival rate holds, the slowdown is on the drawing side, not the capture card. It reads "-" for the first second after launch and after restoring from minimized |
 | Jitter | Standard deviation, minimum and maximum of the frame intervals. Dropped frames or capture stalls make this grow |
 | Decode | Time spent on the RGB conversion of the most recent frame, plus how many frames took the fast path versus the generic path. When the GPU converts, it reads "Decode GPU" and the time is from receiving the frame to queuing it (see "Video conversion" under "Recommended settings") |
 | Resolution / format | Pixel size and input format of the frames actually arriving |
