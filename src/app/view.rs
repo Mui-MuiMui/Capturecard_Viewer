@@ -285,6 +285,35 @@ impl CaptureCardViewer {
         );
     }
 
+    /// 映像エリア（映像が無いときはプレースホルダー）のドラッグでウィンドウを動かす。
+    /// `ui.enable_drag_move` が有効なときだけ。リサイズの帯の上にいる間は動かさない
+    /// （両方が効くと、端を掴んだつもりでウィンドウごと動く）。ウィンドウ表示だけで使う
+    fn handle_drag_move(
+        &self,
+        ctx: &egui::Context,
+        response: &egui::Response,
+        on_resize_edge: bool,
+    ) {
+        if !response.dragged() || on_resize_edge {
+            return;
+        }
+        if let Ok(settings) = self.settings.lock() {
+            if settings.ui.enable_drag_move {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+        } else {
+            warn!("ウィンドウドラッグの判定で settings のロックを取得できない");
+        }
+    }
+
+    /// 右クリックされたら、ポインターの位置に右クリックメニューを開く
+    fn handle_secondary_click_menu(&mut self, ctx: &egui::Context, response: &egui::Response) {
+        if response.secondary_clicked() {
+            let pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
+            self.open_context_menu(ctx, pos);
+        }
+    }
+
     pub(super) fn show_windowed_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         // 映像が無いときの文言は描画に入る前に決める。
@@ -329,27 +358,14 @@ impl CaptureCardViewer {
                     let response = ui.allocate_rect(rect, VIDEO_AREA_SENSE);
                     self.paint_video(ui, texture, rect);
 
-                    // ウィンドウドラッグを処理（設定が有効な場合のみ）
-                    if response.dragged() && !on_resize_edge {
-                        if let Ok(settings) = self.settings.lock() {
-                            if settings.ui.enable_drag_move {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                            }
-                        } else {
-                            warn!("ウィンドウドラッグの判定で settings のロックを取得できない");
-                        }
-                    }
+                    self.handle_drag_move(ctx, &response, on_resize_edge);
 
                     // インタラクションを処理
                     if response.double_clicked() {
                         self.toggle_fullscreen(ctx, true);
                     }
 
-                    if response.secondary_clicked() {
-                        let pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
-                        self.open_context_menu(ctx, pos);
-                    }
-
+                    self.handle_secondary_click_menu(ctx, &response);
                     self.handle_middle_click_mute(&response);
 
                     // 音量調整のためのスクロールを処理
@@ -359,23 +375,9 @@ impl CaptureCardViewer {
                 } else {
                     let response = show_video_placeholder(ui, available_size, &placeholder);
 
-                    // 空エリアでのウィンドウドラッグを処理（設定が有効な場合のみ）
-                    if response.dragged() && !on_resize_edge {
-                        if let Ok(settings) = self.settings.lock() {
-                            if settings.ui.enable_drag_move {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                            }
-                        } else {
-                            warn!("ウィンドウドラッグの判定で settings のロックを取得できない");
-                        }
-                    }
-
-                    // 空エリアでの右クリックを処理
-                    if response.secondary_clicked() {
-                        let pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
-                        self.open_context_menu(ctx, pos);
-                    }
-
+                    // 空エリアでも映像と同じくドラッグ移動と右クリックメニューを受ける
+                    self.handle_drag_move(ctx, &response, on_resize_edge);
+                    self.handle_secondary_click_menu(ctx, &response);
                     self.handle_middle_click_mute(&response);
                 }
             });
@@ -427,11 +429,7 @@ impl CaptureCardViewer {
                     }
 
                     // 右クリックでコンテキストメニュー
-                    if response.secondary_clicked() {
-                        let pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
-                        self.open_context_menu(ctx, pos);
-                    }
-
+                    self.handle_secondary_click_menu(ctx, &response);
                     self.handle_middle_click_mute(&response);
 
                     // マウススクロールでの音量調整（ウィンドウ版と同じ機能）
@@ -451,11 +449,7 @@ impl CaptureCardViewer {
                     }
 
                     // 右クリックでコンテキストメニュー
-                    if response.secondary_clicked() {
-                        let pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
-                        self.open_context_menu(ctx, pos);
-                    }
-
+                    self.handle_secondary_click_menu(ctx, &response);
                     self.handle_middle_click_mute(&response);
                 }
             });
