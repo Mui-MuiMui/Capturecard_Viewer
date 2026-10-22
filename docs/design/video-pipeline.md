@@ -20,6 +20,17 @@ YUY2 を GPU で変換するとき（既定、#456）は、フレームコール
 
 フレームコールバックの本体（YUY2→RGB 変換、`FrameBuffer` への格納、`RepaintWaker` で UI を起こす）は `video/frame_sink.rs` の `FrameSink` にある。nokhwa のコールバックは `Buffer` から幅・高さ・バイト列を取り出し、形式ごとの受け口へ振り分けて渡すだけ（`video/mf_format.rs` の `sink_route`）。フェイクの映像デバイス（`video/fake.rs`）と DirectShow のデバイス（`video/directshow/`、自前のレンダラーの `Receive`）も同じ `FrameSink` を通る（`docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」）。
 
+### フレームコールバックの中のログ（#511）
+
+**フレームコールバック（nokhwa のコールバック、DirectShow の `Receive`、フェイクの生成スレッド）では、原則としてログを出さない。** ロガーのロック（`logging.rs` のファイルの `Mutex`）と文字列の確保が起きる。残したいことは Atomic に書かせ、ワーカーの監視の周期で読んでログへ出す（DirectShow の形式の変化と音声ピンの塊の長さ。`docs/design/directshow-audio.md` の「`Receive` の中でしないこと」）。
+
+**例外は `FrameSink` の初回だけのログ。** `FirstTimeOnly` で守った、最初のフレームが届いたときの `info` と、捨てたとき（短いフレーム、MJPEG の展開の失敗、デコーダが返した長さの食い違い、フレームバッファのロックを取れない）の `warn` の 2 種類だけ。
+
+- 1 つの `FrameSink`（開いたストリーム 1 本）につき種類ごとに 1 回までしか出ない。開き直すと `FrameSink` を作り直すので、また 1 回出る
+- 最初のフレームの `info` は「接続した」と「映像が出ている」を分ける唯一の手がかりで、捨てた理由の `warn` は画面が止まる原因の手がかり。Atomic へ移すと、届いた形（幅・高さ・形式・変換の経路）の多くを詰め直すことになる
+- 閉じるときに捨てた枚数をまとめて出す `FrameSink` の `Drop` の `warn` は、流れが止まってから 1 回だけなので同じ扱い
+- **2 回目以降も出うるログをコールバックへ足さない。** 形式の変化のように流れの途中で何度でも起こりうるものは、上の Atomic の形にする
+
 ### `FrameSink` が受け取れる形式
 
 | 形式 | 受け口 | 変換（`video/convert.rs`、4:2:0 は `video/yuv420.rs`） | 係数表（色空間・レンジ・映像調整） | 届く経路 | Media Foundation のサブタイプ（nokhwa の `FrameFormat`） | DirectShow のサブタイプ |

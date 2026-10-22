@@ -94,6 +94,15 @@ flowchart LR
 - 時刻は `Receive` の入口で 1 回だけ読む（映像の `received_at` と同じ）。DirectShow のタイムスタンプは使わない。基準時計を外してあるので（`SetSyncSource(NULL)`）、GC551 はタイムスタンプを付けない（`GetTime` が `VFW_E_SAMPLE_TIME_NOT_SET`。基準時計を付けても届いた時刻とほぼ同じ。#406、`docs/design/recording.md` の「DirectShow のサンプルのタイムスタンプ（#406）」）
 - `IMediaSample::IsDiscontinuity` が立っていたら、取りこぼしとして数える（cpal の `Xrun` と同じ数え手。「接続状態」タブの「入力の取りこぼし」に出る）
 
+### `Receive` の中でしないこと
+
+映像のレンダラーの `Receive`（`video_stream.rs`）も同じ決まりに揃えてある（#511）。
+
+- **ログを出さない。** ロガーのロックと文字列の確保が起きる。残したいことは Atomic に書かせ、ワーカーの監視の周期（`DirectShowCapture::link_state`）で読んでログへ出す。音声ピンの塊の長さは `AudioPinFeed::observed_chunk_bytes` → `log_first_pin_chunk`、映像の流れの途中での形式の変化は `video_stream::FormatChanges`（回数と、1 つの `AtomicU64` に詰めた最後の形式）→ `CaptureGraph::poll` の `log_format_change`。音声ピンの形式の変化も同じ形で、`AudioPinFeed::record_format_change` → `log_format_changes`。周期の間に何度も変わったら、最後の形式と回数を 1 行で出す。受け取れない形式へ変わったとき（映像を捨てている）と、音声ピンが繋いだときと食い違う形式へ変わったとき（`push` が積まずに捨てるので音が止まる）は `warn`、音声ピンが繋いだときの形式へ戻ったときは `info`。回数はグラフごとに数え直す（`begin_graph`）
+- **cpal のエラーのコールバックのような例外は作らない**（`docs/design/audio.md` の「エラーのコールバックのログ」）。形式の変化はサンプルの流れの途中で何度でも起こりうるため
+- `IMediaSample::GetMediaType` は形式が変わったサンプルにだけメディアタイプを付けて返し、そのときだけ上流が `CoTaskMemAlloc` で確保する（こちらは `delete_media_type` で解放する）。形式の変化を知る手段がこれしか無いので許容する。付いていなければ null で、確保は起きない
+- 映像の `Receive` から呼ぶ `FrameSink` の初回だけのログは例外にしてある。範囲と理由は `docs/design/video-pipeline.md` の「フレームコールバックの中のログ」
+
 `docs/design/threads.md` のスレッドの一覧には「DirectShow の音声ピンのストリーミングスレッド」を 1 行足す（実装の段で）。**デバイスに触る使い捨てのスレッドには当たらない。** 作るのはキャプチャーフィルターで、cpal / nokhwa のコールバックスレッドの代役にあたる。
 
 ### 音声ピンを繋ぐ手順

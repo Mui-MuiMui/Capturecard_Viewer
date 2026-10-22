@@ -28,6 +28,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::capabilities::AudioCapabilities;
+use super::pin_stream::{
+    format_change_report, FormatChangeReport, PinCarry, PinStream, StreamChanges,
+};
 use super::sample::i16_to_f32;
 use super::stream::{count_xrun, process_input_iter, AudioProducer};
 use super::tap::AudioTap;
@@ -57,6 +60,11 @@ impl PinFormat {
             PinSampleType::I16 => 2,
             PinSampleType::F32 => 4,
         }
+    }
+
+    /// 1 フレーム（全チャンネルの 1 サンプルずつ）のバイト数
+    pub(super) fn bytes_per_frame(self) -> usize {
+        usize::from(self.channels) * self.bytes_per_sample() as usize
     }
 
     /// 1 秒ぶんのバイト数。塊の長さの提案と換算に使う
@@ -195,9 +203,8 @@ pub(super) struct PinSink {
     pub(super) tap: AudioTap,
     pub(super) dropped_frames: Arc<AtomicU32>,
     pub(super) xruns: Arc<AtomicU32>,
-    /// 1 つでも積んだか。最初のサンプルには不連続の印が付くのがふつうなので、
-    /// それは取りこぼしに数えない
-    pub(super) started: bool,
+    /// 流れの状態。差し込むときは `Default::default()`（まだ何も受け取っていない）
+    pub(super) stream: PinStream,
 }
 
 #[derive(Default)]
@@ -210,6 +217,8 @@ struct FeedInner {
     sink: Mutex<Option<PinSink>>,
     /// いまのグラフで受け取った塊の最大のバイト数。0 はまだ受け取っていない
     observed_chunk_bytes: AtomicU32,
+    /// 流れの途中での形式の変化と、`push` を呼ばずに捨てた塊の数。`Receive` が書く
+    changes: StreamChanges,
 }
 
 /// 音声ピンの差し込み口。複製しても同じ中身を指す。
@@ -228,7 +237,68 @@ impl AudioPinFeed {
     pub fn begin_graph(&self) -> u64 {
         self.set_connection(None);
         self.inner.observed_chunk_bytes.store(0, Ordering::Relaxed);
+        // 数え直す。前のグラフの `Receive` はもう止まっている（グラフを捨ててから呼ぶ）
+        self.inner.changes.reset_formats();
         self.inner.graph.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// 流れの途中で音声ピンの形式が変わった。**音声ピンの `Receive` から呼ぶ。**
+    /// ロックも確保もせず、回数と新しい形式を Atomic へ書くだけ。ログはワーカーが
+    /// `log_format_changes` で出す。次の `push` は持ち越した端数を捨てる
+    pub fn record_format_change(&self, format: Option<PinFormat>) {
+        self.inner.changes.record_format(format);
+    }
+
+    /// `push` を呼ばずに塊を捨てた（受け取れない形式・データを読めない）。
+    /// **音声ピンの `Receive` から呼ぶ。** 差し込み先には触らず（`try_lock` も
+    /// しない）、次の `push` が端数を捨てるよう Atomic を進めるだけ
+    pub fn note_stream_break(&self) {
+        self.inner.changes.note_break();
+    }
+
+    /// 音声ピンの形式が流れの途中で変わっていたら、ログへ出す。**ワーカーの監視の
+    /// 周期で呼ぶ**（`video::directshow` の `link_state`）。
+    ///
+    /// 繋いだときと食い違う形式のサンプルは `push` が積まずに捨てるので、音が止まる。
+    /// `Receive` の中ではログを出せないので、ここで理由を残す
+    /// （`docs/design/directshow-audio.md` の「`Receive` の中でしないこと」）。
+    pub fn log_format_changes(&self) {
+        let Some((changes, latest)) = self.inner.changes.take_formats() else {
+            return;
+        };
+        let connected = self.connection().map(|connection| connection.format);
+        let Some(report) = format_change_report(changes, connected, latest) else {
+            // 繋いだ記録が書かれる前（グラフを動かした直後）。比べる相手が無い
+            log::debug!(
+                "音声ピンの形式が繋いだ記録の前に変わった（前回の確認から {} 回）",
+                changes
+            );
+            return;
+        };
+        let connected_text = connected.map_or_else(String::new, PinFormat::summary);
+        match report {
+            FormatChangeReport::Mismatch(format) => log::warn!(
+                "音声ピンの形式が繋いだときの形式（{}）から {} に変わったので、その音声を捨てている（前回の確認から {} 回）",
+                connected_text,
+                format.summary(),
+                changes
+            ),
+            FormatChangeReport::Unsupported => log::warn!(
+                "音声ピンの形式が受け取れない形式に変わったので、その音声を捨てている（繋いだときの形式: {}、前回の確認から {} 回）",
+                connected_text,
+                changes
+            ),
+            FormatChangeReport::RestoredAfterDetour => log::warn!(
+                "音声ピンの形式が途中で変わり、繋いだときの形式（{}）に戻った。変わっていた間の音声は捨てた（前回の確認から {} 回）",
+                connected_text,
+                changes
+            ),
+            FormatChangeReport::Restored => log::info!(
+                "音声ピンの形式が繋いだときの形式（{}）に戻った（前回の確認から {} 回）",
+                connected_text,
+                changes
+            ),
+        }
     }
 
     /// 音声ピンを繋いだことを書く。映像のバックエンドがグラフを動かしたあとに呼ぶ
@@ -289,6 +359,10 @@ impl AudioPinFeed {
     /// 待たず、確保もしない。** 差し込み先が無い・使用中・グラフの番号か形式が
     /// 違うときは捨てる。`discontinuity` はサンプルの不連続の印で、取りこぼしとして
     /// 数える（「接続状態」タブの「入力の取りこぼし」）。
+    ///
+    /// **塊がフレームの途中で切れていたら、端数を次の塊へ持ち越す**（`PinCarry`）。
+    /// 次の塊の頭で 1 フレームに組み直してから積むので、塊の切れ目で左右がずれない。
+    /// 不連続の印が付いた塊・形式が食い違った塊では、持ち越した端数を捨てる。
     pub fn push(&self, graph: u64, format: PinFormat, data: &[u8], discontinuity: bool) {
         let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
         self.inner
@@ -300,13 +374,47 @@ impl AudioPinFeed {
         let Some(sink) = guard.as_mut() else {
             return;
         };
-        if sink.graph != graph || sink.format != format {
+        if sink.graph != graph {
             return;
         }
-        if discontinuity && sink.started {
+        if sink.format != format {
+            sink.stream.carry.clear();
+            return;
+        }
+        if discontinuity && sink.stream.started {
             count_xrun(&sink.xruns);
         }
-        sink.started = true;
+        // 前の塊とこの塊の間で `Receive` が塊を捨てていたら、端数はつながらない
+        let breaks = self.inner.changes.breaks();
+        if discontinuity || breaks != sink.stream.breaks_seen {
+            sink.stream.carry.clear();
+        }
+        sink.stream.breaks_seen = breaks;
+        sink.stream.started = true;
+        let frame = format.bytes_per_frame();
+        let mut data = data;
+        if !sink.stream.carry.is_empty() {
+            let (joined, rest) = sink.stream.carry.fill(frame, data);
+            data = rest;
+            if !joined {
+                // この塊は全部端数に吸われた。まだ 1 フレームに揃わない
+                return;
+            }
+            let mut carried = PinCarry::default();
+            std::mem::swap(&mut carried, &mut sink.stream.carry);
+            Self::push_whole(sink, format, carried.bytes());
+        }
+        let whole = data.len() / frame.max(1) * frame;
+        let (head, tail) = data.split_at(whole);
+        Self::push_whole(sink, format, head);
+        sink.stream.carry.keep(tail, frame);
+    }
+
+    /// 丸ごとのフレームが並んだバイト列を、リングと録画の差し込み口へ積む。
+    fn push_whole(sink: &PinSink, format: PinFormat, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
         let channels = usize::from(format.channels);
         match format.sample_type {
             PinSampleType::I16 => process_input_iter(
@@ -382,7 +490,7 @@ mod tests {
             tap: AudioTap::new(),
             dropped_frames: Arc::new(AtomicU32::new(0)),
             xruns: xruns.clone(),
-            started: false,
+            stream: Default::default(),
         });
         (Arc::new(Mutex::new(consumer)), xruns)
     }
@@ -464,13 +572,132 @@ mod tests {
     }
 
     #[test]
-    fn push_ignores_a_trailing_partial_sample() {
-        // 2 バイトに満たない端は読まない（並びを前提にしない）
+    fn push_carries_a_trailing_partial_sample_into_the_next_chunk() {
+        // 1 フレームに満たない端（ここではサンプルの途中の 1 バイト）は積まずに
+        // 持ち越し、次の塊の頭と組み直す
         let feed = AudioPinFeed::new();
         let graph = feed.begin_graph();
         let (consumer, _) = attached(&feed, graph, GC551);
-        feed.push(graph, GC551, &[0x00, 0x40, 0x00, 0x40, 0x7F], false);
-        assert_eq!(drain(&consumer).len(), 2);
+        feed.push(graph, GC551, &[0x00, 0x40, 0x00, 0x40, 0x00], false);
+        assert_eq!(drain(&consumer), vec![0.5, 0.5]);
+        // 0x00 0x40 = 0.5 の残り 1 バイトと、-0.5（0x00 0xC0）
+        feed.push(graph, GC551, &[0x40, 0x00, 0xC0], false);
+        assert_eq!(drain(&consumer), vec![0.5, -0.5]);
+    }
+
+    /// 連続した流れ `bytes` を、フレームの途中（奇数のサンプル、サンプルの途中の
+    /// バイトも含む）で切って渡し、録画とパススルーの両方に `expected` が
+    /// そのまま並ぶことを確かめる
+    fn assert_split_stream_stays_aligned(format: PinFormat, bytes: &[u8], expected: &[f32]) {
+        use ringbuf::traits::Split;
+        let feed = AudioPinFeed::new();
+        let graph = feed.begin_graph();
+        let (producer, consumer) = ringbuf::HeapRb::<f32>::new(expected.len()).split();
+        let consumer = Mutex::new(consumer);
+        let tap = AudioTap::new();
+        let mut attachment = tap.attach(expected.len());
+        feed.attach(PinSink {
+            graph,
+            format,
+            producer: Arc::new(Mutex::new(producer)),
+            tap: tap.clone(),
+            dropped_frames: Arc::new(AtomicU32::new(0)),
+            xruns: Arc::new(AtomicU32::new(0)),
+            stream: Default::default(),
+        });
+        // 6 バイト = 2ch 16bit の 1.5 フレーム、3 バイト = サンプルの途中、など
+        let mut rest = bytes;
+        for size in [6, 3, 7, 2, 1, 1, 10, 5, 13].iter().cycle() {
+            if rest.is_empty() {
+                break;
+            }
+            let (chunk, tail) = rest.split_at((*size).min(rest.len()));
+            feed.push(graph, format, chunk, false);
+            rest = tail;
+        }
+
+        let mut recorded = vec![0.0f32; expected.len()];
+        let count = attachment.consumer.pop_slice(&mut recorded);
+        assert_eq!(&recorded[..count], expected);
+        assert_eq!(drain(&consumer), expected);
+    }
+
+    #[test]
+    fn push_carries_a_split_frame_into_the_next_chunk() {
+        // 2ch 16bit。最後まで左（正）と右（負）が入れ替わらずに全フレームが並ぶ
+        let mut expected = Vec::new();
+        let mut bytes = Vec::new();
+        for i in 0..40 {
+            let value = 1000 + i as i16;
+            for sample in [value, -value] {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+                expected.push(i16_to_f32(sample));
+            }
+        }
+        assert_split_stream_stays_aligned(GC551, &bytes, &expected);
+    }
+
+    #[test]
+    fn push_carries_a_split_f32_frame_into_the_next_chunk() {
+        // 2ch f32（1 フレーム 8 バイト）でも同じ
+        let format = PinFormat {
+            sample_type: PinSampleType::F32,
+            ..GC551
+        };
+        let mut expected = Vec::new();
+        let mut bytes = Vec::new();
+        for i in 0..40 {
+            let value = 0.25 + i as f32 / 100.0;
+            for sample in [value, -value] {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+                expected.push(sample);
+            }
+        }
+        assert_split_stream_stays_aligned(format, &bytes, &expected);
+    }
+
+    #[test]
+    fn push_does_not_join_the_carried_bytes_across_a_dropped_chunk() {
+        // A → 受け取れない形式 → A。不連続の印が無くても、捨てた区間をまたいで
+        // 前の端数と新しい塊の頭をつながない
+        let feed = AudioPinFeed::new();
+        let graph = feed.begin_graph();
+        let (consumer, _) = attached(&feed, graph, GC551);
+        feed.push(graph, GC551, &[0x00, 0x40, 0x00], false);
+        feed.record_format_change(None);
+        feed.record_format_change(Some(GC551));
+        feed.push(graph, GC551, &[0x00, 0xC0, 0x00, 0x40], false);
+        assert_eq!(drain(&consumer), vec![-0.5, 0.5]);
+        // データを読めずに捨てた塊（`note_stream_break`）も同じ
+        feed.push(graph, GC551, &[0x00, 0x40, 0x00], false);
+        feed.note_stream_break();
+        feed.push(graph, GC551, &[0x00, 0xC0, 0x00, 0x40], false);
+        assert_eq!(drain(&consumer), vec![-0.5, 0.5]);
+        // 何も捨てていなければつなぐ
+        feed.push(graph, GC551, &[0x00, 0x40, 0x00], false);
+        feed.push(graph, GC551, &[0xC0], false);
+        assert_eq!(drain(&consumer), vec![0.5, -0.5]);
+    }
+
+    #[test]
+    fn push_drops_the_carried_bytes_on_a_discontinuity_or_a_format_change() {
+        let feed = AudioPinFeed::new();
+        let graph = feed.begin_graph();
+        let (consumer, _) = attached(&feed, graph, GC551);
+        // 1 フレームに満たない 3 バイトは積まずに持ち越す
+        feed.push(graph, GC551, &[0x00, 0x40, 0x00], false);
+        // 不連続の印が付いたら、端数を足さずに新しいフレームから積む
+        feed.push(graph, GC551, &[0x00, 0xC0, 0x00, 0x40], true);
+        assert_eq!(drain(&consumer), vec![-0.5, 0.5]);
+        // 形式が食い違った塊を挟んでも、端数は捨てる
+        feed.push(graph, GC551, &[0x00, 0x40, 0x00], false);
+        let mono = PinFormat {
+            channels: 1,
+            ..GC551
+        };
+        feed.push(graph, mono, &[0x00, 0x40], false);
+        feed.push(graph, GC551, &[0x00, 0x40, 0x00, 0xC0], false);
+        assert_eq!(drain(&consumer), vec![0.5, -0.5]);
     }
 
     #[test]

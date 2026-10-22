@@ -93,6 +93,12 @@ fn is_recoverable_stream_error(kind: cpal::ErrorKind) -> bool {
 /// あれば回数だけ数える（「接続状態」タブへ出す、Issue #377）。取りこぼしの
 /// たびに届きうるうえ、WASAPI ではデータのコールバックと同じ音声スレッドから呼ばれる
 /// ため、そこでロックやアロケーションをしたくない。出力は数えない（`None`）。
+///
+/// **`Xrun` 以外はここでログへ出す。** 「cpal のコールバックでロックも
+/// アロケーションもしない」の例外として認めている（`docs/design/audio.md` の
+/// 「エラーのコールバックのログ」）。届くのはストリームの寿命に数回までで、致命的な
+/// ものはストリームが止まるところなので音への影響が無い。文言の中身（HRESULT など）は
+/// cpal が作った `cpal::Error` にしか無く、Atomic の旗へ移すと失われる。
 pub(super) fn handle_stream_error(
     direction: &str,
     e: &cpal::Error,
@@ -295,8 +301,12 @@ pub(super) fn process_input_iter<T, I>(
     I: IntoIterator<Item = T>,
     I::IntoIter: ExactSizeIterator,
 {
+    // 丸ごとのフレームだけを扱う。cpal とフェイクは必ずフレームの倍数で渡し、
+    // 音声ピンは塊の端数を次の塊へ持ち越してから渡す（`pin_feed::push`）。ここは
+    // その最後の守りで、半端を録画のリングへ積んで以降の左右が入れ替わるのを防ぐ
     let data = data.into_iter();
-    let len = data.len();
+    let len = whole_frame_samples(data.len(), channels);
+    let data = data.take(len);
     let mut passthrough = producer.try_lock().ok();
     let mut recording = tap.writer(len);
     if passthrough.is_none() && recording.is_none() {
@@ -495,6 +505,32 @@ mod tests {
         let count = attachment.consumer.pop_slice(&mut read);
         assert_eq!(&read[..count], &[0.5, -1.0]);
         assert_eq!(tap.snapshot().samples_total, 2);
+    }
+
+    #[test]
+    fn process_input_drops_a_trailing_partial_frame_from_both_rings() {
+        // 2ch に 3 サンプル。半端な 1 サンプルは録画にもパススルーにも積まない
+        let (producer, _consumer) = ring(8);
+        let tap = AudioTap::new();
+        let mut attachment = tap.attach(8);
+        let dropped = AtomicU32::new(0);
+
+        process_input(
+            &[0.25f32, 0.5, 0.75],
+            2,
+            &producer,
+            &tap,
+            &dropped,
+            |sample| sample,
+        );
+
+        let mut read = [0.0f32; 4];
+        let count = attachment.consumer.pop_slice(&mut read);
+        assert_eq!(&read[..count], &[0.25, 0.5]);
+        assert_eq!(tap.snapshot().samples_total, 2);
+        assert_eq!(producer.lock().expect("ロックできる").occupied_len(), 2);
+        // 半端はフレームに数えないので、満杯で捨てた数にも入らない
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
     }
 
     #[test]

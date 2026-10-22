@@ -330,7 +330,7 @@ impl FakeAudioCapture {
                         tap: self.tap.clone(),
                         dropped_frames: Arc::clone(&dropped_frames),
                         xruns: Arc::clone(&xruns),
-                        started: false,
+                        stream: Default::default(),
                     });
                 }
                 AudioInputRoute::VideoPin {
