@@ -346,7 +346,7 @@ impl WorkerState {
 #[cfg(test)]
 mod tests {
     use super::super::backend::mock::{MockAudioBackend, MockVideoBackend};
-    use super::super::worker_loop::testing::{apply_config, config_for, mock_state};
+    use super::super::worker_testing::{apply_config, config_for, mock_state};
     use super::*;
     use std::time::Duration;
 
@@ -463,7 +463,7 @@ mod tests {
     }
 
     fn audio_failures(events: &std::sync::mpsc::Receiver<DeviceEvent>) -> Vec<String> {
-        super::super::worker_loop::testing::drain(events)
+        super::super::worker_testing::drain(events)
             .into_iter()
             .filter_map(|event| match event {
                 DeviceEvent::AudioFailed(reason) => Some(reason),

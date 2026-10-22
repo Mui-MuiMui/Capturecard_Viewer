@@ -133,7 +133,7 @@ impl WorkerState {
 #[cfg(test)]
 mod tests {
     use super::super::backend::mock::{MockAudioBackend, MockVideoBackend};
-    use super::super::worker_loop::testing::{apply_config, config_for, drain, mock_state};
+    use super::super::worker_testing::{apply_config, config_for, drain, mock_state};
     use super::*;
     use std::time::Duration;
 

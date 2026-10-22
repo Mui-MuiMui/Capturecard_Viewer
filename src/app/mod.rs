@@ -34,6 +34,8 @@ mod worker_connect;
 mod worker_default_input;
 mod worker_enumeration;
 mod worker_loop;
+#[cfg(test)]
+mod worker_testing;
 mod worker_timers;
 
 use self::menu::MenuLayout;

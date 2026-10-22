@@ -260,9 +260,7 @@ impl WorkerState {
 #[cfg(test)]
 mod tests {
     use super::super::backend::mock::{MockAudioBackend, MockVideoBackend};
-    use super::super::worker_loop::testing::{
-        apply_config, capture_logs, config_for, drain, mock_state,
-    };
+    use super::super::worker_testing::{apply_config, capture_logs, config_for, drain, mock_state};
     use super::*;
     use crate::video::VideoError;
     use log::Level;

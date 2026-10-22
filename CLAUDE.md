@@ -42,6 +42,7 @@ cargo build --release
 | `src/app/device.rs` | `apply_settings`（設定をワーカーへ渡す）と、ワーカーから届いたイベントの取り込み |
 | `src/app/worker.rs` | デバイスワーカーとやり取りする型（コマンド / イベント / `DeviceConfig` / `DeviceSnapshot`）と、UI 側の窓口 `DeviceWorker` |
 | `src/app/worker_loop.rs` | デバイスワーカースレッドの本体。`WorkerState` の定義、待ち時間の決定、観測値の書き出し |
+| `src/app/worker_testing.rs` | テストを含むビルドだけ（`#[cfg(test)]`）。ワーカーのテストの組み立て。モックを載せた `WorkerState` をスレッドなしで作る（`mock_state`）、設定の流し込み、届いたイベントの取り出し、ログの捕まえ（`capture_logs`）。状態も `impl WorkerState` も持たない |
 | `src/app/worker_commands.rs` | デバイスワーカーのコマンドの受け口（`handle`）。設定の受け取りと開き直しの要求、最小化中のホットキーの代役（音量・ミュート）、即時の再接続 |
 | `src/app/worker_timers.rs` | ワーカーがタイマーで回す監視の入口（`tick`）。再試行の期限、フレームの途絶 |
 | `src/app/worker_audio_timers.rs` | ワーカーがタイマーで回す監視のうち音声まわり。音声ストリームのエラー、Windows の既定デバイスの切り替え、クロックドリフト補正、映像の音声ピンの番号が変わったときの開き直し（`monitor_audio_pin`）、観測値のデバッグログ |
