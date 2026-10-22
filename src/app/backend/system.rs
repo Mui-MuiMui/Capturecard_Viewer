@@ -28,8 +28,9 @@ use crate::video::{
 };
 use std::sync::Arc;
 
+use super::system_devices::merge_video_devices;
 use super::system_route::{
-    attempt_with_fallback, capabilities_with_fallback, merge_video_devices, Operation, VideoRoute,
+    attempt_with_fallback, capabilities_with_fallback, Operation, VideoRoute,
 };
 
 /// 本番のバックエンド。映像は Media Foundation（nokhwa）と DirectShow、音声は
