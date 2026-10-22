@@ -135,6 +135,10 @@ pub struct DisplayLatency {
     // いまフルスクリーンか。窓の始まりのモードとして要約に載せる。アプリはウィンドウ表示で
     // 起動するので既定は偽
     fullscreen: bool,
+    // 表示の速さ（`recent_rate`、#526）を数え始めた時刻。起動して最初に取り込んだときと、
+    // 最小化から戻って最初に取り込んだときに置く。そこから 1 秒経つまでは窓が埋まって
+    // おらず、数えた枚数が実際の速さより少なく出るので数値を出さない
+    rate_started: Option<Instant>,
 }
 
 impl DisplayLatency {
@@ -147,8 +151,12 @@ impl DisplayLatency {
         }
     }
 
-    /// 最小化している間の `update()` で呼ぶ。5 分の要約の窓に印を付ける
+    /// 最小化している間の `update()` で呼ぶ。5 分の要約の窓に印を付ける。
+    ///
+    /// 表示の速さ（`recent_rate`）は数え直す。最小化中は `update()` が 1 秒ごとにしか
+    /// 回らず 1 秒に 1 枚しか取り込まないので、戻った直後の窓をそのまま数えると低く出る
     pub fn note_minimized(&mut self) {
+        self.rate_started = None;
         if self.summary_started.is_some() {
             self.summary_minimized = true;
         }
@@ -245,6 +253,9 @@ impl DisplayLatency {
             self.summary_idle_passes = 0;
             self.summary_frame_time = Accumulator::default();
             self.summary_minimized = false;
+            // 表示の速さ（`recent_rate`）も数え直す。再接続やデバイスの切り替えの直後は
+            // 窓が埋まっておらず、最小化から戻ったときと同じく 1 秒は数値を出さない
+            self.rate_started = None;
         }
         while let Some(&(oldest, _)) = self.recent.front() {
             if at.saturating_duration_since(oldest) > DISPLAY_LATENCY_WINDOW {
@@ -254,6 +265,7 @@ impl DisplayLatency {
             }
         }
         self.recent.push_back((at, ms));
+        self.rate_started.get_or_insert(at);
 
         self.summary_started.get_or_insert(at);
         self.summary.add(ms);
@@ -288,6 +300,26 @@ impl DisplayLatency {
             }
         }
         window.summary()
+    }
+
+    /// 画面へ出した速さ（#526）。`now` から見て直近 `DISPLAY_LATENCY_WINDOW` の間に
+    /// テクスチャへ取り込んだ枚数（枚/秒）。統計 OSD の FPS の行に、ボードから届いた速さと
+    /// 並べて出す。届く速さが保たれたまま画面の側だけ落ちたとき（#501）に見分けるため。
+    ///
+    /// 数え始めて（起動して最初に取り込んで / 最小化から戻って最初に取り込んで）から
+    /// 1 秒経つまでは `None`。映像が止まったあとは窓が空になって 0 へ下がる（止まる前の
+    /// 値を出し続けない）。窓の端はちょうど 1 秒前を含めない。含めると 60fps で 61 と出る
+    pub fn recent_rate(&self, now: Instant) -> Option<usize> {
+        let started = self.rate_started?;
+        if now.saturating_duration_since(started) < DISPLAY_LATENCY_WINDOW {
+            return None;
+        }
+        let frames = self
+            .recent
+            .iter()
+            .filter(|&&(at, _)| now.saturating_duration_since(at) < DISPLAY_LATENCY_WINDOW)
+            .count();
+        Some(frames)
     }
 }
 
@@ -644,5 +676,100 @@ mod tests {
         latency.record(base + ms(5_000), ms(1), 0);
         let next = latency.cut_summary(base + ms(6_000), false).expect("1 枚");
         assert!(!next.minimized);
+    }
+
+    /// `start` から `seconds` 秒、60fps で取り込む。最後に取り込んだ時刻を返す
+    fn record_60fps(latency: &mut DisplayLatency, start: Instant, seconds: u64) -> Instant {
+        let mut at = start;
+        for i in 0..seconds * 60 {
+            at = start + Duration::from_micros(i * 16_667);
+            latency.record(at, ms(1), 0);
+        }
+        at
+    }
+
+    #[test]
+    fn recent_rate_without_frames_is_none() {
+        let latency = DisplayLatency::default();
+        assert_eq!(latency.recent_rate(Instant::now()), None);
+    }
+
+    #[test]
+    fn recent_rate_counts_frames_in_the_last_second() {
+        // 60fps で 3 秒。窓の端（ちょうど 1 秒前）は含めないので 61 ではなく 60
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        let last = record_60fps(&mut latency, base, 3);
+        assert_eq!(latency.recent_rate(last), Some(60));
+    }
+
+    #[test]
+    fn recent_rate_waits_one_second_after_the_first_frame() {
+        // 起動直後は窓が埋まっておらず、数えると実際の速さより少なく出る
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        latency.record(base, ms(1), 0);
+        latency.record(base + ms(500), ms(1), 0);
+        assert_eq!(latency.recent_rate(base + ms(999)), None);
+        assert_eq!(latency.recent_rate(base + ms(1_000)), Some(1));
+    }
+
+    #[test]
+    fn recent_rate_shows_a_drop_while_frames_still_arrive() {
+        // 届く速さが保たれたまま、取り込みだけが 30 枚/秒に落ちた（#501 の見分けたい状態）
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        for i in 0..90u64 {
+            latency.record(base + Duration::from_micros(i * 33_334), ms(1), 1);
+        }
+        let last = base + Duration::from_micros(89 * 33_334);
+        assert_eq!(latency.recent_rate(last), Some(30));
+    }
+
+    #[test]
+    fn recent_rate_falls_to_zero_after_the_video_stops() {
+        // 止まる前の値を出し続けない
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        let last = record_60fps(&mut latency, base, 2);
+        assert_eq!(latency.recent_rate(last + ms(1_000)), Some(0));
+    }
+
+    #[test]
+    fn recent_rate_starts_over_after_a_minimize() {
+        // 最小化中は 1 秒に 1 枚しか取り込まない。戻ってから 1 秒は数値を出さず、
+        // そのあとは戻ってからの枚数だけを数える
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        let last = record_60fps(&mut latency, base, 2);
+        for i in 1..=3u64 {
+            latency.record(last + ms(i * 1_000), ms(1), 59);
+            latency.note_minimized();
+        }
+        let restored = last + ms(3_500);
+        assert_eq!(latency.recent_rate(restored), None, "最小化中");
+        let after = record_60fps(&mut latency, restored, 2);
+        assert_eq!(
+            latency.recent_rate(restored + ms(999)),
+            None,
+            "戻って 1 秒以内"
+        );
+        assert_eq!(latency.recent_rate(after), Some(60));
+    }
+
+    #[test]
+    fn recent_rate_starts_over_after_a_long_stall() {
+        // 30 秒以上止まったあとの再接続・デバイスの切り替えでも、戻って 1 秒は数値を出さない
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        let last = record_60fps(&mut latency, base, 2);
+        let resumed = last + ms(30_000);
+        let after = record_60fps(&mut latency, resumed, 2);
+        assert_eq!(
+            latency.recent_rate(resumed + ms(999)),
+            None,
+            "戻って 1 秒以内"
+        );
+        assert_eq!(latency.recent_rate(after), Some(60));
     }
 }

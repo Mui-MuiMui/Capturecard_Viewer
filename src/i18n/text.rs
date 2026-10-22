@@ -332,7 +332,6 @@ texts! {
     PlaceholderNoSignal { ja: "映像信号がありません", en: "No video signal" },
     PlaceholderReconnecting { ja: "デバイスが接続されていません（再接続を試しています）", en: "No device connected (trying to reconnect)" },
     PlaceholderDisconnected { ja: "デバイスが接続されていません", en: "No device connected" },
-    StatsFpsPending { ja: "FPS - (フレーム間隔の計測待ち)", en: "FPS - (measuring frame interval)" },
     StatsDecodeUnknown { ja: "デコード -", en: "Decode -" },
     StatsNoFrame { ja: "映像フレームなし", en: "No video frames" },
     StatsDisplayLatencyPending { ja: "表示までの遅れ: - (到着→テクスチャ更新)", en: "Display latency: - (arrival→texture update)" },
