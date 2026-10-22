@@ -161,17 +161,30 @@ impl GlConverter {
             .ok_or_else(|| GpuFailure::ShaderVersion(format!("{version:?}")))?;
         unsafe {
             let program = link_program(gl, declaration, version.is_embedded())?;
-            let resources = (
-                gl.create_vertex_array(),
-                gl.create_texture(),
-                gl.create_framebuffer(),
-            );
-            let (Ok(vertex_array), Ok(source), Ok(framebuffer)) = resources else {
-                gl.delete_program(program);
+            // ここから先で失敗したら、作れた分を作った逆順に消してから返す
+            let mut guard = ResourceGuard::new(gl);
+            guard.push(GlResource::Program(program));
+            let vertex_array = gl.create_vertex_array();
+            if let Ok(vertex_array) = vertex_array {
+                guard.push(GlResource::VertexArray(vertex_array));
+            }
+            let source = gl.create_texture();
+            if let Ok(source) = source {
+                guard.push(GlResource::Texture(source));
+            }
+            let framebuffer = gl.create_framebuffer();
+            if let Ok(framebuffer) = framebuffer {
+                guard.push(GlResource::Framebuffer(framebuffer));
+            }
+            let (Ok(vertex_array), Ok(source), Ok(framebuffer)) =
+                (vertex_array, source, framebuffer)
+            else {
                 return Err(GpuFailure::Resources(
                     "vertex array / texture / framebuffer".to_string(),
                 ));
             };
+            // 全部作れた。ここから先は `GlConverter` が持ち、`destroy` で消す
+            guard.disarm();
             gl.bind_texture(glow::TEXTURE_2D, Some(source));
             for (parameter, value) in [
                 (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
@@ -435,21 +448,21 @@ unsafe fn link_program(
 ) -> Result<glow::Program, GpuFailure> {
     unsafe {
         let program = gl.create_program().map_err(GpuFailure::Resources)?;
+        // 途中で返るとき（作れない・コンパイルできない・リンクできない）は、作れた
+        // シェーダーとプログラムを作った逆順に消す。リンクできたときもシェーダーは消す
+        let mut guard = ResourceGuard::new(gl);
+        guard.push(GlResource::Program(program));
         let mut shaders = Vec::new();
         for (kind, source) in [
             (glow::VERTEX_SHADER, VERTEX_SOURCE),
             (glow::FRAGMENT_SHADER, FRAGMENT_SOURCE),
         ] {
             let shader = gl.create_shader(kind).map_err(GpuFailure::Resources)?;
+            guard.push(GlResource::Shader(shader));
             gl.shader_source(shader, &format!("{declaration}{source}"));
             gl.compile_shader(shader);
             if !gl.get_shader_compile_status(shader) {
                 let log = gl.get_shader_info_log(shader);
-                gl.delete_shader(shader);
-                for shader in shaders {
-                    gl.delete_shader(shader);
-                }
-                gl.delete_program(program);
                 return Err(GpuFailure::Compile(log.trim().to_string()));
             }
             gl.attach_shader(program, shader);
@@ -464,13 +477,87 @@ unsafe fn link_program(
         let log = gl.get_program_info_log(program);
         for shader in shaders {
             gl.detach_shader(program, shader);
-            gl.delete_shader(shader);
         }
         if !linked {
-            gl.delete_program(program);
             return Err(GpuFailure::Link(log.trim().to_string()));
         }
+        // プログラムだけ残し、シェーダーは守りが落ちるときに消す
+        guard.release(GlResource::Program(program));
         Ok(program)
+    }
+}
+
+/// 作った GL の資源。失敗経路で消すために `ResourceGuard` へ積む
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlResource {
+    Program(glow::Program),
+    Shader(glow::Shader),
+    VertexArray(glow::VertexArray),
+    Texture(glow::Texture),
+    Framebuffer(glow::Framebuffer),
+}
+
+/// GL の資源を消す口。本番は `glow::Context`、テストは消した順を記録するもの
+trait DeleteGl {
+    /// # Safety
+    /// GL のコンテキストが current であること
+    unsafe fn delete(&self, resource: GlResource);
+}
+
+impl DeleteGl for glow::Context {
+    unsafe fn delete(&self, resource: GlResource) {
+        // SAFETY: 呼び出し側が GL のコンテキストを current にしている
+        unsafe {
+            match resource {
+                GlResource::Program(program) => self.delete_program(program),
+                GlResource::Shader(shader) => self.delete_shader(shader),
+                GlResource::VertexArray(vertex_array) => self.delete_vertex_array(vertex_array),
+                GlResource::Texture(texture) => self.delete_texture(texture),
+                GlResource::Framebuffer(framebuffer) => self.delete_framebuffer(framebuffer),
+            }
+        }
+    }
+}
+
+/// 作った GL の資源を覚えておき、落ちるときに作った逆順に消す守り。途中で `?` や
+/// `return Err` で抜けても、作れた分を残さない。全部を手元に残すなら `disarm`、
+/// 1 つだけ残すなら `release` で外す。
+///
+/// **GL のコンテキストが current の間（`unsafe fn` の中）だけ作る。** 落ちるときに消すので
+struct ResourceGuard<'a, D: DeleteGl> {
+    gl: &'a D,
+    created: Vec<GlResource>,
+}
+
+impl<'a, D: DeleteGl> ResourceGuard<'a, D> {
+    fn new(gl: &'a D) -> Self {
+        Self {
+            gl,
+            created: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, resource: GlResource) {
+        self.created.push(resource);
+    }
+
+    /// `resource` を消す対象から外す（呼び出し側が持ち続ける）
+    fn release(&mut self, resource: GlResource) {
+        self.created.retain(|created| *created != resource);
+    }
+
+    /// 全部を消す対象から外す
+    fn disarm(mut self) {
+        self.created.clear();
+    }
+}
+
+impl<D: DeleteGl> Drop for ResourceGuard<'_, D> {
+    fn drop(&mut self) {
+        for resource in self.created.drain(..).rev() {
+            // SAFETY: 守りは GL のコンテキストが current の間だけ作る（型の説明）
+            unsafe { self.gl.delete(resource) };
+        }
     }
 }
 
@@ -560,6 +647,63 @@ mod tests {
         );
         assert_eq!(version_declaration(ShaderVersion::Gl120), None);
         assert_eq!(version_declaration(ShaderVersion::Es100), None);
+    }
+
+    /// 消した資源を順に記録する。GL のコンテキストが無くても守りの動きを確かめるため
+    #[derive(Default)]
+    struct RecordingDeleter {
+        deleted: std::cell::RefCell<Vec<GlResource>>,
+    }
+
+    impl DeleteGl for RecordingDeleter {
+        unsafe fn delete(&self, resource: GlResource) {
+            self.deleted.borrow_mut().push(resource);
+        }
+    }
+
+    fn id(n: u32) -> std::num::NonZeroU32 {
+        std::num::NonZeroU32::new(n).unwrap()
+    }
+
+    #[test]
+    fn resource_guard_deletes_what_was_created_in_reverse_order() {
+        // GlConverter::new で頂点配列とフレームバッファは作れ、テクスチャで失敗した形
+        let program = GlResource::Program(glow::NativeProgram(id(1)));
+        let vertex_array = GlResource::VertexArray(glow::NativeVertexArray(id(2)));
+        let framebuffer = GlResource::Framebuffer(glow::NativeFramebuffer(id(3)));
+        let gl = RecordingDeleter::default();
+        {
+            let mut guard = ResourceGuard::new(&gl);
+            guard.push(program);
+            guard.push(vertex_array);
+            guard.push(framebuffer);
+        }
+        assert_eq!(*gl.deleted.borrow(), [framebuffer, vertex_array, program]);
+    }
+
+    #[test]
+    fn resource_guard_keeps_released_and_disarmed_resources() {
+        // link_program が成功した形: プログラムは残し、シェーダーだけ消す
+        let program = GlResource::Program(glow::NativeProgram(id(1)));
+        let vertex = GlResource::Shader(glow::NativeShader(id(2)));
+        let fragment = GlResource::Shader(glow::NativeShader(id(3)));
+        let gl = RecordingDeleter::default();
+        {
+            let mut guard = ResourceGuard::new(&gl);
+            guard.push(program);
+            guard.push(vertex);
+            guard.push(fragment);
+            guard.release(program);
+        }
+        assert_eq!(*gl.deleted.borrow(), [fragment, vertex]);
+
+        // GlConverter::new で全部作れた形: 何も消さない
+        let gl = RecordingDeleter::default();
+        let mut guard = ResourceGuard::new(&gl);
+        guard.push(program);
+        guard.push(GlResource::Texture(glow::NativeTexture(id(4))));
+        guard.disarm();
+        assert!(gl.deleted.borrow().is_empty());
     }
 
     #[test]
