@@ -33,6 +33,7 @@ cargo build --release
 | `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`main.rs` が読んだ設定から作る `new`、1 フレームの処理 `update` の本体（描画と、その間に挟まる設定ダイアログ・ホットキー入力ダイアログの処理）、`eframe::App` 実装（`ui` が `update` を呼ぶ / `on_exit`） |
 | `src/app/frame_cycle.rs` | `update` の前後。描画より前の結果の取り込みと起動直後の処理（`begin_frame`）、描画のあとの一時表示・設定の書き出し・次の再描画の予約・ホットキーのリスナーへのウィンドウの状態の受け渡し（`end_frame`）。呼び出しの順に意味がある |
 | `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、テクスチャの取り込みと表示までの遅れの計測（#455）、フェイクデバイスの帯 |
+| `src/app/view/area.rs` | 映像エリアの置き場所と操作の判定（純粋関数と egui の応答だけ、#512）。縦横比を保つ大きさ（`calculate_aspect_ratio_size`）と映像を置く矩形（`video_rect`）、ドラッグでのウィンドウの移動（`drag_move`）、右クリックメニューを開く位置（`context_menu_request`）。ウィンドウ表示とフルスクリーンが共通に使い、egui_kittest で単体に確かめる |
 | `src/app/stats_overlay.rs` | 統計 OSD（情報表示）。出す行の組み立て（`format_stats_lines`）と描画（`show_stats_overlay`） |
 | `src/app/placeholder.rs` | 映像が出ていないときのプレースホルダー。文言の決め方（`video_placeholder_text`）と映像エリアの中央への配置（`show_video_placeholder`） |
 | `src/app/video_overlay.rs` | 映像の上に常設で重ねる表示（統計 OSD・フェイクデバイスの帯・録画中の印）を、映像の上・設定ダイアログの下の層へ寄せて描く `show_video_overlay` |
