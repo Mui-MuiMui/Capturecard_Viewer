@@ -14,7 +14,7 @@
 //! `SHA256SUMS.txt` の読み方と照合は `checksum.rs`、資産の選び方（`ApplyPlan`）は `assets.rs`、
 //! 資産の読み取り（HTTP / ファイルを開き、小分けに読みながらキャンセルを見る）は `download.rs`。
 
-pub use super::swap::{remove_leftovers, roll_back, ExePaths};
+pub use super::swap::{remove_leftover_new, remove_leftover_old, roll_back, ExePaths};
 
 use super::assets::ApplyPlan;
 use super::checksum::{checksum_matches, find_checksum, to_hex};

@@ -5,10 +5,28 @@
 //! **元の exe を壊す経路を作らない。** 戻し方の順は純粋関数（`recovery_for`）で決める。
 
 use super::apply::ApplyError;
-use log::{info, warn};
+use log::{debug, info, warn};
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// 差し替えの改名を試し直す間隔と、最初の 1 回を含めた回数。
+///
+/// 待つのは**改名 1 回につき**最大 9 回 × 0.1 秒 = 0.9 秒。差し替えの改名は 2 回
+/// なので、両方が試し直しに入ると合わせて 1.8 秒ほどになる。
+/// ウイルス対策ソフトが書いたばかりの `.new` を走査している間などは、改名が
+/// 共有違反やアクセス拒否で一時的に失敗する。短く待てば通ることが多い。
+/// 適用のスレッドの中で待つので UI は止まらない。
+const RENAME_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const RENAME_ATTEMPTS: u32 = 10;
+
+// 改名 1 回あたりの待ちを 1 秒未満に保つ（定数を変えたときにビルドで気づく）
+const _: () = assert!(RENAME_RETRY_INTERVAL.as_millis() * (RENAME_ATTEMPTS as u128 - 1) < 1000);
+
+/// Win32 の `ERROR_ACCESS_DENIED` / `ERROR_SHARING_VIOLATION`。
+const ERROR_ACCESS_DENIED: i32 = 5;
+const ERROR_SHARING_VIOLATION: i32 = 32;
 
 /// 実行中の exe と、その隣に置く一時名。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,7 +35,7 @@ pub struct ExePaths {
     pub exe: PathBuf,
     /// ダウンロード先（`<exe の名前>.new`）。照合が済んでから `exe` へ改名する
     pub new: PathBuf,
-    /// 差し替えで退避した元の exe（`<exe の名前>.old`）。次の起動で消す
+    /// 差し替えで退避した元の exe（`<exe の名前>.old`）。新しい版がしばらく動いてから消す
     pub old: PathBuf,
 }
 
@@ -165,8 +183,8 @@ pub fn swap_in(paths: &ExePaths) -> Result<(), ApplyError> {
     for step in steps {
         let result = match step {
             SwapStep::RemoveStaleOld => remove_file_if_exists(&paths.old),
-            SwapStep::MoveCurrentToOld => fs::rename(&paths.exe, &paths.old),
-            SwapStep::MoveNewToCurrent => fs::rename(&paths.new, &paths.exe),
+            SwapStep::MoveCurrentToOld => rename_with_retry(&paths.exe, &paths.old),
+            SwapStep::MoveNewToCurrent => rename_with_retry(&paths.new, &paths.exe),
         };
         if let Err(e) = result {
             warn!("exe の差し替えに失敗した（{:?}）: {}", step, e);
@@ -191,6 +209,42 @@ pub fn swap_in(paths: &ExePaths) -> Result<(), ApplyError> {
         paths.old.display()
     );
     Ok(())
+}
+
+/// `attempt` 回目（1 から）の改名が `error` で失敗したとき、もう一度試すか。
+///
+/// 試し直すのは、ほかのプロセスが一時的に掴んでいるときに出る共有違反と
+/// アクセス拒否だけ。それ以外（ファイルが無い、など）は待っても変わらないので
+/// すぐ失敗にする。回数は `RENAME_ATTEMPTS` まで。
+fn should_retry_rename(error: &io::Error, attempt: u32) -> bool {
+    attempt < RENAME_ATTEMPTS
+        && matches!(
+            error.raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION | ERROR_ACCESS_DENIED)
+        )
+}
+
+/// 差し替えの改名。`should_retry_rename` が真のあいだ、間を置いて試し直す。
+///
+/// 戻し方（`recover` / `roll_back`）の改名には使わない。戻し方は失敗したら次の手へ
+/// 進む作りで、そこで待つと元の名前が空いている時間が延びるだけになる。
+fn rename_with_retry(from: &Path, to: &Path) -> io::Result<()> {
+    let mut attempt = 1;
+    loop {
+        match fs::rename(from, to) {
+            Err(e) if should_retry_rename(&e, attempt) => {
+                debug!(
+                    "{} を改名できないので試し直す（{} 回目）: {}",
+                    from.display(),
+                    attempt,
+                    e
+                );
+                std::thread::sleep(RENAME_RETRY_INTERVAL);
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
 }
 
 fn recover(paths: &ExePaths, failed: SwapStep) -> Kept {
@@ -267,13 +321,22 @@ pub fn roll_back(paths: &ExePaths) -> io::Result<()> {
     Ok(())
 }
 
-/// 前回の更新で残ったものを消す。**起動時に呼ぶ。**
+/// 前回の更新で残った書きかけの `.new` を消す。**起動時にすぐ呼ぶ。**
 ///
-/// `.old` は差し替えで退避した前の版、`.new` はダウンロードの途中で終了したときの
-/// 書きかけ。どちらも使わない。無ければ何もしない。`.old` は前の版のプロセスが
-/// まだ終わりきっていないと消せないので、失敗は返して呼び出し側に任せる。
-pub fn remove_leftovers(paths: &ExePaths) -> io::Result<()> {
+/// ダウンロードの途中で終了したときの書きかけで、照合が済んでいないので使わない。
+/// 無ければ何もしない。消せなければログに残すだけで、次の起動でまた試す。
+pub fn remove_leftover_new(paths: &ExePaths) {
     remove_if_exists(&paths.new);
+}
+
+/// 前回の差し替えで退避した前の版（`.old`）を消す。
+///
+/// **起動した直後には呼ばない。** 新しい版が起動してすぐ落ちたときに、手で戻せる
+/// 前の版を残しておくため（呼ぶ時機は `app::update` の `clean_up_update_leftovers`、
+/// `docs/design/update.md` の「適用」）。`.new` には触らない。待つ間に始まった更新の
+/// ダウンロード先でありうるため。無ければ何もしない。前の版のプロセスがまだ
+/// 終わりきっていないと消せないので、失敗は返して呼び出し側に任せる。
+pub fn remove_leftover_old(paths: &ExePaths) -> io::Result<()> {
     remove_file_if_exists(&paths.old)
 }
 
@@ -401,6 +464,41 @@ mod tests {
         assert_eq!(kept, Kept::Old);
     }
 
+    // ---- 改名の再試行 ----
+
+    #[test]
+    fn should_retry_rename_only_on_sharing_violation_and_access_denied() {
+        let sharing = io::Error::from_raw_os_error(ERROR_SHARING_VIOLATION);
+        let denied = io::Error::from_raw_os_error(ERROR_ACCESS_DENIED);
+        // ERROR_FILE_NOT_FOUND は待っても変わらない
+        let missing = io::Error::from_raw_os_error(2);
+        let no_code = io::Error::other("OS のコードが無い");
+
+        assert!(should_retry_rename(&sharing, 1));
+        assert!(should_retry_rename(&denied, 1));
+        assert!(!should_retry_rename(&missing, 1));
+        assert!(!should_retry_rename(&no_code, 1));
+    }
+
+    #[test]
+    fn should_retry_rename_stops_at_the_attempt_limit() {
+        let sharing = io::Error::from_raw_os_error(ERROR_SHARING_VIOLATION);
+
+        assert!(should_retry_rename(&sharing, RENAME_ATTEMPTS - 1));
+        assert!(!should_retry_rename(&sharing, RENAME_ATTEMPTS));
+    }
+
+    /// `path` を共有なし（ほかのプロセスに改名も読み書きもさせない）で開く。
+    /// ウイルス対策ソフトが走査している間の状態を真似る。
+    fn open_exclusively(path: &Path) -> File {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .expect("共有なしで開ける")
+    }
+
     // ---- ファイル操作（一時ディレクトリで実際に改名する） ----
 
     fn dummy_paths(dir: &Path) -> ExePaths {
@@ -425,6 +523,51 @@ mod tests {
         assert_eq!(read(&paths.exe), "new");
         assert_eq!(read(&paths.old), "old");
         assert!(!paths.new.exists());
+    }
+
+    #[test]
+    fn swap_in_waits_while_new_is_briefly_held_open() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let paths = dummy_paths(dir.path());
+        fs::write(&paths.exe, "old").unwrap();
+        fs::write(&paths.new, "new").unwrap();
+        let held = open_exclusively(&paths.new);
+        let old = paths.old.clone();
+        let holder = std::thread::spawn(move || {
+            // 元の exe が .old へ動いたら（= .new の改名に入ったら）すぐ手放す。
+            // 改名の 1 回目はほぼ同時なので共有違反で失敗し、試し直しで通る。
+            // 決まった時間で手放す形にしないのは、負荷の高い環境で手放すのが
+            // 遅れると試し直しの上限（0.9 秒）を越えて結果が変わるため
+            while !old.exists() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            drop(held);
+        });
+
+        let result = swap_in(&paths);
+        holder.join().unwrap();
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(read(&paths.exe), "new");
+        assert_eq!(read(&paths.old), "old");
+        assert!(!paths.new.exists());
+    }
+
+    #[test]
+    fn swap_in_gives_up_when_new_stays_held_open_and_restores_the_old_exe() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let paths = dummy_paths(dir.path());
+        fs::write(&paths.exe, "old").unwrap();
+        fs::write(&paths.new, "new").unwrap();
+        let held = open_exclusively(&paths.new);
+
+        let result = swap_in(&paths);
+        drop(held);
+
+        // 試し直しを使い切ったら、今までどおり元の exe を戻す
+        assert!(matches!(result, Err(ApplyError::Replace(_))));
+        assert_eq!(read(&paths.exe), "old");
+        assert!(!paths.old.exists());
     }
 
     #[test]
@@ -547,19 +690,37 @@ mod tests {
     }
 
     #[test]
-    fn remove_leftovers_removes_old_and_new_and_ignores_missing() {
+    fn remove_leftover_new_keeps_old_and_ignores_missing() {
         let dir = tempfile::tempdir().expect("一時ディレクトリ");
         let paths = dummy_paths(dir.path());
         fs::write(&paths.exe, "exe").unwrap();
         fs::write(&paths.old, "old").unwrap();
         fs::write(&paths.new, "new").unwrap();
 
-        remove_leftovers(&paths).expect("消せる");
-        remove_leftovers(&paths).expect("無くても失敗にしない");
+        remove_leftover_new(&paths);
+        remove_leftover_new(&paths);
 
+        // 前の版は起動した直後には消さない。手で戻せるように残す
+        assert_eq!(read(&paths.old), "old");
         assert!(paths.exe.exists());
-        assert!(!paths.old.exists());
         assert!(!paths.new.exists());
+    }
+
+    #[test]
+    fn remove_leftover_old_keeps_new_and_ignores_missing() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let paths = dummy_paths(dir.path());
+        fs::write(&paths.exe, "exe").unwrap();
+        fs::write(&paths.old, "old").unwrap();
+        // 待つ間に始まった更新のダウンロード先
+        fs::write(&paths.new, "new").unwrap();
+
+        remove_leftover_old(&paths).expect("消せる");
+        remove_leftover_old(&paths).expect("無くても失敗にしない");
+
+        assert!(!paths.old.exists());
+        assert_eq!(read(&paths.new), "new");
+        assert!(paths.exe.exists());
     }
 
     #[test]
@@ -572,7 +733,8 @@ mod tests {
         fs::write(&original.new, "new").unwrap();
         let paths = ExePaths::for_exe(original.old.clone()).expect("名前がある");
 
-        remove_leftovers(&paths).expect("消すものが無くても失敗にしない");
+        remove_leftover_new(&paths);
+        remove_leftover_old(&paths).expect("消すものが無くても失敗にしない");
 
         assert_eq!(read(&original.old), "old");
         assert_eq!(read(&original.new), "new");
