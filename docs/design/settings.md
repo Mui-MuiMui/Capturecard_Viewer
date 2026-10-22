@@ -28,6 +28,23 @@
 - 退避できずに自動保存を止めた知らせは、「適用」「OK」で保存して自動保存を再開したときに取り下げる（`errors.clear(ErrorSource::Settings)` と `settings_load_notice` を消す）。退避して既定値で起動した知らせは、保存しても事実は変わらないので、終了するまで起きた時刻と一緒に残す
 - `AutoSavePolicy` と `may_write_defaults_on_startup` の判定は変えていない
 
+## 1 項目が読めなくても設定全体を失わせない
+
+設定ファイルは手で書き換えられる。serde は 1 項目でも読めないとパース全体を失敗にするので、そのままでは綴りを 1 つ誤っただけで、ファイルが `.bak` へ退避されて全設定が既定値に戻る。そこで、手で書き換えやすい項目は `deserialize_with` の補助を通し、**その項目だけ**既定値か範囲の端にして WARN を残す。共通の読み方は `src/settings/lenient.rs`、各項目の `deserialize_*` はその設定と同じファイルに置く。
+
+| 補助 | 項目 | 拾うもの |
+|---|---|---|
+| `choice` | `[video]` `color_space` / `color_range` / `backend` / `convert`、`[audio]` `input_source`、`[screenshot]` `destination` / `format`、`[ui]` `language` | 知らない文字列、文字列でない値 → 既定値 |
+| `integer` + `clamp_integer` | `[video]` `brightness` / `contrast` / `saturation`、`[audio]` `buffer_ms`、`[recording]` `video_bitrate_kbps` / `replay_seconds` / `audio_offset_ms`、`[screenshot]` `jpeg_quality` | 範囲外 → 範囲の端、整数でない値（`90.0` も） → 既定値 |
+| `integer` + 近い選択肢 | `[recording]` `audio_bitrate_kbps` | 選択肢に無い値 → 近い選択肢、整数でない値 → 既定値 |
+| `number` + `clamp_finite` | `[ui]` `volume`、`[screenshot]` `sound_volume` | 範囲外 → 範囲の端、NaN・無限大と数値でない値 → 既定値（整数は数値として読む） |
+
+**値の型の違い（`color_space = 5`、`jpeg_quality = 90.0`、`volume = "loud"` など）も、2026-10 から（#531）その項目だけ既定値にする。** それまでの補助は値を `String` / `i64` / `f32` で受けていたので、型が違うと補助へ届く前に失敗し、ファイルごと退避されていた。いまは `toml::Value` で受けてから型を確かめる。
+
+**構造体レベルの `#[serde(default)]` との関係。** `#[serde(default)]` が拾うのは**キーが無い**場合だけで、キーがあって値が読めない場合は拾わない。上の補助は後者を拾う。両方を合わせて、表の項目は「無い・読めない・範囲外」のどれでも、その項目だけが既定値になる。補助を足したからといって構造体レベルの `#[serde(default)]` を外さないこと（キーが無い場合が拾えなくなる）。
+
+**補助を通していない項目は、型が違うと今までどおりパース全体が失敗して退避される**（`LoadOutcome::FellBackToDefaults`、退避できなければ `BrokenFileLeftBehind`）。真偽値（`always_on_top` など）、文字列とパス（`device_name`、`save_folder` など）、配列（`resolution`、`last_window_size` など）、`[hotkeys]` の表、`[[presets]]` の `name`、TOML として読めないファイルがそう（プリセットの中の `video` / `audio` は同じ型なので、表の項目は寛容に読む）。真偽値や名前は手で書き換えても型を誤りにくく、配列や表は型だけ直しても意味を取り違えやすいので、退避して利用者に知らせる（「読めなかったことを利用者へ知らせる」）ほうを残した。項目を寛容にしたくなったら、表に足して `lenient` を呼ぶ。両方の場合は `lenient.rs` のテストが押さえている。
+
 ## 置き場所の差し替え
 
 設定ファイルの置き場所は既定で `%AppData%\capturecard_viewer\config\default-config.toml`（`dirs::config_dir()` の下。1.2.x まで使っていた confy 0.6 と同じ場所で、ずらすと既存の設定ファイルを見失う。`docs/DEPENDENCIES.md` の第 3 段）。環境変数 `CAPTURECARD_VIEWER_CONFIG_DIR` にフォルダを指定すると、`<フォルダ>\default-config.toml` を使い、ログもそのフォルダの `logs\` に出す（`src/config_path.rs`、Issue #290）。複数のエージェントが並行してアプリを起動したとき、全員が同じ `%AppData%` の設定ファイルを読み書きして退避と復元が交差し、設定が壊れたため足した。開発者向けで、設定ファイルには保存しない。

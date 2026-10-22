@@ -142,10 +142,8 @@ const DEFAULT_JPEG_QUALITY: u8 = 90;
 
 // 設定ファイルの format に知らない値が書かれていても、設定全体を失わせない。
 // ここでエラーを返すと TOML のパースがファイル単位で失敗し、保存形式と
-// 無関係な項目まで既定値へ戻ってしまう。
-//
-// 値が文字列ですらない場合（format = 3 など）はここでも落ちる。手で書き換えた
-// ときに起きやすいのは綴りの誤りなので、拾うのはそこまでにしてある。
+// 無関係な項目まで既定値へ戻ってしまう。値が文字列ですらない場合（format = 3
+// など）も同じく既定値にする（`lenient::choice`、#531）。
 fn deserialize_screenshot_format<'de, D>(deserializer: D) -> Result<ScreenshotFormat, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -172,10 +170,8 @@ where
 // 範囲外の品質が書かれていても、設定全体を失わせない。u8 のまま読むと
 // jpeg_quality = 256 のような値でパースがファイル単位で失敗し、品質と
 // 無関係な項目まで既定値へ戻ってしまう。TOML の整数は i64 なので、
-// 広いほうで受けてから 1〜100 に丸める。
-//
-// 値が整数ですらない場合（jpeg_quality = 90.5 など）はここでも落ちる。
-// format と同じく、手で書き換えたときに起きやすいところだけを拾う。
+// 広いほうで受けてから 1〜100 に丸める。値が整数ですらない場合
+// （jpeg_quality = 90.5 など）は既定値にする（`lenient::integer`、#531）。
 fn deserialize_jpeg_quality<'de, D>(deserializer: D) -> Result<u8, D::Error>
 where
     D: serde::Deserializer<'de>,
