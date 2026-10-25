@@ -231,7 +231,7 @@ set CAPTURECARD_VIEWER_FRAME_LATENCY=
 capturecard_viewer.exe
 ```
 
-- 受け付けるのは `CAPTURECARD_VIEWER_PRESENT_MODE` が `mailbox` / `fifo`、`CAPTURECARD_VIEWER_FRAME_LATENCY` が `1` / `2` だけ。それ以外（`immediate` など）は WARN を出して既定（Mailbox、1）で動く。glow で描くときは効かない
+- 受け付けるのは `CAPTURECARD_VIEWER_PRESENT_MODE` が `mailbox` / `fifo`、`CAPTURECARD_VIEWER_FRAME_LATENCY` が `1` / `2` だけ。2 つは別々に判定し、それ以外の値（`immediate` など）を指定した項目だけが WARN を出して既定（present mode は Mailbox、溜めるフレーム数は 1）になる。もう一方は指定どおりに効く。例: `fifo` と `3` なら Fifo、溜めるフレーム数 1。glow で描くときは効かない
 - `MsUntilDisplayed` の数え始めは present mode で違いうるので、PresentMon の値だけで決めず、同じ日に撮影（上の「測り方」）でも比べる
 
 ## アプリ内の計測の読み方
