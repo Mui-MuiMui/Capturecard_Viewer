@@ -191,7 +191,7 @@ Media Foundation のソースリーダーに `MF_LOW_LATENCY = TRUE` を付け�
 ### 測り方
 
 1. PresentMon（コンソール版の `PresentMon.exe`）を用意する。管理者権限のコマンドプロンプトで動かす
-2. Capturecard Viewer を起動し、映像を流してフルスクリーンにする。他のウィンドウや通知を重ねない。統計 OSD の「描画」の行で、どちらで描いているか（`wgpu Dx12 Mailbox / <GPU の名前>` か `glow (OpenGL)`）を書き残す
+2. Capturecard Viewer を起動し、映像を流してフルスクリーンにする。他のウィンドウや通知を重ねない。統計 OSD の「描画」の行で、どちらで描いているか（`wgpu Dx12 Mailbox latency 1 / <GPU の名前>` か `glow (OpenGL)`。`latency` の後ろは溜めるフレーム数）を書き残す
 3. 次を実行し、20 秒待つ
 
 ```bat
@@ -200,6 +200,22 @@ PresentMon.exe --process_name capturecard_viewer.exe --output_file cv.csv --time
 
 4. `cv.csv` の `PresentMode` の列（どの経路で出たか）と `MsUntilDisplayed` の列（Present → 表示）を集計する。平均・中央値・95%・最大を出す
 5. glow と比べるときは、同じ exe を `CAPTURECARD_VIEWER_RENDERER=glow` で起動して 2〜4 をなぞる。コマンドプロンプトなら `set CAPTURECARD_VIEWER_RENDERER=glow` のあとに同じ窓から exe を起動し、戻すときは `set CAPTURECARD_VIEWER_RENDERER=` で消してから起動する
+6. present mode（Mailbox / Fifo）と溜めるフレーム数（1 / 2）を比べるときも、同じ exe を環境変数を替えて起動し、2〜4 をなぞる（#476、試験用の口）。統計 OSD の「描画」の行が選んだ値（例: `wgpu Dx12 Fifo latency 2 / <GPU の名前>`）になっていることを確かめてから測る。ログにも「試験用の環境変数で present の仕方を既定から変えている」の WARN が出る
+
+```bat
+rem Fifo、溜めるフレーム数 1
+set CAPTURECARD_VIEWER_PRESENT_MODE=fifo
+set CAPTURECARD_VIEWER_FRAME_LATENCY=1
+capturecard_viewer.exe
+
+rem 既定（Mailbox、1）へ戻す。値を消してから同じ窓で起動する
+set CAPTURECARD_VIEWER_PRESENT_MODE=
+set CAPTURECARD_VIEWER_FRAME_LATENCY=
+capturecard_viewer.exe
+```
+
+- 受け付けるのは `CAPTURECARD_VIEWER_PRESENT_MODE` が `mailbox` / `fifo`、`CAPTURECARD_VIEWER_FRAME_LATENCY` が `1` / `2` だけ。それ以外（`immediate` など）は WARN を出して既定（Mailbox、1）で動く。glow で描くときは効かない
+- `MsUntilDisplayed` の数え始めは present mode で違いうるので、PresentMon の値だけで決めず、同じ日に撮影（上の「測り方」）でも比べる
 
 ## アプリ内の計測の読み方
 

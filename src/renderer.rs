@@ -5,6 +5,9 @@
 //! ティアリングは起きない）。環境変数 `CAPTURECARD_VIEWER_RENDERER=glow` で同じ exe の
 //! まま glow（OpenGL）へ戻せる。遅れの撮り比べのためで、設定ファイルには入れない。
 //! DX12 の GPU のアダプターが取れないときも glow へ倒す。
+//! present mode（Mailbox / Fifo）と溜めるフレーム数（1 / 2）も、撮り比べのための
+//! 試験用の環境変数 `CAPTURECARD_VIEWER_PRESENT_MODE` / `CAPTURECARD_VIEWER_FRAME_LATENCY`
+//! で替えられる（#476）。指定しなければ Mailbox と 1。
 //!
 //! **どちらで描くかは `run_native` の前に決める。** winit のイベントループは 1 プロセスに
 //! 1 回しか作れないので、wgpu で起動に失敗してから glow で開き直すことはできない。
@@ -21,27 +24,9 @@ use crate::video::is_software_renderer;
 /// 描画のバックエンドを選ぶ環境変数。`glow` か `wgpu`（大文字小文字は問わない）。
 pub const RENDERER_ENV: &str = "CAPTURECARD_VIEWER_RENDERER";
 
-/// present mode。**Mailbox だけを使う。**
-///
-/// Mailbox は待たずに渡し、次の垂直同期で最新の 1 枚を出す（ティアリング無し）。
-/// Fifo は垂直同期まで待たされるぶん、届いたフレームが画面に出るのが遅れうる。
-/// Immediate（垂直同期を待たずに出す）はティアリングが起きるので使わない（#456、
-/// ユーザー判断）。
-///
-/// present mode は起動前の `WgpuConfiguration` で決める。eframe 0.36 は起動後に
-/// 変えられなかった（`Frame::set_wgpu_surface_config` は `Frame` が持つ複製を書き換える
-/// だけで、描画側へ届かなかった）。0.37 で描画側へ届くようになったが（eframe #8442。
-/// `Frame` の複製は起動時の `WgpuConfiguration` の値から始まるので、起動時の指定は
-/// そのまま効く）、このアプリは起動後に変えない。wgpu は対応していない present mode を
-/// 指定すると落ちる（自動の Fifo への切り替えは `AutoVsync` / `AutoNoVsync` にしか無い）。
-/// そのため **Mailbox を出せることが分かっているバックエンド（DX12）だけで wgpu を使う。**
-/// wgpu-hal の DX12 は Mailbox と Fifo を常に対応一覧に載せる。アダプターの選び方
-/// （`adapter_rank`）でも、ウィンドウへ Mailbox で出せないものは選ばない
-const PRESENT_MODE: wgpu::PresentMode = wgpu::PresentMode::Mailbox;
+mod present;
 
-/// 先に描いたフレームを何枚まで溜めてよいか。**1（最小）。**
-/// DX12 では `SetMaximumFrameLatency(1)` と、swapchain のバッファ 2 枚になる
-const MAX_FRAME_LATENCY: u32 = 1;
+use present::PresentSettings;
 
 /// 描画のバックエンド。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,7 +152,7 @@ fn luid_value(high: i32, low: u32) -> u64 {
     (u64::from(high.cast_unsigned()) << 32) | u64::from(low)
 }
 
-/// アダプターの候補。種類、名前がソフトウェア描画のものか、ウィンドウへ `PRESENT_MODE` で出せるか。
+/// アダプターの候補。種類、名前がソフトウェア描画のものか、ウィンドウへ選んだ present mode で出せるか。
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
     id: AdapterId,
@@ -182,7 +167,7 @@ struct Candidate {
 /// GPU（外付け → 内蔵 → 仮想）を先にする。CPU で描く WARP（Microsoft Basic Render
 /// Driver）は `allow_software` のときだけ最後の候補にする（`allows_software_adapter`）。
 /// WARP は種類（`DeviceType::Cpu`）でも名前でも見分ける。ドライバーによっては種類が
-/// `Other` で返るため。Mailbox で出せないアダプターは選ばない（`PRESENT_MODE`）
+/// `Other` で返るため。選んだ present mode で出せないアダプターは選ばない（`present::DEFAULT_PRESENT_MODE`）
 fn adapter_rank(candidate: Candidate, allow_software: bool) -> Option<u8> {
     if !candidate.presentable {
         return None;
@@ -258,24 +243,34 @@ pub struct RendererChoice {
     /// wgpu のときに実際に選ばれたアダプター。描画側（eframe）がアダプターを選んだ
     /// 時点で入る。アプリを作るより前に選ばれるので、アプリを作るときには入っている
     adapter: Arc<OnceLock<WgpuAdapter>>,
+    /// wgpu で描くときの present の仕方
+    present: PresentSettings,
 }
 
 impl RendererChoice {
     /// 統計 OSD に出す描画のバックエンドの説明（言語に依らない技術名）。
-    /// 例: `wgpu Dx12 Mailbox / NVIDIA GeForce RTX 4070`、`glow (OpenGL)`
+    /// 例: `wgpu Dx12 Mailbox latency 1 / NVIDIA GeForce RTX 4070`、`glow (OpenGL)`
     pub fn label(&self) -> String {
-        format_label(self.kind, self.adapter.get())
+        format_label(self.kind, self.present, self.adapter.get())
     }
 }
 
-fn format_label(kind: RendererKind, adapter: Option<&WgpuAdapter>) -> String {
+fn format_label(
+    kind: RendererKind,
+    present: PresentSettings,
+    adapter: Option<&WgpuAdapter>,
+) -> String {
+    let PresentSettings {
+        present_mode,
+        frame_latency,
+    } = present;
     match (kind, adapter) {
         (RendererKind::Glow, _) => "glow (OpenGL)".to_string(),
         (RendererKind::Wgpu, Some(adapter)) => format!(
-            "wgpu {:?} {PRESENT_MODE:?} / {}",
+            "wgpu {:?} {present_mode:?} latency {frame_latency} / {}",
             adapter.backend, adapter.name
         ),
-        (RendererKind::Wgpu, None) => format!("wgpu {PRESENT_MODE:?}"),
+        (RendererKind::Wgpu, None) => format!("wgpu {present_mode:?} latency {frame_latency}"),
     }
 }
 
@@ -292,6 +287,10 @@ pub fn configure(options: &mut eframe::NativeOptions) -> RendererChoice {
 
     let adapter = Arc::new(OnceLock::new());
     let allow_software = request.allows_software_adapter();
+    let present = match request.kind() {
+        RendererKind::Glow => PresentSettings::default(),
+        RendererKind::Wgpu => PresentSettings::from_env(),
+    };
     let kind = match request.kind() {
         RendererKind::Glow => {
             log::info!("描画は glow（OpenGL）。{RENDERER_ENV} で指定された");
@@ -300,13 +299,15 @@ pub fn configure(options: &mut eframe::NativeOptions) -> RendererChoice {
         RendererKind::Wgpu => match probe_dx12(allow_software) {
             Ok((info, elapsed_ms)) => {
                 log::info!(
-                    "描画は wgpu（DX12、present mode {PRESENT_MODE:?}、最大フレーム遅延 {MAX_FRAME_LATENCY}）。\
+                    "描画は wgpu（DX12、present mode {:?}、最大フレーム遅延 {}）。\
                      使えるアダプター: {} ({:?})。確認に {elapsed_ms}ms",
+                    present.present_mode,
+                    present.frame_latency,
                     info.name,
                     info.device_type
                 );
                 options.wgpu_options =
-                    wgpu_configuration(Arc::clone(&adapter), allow_software, info.id);
+                    wgpu_configuration(Arc::clone(&adapter), allow_software, info.id, present);
                 RendererKind::Wgpu
             }
             Err(reason) => {
@@ -319,12 +320,16 @@ pub fn configure(options: &mut eframe::NativeOptions) -> RendererChoice {
         RendererKind::Glow => eframe::Renderer::Glow,
         RendererKind::Wgpu => eframe::Renderer::Wgpu,
     };
-    RendererChoice { kind, adapter }
+    RendererChoice {
+        kind,
+        adapter,
+        present,
+    }
 }
 
 /// DX12 のインスタンスの組み立て。起動前の確認と eframe の両方が同じものを使う。
 ///
-/// - バックエンドは DX12 だけ（`PRESENT_MODE` の理由）。`WGPU_BACKEND` も読まない
+/// - バックエンドは DX12 だけ（`present::DEFAULT_PRESENT_MODE` の理由）。`WGPU_BACKEND` も読まない
 /// - シェーダーのコンパイラは FXC（Windows に入っている `d3dcompiler_47.dll`）。
 ///   既定の Auto は PATH 上の `dxcompiler.dll` を拾いうるので、どこで起動しても
 ///   同じになるよう固定する
@@ -344,7 +349,7 @@ fn probe_dx12(allow_software: bool) -> Result<(WgpuAdapter, u128), String> {
     let instance = wgpu::Instance::new(dx12_instance_descriptor());
     let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::DX12));
     // ウィンドウがまだ無いので、ここでは present mode を確かめられない。
-    // DX12 は Mailbox を常に出せる（`PRESENT_MODE`）
+    // DX12 は Mailbox と Fifo を常に出せる（`present::DEFAULT_PRESENT_MODE`）
     let candidates: Vec<_> = adapters
         .iter()
         .map(|adapter| {
@@ -405,11 +410,13 @@ fn wgpu_configuration(
     selected: Arc<OnceLock<WgpuAdapter>>,
     allow_software: bool,
     preferred: AdapterId,
+    present: PresentSettings,
 ) -> WgpuConfiguration {
+    let present_mode = present.present_mode;
     let mut setup = WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor = dx12_instance_descriptor();
     // アダプターは自分で選ぶ。起動前の確認と同じ順位で、確認で作れたものを優先し、
-    // ウィンドウの surface へ Mailbox で出せるものに限る
+    // ウィンドウの surface へ選んだ present mode で出せるものに限る
     setup.native_adapter_selector = Some(Arc::new(move |adapters, surface| {
         let candidates: Vec<_> = adapters
             .iter()
@@ -424,14 +431,14 @@ fn wgpu_configuration(
                             && surface
                                 .get_capabilities(adapter)
                                 .present_modes
-                                .contains(&PRESENT_MODE)
+                                .contains(&present_mode)
                     }),
                 }
             })
             .collect();
         let index =
             pick_adapter(&candidates, allow_software, Some(preferred)).ok_or_else(|| {
-                format!("ウィンドウへ {PRESENT_MODE:?} で出せる DX12 のアダプターが無い")
+                format!("ウィンドウへ {present_mode:?} で出せる DX12 のアダプターが無い")
             })?;
         let adapter = adapters[index].clone();
         let info = adapter.get_info();
@@ -459,8 +466,8 @@ fn wgpu_configuration(
 
     WgpuConfiguration {
         surface: SurfaceConfig {
-            present_mode: PRESENT_MODE,
-            desired_maximum_frame_latency: Some(MAX_FRAME_LATENCY),
+            present_mode,
+            desired_maximum_frame_latency: Some(present.frame_latency),
         },
         wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(setup),
         ..Default::default()
@@ -673,11 +680,27 @@ mod tests {
             device_type: DeviceType::Cpu,
             id: pci(0x1414, 0x8c),
         };
+        let default = PresentSettings::default();
         assert_eq!(
-            format_label(RendererKind::Wgpu, Some(&adapter)),
-            "wgpu Dx12 Mailbox / Microsoft Basic Render Driver"
+            format_label(RendererKind::Wgpu, default, Some(&adapter)),
+            "wgpu Dx12 Mailbox latency 1 / Microsoft Basic Render Driver"
         );
-        assert_eq!(format_label(RendererKind::Wgpu, None), "wgpu Mailbox");
-        assert_eq!(format_label(RendererKind::Glow, None), "glow (OpenGL)");
+        assert_eq!(
+            format_label(RendererKind::Wgpu, default, None),
+            "wgpu Mailbox latency 1"
+        );
+        assert_eq!(
+            format_label(RendererKind::Glow, default, None),
+            "glow (OpenGL)"
+        );
+        // 試験用の環境変数で替えたときは、実際に使う値を出す
+        let fifo = PresentSettings {
+            present_mode: wgpu::PresentMode::Fifo,
+            frame_latency: 2,
+        };
+        assert_eq!(
+            format_label(RendererKind::Wgpu, fifo, Some(&adapter)),
+            "wgpu Dx12 Fifo latency 2 / Microsoft Basic Render Driver"
+        );
     }
 }

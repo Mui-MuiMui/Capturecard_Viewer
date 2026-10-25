@@ -123,7 +123,7 @@ YUY2 で開ける実機で確認する。統計 OSD を出しておく。
 
 GPU のある実機で確認する（`docs/design/video-pipeline.md` の「描画バックエンド」）。統計 OSD を出しておく。上の「YUY2 の GPU 変換」は既定（wgpu）でなぞり、`CAPTURECARD_VIEWER_RENDERER=glow` でももう一度なぞる。
 
-- [ ] 環境変数なしで起動すると、ログに「描画は wgpu（DX12、present mode Mailbox、最大フレーム遅延 1）。使えるアダプター: <GPU の名前> …」と「wgpu のアダプター: <GPU の名前> (Dx12, DiscreteGpu か IntegratedGpu, …)」が出て、統計 OSD の「描画」の行が `wgpu Dx12 Mailbox / <GPU の名前>` になる
+- [ ] 環境変数なしで起動すると、ログに「描画は wgpu（DX12、present mode Mailbox、最大フレーム遅延 1）。使えるアダプター: <GPU の名前> …」と「wgpu のアダプター: <GPU の名前> (Dx12, DiscreteGpu か IntegratedGpu, …)」が出て、統計 OSD の「描画」の行が `wgpu Dx12 Mailbox latency 1 / <GPU の名前>` になる
 - [ ] 同じ起動で、ログに「YUY2 → RGB を GPU（シェーダー）で変換できる（自己診断で CPU の変換と全画素が一致、wgpu Dx12、<GPU の名前>）」が出る（YUY2 で開けるデバイスのとき）。OSD の「デコード」の行が「デコード GPU (…)」になり、色が glow のときと同じ
 - [ ] 映像にティアリング（横の裂け目）もカクつきも出ない。最大化と復帰、最小化と復帰、フルスクリーンの切り替え、右クリックメニューとサブメニュー、設定ダイアログが崩れない
 - [ ] 映像の解像度を変えても（設定画面で別の解像度にして適用）、黒いまま止まらずに新しい解像度で映る（GPU 変換の書き込み先の作り直し）

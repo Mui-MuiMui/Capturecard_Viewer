@@ -408,7 +408,7 @@ pub fn stats_display_latency(average_ms: f32, max_ms: f32) -> String {
 }
 
 /// 描画のバックエンド（#492）。`label` は `renderer::RendererChoice::label` の技術名
-/// （`wgpu Dx12 Mailbox / <アダプター名>` や `glow (OpenGL)`）で、訳さない
+/// （`wgpu Dx12 Mailbox latency 1 / <アダプター名>` や `glow (OpenGL)`）で、訳さない
 pub fn stats_renderer(label: impl Display) -> String {
     match language() {
         Language::Japanese => format!("描画 {label}"),
