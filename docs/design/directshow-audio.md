@@ -94,6 +94,15 @@ flowchart LR
 - 時刻は `Receive` の入口で 1 回だけ読む（映像の `received_at` と同じ）。DirectShow のタイムスタンプは使わない。基準時計を外してあるので（`SetSyncSource(NULL)`）、GC551 はタイムスタンプを付けない（`GetTime` が `VFW_E_SAMPLE_TIME_NOT_SET`。基準時計を付けても届いた時刻とほぼ同じ。#406、`docs/design/recording.md` の「DirectShow のサンプルのタイムスタンプ（#406）」）
 - `IMediaSample::IsDiscontinuity` が立っていたら、取りこぼしとして数える（cpal の `Xrun` と同じ数え手。「接続状態」タブの「入力の取りこぼし」に出る）
 
+### `Receive` の中でしないこと
+
+映像のレンダラーの `Receive`（`video_stream.rs`）も同じ決まりに揃えてある（#511）。
+
+- **ログを出さない。** ロガーのロックと文字列の確保が起きる。残したいことは Atomic に書かせ、ワーカーの監視の周期（`DirectShowCapture::link_state`）で読んでログへ出す。音声ピンの塊の長さは `AudioPinFeed::observed_chunk_bytes` → `log_first_pin_chunk`、映像の流れの途中での形式の変化は `video_stream::FormatChanges`（回数と、1 つの `AtomicU64` に詰めた最後の形式）→ `CaptureGraph::poll` の `log_format_change`。音声ピンの形式の変化も同じ形で、`AudioPinFeed::record_format_change` → `log_format_changes`。周期の間に何度も変わったら、最後の形式と回数を 1 行で出す。受け取れない形式へ変わったとき（映像を捨てている）と、音声ピンが繋いだときと食い違う形式へ変わったとき（`push` が積まずに捨てるので音が止まる）は `warn`、音声ピンが繋いだときの形式へ戻ったときは `info`。回数はグラフごとに数え直す（`begin_graph`）
+- **cpal のエラーのコールバックのような例外は作らない**（`docs/design/audio.md` の「エラーのコールバックのログ」）。形式の変化はサンプルの流れの途中で何度でも起こりうるため
+- `IMediaSample::GetMediaType` は形式が変わったサンプルにだけメディアタイプを付けて返し、そのときだけ上流が `CoTaskMemAlloc` で確保する（こちらは `delete_media_type` で解放する）。形式の変化を知る手段がこれしか無いので許容する。付いていなければ null で、確保は起きない
+- 映像の `Receive` から呼ぶ `FrameSink` の初回だけのログは例外にしてある。範囲と理由は `docs/design/video-pipeline.md` の「フレームコールバックの中のログ」
+
 `docs/design/threads.md` のスレッドの一覧には「DirectShow の音声ピンのストリーミングスレッド」を 1 行足す（実装の段で）。**デバイスに触る使い捨てのスレッドには当たらない。** 作るのはキャプチャーフィルターで、cpal / nokhwa のコールバックスレッドの代役にあたる。
 
 ### 音声ピンを繋ぐ手順
@@ -453,7 +462,7 @@ input_device_name = "Line (AVerMedia Live Gamer)"   # "video_pin" の間は使�
 | 待っている間は理由を出さない | 書き戻しが届くまでも理由を出さない。WASAPI の先頭に決めたときは往復を待たずにこの場の設定へ写して開き、書き戻す前の設定（入力なし）が届いたら決めた名前を引き継ぐ。`video_pin` に決めたときは、ワーカーは映像の接続対象を書き換えず、書き戻しが届いてから映像を開き直して音声を開く | 引き継がないと、書き戻す前の設定の差分で音声を閉じて「入力が選ばれていない」を出してしまう |
 | （書いていない） | 「音声ピンを繋ぐために映像を開き直すのを待っている」（`PinWait::NotConnected`）は、映像の開き直しがまだ済んでいない（設定の映像の接続対象と開いている相手が違う）間は理由を出さない（`monitor_audio_pin::waits_silently`） | 入力を切り替えた直後と初回の既定の直後は、映像の開き直しに「成功から 1 秒」の下限が掛かり、その間に音声の試行が先に来る。第 1 段では切り替えるたびに一瞬トーストが出ていた |
 | 選べるのは `audio_pin` が「無い」「対象外」以外 | そのとおり（「繋げなかった」も選べる）。判定は `monitor_audio_pin::pin_choice`、ダイアログへは `ui::VideoPinChoice` を `SettingsDialogState` に置いて `SettingsDialogView` の借用で渡す。`app` が観測値から毎フレーム作り直す（ダイアログを開いている間だけ） | 描画の中でデバイスへ問い合わせない（GUARDRAIL） |
-| 「デバイス設定」タブに項目を足す | コンボボックスは `src/ui/audio_input.rs` に出した | `device_tab.rs` が 800 行に近い |
+| 「デバイス設定」タブに項目を足す | コンボボックスは `src/ui/audio_input.rs` に出した | `device_tab.rs` に描画を詰め込まない（1 ファイル 800 行の目安） |
 | 統計 OSD に「（音声ピン）」 | `i18n::via_audio_pin`（引数を取る文字列）で添える | `Text` の表は前後の空白を許さないので、英語の " (audio pin)" を置けない |
 | フェイクの音声ピン | シナリオ `audio-pin`（引数なし）。`FakeVideoCapture::with_audio_pin` と `FakeAudioCapture::with_pin_feed` に同じ `AudioPinFeed` を渡し、映像のフェイクは繋ぐ指定で開くと `FakePinSource`（660Hz の正弦波を 48kHz 2ch 16bit、10ms ごと）を立てる | 実機と同じ形にして、`AudioCapture` と同じ差し込み方（番号の照合、出力を落とす前に抜く）をフェイクの音声でも通す |
 

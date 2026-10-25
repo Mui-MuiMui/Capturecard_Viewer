@@ -621,7 +621,7 @@ mod tests {
     #[ignore = "音声の出力デバイスが必要（鳴り終わるまで 1 秒ほど待つ）"]
     fn play_blocking_plays_the_embedded_sound_on_the_default_output() {
         // 実行: cargo test play_blocking_plays -- --ignored
-        // 既定の出力デバイスを開いて内蔵音を鳴らし終わること（rodio 0.22 の経路、#299）
+        // 既定の出力デバイスを開いて内蔵音を鳴らし終わること（rodio 0.23 の経路、#299、#500）
         let mut outcome = None;
         play_blocking(open_output, Arc::from(EMBEDDED_SOUND), 0.3, |r| {
             outcome = Some(r)

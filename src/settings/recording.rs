@@ -1,6 +1,7 @@
 //! 録画の設定（[recording]）。ビットレート・リプレイバッファの長さの範囲と
 //! serde の補助、保存先の既定値。
 
+use super::lenient;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -133,14 +134,15 @@ fn deserialize_replay_seconds<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = i64::deserialize(deserializer)?;
-    let clamped = raw.clamp(i64::from(MIN_REPLAY_SECONDS), i64::from(MAX_REPLAY_SECONDS));
-    if clamped != raw {
-        warn!(
-            "設定のリプレイバッファのさかのぼる長さ {} 秒は範囲外なので {} 秒として扱う",
-            raw, clamped
-        );
-    }
+    const WHAT: &str = "リプレイバッファのさかのぼる長さ";
+    let raw = lenient::integer(deserializer, WHAT, i64::from(DEFAULT_REPLAY_SECONDS))?;
+    let clamped = lenient::clamp_integer(
+        WHAT,
+        " 秒",
+        raw,
+        i64::from(MIN_REPLAY_SECONDS),
+        i64::from(MAX_REPLAY_SECONDS),
+    );
     // clamp 済みなので u32 に収まる
     Ok(clamped as u32)
 }
@@ -151,17 +153,15 @@ fn deserialize_audio_offset_ms<'de, D>(deserializer: D) -> Result<i32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = i64::deserialize(deserializer)?;
-    let clamped = raw.clamp(
+    const WHAT: &str = "録画の映像と音声のずれの補正";
+    let raw = lenient::integer(deserializer, WHAT, 0)?;
+    let clamped = lenient::clamp_integer(
+        WHAT,
+        " ms",
+        raw,
         i64::from(MIN_RECORDING_AUDIO_OFFSET_MS),
         i64::from(MAX_RECORDING_AUDIO_OFFSET_MS),
     );
-    if clamped != raw {
-        warn!(
-            "設定の録画の映像と音声のずれの補正 {} ms は範囲外なので {} ms として扱う",
-            raw, clamped
-        );
-    }
     // clamp 済みなので i32 に収まる
     Ok(clamped as i32)
 }
@@ -186,7 +186,11 @@ fn deserialize_recording_audio_bitrate<'de, D>(deserializer: D) -> Result<u32, D
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = i64::deserialize(deserializer)?;
+    let raw = lenient::integer(
+        deserializer,
+        "録画の音声のビットレート",
+        i64::from(DEFAULT_RECORDING_AUDIO_BITRATE_KBPS),
+    )?;
     let nearest = nearest_audio_bitrate_kbps(raw);
     if i64::from(nearest) != raw {
         warn!(
@@ -203,17 +207,19 @@ fn deserialize_recording_bitrate<'de, D>(deserializer: D) -> Result<u32, D::Erro
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = i64::deserialize(deserializer)?;
-    let clamped = raw.clamp(
+    const WHAT: &str = "録画のビットレート";
+    let raw = lenient::integer(
+        deserializer,
+        WHAT,
+        i64::from(DEFAULT_RECORDING_BITRATE_KBPS),
+    )?;
+    let clamped = lenient::clamp_integer(
+        WHAT,
+        " kbps",
+        raw,
         i64::from(MIN_RECORDING_BITRATE_KBPS),
         i64::from(MAX_RECORDING_BITRATE_KBPS),
     );
-    if clamped != raw {
-        warn!(
-            "設定の録画のビットレート {} kbps は範囲外なので {} kbps として扱う",
-            raw, clamped
-        );
-    }
     // clamp 済みなので u32 に収まる
     Ok(clamped as u32)
 }

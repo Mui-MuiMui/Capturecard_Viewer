@@ -24,7 +24,7 @@ use log::{debug, info, warn};
 use ringbuf::traits::Consumer;
 
 use super::audio::{AudioChunk, AudioTrack};
-use super::convert::{even_size, rgb_to_nv12, Nv12Matrix};
+use super::convert::{frame_to_nv12, recording_size};
 use super::encoder::{EncodedSample, EncoderError, EncoderMft};
 use super::pts::{units_since, PtsClock, AUDIO_CHANNELS, UNITS_PER_SECOND};
 use super::recorder::{RecordingEvent, RecordingRequest, RecordingTelemetry};
@@ -36,8 +36,8 @@ use super::replay_ring::{
 use super::replay_save::{RecordingKind, SaveReplayBlock};
 use super::sample_pool::{SamplePool, SAMPLE_POOL_CAPACITY};
 use super::session::{check_disk, prepare_folder, MIN_AUDIO_CHUNK_FRAMES};
-use super::storage::{free_bytes, is_short, megabytes, replay_required_bytes};
-use super::writer::{memory_sample, WriterParams};
+use super::storage::{free_bytes, is_short, mebibytes, replay_required_bytes};
+use super::writer::{pcm_sample, WriterParams};
 use super::RecordingError;
 use crate::audio::AudioTap;
 use crate::video::{VideoTap, VideoTapConsumer, VIDEO_TAP_CAPACITY};
@@ -172,13 +172,13 @@ impl ReplayPipeline {
             let _ = self.events.send(kind.failed(error, None));
             return;
         }
-        // リングは始めてすぐまとめて書き出すので、書き切っても 500MB 残るかを先に見る（#313）
+        // リングは始めてすぐまとめて書き出すので、書き切っても 500MiB 残るかを先に見る（#313）
         let free = free_bytes(&request.folder);
         let required = replay_required_bytes(self.ring.bytes() as u64);
         if is_short(free, required) {
             let error = RecordingError::ReplayDiskShort {
-                free_mb: free.map(megabytes).unwrap_or(0),
-                required_mb: megabytes(required),
+                free_mib: free.map(mebibytes).unwrap_or(0),
+                required_mib: mebibytes(required),
             };
             let _ = self.events.send(kind.failed(error, None));
             return;
@@ -315,36 +315,39 @@ impl ReplayPipeline {
             let Some(pts) = self.clock.pts_for(received_at) else {
                 continue;
             };
-            let (width, height) = even_size(frame.width, frame.height);
-            if width == 0 || height == 0 {
+            let Some(even) = recording_size(&frame) else {
+                continue;
+            };
+            let size = (even.0 as u32, even.1 as u32);
+            // エンコーダを作る・作り直す（大きさの変化、問い合わせの失敗からのソフトウェアへの
+            // 作り直し）のは、`Arc` を手放してからにする。作るのに時間がかかりうるので、その間
+            // リングの枠を塞いで `FrameSink` の Vec の回収を妨げないため（#504）。いまの
+            // エンコーダへ渡すときは受け付けるかを先に問い、受け付けないなら NV12 へ直さずに捨てる
+            let reopen = self.size != Some(size) || self.video_encoder.is_none();
+            let peeked = (!reopen).then(|| self.peek_video_accepts());
+            if matches!(peeked, Some(Ok(false))) {
+                self.note_video_skipped();
                 continue;
             }
-            let size = (width as u32, height as u32);
-            if self.size != Some(size) {
-                self.change_size(size);
-            }
-            if self.video_encoder.is_none() {
-                self.open_video_encoder(size)?;
-            }
-            let accepts = self.video_accepts_input()?;
-            if !accepts {
-                // エンコーダが追いつかない。表示は落とさず、録画（リング）だけがコマ落ちする
-                if let Some(recording) = self.recording.as_mut() {
-                    recording.note_skipped();
-                }
-                continue;
-            }
-            let converted = rgb_to_nv12(
-                frame.rgb(&mut self.rgb),
-                frame.width,
-                frame.height,
-                width,
-                height,
-                Nv12Matrix::for_size(width, height),
-                &mut self.nv12,
-            );
             // **`Arc` は NV12 へ直したらすぐ手放す**（`FrameSink` の Vec の回収を妨げないため）
-            drop(frame);
+            let converted = frame_to_nv12(frame, even, &mut self.rgb, &mut self.nv12);
+            let accepts = match peeked {
+                Some(Ok(accepts)) => accepts,
+                Some(Err(error)) => self.recover_video_accepts(error)?,
+                None => {
+                    if self.size != Some(size) {
+                        self.change_size(size);
+                    }
+                    if self.video_encoder.is_none() {
+                        self.open_video_encoder(size)?;
+                    }
+                    self.video_accepts_input()?
+                }
+            };
+            if !accepts {
+                self.note_video_skipped();
+                continue;
+            }
             if converted {
                 self.force_keyframe_if_overdue(pts);
                 self.encode_video(pts)?;
@@ -362,23 +365,41 @@ impl ReplayPipeline {
         Ok(())
     }
 
+    /// エンコーダが追いつかない。表示は落とさず、録画（リング）だけがコマ落ちする
+    fn note_video_skipped(&mut self) {
+        if let Some(recording) = self.recording.as_mut() {
+            recording.note_skipped();
+        }
+    }
+
     /// 映像のエンコーダがいま入力を受け取れるか。非同期型の失敗（`MEError`）はここで
     /// 届くのが普通なので、ハードウェアで最初の 1 枚から失敗していればソフトウェアで作り直して
     /// 問い直す（#312）。
     fn video_accepts_input(&mut self) -> Result<bool, RecordingError> {
-        let Some(encoder) = self.video_encoder.as_mut() else {
-            return Ok(false);
-        };
-        match encoder.accepts_input() {
+        match self.peek_video_accepts() {
             Ok(accepts) => Ok(accepts),
-            Err(error) => {
-                let fall_back = should_fall_back(encoder.is_hardware(), encoder.has_produced());
-                self.fall_back_to_software(fall_back, error)?;
-                match self.video_encoder.as_mut() {
-                    Some(encoder) => encoder.accepts_input().map_err(encoder_error),
-                    None => Ok(false),
-                }
-            }
+            Err(error) => self.recover_video_accepts(error),
+        }
+    }
+
+    /// いまのエンコーダに受け付けるかを問うだけ。失敗しても作り直さない（`drain_video` が
+    /// `Arc` を手放してから `recover_video_accepts` を呼ぶため）。エンコーダが無ければ `false`。
+    fn peek_video_accepts(&mut self) -> Result<bool, EncoderError> {
+        self.video_encoder
+            .as_mut()
+            .map_or(Ok(false), EncoderMft::accepts_input)
+    }
+
+    /// `peek_video_accepts` の失敗を受けて、ソフトウェアで作り直して問い直すか、失敗として返す。
+    fn recover_video_accepts(&mut self, error: EncoderError) -> Result<bool, RecordingError> {
+        let fall_back = self
+            .video_encoder
+            .as_ref()
+            .is_some_and(|encoder| should_fall_back(encoder.is_hardware(), encoder.has_produced()));
+        self.fall_back_to_software(fall_back, error)?;
+        match self.video_encoder.as_mut() {
+            Some(encoder) => encoder.accepts_input().map_err(encoder_error),
+            None => Ok(false),
         }
     }
 
@@ -644,14 +665,7 @@ impl ReplayPipeline {
             let pts = chunk.pts + chunk.duration * start as i64 / frames as i64;
             let next = chunk.pts + chunk.duration * end as i64 / frames as i64;
             let samples = &chunk.samples[start * channels..end * channels];
-            // SAFETY: i16 の並びをそのままバイト列として読む（リトルエンディアンの PCM と同じ並び）
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    samples.as_ptr().cast::<u8>(),
-                    std::mem::size_of_val(samples),
-                )
-            };
-            let sample = memory_sample(bytes, pts, next - pts).map_err(|error| {
+            let sample = pcm_sample(samples, pts, next - pts).map_err(|error| {
                 RecordingError::EncoderUnavailable {
                     reason: error.to_string(),
                 }

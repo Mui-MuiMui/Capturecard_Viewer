@@ -1,6 +1,8 @@
 //! スクリーンショットの設定（[screenshot]）。出力先・保存形式・JPEG 品質の
 //! 選択肢と serde の補助、保存先の既定値、保存するファイルのパスの決め方。
 
+use super::lenient;
+use super::ui::{MAX_VOLUME, MIN_VOLUME};
 use super::AppSettings;
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,7 @@ pub struct ScreenshotSettings {
     #[serde(deserialize_with = "deserialize_jpeg_quality")]
     pub jpeg_quality: u8,
     pub sound_file: Option<PathBuf>,
+    #[serde(deserialize_with = "deserialize_sound_volume")]
     pub sound_volume: f32,
     // 旧版のホットキー設定。**読むだけで、保存では書き出さない。**
     //
@@ -131,24 +134,21 @@ pub const MAX_JPEG_QUALITY: u8 = 100;
 // 一致で判定する（docs/design/assets.md）
 pub const DEFAULT_SOUND_FILE: &str = "sound/SS.mp3";
 
+// 効果音の音量の既定値（%、等倍）。`Default` と読み込みの補助の両方が使う（#505）
+const DEFAULT_SOUND_VOLUME: f32 = 100.0;
+
+// JPEG 品質の既定値。`Default` と読み込みの補助の両方が使う
+const DEFAULT_JPEG_QUALITY: u8 = 90;
+
 // 設定ファイルの format に知らない値が書かれていても、設定全体を失わせない。
 // ここでエラーを返すと TOML のパースがファイル単位で失敗し、保存形式と
-// 無関係な項目まで既定値へ戻ってしまう。
-//
-// 値が文字列ですらない場合（format = 3 など）はここでも落ちる。手で書き換えた
-// ときに起きやすいのは綴りの誤りなので、拾うのはそこまでにしてある。
+// 無関係な項目まで既定値へ戻ってしまう。値が文字列ですらない場合（format = 3
+// など）も同じく既定値にする（`lenient::choice`、#531）。
 fn deserialize_screenshot_format<'de, D>(deserializer: D) -> Result<ScreenshotFormat, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = String::deserialize(deserializer)?;
-    Ok(screenshot_format_from_str(&raw).unwrap_or_else(|| {
-        warn!(
-            "設定の保存形式 \"{}\" を解釈できないので JPEG として扱う",
-            raw
-        );
-        ScreenshotFormat::default()
-    }))
+    lenient::choice(deserializer, "保存形式", "JPEG", screenshot_format_from_str)
 }
 
 // 設定ファイルの destination に知らない値が書かれていても、設定全体を失わせない。
@@ -159,37 +159,53 @@ fn deserialize_screenshot_destination<'de, D>(
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = String::deserialize(deserializer)?;
-    Ok(screenshot_destination_from_str(&raw).unwrap_or_else(|| {
-        warn!(
-            "設定の出力先 \"{}\" を解釈できないのでファイルへの保存として扱う",
-            raw
-        );
-        ScreenshotDestination::default()
-    }))
+    lenient::choice(
+        deserializer,
+        "出力先",
+        "ファイルへの保存",
+        screenshot_destination_from_str,
+    )
 }
 
 // 範囲外の品質が書かれていても、設定全体を失わせない。u8 のまま読むと
 // jpeg_quality = 256 のような値でパースがファイル単位で失敗し、品質と
 // 無関係な項目まで既定値へ戻ってしまう。TOML の整数は i64 なので、
-// 広いほうで受けてから 1〜100 に丸める。
-//
-// 値が整数ですらない場合（jpeg_quality = 90.5 など）はここでも落ちる。
-// format と同じく、手で書き換えたときに起きやすいところだけを拾う。
+// 広いほうで受けてから 1〜100 に丸める。値が整数ですらない場合
+// （jpeg_quality = 90.5 など）は既定値にする（`lenient::integer`、#531）。
 fn deserialize_jpeg_quality<'de, D>(deserializer: D) -> Result<u8, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = i64::deserialize(deserializer)?;
-    let clamped = raw.clamp(i64::from(MIN_JPEG_QUALITY), i64::from(MAX_JPEG_QUALITY));
-    if clamped != raw {
-        warn!(
-            "設定の JPEG 品質 {} は範囲外なので {} として扱う",
-            raw, clamped
-        );
-    }
+    const WHAT: &str = "JPEG 品質";
+    let raw = lenient::integer(deserializer, WHAT, i64::from(DEFAULT_JPEG_QUALITY))?;
+    let clamped = lenient::clamp_integer(
+        WHAT,
+        "",
+        raw,
+        i64::from(MIN_JPEG_QUALITY),
+        i64::from(MAX_JPEG_QUALITY),
+    );
     // clamp 済みなので u8 に収まる
     Ok(clamped as u8)
+}
+
+// 効果音の音量も `[ui] volume`（`ui::deserialize_volume`）と同じく NaN・無限大と範囲外を
+// 受け取らない（#505）。`nan` は再生側の `clamp` を素通りして `Player::set_volume` へ
+// 渡っていた。範囲は設定画面のスライダーと同じ 0〜200%。
+fn deserialize_sound_volume<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    const WHAT: &str = "効果音の音量";
+    let raw = lenient::number(deserializer, WHAT, f64::from(DEFAULT_SOUND_VOLUME))?;
+    Ok(lenient::clamp_finite(
+        WHAT,
+        "%",
+        raw,
+        DEFAULT_SOUND_VOLUME,
+        MIN_VOLUME,
+        MAX_VOLUME,
+    ))
 }
 
 // 設定ファイルに書かれた文字列から出力先を決める。
@@ -283,14 +299,14 @@ impl Default for ScreenshotSettings {
             // なるが、それでも PNG よりはずっと小さい。
             // 品質を気にしない用途は既定のまま、跡を残したくない用途は
             // PNG を選ぶ、という切り分けにする
-            jpeg_quality: 90,
+            jpeg_quality: DEFAULT_JPEG_QUALITY,
             // 相対パスのまま既定値にしてある。既存ユーザーの設定ファイルにも
             // この値が保存されているため、変えると移行の前提が崩れる。
             // 解決は screenshot_sound::resolve_sound_path が exe の置き場所を基準に行い、
             // 見つからなければ埋め込みの既定音へ倒す。
             // None は「効果音を鳴らさない」の意味なので、既定値には使えない
             sound_file: Some(PathBuf::from(DEFAULT_SOUND_FILE)),
-            sound_volume: 100.0,
+            sound_volume: DEFAULT_SOUND_VOLUME,
             // 既定は「旧版の項目が無い」。既定のホットキーは
             // default_hotkeys() が持つ
             legacy_hotkey: None,
@@ -739,5 +755,31 @@ mod tests {
         );
         assert_eq!(screenshot_format_from_str(""), None);
         assert_eq!(screenshot_format_from_str("bmp"), None);
+    }
+
+    // 効果音の音量を書き換えた設定ファイルを読む
+    fn sound_volume_read_as(value: &str) -> f32 {
+        let config = FULL_CONFIG.replace("sound_volume = 50.0", &format!("sound_volume = {value}"));
+        let settings: AppSettings = toml::from_str(&config).expect("読めなければならない");
+        // 他の項目は失われない
+        assert_eq!(settings.ui.volume, 80.0);
+        settings.screenshot.sound_volume
+    }
+
+    #[test]
+    fn app_settings_non_finite_sound_volume_falls_back_to_default() {
+        // Issue #505。NaN のまま再生側の clamp を素通りしていた
+        assert_eq!(sound_volume_read_as("nan"), DEFAULT_SOUND_VOLUME);
+        assert_eq!(sound_volume_read_as("inf"), DEFAULT_SOUND_VOLUME);
+        assert_eq!(sound_volume_read_as("-inf"), DEFAULT_SOUND_VOLUME);
+    }
+
+    #[test]
+    fn app_settings_sound_volume_is_clamped_to_the_slider_range() {
+        assert_eq!(sound_volume_read_as("1000.0"), MAX_VOLUME);
+        assert_eq!(sound_volume_read_as("-10.0"), MIN_VOLUME);
+        // 境界はそのまま
+        assert_eq!(sound_volume_read_as("200.0"), 200.0);
+        assert_eq!(sound_volume_read_as("0.0"), 0.0);
     }
 }

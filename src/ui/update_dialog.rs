@@ -89,7 +89,7 @@ pub fn show_update_dialog(
     // Id は固定にする。タイトルから作ると言語の切り替えや段階の移り変わりで
     // 別のウィンドウになる（docs/design/i18n.md）
     let mut window = egui::Window::new(title.get())
-        .id(egui::Id::new("update_dialog"))
+        .id(egui::Id::unique("update_dialog"))
         .collapsible(false)
         .resizable(false)
         .min_width(DIALOG_WIDTH)

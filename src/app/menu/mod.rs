@@ -205,7 +205,7 @@ fn draw_context_menu(
     let screen = ctx.content_rect();
     let (width, max_height) = context_menu_size_limits(screen.size(), frame.inner_margin.sum());
 
-    egui::Area::new(egui::Id::new("context_menu"))
+    egui::Area::new(egui::Id::unique("context_menu"))
         .fixed_pos(pos)
         .order(egui::Order::Foreground)
         // 画面の下端や右端の近くで開いたときに、メニューごと画面内へ押し戻す
@@ -539,14 +539,15 @@ mod tests {
     #[test]
     fn estimate_flat_menu_height_counts_rows_from_the_flat_menu_table() {
         // 行数とセパレータの数は items::FLAT_MENU から数える。いまの並びは
-        // 16 行（音量の 3 行を含む）とセパレータ 5 本。egui の既定では
-        // 1 行 18 + 3、セパレータ 6 + 3 なので 16 * 21 + 5 * 9 = 381。
+        // 16 行（音量の 3 行を含む）とセパレータ 5 本。egui 0.37 の既定では
+        // 1 行 20 + 3、セパレータ 6 + 3 なので 16 * 23 + 5 * 9 = 413
+        // （0.36 までは 1 行 18 + 3 で 381）。
         // 期待値は実装と同じ式で組み立てず、数字で書く
         let spacing = egui::Style::default().spacing;
 
         let estimate = estimate_flat_menu_height(&spacing, DEFAULT_TEXT_ROW, false);
 
-        assert!((estimate - 381.0).abs() < 1e-3, "{estimate}");
+        assert!((estimate - 413.0).abs() < 1e-3, "{estimate}");
     }
 
     #[test]
@@ -677,7 +678,10 @@ mod tests {
     }
 
     fn menu_harness(size: egui::Vec2, state: MenuArea) -> egui_kittest::Harness<'static, MenuArea> {
+        // 日本語のフォントは読み込まず、字形の無い文字は豆腐で描く（0.36 までと同じ）。
+        // egui_kittest 0.37 は既定で字形の無い文字に当たると panic する
         egui_kittest::Harness::builder()
+            .allow_missing_glyphs()
             .with_size(size)
             .build_ui_state(|ui, state: &mut MenuArea| state.draw(ui), state)
     }

@@ -24,8 +24,13 @@ const STATS_OVERLAY_MARGIN: f32 = 8.0;
 /// ないが、**バッファ長を詰めたときに音が途切れていないかを、設定画面を開かずに
 /// 見られるようにする**ためにここへ並べてある。`latency_line` は表示までの遅れの行
 /// （`video::format_display_latency`、#455）で、映像の行の最後に置く。
+///
+/// `shown_rate` は画面へ出した速さ（`DisplayLatency::recent_rate`、#526）。行を増やさない
+/// よう、ボードから届いた速さの FPS の行の後ろに「表示」として並べる。フレーム間隔を
+/// まだ測れていなくても、取り込んだ枚数が数えられていれば出す
 fn format_stats_lines(
     stats: &FrameStats,
+    shown_rate: Option<usize>,
     convert_note: Option<String>,
     latency_line: String,
     audio_line: String,
@@ -38,6 +43,7 @@ fn format_stats_lines(
                 intervals.fps,
                 intervals.average_ms,
                 intervals.samples,
+                shown_rate,
             ));
             lines.push(i18n::stats_jitter(
                 intervals.stddev_ms,
@@ -45,7 +51,7 @@ fn format_stats_lines(
                 intervals.max_ms,
             ));
         }
-        None => lines.push(Text::StatsFpsPending.get().to_string()),
+        None => lines.push(i18n::stats_fps_pending(shown_rate)),
     }
 
     match (stats.resolution, stats.source_format) {
@@ -101,7 +107,9 @@ impl CaptureCardViewer {
     pub(super) fn show_stats_overlay(&self, ctx: &egui::Context) -> f32 {
         let stats = self.frames.stats();
         // ワーカーが書き出した観測値の複製。ここでデバイスへは問い合わせない
-        let latency = format_display_latency(self.display_latency.recent(Instant::now()));
+        let now = Instant::now();
+        let latency = format_display_latency(self.display_latency.recent(now));
+        let shown_rate = self.display_latency.recent_rate(now);
         let convert_note = match self.gpu_yuy2.conversion() {
             Yuy2Conversion::Cpu(reason) if reason.is_fallback() => {
                 Some(i18n::stats_gpu_fallback(&reason))
@@ -110,6 +118,7 @@ impl CaptureCardViewer {
         };
         let mut lines = format_stats_lines(
             &stats,
+            shown_rate,
             convert_note,
             latency,
             self.device_snapshot.osd_audio_line(),
@@ -129,7 +138,7 @@ impl CaptureCardViewer {
         );
         let shown = show_video_overlay(
             ctx,
-            egui::Id::new("stats_overlay"),
+            egui::Id::unique("stats_overlay"),
             area,
             egui::Align2::LEFT_TOP,
             |ui| {
@@ -165,6 +174,7 @@ mod tests {
         let lines = format_stats_lines(
             &FrameStats::default(),
             None,
+            None,
             format_display_latency(None),
             status::format_underrun_count(None),
         );
@@ -175,6 +185,8 @@ mod tests {
         );
 
         assert!(joined.contains("FPS -"), "FPS が出ていない: {}", joined);
+        // 画面へ出した速さ（#526）も、数えられていなければ数値を出さない
+        assert!(lines[0].ends_with("/ 表示 -"), "{}", lines[0]);
         assert!(
             joined.contains("デコード -"),
             "計測前の 0 を数値で出している: {}",
@@ -229,6 +241,7 @@ mod tests {
         let latency_line = format_display_latency(latency.recent(now));
         let lines = format_stats_lines(
             &stats,
+            Some(60),
             None,
             latency_line,
             status::format_underrun_count(Some(3)),
@@ -240,6 +253,11 @@ mod tests {
 
         assert!(joined.contains("FPS 60.0"), "{}", joined);
         assert!(joined.contains("120 件"), "{}", joined);
+        // 画面へ出した速さ（#526）は、届いた速さと同じ行の後ろに「表示」として並べる
+        assert_eq!(
+            lines[0], "FPS 60.0 (平均間隔 16.7ms / 120 件) / 表示 60 枚/秒",
+            "{joined}"
+        );
         assert!(joined.contains("±1.25ms"), "{}", joined);
         assert!(joined.contains("最小 15.0 / 最大 18.0"), "{}", joined);
         assert!(joined.contains("デコード 2.50ms"), "{}", joined);
@@ -264,6 +282,7 @@ mod tests {
         let lines = format_stats_lines(
             &stats,
             None,
+            None,
             format_display_latency(None),
             status::format_underrun_count(None),
         );
@@ -286,6 +305,7 @@ mod tests {
         let note = i18n::stats_gpu_fallback(&crate::video::CpuReason::TooSlow);
         let lines = format_stats_lines(
             &stats,
+            None,
             Some(note.clone()),
             format_display_latency(None),
             status::format_underrun_count(None),
@@ -296,5 +316,55 @@ mod tests {
             .expect("デコードの行がある");
         assert_eq!(lines[decode + 1], note);
         assert!(note.contains("CPU"), "{note}");
+    }
+
+    #[test]
+    fn format_stats_lines_shows_the_shown_rate_before_the_interval_is_measured() {
+        // フレーム間隔をまだ測れていなくても、取り込んだ枚数が数えられていれば出す（#526）
+        let lines = format_stats_lines(
+            &FrameStats::default(),
+            Some(0),
+            None,
+            format_display_latency(None),
+            status::format_underrun_count(None),
+        );
+        assert_eq!(lines[0], "FPS - (フレーム間隔の計測待ち) / 表示 0 枚/秒");
+    }
+
+    #[test]
+    fn format_stats_lines_in_english_tells_arrived_and_shown_apart() {
+        let stats = FrameStats {
+            intervals: Some(IntervalStats {
+                fps: 60.0,
+                average_ms: 16.6667,
+                min_ms: 15.0,
+                max_ms: 18.0,
+                stddev_ms: 1.25,
+                samples: 120,
+            }),
+            ..FrameStats::default()
+        };
+        let (shown, pending) = i18n::with_language(i18n::Language::English, || {
+            let shown = format_stats_lines(
+                &stats,
+                Some(30),
+                None,
+                format_display_latency(None),
+                status::format_underrun_count(None),
+            );
+            let pending = format_stats_lines(
+                &FrameStats::default(),
+                None,
+                None,
+                format_display_latency(None),
+                status::format_underrun_count(None),
+            );
+            (shown, pending)
+        });
+        assert_eq!(
+            shown[0],
+            "FPS 60.0 (avg interval 16.7ms / 120 samples) / shown 30/s"
+        );
+        assert_eq!(pending[0], "FPS - (measuring frame interval) / shown -");
     }
 }

@@ -20,12 +20,12 @@ use log::{debug, info, warn};
 use ringbuf::traits::Consumer;
 
 use super::audio::{AudioChunk, AudioTrack};
-use super::convert::{even_size, rgb_to_nv12, Nv12Matrix};
+use super::convert::{frame_to_nv12, recording_size};
 use super::file_name::unique_path;
 use super::pts::{units_from, PtsClock, AUDIO_SAMPLE_RATE};
 use super::recorder::{RecordingEvent, RecordingRequest, RecordingSummary, RecordingTelemetry};
 use super::replay_save::RecordingKind;
-use super::storage::{free_bytes, is_low, megabytes, DISK_CHECK_INTERVAL};
+use super::storage::{free_bytes, is_low, mebibytes, DISK_CHECK_INTERVAL};
 use super::writer::{SinkWriter, WriterError, WriterParams, WriterStage};
 use super::RecordingError;
 use crate::audio::AudioTap;
@@ -234,41 +234,35 @@ impl Session {
         frame: Arc<VideoFrame>,
         received_at: Instant,
     ) -> Result<(), RecordingError> {
-        let (width, height) = even_size(frame.width, frame.height);
-        if width == 0 || height == 0 {
+        let Some(even) = recording_size(&frame) else {
             return Ok(());
-        }
-        let size = (width as u32, height as u32);
+        };
+        let size = (even.0 as u32, even.1 as u32);
         let writer_size = self.writer.as_ref().map(SinkWriter::size);
         let Some(pts) = stamp_frame(&mut self.clock, writer_size, size, received_at)? else {
             // 録画を始める前に受け取ったフレーム
             return Ok(());
         };
 
-        match &self.writer {
-            None => self.open_writer(size)?,
-            Some(writer) if writer.backlog() > MAX_ENCODER_BACKLOG => {
-                // エンコーダが追いつかない。表示は落とさず、録画だけがコマ落ちする
-                self.frames_skipped += 1;
-                self.telemetry
-                    .frames_skipped
-                    .store(self.frames_skipped, Ordering::Relaxed);
-                return Ok(());
-            }
-            Some(_) => {}
+        if self
+            .writer
+            .as_ref()
+            .is_some_and(|writer| writer.backlog() > MAX_ENCODER_BACKLOG)
+        {
+            // エンコーダが追いつかない。表示は落とさず、録画だけがコマ落ちする
+            self.frames_skipped += 1;
+            self.telemetry
+                .frames_skipped
+                .store(self.frames_skipped, Ordering::Relaxed);
+            return Ok(());
         }
 
-        let matrix = Nv12Matrix::for_size(width, height);
-        let converted = rgb_to_nv12(
-            frame.rgb(&mut self.rgb),
-            frame.width,
-            frame.height,
-            width,
-            height,
-            matrix,
-            &mut self.nv12,
-        );
-        drop(frame);
+        let converted = frame_to_nv12(frame, even, &mut self.rgb, &mut self.nv12);
+        // Sink Writer は `Arc` を手放してから作る。作るのに時間がかかりうるので、
+        // その間リングの枠を塞いで `FrameSink` の Vec の回収を妨げないため（#504）
+        if self.writer.is_none() {
+            self.open_writer(size)?;
+        }
         if !converted {
             // 画素が足りないフレーム。`FrameSink` が作るフレームでは起きない
             return Ok(());
@@ -538,7 +532,7 @@ pub(super) fn check_disk(folder: &Path) -> Result<(), RecordingError> {
     let free = free_bytes(folder);
     if is_low(free) {
         return Err(RecordingError::DiskLow {
-            free_mb: free.map(megabytes).unwrap_or(0),
+            free_mib: free.map(mebibytes).unwrap_or(0),
         });
     }
     Ok(())
@@ -674,7 +668,7 @@ mod tests {
             to: (640, 480)
         }));
         assert!(finishes_audio_after(&RecordingError::DiskLow {
-            free_mb: 499
+            free_mib: 499
         }));
         // 書き込みに失敗したら書けない。Sink Writer を作れなかった失敗には書く先が無い
         let reason = || "理由".to_string();

@@ -283,6 +283,12 @@ mod tests {
 
     /// 「オーディオ入力デバイス」のコンボボックスを開き、一覧の項目名を上から返す
     fn open_input_combo(harness: &mut egui_kittest::Harness<'_, DialogFixture>) -> Vec<String> {
+        // egui 0.37 で 1 行が高くなり（`interact_size.y` 18 → 20）、コンボが 900x800 の
+        // 画面の下に外れるので、見える位置まで送ってから押す
+        harness
+            .get_by_label(Text::AudioInputDevice.get())
+            .scroll_to_me();
+        harness.run();
         harness.get_by_label(Text::AudioInputDevice.get()).click();
         harness.run();
         // 一覧の項目は同じ親の下に並ぶ。先頭の項目の親から兄弟を順に読む
@@ -388,7 +394,10 @@ mod tests {
         harness.key_press(egui::Key::Escape);
         harness.run();
 
-        // ドラフトの映像デバイスを GC551 に選び直す
+        // ドラフトの映像デバイスを GC551 に選び直す。入力の一覧を開くときに下へ
+        // 送ってあるので、映像デバイスのコンボが見える位置まで戻してから押す
+        harness.get_by_label(Text::VideoDevice.get()).scroll_to_me();
+        harness.run();
         harness.get_by_label(Text::VideoDevice.get()).click();
         harness.run();
         harness.get_by_label("GC551 (DirectShow)").click();

@@ -230,15 +230,8 @@ impl SinkWriter {
         if samples.is_empty() {
             return Ok(());
         }
-        // SAFETY: i16 の並びをそのままバイト列として読む（リトルエンディアンの PCM と同じ並び）
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                samples.as_ptr().cast::<u8>(),
-                std::mem::size_of_val(samples),
-            )
-        };
         let sample =
-            memory_sample(bytes, pts, duration).map_err(WriterError::at(WriterStage::Write))?;
+            pcm_sample(samples, pts, duration).map_err(WriterError::at(WriterStage::Write))?;
         unsafe { self.writer.WriteSample(stream, &sample) }
             .map_err(WriterError::at(WriterStage::Write))?;
         Ok(())
@@ -497,6 +490,24 @@ pub(super) fn memory_sample(
     unsafe { sample.SetSampleTime(pts) }?;
     unsafe { sample.SetSampleDuration(duration) }?;
     Ok(sample)
+}
+
+/// 16bit PCM（インターリーブ）のサンプルを 1 つ作る。Sink Writer（①②）と AAC の
+/// エンコーダ（③）で共通。
+pub(super) fn pcm_sample(
+    samples: &[i16],
+    pts: i64,
+    duration: i64,
+) -> windows::core::Result<IMFSample> {
+    // SAFETY: i16 の並びをそのままバイト列として読む（リトルエンディアンの PCM と同じ並び）。
+    // u8 の整列は 1 なので、どの `&[i16]` からでも長さ `size_of_val` の `&[u8]` を作れる
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            samples.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(samples),
+        )
+    };
+    memory_sample(bytes, pts, duration)
 }
 
 /// 前の出力に使ったサンプルを次も使えるか。バッファが 1 つで、要る大きさ以上あるときだけ

@@ -19,6 +19,7 @@
 //! | `fake.rs` | 実機なしで動くフェイクの音声デバイス（正弦波の入力と、書き込みを捨てる出力）。環境変数で有効にしたときだけ使う |
 //! | `fake_stream.rs` | フェイクの入出力のスレッドの本体（正弦波を吐く入力と、書き込みを捨てる出力）と、フェイクの映像デバイスの音声ピン（`FakePinSource`、#394） |
 //! | `pin_feed.rs` | DirectShow の映像デバイスの音声ピンと `AudioCapture` をつなぐ差し込み口（`AudioPinFeed`）。音声ピンの `Receive` が受け取った PCM を `process_input_iter` へ渡す。音声ピンの状態（`AudioPinState`）と形式もここ |
+//! | `pin_stream.rs` | 音声ピンの流れの状態（塊の切れ目の端数を持ち越す `PinCarry`）と、形式の変化と捨てた塊の数の Atomic の控え（`StreamChanges`）・ワーカーのログの出し方の判定（#511） |
 //! | `tap.rs` | 録画へ音声を回す差し込み口（`AudioTap`）。録画中だけ、入力コールバックが f32 へ直した値を入力の形のまま録画のリングへも積む。PTS を決めるための累計・時刻・入力の形・開き直しの番号も持つ |
 
 mod capabilities;
@@ -26,9 +27,11 @@ mod capture;
 mod controls;
 mod convert;
 mod fake;
+mod fake_devices;
 mod fake_stream;
 mod passthrough_output;
 mod pin_feed;
+mod pin_stream;
 mod resample;
 mod sample;
 mod stream;
@@ -153,7 +156,7 @@ impl AudioDirection {
 /// 伝えられない。
 ///
 /// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
-/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事。
+/// （`status::ErrorSource::headline`）との連結だけが `status/mod.rs` の仕事。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioError {
     /// デバイスの列挙に失敗した

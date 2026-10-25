@@ -20,6 +20,17 @@ YUY2 を GPU で変換するとき（既定、#456）は、フレームコール
 
 フレームコールバックの本体（YUY2→RGB 変換、`FrameBuffer` への格納、`RepaintWaker` で UI を起こす）は `video/frame_sink.rs` の `FrameSink` にある。nokhwa のコールバックは `Buffer` から幅・高さ・バイト列を取り出し、形式ごとの受け口へ振り分けて渡すだけ（`video/mf_format.rs` の `sink_route`）。フェイクの映像デバイス（`video/fake.rs`）と DirectShow のデバイス（`video/directshow/`、自前のレンダラーの `Receive`）も同じ `FrameSink` を通る（`docs/design/device-worker.md` の「DirectShow のバックエンド（#143）」）。
 
+### フレームコールバックの中のログ（#511）
+
+**フレームコールバック（nokhwa のコールバック、DirectShow の `Receive`、フェイクの生成スレッド）では、原則としてログを出さない。** ロガーのロック（`logging.rs` のファイルの `Mutex`）と文字列の確保が起きる。残したいことは Atomic に書かせ、ワーカーの監視の周期で読んでログへ出す（DirectShow の形式の変化と音声ピンの塊の長さ。`docs/design/directshow-audio.md` の「`Receive` の中でしないこと」）。
+
+**例外は `FrameSink` の初回だけのログ。** `FirstTimeOnly` で守った、最初のフレームが届いたときの `info` と、捨てたとき（短いフレーム、MJPEG の展開の失敗、デコーダが返した長さの食い違い、フレームバッファのロックを取れない）の `warn` の 2 種類だけ。
+
+- 1 つの `FrameSink`（開いたストリーム 1 本）につき種類ごとに 1 回までしか出ない。開き直すと `FrameSink` を作り直すので、また 1 回出る
+- 最初のフレームの `info` は「接続した」と「映像が出ている」を分ける唯一の手がかりで、捨てた理由の `warn` は画面が止まる原因の手がかり。Atomic へ移すと、届いた形（幅・高さ・形式・変換の経路）の多くを詰め直すことになる
+- 閉じるときに捨てた枚数をまとめて出す `FrameSink` の `Drop` の `warn` は、流れが止まってから 1 回だけなので同じ扱い
+- **2 回目以降も出うるログをコールバックへ足さない。** 形式の変化のように流れの途中で何度でも起こりうるものは、上の Atomic の形にする
+
 ### `FrameSink` が受け取れる形式
 
 | 形式 | 受け口 | 変換（`video/convert.rs`、4:2:0 は `video/yuv420.rs`） | 係数表（色空間・レンジ・映像調整） | 届く経路 | Media Foundation のサブタイプ（nokhwa の `FrameFormat`） | DirectShow のサブタイプ |
@@ -155,8 +166,8 @@ YUY2 / 4:2:0 の経路のように係数表へ畳み込めないので、1 画�
 
 **入力信号と違う解像度で開くと、映像の代わりに自前の警告画面（「Signal Out of Range」）を送ってくるボードがある**（AVerMedia GC551、DirectShow で開く）。解像度を変換しないボードで、開いた解像度が入力と一致するときだけ映る。警告画面も正しい大きさの YUY2 のフレームとして届くので、**アプリからは見分けられない。** 開く解像度を入力に合わせるしかない。
 
-- **ドライバーが返すいまの形式（`IAMStreamConfig::GetFormat`）を手掛かりにする。** GC551 は入力が 1920x1080 60Hz なら、前に 1280x720 で開いたあとでも 1920x1080 60fps を返した（実機で確かめた）。`SetFormat` すると設定した値が返るようになるので、**読むのは `SetFormat` の前**（`devices::current_resolution`）。入力を切り替えたときに追従するかは、入力側の解像度を変えられる環境が無く確かめていない
-- 開くとき（`graph::apply_format`）は、設定の解像度がそのデバイスの対応一覧に無いか未指定なら、いまの解像度で開く（`devices::target_resolution`）。**一覧にある解像度を利用者が選んでいれば上書きしない。** 解像度を変換できる DirectShow のデバイス（Web カメラ、OBS の仮想カメラ）で、選んだ解像度が効かなくなるため。fps の扱いは変えない
+- **ドライバーが返すいまの形式（`IAMStreamConfig::GetFormat`）を手掛かりにする。** GC551 は入力が 1920x1080 60Hz なら、前に 1280x720 で開いたあとでも 1920x1080 60fps を返した（実機で確かめた）。`SetFormat` すると設定した値が返るようになるので、**読むのは `SetFormat` の前**（`devices::current_format`）。入力を切り替えたときに追従するかは、入力側の解像度を変えられる環境が無く確かめていない
+- 開くとき（`graph::apply_format`）は、設定の解像度がそのデバイスの対応一覧に無いか未指定なら、いまの解像度で開く（`stream_select::target_resolution`）。**一覧にある解像度を利用者が選んでいれば上書きしない。** 解像度を変換できる DirectShow のデバイス（Web カメラ、OBS の仮想カメラ）で、選んだ解像度が効かなくなるため。fps の扱いは変えない
 - **初回（設定ファイルが無い）は設定の解像度を未指定にして開く。** 既定の 1280x720 はデバイスに合わせて選んだ値ではないため。ワーカーの `resolve_default_devices` が映像デバイスの名前を埋めるときに解像度を外し、UI も `DefaultDevicesResolved` を受けて外す。開けたら実際の解像度を `VideoResolutionResolved` で返し、UI が設定へ書き戻す（次の起動からはその解像度を指定して開く）。書き戻すのは、設定の解像度がまだ未指定で、名前・形式・fps・開き方がイベントの運ぶ接続対象と同じときだけ（`device::should_store_resolved_resolution`。届くまでに利用者が選び直した値を上書きしない）。Media Foundation の経路は未指定なら従来どおり 1280x720 を要求するので、開き方は変わらない
   - 書き戻すまでの間に UI が 2 秒ごとに送る設定（解像度なし）が遅れて届くと、そのまま比べれば差分ありで開き直してしまう。ワーカーは開いた相手と解像度以外が同じなら開いた解像度を引き継ぐ（`worker_commands::carry_resolved_resolution`）
 - 設定ダイアログでデバイスを切り替えたときの既定（`ui::video_mode::select_default_video_mode`）も、能力に添えたいまの解像度（`FormatCapability::current_resolution`、DirectShow だけが埋める）を前の解像度より優先する。前のデバイスの 1280x720 を引き継ぐと映らないため
@@ -185,15 +196,15 @@ eframe は **`update()` の中で要求された再描画しか予約しない�
 
 - **ここは上限であって下限ではない。** `overlay.rs` の OSD（消える時刻）、`flush_settings_if_due`（書き出す時刻）はそれぞれ自分で予約している。egui の `request_repaint_after` は同じフレームで要求された中の最短を採るので、互いに邪魔しない
 - 以前は `update_video_texture` が無条件に 16ms を予約しており、映像が来ていなくても 60fps で描き続けていた（Issue #98）。**映像の有無にかかわらず短い間隔で予約する形へ戻さないこと**
-- **egui は要求された遅延から 1 フレームぶん（`predicted_dt`。eframe は設定しないので既定の 1/60 秒）を引いてから予約する**（`egui::Context` の `request_repaint_after`）。16ms は 0ms に、250ms は約 233ms になる。テスト `egui_shortens_a_requested_delay_by_one_predicted_frame` がこの前提を固定している
+- **egui 0.37 は要求された遅延をそのまま予約する**（`egui::Context` の `request_repaint_after`、egui #8595）。0.36 までは 1 フレームぶん（`predicted_dt`。eframe は設定しないので既定の 1/60 秒）を引いてから予約しており、16ms は 0ms に、250ms は約 233ms になっていた（下の「到着で起こす形にした理由」はこの前提での話）。テスト `egui_schedules_a_requested_delay_as_is` がいまの前提を固定している
 
 映像フレームの取り込みは `RepaintWaker`（`repaint.rs`）が駆動する。`egui::Context` を 1 つだけ持ち、フレームコールバックスレッド・ホットキーのリスナースレッド・デバイスワーカーなどが複製を握っている。**フレームが届いたら、コールバックが `FrameBuffer` へ置いた直後に UI スレッドを起こし、その `update()` の先頭近くでテクスチャへ取り込む**（#459）。
 
 - **起こすのは最小化していない間ずっと**（`should_wake_on_event`）。映像が流れている間も起こす。止めると 250ms ごとにしか描かれない
 - 描いている最中に届いた通知は、その `update()` と描画が終わってから次の `update()` を 1 回呼ぶ。そのフレームを取り込む前に届いた通知なら次は「新着なし」になるが、取り込むのは `update()` の先頭近くなのでまれ。数は `debug` の 30 秒ごとのログ（下の「表示までの遅れの計測」）に「新着なしの update()」として出る
-- `WAKE_DELAY`（1ms）を `Duration::ZERO` にしないこと。egui は遅延ゼロの要求で `outstanding` を立て、1 回の通知で `update()` を 2 回回す。1ms なら `outstanding` は立たず、`predicted_dt` を引かれて 0ms で予約される
+- `WAKE_DELAY`（1ns）を `Duration::ZERO` にしないこと。egui は遅延ゼロの要求で `outstanding` を立て、1 回の通知で `update()` を 2 回回す（テスト `wake_delay_does_not_make_egui_paint_twice`）。**ミリ秒単位の値にもしないこと。** 0.36 までは 1ms でも `predicted_dt` を引かれて 0ms で予約されたが、0.37 では 1ms がそのまま予約され、eframe のイベントループが 1ms 待ってから描く（winit は Windows で高分解能のタイマーで待つので、待つのはほぼ 1ms）。その分だけ到着から表示までが遅れるので、0.37 へ上げたときに 1ms → 1ns に変えた（#514）
 - フレームコールバックは毎フレーム `request_repaint_after` を 1 回呼ぶ。中身は egui の `Context` の短いロック、eframe のイベントループの窓口（`EventLoopProxy`）のロック、winit のユーザーイベント 1 つ（Windows では `PostMessage`）で、画素には触らない。**「フレームコールバックでロックもアロケーションもしない」の例外はこの 1 回だけ**（#459 までも映像が止まっている間の 1 枚目で同じものを呼んでいた）。egui の `Context` のロックは UI スレッドが書き込み（`end_pass` や tessellate）で握っている間は待たされうるので、その間はこのフレームを録画へ回す処理と次のフレームの変換も遅れる。コールバック側でこの呼び出しに掛かる時間は測っていない。**`RepaintWaker::wake` の中へ処理を足さないこと**
-- **最小化中は起こさない。** eframe 0.36 は最小化中のウィンドウにも `update()`（このアプリの `App::ui`）を回す。最小化したウィンドウには `RedrawRequested` が届かないので、`eframe::native::run` が期限の来たウィンドウを `is_invisible_or_minimized` で拾い、`run_ui_and_paint` を直接呼ぶ。ただし間隔は 100ms（`INVISIBLE_WINDOW_REPAINT_INTERVAL`）より詰めず、他スレッドからの再描画要求も同じ下限へ丸める。画面には何も見えないので、起こしても見えない `update()` が最大で毎秒 10 回増えるだけになる。そのため最小化中は `should_wake_on_event` が偽を返し、`next_repaint_delay` は 1 秒を予約する（`src/repaint.rs`。最小化の判定は `src/app/mod.rs` の `viewport.minimized`）。**`update()` は止まらないが 1 秒ごとにしか来ない**ので、そこで動く処理（OSD の消滅、設定の遅延書き出しなど）は最大 1 秒遅れる。接続の再試行と切断の監視はデバイスワーカースレッドへ移したので影響を受けない（#133）。ホットキーのアクションも、画面が要らないもの（デバイス再接続・音量・ミュート）はリスナースレッドからワーカーへ流して実行する。画面が要るもの（フルスクリーン切替など）だけが復帰まで持ち越される（`docs/design/hotkeys.md` の「最小化中の扱い」）。最小化中に閉じる要求で終了しなかった問題（#420）は再描画とは別の原因で、`docs/design/window.md` に書いてある
+- **最小化中は起こさない。** eframe 0.36 / 0.37 は最小化中のウィンドウにも `update()`（このアプリの `App::ui`）を回す。最小化したウィンドウには `RedrawRequested` が届かないので、`eframe::native::run` が期限の来たウィンドウを `is_invisible_or_minimized` で拾い、`run_ui_and_paint` を直接呼ぶ。ただし間隔は 100ms（`INVISIBLE_WINDOW_REPAINT_INTERVAL`）より詰めず、他スレッドからの再描画要求も同じ下限へ丸める。画面には何も見えないので、起こしても見えない `update()` が最大で毎秒 10 回増えるだけになる。そのため最小化中は `should_wake_on_event` が偽を返し、`next_repaint_delay` は 1 秒を予約する（`src/repaint.rs`。最小化の判定は `src/app/mod.rs` の `viewport.minimized`）。**`update()` は止まらないが 1 秒ごとにしか来ない**ので、そこで動く処理（OSD の消滅、設定の遅延書き出しなど）は最大 1 秒遅れる。接続の再試行と切断の監視はデバイスワーカースレッドへ移したので影響を受けない（#133）。ホットキーのアクションも、画面が要らないもの（デバイス再接続・音量・ミュート）はリスナースレッドからワーカーへ流して実行する。画面が要るもの（フルスクリーン切替など）だけが復帰まで持ち越される（`docs/design/hotkeys.md` の「最小化中の扱い」）。最小化中に閉じる要求で終了しなかった問題（#420）は再描画とは別の原因で、`docs/design/window.md` に書いてある
 - 最小化から戻ったとき（`set_enabled` が偽から真へ変わったとき）は、その場で 1 回再描画を予約する。止めている間に届いたフレームの通知は捨てられているため
 - `Context` と結びつくのは最初の `update()`（`RepaintWaker::bind`）。**`RepaintWaker` は `VideoCapture::new` の引数で渡す。** フレームコールバックは `start_capture` の時点の複製を持つので、開いたあとに差し替える手段は用意していない
 - 渡し忘れても映像は止まらないが、250ms ごとにしか描かれない。既定の `RepaintWaker` は何もしない
@@ -202,7 +213,7 @@ eframe は **`update()` の中で要求された再描画しか予約しない�
 
 #459 までは、映像が流れている間（最後のフレームから 200ms 以内）は 16ms を予約し、`RepaintWaker` を止めていた。到着で起こす形を以前に試したとき、1080p60 で CPU が 66% → 85%（1 コアあたり）に増え、描いている最中に届いた通知が「新着なし」の `update()` をもう 1 回呼んでいたため（当時の形の詳細は残っていない）。
 
-ところが egui が `predicted_dt` を引くので、16ms の予約は実際には「描き終えたらすぐ次の `update()`」だった。`update()` の回る位相は描画（垂直同期で止まる swap）が決め、フレームの到着とは関係がない。届いたフレームは次の `update()` の始まりまで待たされ、描画が重い環境では取り込む前に次のフレームで上書きされていた。
+ところが egui（0.36 まで）が `predicted_dt` を引くので、16ms の予約は実際には「描き終えたらすぐ次の `update()`」だった。`update()` の回る位相は描画（垂直同期で止まる swap）が決め、フレームの到着とは関係がない。届いたフレームは次の `update()` の始まりまで待たされ、描画が重い環境では取り込む前に次のフレームで上書きされていた。
 
 フェイク 1080p60（VM、GPU なし、統計 OSD を表示。60 秒の計測を 16ms の予約で 7 回、到着で起こす形で 9 回）で比べた値。
 
@@ -218,7 +229,7 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 | 候補 | 採らなかった理由 |
 |---|---|
 | 16ms の予約を残し、描画中でないときだけ到着で起こす | 予約が実質ゼロなので `update()` は描画の位相で回り続け、到着で起こしても速くならない。予約を残す限り位相は変えられない |
-| ポーリングの位相を到着に合わせる（最後の到着からの経過で次の予約を決める） | 予約から `predicted_dt` が引かれ、swap が垂直同期で止まるので、狙った時刻に `update()` を始められない。到着の揺れ（数 ms）にも合わせきれず、外れると 1 フレーム待つ。到着で起こせば合わせる必要が無い |
+| ポーリングの位相を到着に合わせる（最後の到着からの経過で次の予約を決める） | 0.36 では予約から `predicted_dt` が引かれ、swap が垂直同期で止まるので、狙った時刻に `update()` を始められない。到着の揺れ（数 ms）にも合わせきれず、外れると 1 フレーム待つ。到着で起こせば合わせる必要が無い |
 | 取り込んだあと、次の到着の見込み時刻までに描き終わるかで待ち方を変える | 描画の所要時間（swap の待ちを含む）は eframe の外から取れない。見込みを外したときの損（1 フレーム待つ）が大きいわりに、到着で起こす形より速くなる場面が無い |
 | 描いている最中の通知を捨てる（UI が読む前の通知は起こさない旗を持つ） | 新着なしの `update()` は 30 秒に 0〜5 回で、旗の読み書きをフレームコールバックと UI スレッドに足すほどの差が無い |
 
@@ -230,7 +241,12 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 - **終点は UI スレッドがテクスチャを更新した直後**（`update_video_texture`）。GPU が画面へ出した時刻（present）は eframe から取れないので含まない。そのため OSD の文言にも「到着→テクスチャ更新」と書いてある
 - 到着時刻は `FrameBuffer` が既に持っている（フレーム間隔の計測に使う `last_frame_instant`）。`VideoFrames::newer_than` が世代番号と**同じロックの中で**返すので、取り込んだフレームと時刻が食い違わない。**フレームコールバックの側には何も足していない**（ロックもアロケーションも増えない）
 - 集計（`video/display_latency.rs` の `DisplayLatency`）は UI スレッドだけが持つ `CaptureCardViewer` のフィールド。直近 1 秒の平均と最大を統計 OSD と「接続状態」タブの映像の欄に出し、30 秒ごとの平均・最大・枚数を `debug` でログへ出す（音声の観測値のログと同じ間隔）。ログには、取り込む前に次のフレームで上書きされた枚数と、新着が無いまま回った `update()` の回数も並べる（再描画の間隔の判断を確かめるため、#459）。**最小化を挟んだ窓ではどちらも大きく出る。** 最小化中も 1 秒ごとの `update()` が数えられ、取り込むたびに 1 秒ぶんの世代が飛ぶため。比べるときは最小化しない 30 秒を使う。取り込みが止まって 1 秒経てば「-」に戻り、止まる前の値を出し続けない
+- **画面へ出した速さ**（`DisplayLatency::recent_rate`、#526）も同じ直近 1 秒の窓から数え、統計 OSD の FPS の行の後ろに「表示 N 枚/秒」として並べる。FPS（フレーム間隔から出す）はボードから届いた速さなので、届く速さが保たれたまま画面の側だけが落ちても（#501）OSD では見分けられなかった。行を増やさないよう FPS の行へ並べた。窓の端（ちょうど 1 秒前）は含めない（含めると 60fps で 61 と出る）。**数え始めてから 1 秒は「-」にする。** 起動して最初に取り込んだときと、最小化から戻って最初に取り込んだとき（`note_minimized` が数え直させる）、30 秒以上止まったあと最初に取り込んだとき（再接続・デバイスの切り替え。ログの窓を張り直すのと同じ判定）に数え始める。窓が埋まる前の枚数や、最小化中の 1 秒に 1 枚の取り込みを混ぜると実際より低く出るため。取り込みが止まれば 0 へ下がる。「接続状態」タブには出さない
 - 測れるのは取り込んだフレームだけ。UI スレッドが追いつかずに上書きされたフレーム（世代が飛んだもの）は遅れの数に入らない（上書きされた枚数だけをログに出す）。コマ落ちの有無はフレーム間隔の行で見る
+- **同じ数の 5 分ぶんを INFO で出す**（`DisplayLatency::take_summary`、#501）。30 秒ごとのログは `debug` なので、利用者の手元のログ（既定は INFO）には何も残らず、長時間動かしたあとの「遅くなった」を後から追えなかった。5 分の要約には、取り込んだ枚数と速さ（枚/秒）、上書きされた枚数、新着なしの `update()`、遅れの平均と最大、**描画の CPU 時間**（eframe の `cpu_usage`、`update()`・テッセレーション・描画のコールバックを含み swap / present の待ちを含まない）の平均と最大、そのときフルスクリーンかウィンドウかを並べる。フルスクリーンの出入りも INFO で残す（`toggle_fullscreen`）。読み方は下の「長時間動かしたときの劣化（#501）」
+  - **窓はフルスクリーンの出入りで区切る**（`DisplayLatency::cut_summary`）。切り替えの時点までの分を「フルスクリーンの切り替えで区切った」として先に出し、そこから新しいモードの窓を始める。切り替えをまたいだ窓は前後が混ざり、入り直しの前後を比べられないため
+  - 窓は 1 枚目を取り込んだときに始まる。それより前の新着なしの `update()` と描画の CPU 時間は数えない（起動から映像が届くまでの分を最初の窓に混ぜない）
+  - **最小化を挟んだ窓は、数えたまま印を付ける**（「最小化を挟んだので…比べられない」）。最小化中は `update()` が 1 秒ごとにしか回らず、取り込むたびに約 1 秒ぶんの世代が飛ぶので、枚/秒・上書き・新着なしの `update()` が大きく外れる。最小化中だけ数えないようにしても、窓の長さ（枚/秒の分母）に最小化の時間が入るので、印を付けて読む側が外すほうを選んだ
 
 ## 取り込み側の遅れの計測（#476）
 
@@ -276,22 +292,22 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 - glow の present は、OpenGL のフレームを GDI 経由で DWM が合成する一番遠回りの経路（Composed: Copy with GPU GDI）だった。wgpu の DX12 はフリップモデルの swapchain（`DXGI_SWAP_EFFECT_FLIP_DISCARD`、HWND から作る）で、フルスクリーンでは DWM を飛ばして直接スキャンアウトする独立フリップになった
 - **平均で約 2ms、ばらつきの裾（95%・最大）で 4〜8ms 縮む。** ユーザー判断で採用した
 - 2026-10-04 の撮影の比較（スマートフォンの 240fps、パススルーとの差）では wgpu 約 31ms、glow 約 32ms で、差は読み取りの誤差（±4ms）に埋もれていた。平均の 2ms はこの測り方では見えない（`docs/LATENCY.md` の「描画バックエンド glow / wgpu の撮り比べ」）
-- この表の wgpu は PR #465 のブランチ（`desired_maximum_frame_latency` を 1 にしていた版）の exe。#492 の exe で測り直すのはユーザー（`docs/LATENCY.md` の「present の計測（PresentMon）」）
+- この表の wgpu は PR #465 のブランチ（`desired_maximum_frame_latency` を 1 にしていた版）の exe。#492 以降の exe（Mailbox）は 2026-10-25 に親機で測り、独立フリップの `MsUntilDisplayed` が平均約 16.4ms だった。ただし撮影では Fifo より約 24ms 速く、`MsUntilDisplayed` は present mode をまたいで比べられない（`docs/LATENCY.md` の「present mode の撮り比べ」）
 - 費用: exe が約 10.6MB → 約 14.3MB。描画バックエンドが 2 本になり、YUY2 → RGB の GPU 変換（#456）も GL と wgpu の 2 つを持つ（上の「YUY2 → RGB を GPU で変換する」）
 
 ### present mode と溜めるフレーム数
 
-eframe 0.36 の `WgpuConfiguration` の範囲（`SurfaceConfig`）で指定できた。
+eframe 0.36 の `WgpuConfiguration` の範囲（`SurfaceConfig`）で指定できた。0.37 でも同じ形で指定している。
 
 | 設定 | 値 | 理由 |
 |---|---|---|
 | バックエンド | DX12 だけ（`wgpu` のフィーチャも `dx12` と `wgsl` だけ） | Vulkan / GLES は入れない。present mode を確実に選べるのが DX12 だけのため（下） |
-| present mode | **Mailbox** | 待たずに渡し、次の垂直同期で最新の 1 枚だけを出す。ティアリングは起きない。Fifo は垂直同期まで待たされ、待っている間に届いたフレームの取り込みが遅れる |
+| present mode | **Mailbox** | 待たずに渡し、次の垂直同期で最新の 1 枚だけを出す。ティアリングは起きない。Fifo は垂直同期まで待たされ、待っている間に届いたフレームの取り込みが遅れる。2026-10-25 の撮影で、同じ exe の Fifo（約 48.1ms）より約 24ms 速く（約 24.5ms）、Fifo は表示が不規則な間隔で進んだ（`docs/LATENCY.md` の「present mode の撮り比べ」） |
 | 溜めるフレーム数（`desired_maximum_frame_latency`） | 1（最小） | DX12 では `SetMaximumFrameLatency(1)` と、swapchain のバッファ 2 枚。wgpu の既定は 2 |
 | シェーダーのコンパイラ | FXC | Windows に入っている `d3dcompiler_47.dll`。既定の Auto は PATH 上の `dxcompiler.dll` を拾いうるので固定する |
 
 - **Immediate（垂直同期を切る）は使わない。** ティアリングによる画質の低下が大きいので、ユーザーが却下した（#456 のコメント）
-- **Mailbox が使えないときに Fifo へ倒す形にはできなかった。** eframe 0.36 は present mode を起動前の `WgpuConfiguration` で決め、起動後に変える口（`Frame::set_wgpu_surface_config`）は `Frame` が持つ `RenderState` の複製を書き換えるだけで描画側へ届かない。wgpu は対応していない present mode を指定すると落ちる（Fifo への自動の切り替えは `AutoVsync` / `AutoNoVsync` にしか無い）。そこで **Mailbox を必ず出せる DX12 だけで wgpu を使い**、出せないときは glow へ倒す。wgpu-hal の DX12 は Mailbox と Fifo を常に対応一覧に載せる。アダプターを選ぶとき（`native_adapter_selector`）にもウィンドウの surface が Mailbox を出せるかを確かめ、出せないアダプターは選ばない
+- **Mailbox が使えないときに Fifo へ倒す形にはできなかった。** eframe 0.36 は present mode を起動前の `WgpuConfiguration` で決め、起動後に変える口（`Frame::set_wgpu_surface_config`）は `Frame` が持つ `RenderState` の複製を書き換えるだけで描画側へ届かなかった。0.37 で描画側へ届くようになった（eframe #8442。毎フレームの終わりに `Frame` の値を描画側へ渡し、値が変わったときだけ surface を構成し直す。`Frame` の値は起動時の `WgpuConfiguration` から始まるので、起動時の指定はそのまま効く）が、このアプリは起動後に変えないので形は変えていない（#514）。wgpu は対応していない present mode を指定すると落ちる（Fifo への自動の切り替えは `AutoVsync` / `AutoNoVsync` にしか無い）。そこで **Mailbox を必ず出せる DX12 だけで wgpu を使い**、出せないときは glow へ倒す。wgpu-hal の DX12 は Mailbox と Fifo を常に対応一覧に載せる。アダプターを選ぶとき（`native_adapter_selector`）にもウィンドウの surface が Mailbox を出せるかを確かめ、出せないアダプターは選ばない
 - **Mailbox は垂直同期で待たないので、描画の回数を垂直同期が抑えない。** 映像の取り込みは到着で起こす形（上の「再描画をいつ要求するか」）なので、普段は到着の回数（60fps なら毎秒 60 回）しか描かない。ただし egui が描き続けを要求する間（`ui.spinner()` を出している間、アニメーションの間）は、GPU が描ける限りの回数で回る。いまスピナーを出すのは、対応設定の取得中と更新の確認・適用中だけ
 
 ### glow を残す理由と、どちらで描くかの決め方
@@ -303,9 +319,10 @@ eframe 0.36 の `WgpuConfiguration` の範囲（`SurfaceConfig`）で指定で�
 | `CAPTURECARD_VIEWER_RENDERER=glow` | glow | INFO |
 
 - **glow は撮り比べのために残す。** 同じ exe で glow と wgpu を切り替えて測る（`docs/LATENCY.md`）。設定ファイルには入れない
+- **present mode と溜めるフレーム数も、撮り比べのために環境変数で替えられる**（#476）。`CAPTURECARD_VIEWER_PRESENT_MODE`（`mailbox` / `fifo`）と `CAPTURECARD_VIEWER_FRAME_LATENCY`（`1` / `2`）。2 つは別々に判定し、未指定・空・解釈できない値（`immediate` など。Immediate / AutoNoVsync は受け付けない）の項目だけが上の表の既定（present mode は Mailbox、溜めるフレーム数は 1）になる。もう一方は指定どおりに効く（例: `fifo` と `3` なら Fifo、1）。解釈できない値は WARN、既定から変えたときも WARN を出す。wgpu で描くときだけ効き、アダプターの選び方の「出せるか」も選んだ present mode で確かめる。設定ファイルにも UI にも出さない
 - **GPU の DX12 アダプターが無いときの逃げ道でもある。** 既定では WARP（Microsoft Basic Render Driver。画素を CPU で塗る）を選ばない。GPU の無い VM でも、VMware の OpenGL ドライバーなら glow は軽く動くため（下の表）
-- **どちらで描くかは `run_native` の前に決める。** winit のイベントループは 1 プロセスに 1 回しか作れないので、wgpu で起動に失敗してから glow で開き直すことはできない。起動の前に DX12 のインスタンスを作ってアダプターを列挙し、優先順位（外付け → 内蔵 → 仮想 → その他、WARP は明示したときだけ最後）の順にデバイスを作ってみて、最初に作れたアダプターを使う（`probe_dx12`、手元の VM で 60〜150ms）。eframe がアダプターを選ぶときもそのアダプターを優先する（`native_adapter_selector`）。それでも描画の初期化に失敗したらウィンドウは出ずに終わり、ログに ERROR が残る。そのときは `CAPTURECARD_VIEWER_RENDERER=glow` で起動できる
-- どちらで描いているかは統計 OSD の「描画」の行（「描画 wgpu Dx12 Mailbox / <アダプター名>」「描画 glow (OpenGL)」。アンダーランの行の次）とログで分かる
+- **どちらで描くかは `run_native` の前に決める。** winit のイベントループは 1 プロセスに 1 回しか作れないので、wgpu で起動に失敗してから glow で開き直すことはできない。起動の前に DX12 のインスタンスを作ってアダプターを列挙し、優先順位（外付け → 内蔵 → 仮想 → その他、WARP は明示したときだけ最後）の順にデバイスを作ってみて、最初に作れたアダプターを使う（`probe_dx12`、手元の VM で 60〜150ms）。eframe がアダプターを選ぶときもそのアダプターを優先する（`native_adapter_selector`）。**確認と eframe のアダプターは DXGI の LUID で突き合わせる**（#512）。PCI のベンダー ID とデバイス ID だけだと、同じ型の GPU の 2 枚挿しで 2 枚が同じ値になり、確認でデバイスを作れなかった 1 枚目を eframe が選びうるため。wgpu 30 の `AdapterInfo` に LUID は無く、`device_pci_bus_id` も DX12 では (ベンダー, デバイス) の一致する最初の表示アダプターの値なので見分けに使えない。wgpu-hal の DX12 のアダプター（`Adapter::as_hal`）から DXGI のアダプターを借りて `GetDesc1` で読む。LUID は再起動かドライバーの入れ直しまで変わらず、確認と eframe は同じプロセスで続けて列挙するので食い違わない。選んだアダプターの LUID と、確認と同じものかはログ（INFO「wgpu のアダプター: …」）に出る。**eframe / wgpu を上げるとき（eframe 0.37、#514 など）は `Adapter::as_hal` の形（戻り値・型引数の `hal::api::Dx12`）と wgpu-hal の `raw_adapter` が変わっていないかを確かめ、`AdapterInfo` に LUID が入っていればそちらへ移す。** API の形が変わればビルドで気づくが、`as_hal` が `None` を返すようになると LUID は黙って読めなくなり、見分け方が (ベンダー, デバイス) に戻る。上げたあとはログの LUID が「不明」になっていないことも確かめる（eframe 0.37 では wgpu が 30 のままで形は変わらず、WARP の LUID が読めた。2026-10-22、#514）。それでも描画の初期化に失敗したらウィンドウは出ずに終わり、ログに ERROR が残る。そのときは `CAPTURECARD_VIEWER_RENDERER=glow` で起動できる
+- どちらで描いているかは統計 OSD の「描画」の行（「描画 wgpu Dx12 Mailbox latency 1 / <アダプター名>」。`latency` の後ろは溜めるフレーム数。「描画 glow (OpenGL)」。アンダーランの行の次）とログで分かる
 
 ### GPU の無い VM での成立条件
 
@@ -327,6 +344,43 @@ DWM が合成を飛ばしてフリップモデルの swapchain を直接スキ�
 
 効いているかは PresentMon の `PresentMode` の列で見られる（`Hardware: Independent Flip` / `Composed: Flip`）。測り方は `docs/LATENCY.md` の「present の計測（PresentMon）」。
 
+### 長時間動かしたときの劣化（#501）
+
+**原因は特定できていない。** 報告は「長時間起動したあと fps の低下か遅延の増加のように見え、フルスクリーン → 通常 → フルスクリーンで直った」（2026-10-21、メイン PC、wgpu の DX12）。そのときのログは無く（メイン PC のログはこの開発用の VM に無い。あっても 30 秒ごとの観測値は `debug` で、既定の INFO では残らない）、次に起きたときに切り分けられるよう、表示の観測値の 5 分の要約とフルスクリーンの出入りを INFO で残すようにした（上の「表示までの遅れの計測」）。
+
+**フルスクリーンの切り替えで作り直されるのは、アプリの外（swapchain と present の経路）だけ。** コードで確かめたこと。
+
+| 層 | 切り替えで変わるもの |
+|---|---|
+| アプリ | `toggle_fullscreen` は `ViewportCommand::Fullscreen` を送り、`is_fullscreen` と OSD を変えるだけ。映像のテクスチャ（大きさは映像で決まる）、GPU 変換の資源（映像の大きさごと、`gpu_yuy2_wgpu.rs` の `sized`）、`DisplayLatency`、`RepaintWaker`、`SlowPaintWatch`、`FrameBuffer` の世代番号はどれも作り直さない。描画の違いは余白（2px / 0）とドラッグの扱いだけ |
+| eframe / egui-wgpu | ウィンドウの大きさが変わるので `Painter::on_window_resized` が surface を構成し直す。DX12 では `ResizeBuffers` で swapchain のバッファを作り直し、`SetMaximumFrameLatency` と待ちのハンドル（frame latency waitable object）を取り直す。present mode（Mailbox）と溜めるフレーム数（1）は起動時の設定のまま（eframe 0.36 でも `RenderState::surface_config` は起動時の `WgpuConfiguration` から作られるので、起動時の指定は効いている。0.36 で効かなかったのは起動後に変える `Frame::set_wgpu_surface_config` のほうで、0.37 で直った） |
+| OS | DWM が独立フリップに載せるかを決め直す（上の「フルスクリーンで独立フリップが効く条件」） |
+
+**VM のフェイクでは劣化は再現しなかった**（2026-10-21〜22、この開発用の VM、glow、フェイク 1080p60 YUY2、GPU 変換、フルスクリーン、統計 OSD を表示、`CAPTURECARD_VIEWER_LOG=debug`）。
+
+値はどれも 30 秒ごとの `debug` のログ（その区間の各行の最小〜最大）。メモリはタスクマネージャーと同じ作業セットを 5 分ごとに読んだもの。
+
+| 区間 | 30 秒に取り込んだ枚数 | 30 秒の上書き | 到着→テクスチャ更新の平均 | メモリ（作業セット） |
+|---|---|---|---|---|
+| 開始直後（00:08〜00:18） | 1754〜1801 枚 | 0〜33 枚 | 0.86〜1.06ms | 170.4〜170.7MB |
+| 約 1 時間後（00:43〜00:58） | 1786〜1801 枚 | 0〜14 枚 | 0.87〜1.55ms | 170.7MB |
+| VM の一時停止（6.3 時間）から戻ったあと（07:24〜07:34） | 1791〜1801 枚 | 0〜9 枚 | 0.92〜1.36ms | 178.9MB |
+| フルスクリーンを出て入り直したあと（07:35〜07:41） | 1742〜1801 枚 | 0〜52 枚 | 0.88〜1.28ms | 191.1MB |
+
+- 同じ区間の 5 分の要約は、開始直後が 59.8〜60.0 枚/秒、約 1 時間後が 59.7〜60.0 枚/秒
+- メモリが増えた 2 回は、映像を開き直した直後とウィンドウの大きさが変わった直後。それが原因と思われるが確かめていない。どちらもその後は増えていない
+
+- 時間とともに悪くなる値は無く、フルスクリーンの入り直しの前後でも差はばらつきの中だった。新着なしの `update()` も 5 分に 0〜18 回のまま増えていかない（再描画の予約が積み上がっていない）
+- 一時停止の間は映像が途絶えたとして切断扱いになり（「映像フレームが 22815921 ms 途絶えた」）、戻ってすぐ開き直して元の値に戻った
+- 同じ VM で別の描画の重いプロセス（WARP で描くもう 1 つのアプリ）を並べて動かすと、その間の 5 分の要約は 49.6 枚/秒・上書き 2033 枚に落ち、止めると戻った。**表示の側が外から遅くされたときに、5 分の要約に出る**ことはこれで確かめた
+- **この VM の描画は glow で、メイン PC の wgpu（DX12、独立フリップ）とは present の経路が違う。** wgpu の経路はこの VM では WARP でしか動かず（1080p は描けない）、PresentMon は管理者権限が要るので使っていない。メイン PC の経路での再現は確かめていない
+
+確かめていない候補（次に実機で起きたときに見るもの）。
+
+- **独立フリップから合成（Composed: Flip）へ落ちたまま戻らない。** 通知や他のアプリの OSD が重なると合成へ戻る。フルスクリーンに入り直せば条件を判定し直す。PresentMon の `PresentMode` で分かる
+- **wgpu-hal 30 の DX12 は、待ちのハンドルの待ちが 1 秒で切れても、そのまま描いて present する**（`Surface::acquire_texture` が `SwapChain::wait` の `Ok(false)` を捨てる。待つ上限は wgpu-core の `FRAME_TIMEOUT_MS`）。画面の消灯やロックなどで present が 1 秒以上掃けない間にこれが起きると、溜めるフレーム数 1 の約束より多く積まれる。それが `ResizeBuffers` まで残るのか、遅れとして見えるのかは確かめていない
+- どちらでも、アプリの中の値（5 分の要約）は変わらないか、「枚/秒」が下がって「上書き」が増え、「描画の CPU 時間」は変わらない形になる見込み。アプリの中の値が時間とともに悪くなっていれば、アプリの側を疑う
+
 ## 映像の上に重ねる表示の層
 
 映像の上に常設で出す表示（統計 OSD・フェイクデバイスの帯・録画中の印）は、**`egui::Area` ではなく映像と同じ背景の層（`LayerId::background()`）へ、映像のあとから描く**（`src/app/video_overlay.rs` の `show_video_overlay`、#284）。
@@ -345,7 +399,7 @@ DWM が合成を飛ばしてフリップモデルの swapchain を直接スキ�
 - **一覧に出す形式と要求する形式は 1 つの表で対応させる**（`video/mf_format.rs` の `MF_FORMATS`）。能力の取得（`capabilities.rs`）と開くとき（`capture.rs`）が同じ表を引く。並びは YUY2・NV12・MJPEG・RGB24（係数表の効く形式が先）
 - **能力の一覧は、一覧に出す形式のどれかで仮に開いてから読む**（`mf_format::capabilities_probe`、#442）。nokhwa 0.10 には開かずに一覧を読む手段が無い（`compatible_list_by_resolution` / `compatible_camera_formats` は `Camera` のメソッドで、`Camera::new` の中で `fulfill` → `set_format` まで済ませる。開かずに読める `MediaFoundationDevice` は nokhwa-bindings-windows にあるが直接の依存にしていない）。そこで `RequestedFormatType::None` に `MF_FORMATS` の形式だけを受け付けさせて渡し、デバイスが並べた順で最初に当たる形式で開く。以前は 640x480 YUY2 30fps の `Closest` で開いていたので、YUY2 を出さないデバイスと 640x480 の無いデバイス（`Closest` は fps を要求した 640x480 で探す）では一覧を読む前に失敗していた
 - **RGB24 は nokhwa の `RAWBGR`。** nokhwa-bindings-windows 0.4.6 は `MFVideoFormat_RGB24` を `RAWBGR` に対応させる（`guid_to_frameformat`）。以前は能力の取得を `RAWRGB` で引いていたので、一覧が空の `Ok` になり RGB24 が選択肢に出なかった（`Err` ではないので既定値にも倒れない）
-- **能力の一覧には、デバイスから取れた形式だけを並べる**（`capabilities::assemble_capabilities`、#446）。`compatible_list_by_resolution` が `Err` を返した形式も 0 件の形式も外す。以前は `Err` の形式を決め打ちの組み合わせ（YUY2 / MJPEG / RGB24）で埋めていたので、デバイスが出していない形式が選択肢に出ていた。#442 で一覧に出す形式のどれかで仮に開けるようになり、取れた分だけで実態と合う。**どの形式も取れなかったときだけ**既定の組み合わせ（YUY2 / MJPEG）を `FormatCapability::assumed` を立てて返し、設定画面は「対応形式を取得できなかったので既定の一覧」の注意書きと「再取得」を出す（`ui::capability::show_video_capability_progress`）。デバイスを切り替えたときの既定（`select_default_video_mode`）は一覧の先頭を採るので、一覧に無い形式は選ばない。設定ファイルに一覧に無い形式が書かれていても、開くときは下のとおり要求して開けなければ YUY2 で開く
+- **能力の一覧には、デバイスから取れた形式だけを並べる**（`capabilities::assemble_capabilities`、#446）。`compatible_list_by_resolution` が `Err` を返した形式も 0 件の形式も外す。以前は `Err` の形式を決め打ちの組み合わせ（YUY2 / MJPEG / RGB24）で埋めていたので、デバイスが出していない形式が選択肢に出ていた。#442 で一覧に出す形式のどれかで仮に開けるようになり、取れた分だけで実態と合う。**どの形式も取れなかったときだけ**既定の組み合わせ（YUY2 / MJPEG）を `FormatCapability::assumed` を立てて返し、設定画面は「対応形式を取得できなかったので既定の一覧」の注意書きと「再取得」を出す（`ui::capability_view::show_video_capability_progress`）。デバイスを切り替えたときの既定（`select_default_video_mode`）は一覧の先頭を採るので、一覧に無い形式は選ばない。設定ファイルに一覧に無い形式が書かれていても、開くときは下のとおり要求して開けなければ YUY2 で開く
 - **要求した形式で開けなかったときだけ YUY2 で開き直す**（`mf_format::fallback_for`）。nokhwa は要求した形式がデバイスに無いと `Camera::new` で「Failed to fulfill requested format」を返す。`open_stream` の失敗も同じ扱い。YUY2 で失敗したときは形式ではなくデバイス側の問題なので開き直さない。開き直したことは `warn` と「接続状態」タブ（`ActiveVideo::format_fallback`）に出す。表に無い名前（DirectShow でだけ選べる I420 / YV12 が、Media Foundation のデバイスへ切り替えたあとに残っている場合）も YUY2 で開き、同じように出す
 - **フレームは形式ごとの受け口へ渡す**（`mf_format::sink_route`）。DirectShow の経路のために既にある受け口を使い、新しい変換は足していない。MJPEG を nokhwa のデコーダ（mozjpeg）に通さないのは DirectShow と同じ理由（`docs/design/device-worker.md`、壊れたフレームで panic → `abort`）
 - **Media Foundation の RGB24 は上の行から並んだものとして読む**（`mf_format::MF_RGB24_BOTTOM_UP`）。向きは `MF_MT_DEFAULT_STRIDE` の符号で決まるが、nokhwa はこれを読まず外にも出さない。nokhwa 自身のデコーダも上からとして読む。**実機で確かめていない**ので、上下が逆さまに出たらここを変える（`docs/MANUAL-TEST.md`）。行の長さは DirectShow と同じく 4 バイト境界に揃えたものとして読み、足りなければ捨てる

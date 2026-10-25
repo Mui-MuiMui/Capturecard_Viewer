@@ -1,11 +1,11 @@
 //! 保存先のディスクの空き容量。
 //!
-//! 録画の開始時と録画中 5 秒ごとに確かめ、500MB を切ったら満杯になる前に止めて
+//! 録画の開始時と録画中 5 秒ごとに確かめ、500MiB を切ったら満杯になる前に止めて
 //! `Finalize` する（`docs/design/recording.md` の「失敗の扱い」）。満杯まで書くと
 //! `moov` を書けず、それまでの録画が再生できないファイルとして残るため。
 //!
 //! リプレイバッファを通す録画（③）は、始めてすぐリングの中身をまとめて書き出す。
-//! 開始時は「リングの大きさ + 500MB」の空きを求め、録画中は時間だけでなく書いた
+//! 開始時は「リングの大きさ + 500MiB」の空きを求め、録画中は時間だけでなく書いた
 //! バイト数でも見る（#313）。
 
 use std::path::Path;
@@ -21,7 +21,7 @@ pub(super) const MIN_FREE_BYTES: u64 = 500 * 1024 * 1024;
 pub(super) const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 録画中に空き容量を確かめる、書いたバイト数の区切り。リングの中身を書き出している間は
-/// 5 秒で数百 MB 書きうるので、時間の区切りより先にこちらで見る
+/// 5 秒で数百 MiB 書きうるので、時間の区切りより先にこちらで見る
 pub(super) const DISK_CHECK_BYTES: u64 = 64 * 1024 * 1024;
 
 /// `folder` のあるドライブで、このユーザーが使える空き容量。取れなければ `None`。
@@ -45,7 +45,7 @@ pub(super) fn is_short(free: Option<u64>, required: u64) -> bool {
 }
 
 /// リプレイバッファを通す録画を始めるのに要る空き容量。リングをすべて書き出しても
-/// 500MB 残る量。`ring_bytes` はリングが持っているデータの大きさ。
+/// 500MiB 残る量。`ring_bytes` はリングが持っているデータの大きさ。
 pub(super) fn replay_required_bytes(ring_bytes: u64) -> u64 {
     ring_bytes.saturating_add(MIN_FREE_BYTES)
 }
@@ -56,8 +56,8 @@ pub(super) fn disk_check_due(elapsed: Duration, written_since: u64) -> bool {
     elapsed >= DISK_CHECK_INTERVAL || written_since >= DISK_CHECK_BYTES
 }
 
-/// 表示用に MB へ直す（切り捨て）。
-pub(super) fn megabytes(bytes: u64) -> u64 {
+/// 表示用に MiB へ直す（切り捨て）。
+pub(super) fn mebibytes(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
 }
 
@@ -82,21 +82,21 @@ mod tests {
         assert!(!is_low(None));
     }
 
-    // #313: 開始時の判定がリングの大きさを見る。300 秒 × 50Mbps ≒ 1.9GB のリングで
-    // 空きが 800MB なら、500MB の境界は通っても始めない
+    // #313: 開始時の判定がリングの大きさを見る。300 秒 × 50Mbps ≒ 1.9GiB のリングで
+    // 空きが 800MiB なら、500MiB の境界は通っても始めない
     #[test]
     fn replay_start_needs_room_for_the_whole_ring() {
         let ring = 1_900 * 1024 * 1024;
         let free = Some(800 * 1024 * 1024);
-        assert!(!is_low(free), "500MB の境界だけなら通ってしまう");
+        assert!(!is_low(free), "500MiB の境界だけなら通ってしまう");
         let required = replay_required_bytes(ring);
         assert!(is_short(free, required));
-        // リングを書き出しても 500MB 残るなら始める
+        // リングを書き出しても 500MiB 残るなら始める
         assert!(!is_short(Some(required), required));
         assert!(is_short(Some(required - 1), required));
         // 取れないときは始める（ネットワークドライブなど）
         assert!(!is_short(None, required));
-        // 空のリングなら①②と同じ 500MB
+        // 空のリングなら①②と同じ 500MiB
         assert_eq!(replay_required_bytes(0), MIN_FREE_BYTES);
         assert_eq!(replay_required_bytes(u64::MAX), u64::MAX);
     }
@@ -114,9 +114,9 @@ mod tests {
     }
 
     #[test]
-    fn megabytes_rounds_down() {
-        assert_eq!(megabytes(MIN_FREE_BYTES), 500);
-        assert_eq!(megabytes(1024 * 1024 - 1), 0);
+    fn mebibytes_rounds_down() {
+        assert_eq!(mebibytes(MIN_FREE_BYTES), 500);
+        assert_eq!(mebibytes(1024 * 1024 - 1), 0);
     }
 
     #[test]

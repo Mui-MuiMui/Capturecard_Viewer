@@ -317,7 +317,7 @@ impl CaptureCardViewer {
         // 設定ダイアログより下に描く（#284）。理由は `show_video_overlay` にある
         show_video_overlay(
             ctx,
-            egui::Id::new("recording_indicator"),
+            egui::Id::unique("recording_indicator"),
             ctx.content_rect().shrink(INDICATOR_MARGIN),
             egui::Align2::RIGHT_TOP,
             |ui| {

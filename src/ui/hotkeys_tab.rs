@@ -3,8 +3,9 @@
 //! アクションごとの割り当ての一覧と、重複の判定を置いてある。
 //! 入力ダイアログ本体は `hotkey_capture`（`docs/design/hotkeys.md`）。
 
-use crate::hotkey::{HotkeyAction, HotkeyAssignmentError};
+use crate::hotkey::{parse_hotkey, HotkeyAction, HotkeyAssignmentError};
 use crate::i18n::{self, Text};
+use crate::keyboard_hook::KeyChord;
 use crate::settings::AppSettings;
 use crate::status::ErrorSource;
 use eframe::egui;
@@ -142,7 +143,7 @@ fn show_hotkey_assignments(
 
         // 登録に失敗したものを、理由とともに出す。トーストは気付かせるための
         // もので流れて消えるため、どのアクションが失敗しているかはここで見る。
-        // 見出しは status.rs の定型文をそのまま使い、通知と表現を揃える
+        // 見出しは status/mod.rs の定型文をそのまま使い、通知と表現を揃える
         if !hotkey_errors.is_empty() {
             ui.add_space(5.0);
             // 失敗が複数あっても枠は 1 つにまとめる。1 行ごとに枠を重ねると、
@@ -167,16 +168,20 @@ fn show_hotkey_assignments(
 
 /// 同じキーが 2 つ以上のアクションに割り当てられているものを返す。
 ///
-/// 比較は表記のゆれを吸収する。`"Ctrl+S"` と `"ctrl + s"`、`"Shift+Ctrl+S"` は
-/// どれも同じキーの組み合わせになるため、文字列のまま比べると重複を見逃す。
+/// 比較は登録（`HotkeyManager`）と同じ `hotkey::parse_hotkey` の解釈で行う。
+/// `"Ctrl+S"` と `"ctrl + s"`、`"Shift+Ctrl+S"`、`"Control+S"` はどれも同じ
+/// `KeyChord` になるため、文字列のまま比べると重複を見逃す。
+///
+/// **解釈できない文字列は重複の判定に入れない。** 登録でも解釈の段で弾かれ、
+/// どのアクションとも重ならないため。理由は「適用」後の登録の失敗の一覧に出る。
 pub fn duplicate_hotkey_actions(
     hotkeys: &BTreeMap<HotkeyAction, String>,
 ) -> BTreeSet<HotkeyAction> {
-    let mut seen: HashMap<String, Vec<HotkeyAction>> = HashMap::new();
+    let mut seen: HashMap<KeyChord, Vec<HotkeyAction>> = HashMap::new();
     for (action, hotkey) in hotkeys {
-        seen.entry(normalize_hotkey(hotkey))
-            .or_default()
-            .push(*action);
+        if let Some(chord) = hotkey_chord(hotkey) {
+            seen.entry(chord).or_default().push(*action);
+        }
     }
 
     seen.into_values()
@@ -202,11 +207,21 @@ fn has_bare_navigation_key(hotkeys: &BTreeMap<HotkeyAction, String>) -> bool {
         .any(|normalized| NAVIGATION_KEYS.contains(&normalized.as_str()))
 }
 
+/// ホットキー文字列が表すキーの組み合わせ。解釈できなければ `None`。
+///
+/// 重複の判定（一覧の警告と入力ダイアログ）はこれで比べる。修飾キーの別名
+/// （`Control` = `Ctrl`、`Win` / `Windows` / `Super`）・大文字小文字・空白・順序を
+/// 登録と同じく揃えるため（#531）。
+pub(super) fn hotkey_chord(hotkey: &str) -> Option<KeyChord> {
+    parse_hotkey(hotkey).ok()
+}
+
 /// ホットキー文字列を、同じキーの組み合わせなら同じになる形へ正規化する。
 ///
-/// 大文字小文字と空白を落とし、`+` で分けた要素を並べ替える。
-/// `hotkey::parse_hotkey` が修飾キーの順序を問わないことに合わせてある。
-pub(super) fn normalize_hotkey(hotkey: &str) -> String {
+/// 大文字小文字と空白を落とし、`+` で分けた要素を並べ替える。修飾キーの別名は
+/// 揃えないので、使うのは修飾キーなしの移動系のキーの判定だけ。重複の判定は
+/// `hotkey_chord` で比べる。
+fn normalize_hotkey(hotkey: &str) -> String {
     let mut parts: Vec<String> = hotkey
         .split('+')
         .map(|part| part.trim().to_ascii_lowercase())
@@ -283,6 +298,39 @@ mod tests {
         ]);
 
         assert_eq!(duplicate_hotkey_actions(&assigned).len(), 2);
+    }
+
+    #[test]
+    fn duplicate_hotkey_actions_treats_modifier_aliases_as_the_same_key() {
+        // 手で書き換えた設定で別名を使っても、登録では同じキーになる（#531）
+        for (left, right) in [
+            ("Control+A", "Ctrl+A"),
+            ("Win+F5", "Super+F5"),
+            ("Windows+Shift+F5", "shift+win+f5"),
+        ] {
+            let assigned = hotkeys(&[
+                (HotkeyAction::Screenshot, left),
+                (HotkeyAction::VolumeUp, right),
+            ]);
+            assert_eq!(
+                duplicate_hotkey_actions(&assigned).len(),
+                2,
+                "{left} と {right}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_hotkey_actions_ignores_hotkeys_that_cannot_be_parsed() {
+        // 解釈できないものは登録でも弾かれ、どれとも重ならない。同じ文字列が
+        // 2 つあっても重複とは言わない
+        let assigned = hotkeys(&[
+            (HotkeyAction::Screenshot, "Ctrl+Foo"),
+            (HotkeyAction::VolumeUp, "Ctrl+Foo"),
+            (HotkeyAction::VolumeDown, "Ctrl+Shift"),
+            (HotkeyAction::ToggleMute, "ctrl+shift"),
+        ]);
+        assert!(duplicate_hotkey_actions(&assigned).is_empty());
     }
 
     #[test]

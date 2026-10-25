@@ -16,7 +16,7 @@
 //! | `draft.rs` | ドラフトの反映（`commit_draft`） |
 //! | `draft_import.rs` | 読み込みと初期化でドラフトを作る（`draft_from_imported` / `draft_from_defaults`） |
 //! | `preset.rs` | プリセットの保存・読み込み・削除（描画を含まない） |
-//! | `video_mode.rs` | デバイス切り替え時に選び直すビデオの既定値 |
+//! | `video_mode.rs` | デバイス切り替え時に選び直すビデオの既定値と、解像度・FPS のコンボに出す選択肢（`resolution_choices` / `fps_choices`） |
 //! | `device_tab.rs` | 「デバイス設定」タブ |
 //! | `screenshot_tab.rs` | 「スクリーンショット設定」タブ |
 //! | `recording_tab.rs` | 「録画」タブ |
@@ -30,7 +30,9 @@
 
 mod audio_input;
 mod capability;
+mod capability_view;
 mod device_tab;
+mod device_tab_audio;
 mod draft;
 mod draft_import;
 mod hotkey_capture;
@@ -290,13 +292,27 @@ fn status_badge(ui: &mut egui::Ui, text: &str, kind: NoticeKind) {
     });
 }
 
+/// 見出しを横に別の `Label` で置いたスライダーへ、見出しと同じ名前を付ける。
+///
+/// 名前の無い入力のウィジェットは読み上げで何の欄か分からない。egui_kittest 0.37 は
+/// そういうウィジェットがあるとテストを落とす（egui #8589）。コンボと入力欄は
+/// `labelled_by` で見出しへ結ぶが、**スライダーは名前そのものを入れる。** egui 0.37 の
+/// `Slider` は横の数値欄（`DragValue`）を本体の名前で呼ばせる（数値欄を本体へ
+/// `labelled_by` で結ぶ）ので、本体を `labelled_by` にすると本体の名前が空になり、
+/// 数値欄の名前も空になる。
+///
+/// 右クリックメニューの音量のスライダーも使う。
+pub(crate) fn name_slider(response: egui::Response, name: &str) -> egui::Response {
+    response.accessible_name(name)
+}
+
 /// 設定ダイアログのタブ。
 ///
 /// 並びはデバイス設定 / スクリーンショット設定 / 録画 / ホットキー / その他 / 接続状態。
 /// 「接続状態」を最後に置き、既定は「デバイス設定」のままにしてある。
 /// ダイアログを開く主な目的は設定の変更で、状態の確認は調べたいときだけ
 /// だからで、先頭に置くと毎回そこを通ることになる。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SettingsTab {
     #[default]
     Device,
@@ -388,7 +404,7 @@ pub fn show_settings_dialog(
     // Id は固定にする。タイトルから作ると、「適用」で言語を切り替えた直後に
     // 別のウィンドウとして扱われ、位置や大きさが初期値へ戻る（docs/design/i18n.md）
     egui::Window::new(Text::SettingsTitle.get())
-        .id(egui::Id::new("settings_dialog"))
+        .id(egui::Id::unique("settings_dialog"))
         .open(&mut window_open)
         .default_size([650.0, 500.0])
         .resizable(true)
@@ -453,8 +469,12 @@ pub fn show_settings_dialog(
             // ここでタブの中身を高さいっぱいに広げてしまうと、上のボタン列の
             // 予約が効いていても、タブによってはスクロール領域自体が必要
             // 以上に大きく残る。`auto_shrink` で中身が少ないタブでは
-            // 領域自体を縮める
+            // 領域自体を縮める。
+            // Id はタブごとに分ける。id_salt が無いと親の Id と "scroll_area" から
+            // 作られ、どのタブでも同じになる。スクロール位置がタブ間で共有され、
+            // 長いタブを下へ送ったあと別のタブへ移ると、先頭が隠れたまま開く（#531）
             egui::ScrollArea::vertical()
+                .id_salt(("settings_tab_scroll", selected_tab))
                 .auto_shrink([false, true])
                 .show(ui, |ui| match selected_tab {
                     SettingsTab::Device => show_device_settings_tab(
@@ -635,5 +655,80 @@ mod tests {
         ];
 
         assert_eq!(BTreeSet::from(symbols).len(), symbols.len());
+    }
+
+    #[test]
+    fn symbols_are_drawn_by_the_bundled_fonts() {
+        // 注意書きの「⚠」と右クリックメニューのサブメニューの「⏵」は、日本語のフォントに
+        // 無いことがあり、egui が同梱する記号のフォントに頼っている（src/platform.rs）。
+        // egui 0.37 でそのフォントが `monochrome_emoji_fonts` フィーチャに分かれた。
+        // フィーチャが外れて豆腐になったら、ここが字形の無い文字で panic する。
+        // 「●」は同梱のフォントに無く、日本語のフォントが描く（0.36 までと同じ）ので入れない
+        let ctx = egui::Context::default();
+        ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Panic);
+        let text = [
+            NoticeKind::Warning.symbol(),
+            NoticeKind::Error.symbol(),
+            "⏵",
+        ]
+        .concat();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.label(text.as_str());
+        })
+        .drop_without_applying_deltas();
+    }
+
+    // ---- ウィジェットのテスト（egui_kittest、#419） ----
+
+    #[test]
+    fn scroll_position_is_kept_per_tab() {
+        use crate::ui::testing::{dialog_harness, DialogFixture};
+        use egui_kittest::kittest::Queryable;
+
+        // 「録画」タブを下までスクロールしてから「デバイス設定」タブへ移る。
+        // ScrollArea の Id が同じだと、移った先も同じだけ下へずれて見出しが隠れる（#531）
+        let mut harness = dialog_harness(DialogFixture::new(
+            &AppSettings::default(),
+            SettingsTab::Recording,
+            VideoPinChoice::default(),
+            &[],
+        ));
+        harness.run();
+        // タブの見出し（ボタンと同じ文言の 2 つ目）の上端と、タブの並びの下端
+        let heading_top = |harness: &egui_kittest::Harness<'_, DialogFixture>, label: &str| {
+            let mut nodes = harness.get_all_by_label(label);
+            let tab = nodes
+                .next()
+                .unwrap_or_else(|| panic!("「{label}」のタブのボタンがあるはず"));
+            let heading = nodes
+                .next()
+                .unwrap_or_else(|| panic!("「{label}」のタブの見出しがあるはず"));
+            (heading.rect().top(), tab.rect().bottom())
+        };
+        for _ in 0..20 {
+            harness
+                .get_by_label(Text::RecordingTabHint.get())
+                .scroll_down();
+            harness.run();
+        }
+        let (recording_top, tab_bottom) = heading_top(&harness, Text::TabRecording.get());
+        assert!(
+            recording_top < tab_bottom,
+            "録画タブがスクロールされているはず（見出し {recording_top}、タブ {tab_bottom}）"
+        );
+
+        harness.state_mut().state.select_tab(SettingsTab::Device);
+        harness.run();
+        let (device_top, tab_bottom) = heading_top(&harness, Text::TabDevice.get());
+        assert!(
+            device_top >= tab_bottom,
+            "デバイス設定タブは先頭から見えるはず（見出し {device_top}、タブ {tab_bottom}）"
+        );
+
+        // 戻ると、録画タブのスクロール位置は残っている
+        harness.state_mut().state.select_tab(SettingsTab::Recording);
+        harness.run();
+        let (back_top, _) = heading_top(&harness, Text::TabRecording.get());
+        assert_eq!(back_top, recording_top);
     }
 }

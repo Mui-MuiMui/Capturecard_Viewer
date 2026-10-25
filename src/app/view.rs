@@ -4,13 +4,18 @@
 //! ここに並べてある。ウィンドウそのものの操作（装飾・リサイズ・
 //! フルスクリーン切替）は `super::window`、右クリックメニューは `super::menu`。
 
+mod area;
+
 use super::placeholder::{show_video_placeholder, video_placeholder_text};
 use super::video_overlay::show_video_overlay;
 use super::CaptureCardViewer;
 use crate::status::{self, ErrorSource};
-use crate::video::{GpuContext, GpuYuy2, PixelFormat, VideoFrame, GPU_CONVERT_ENV};
+use crate::video::{
+    DisplaySummaryLog, GpuContext, GpuYuy2, PixelFormat, VideoFrame, GPU_CONVERT_ENV,
+};
+use area::{context_menu_request, drag_move, video_rect};
 use eframe::egui;
-use log::{debug, warn};
+use log::{debug, info};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -23,36 +28,6 @@ use std::time::Instant;
 /// フォーカスがある」状態が続く（#238）。映像エリアにはキーボードで操作する
 /// ものが無いので、フォーカスを受ける理由も無い。
 pub(super) const VIDEO_AREA_SENSE: egui::Sense = egui::Sense::CLICK.union(egui::Sense::DRAG);
-
-// 映像の縦横比を保ったまま、表示領域に収まる大きさを求める。
-//
-// self を使わない純粋な計算なので、ユニットテストできるよう
-// impl の外へ出してある。
-//
-// 幅か高さが 0 以下の入力に対しては egui::Vec2::ZERO を返す。最小化や
-// ウィンドウの極端な縮小で available_size が潰れると 0 除算で縦横比が
-// inf / NaN になり、そのまま Rect へ渡すと描画が壊れるため。
-// 呼び出し側は ZERO を「描画するものがない」と解釈して描画を飛ばす。
-fn calculate_aspect_ratio_size(image_size: egui::Vec2, available_size: egui::Vec2) -> egui::Vec2 {
-    if image_size.x <= 0.0
-        || image_size.y <= 0.0
-        || available_size.x <= 0.0
-        || available_size.y <= 0.0
-    {
-        return egui::Vec2::ZERO;
-    }
-
-    let image_aspect = image_size.x / image_size.y;
-    let available_aspect = available_size.x / available_size.y;
-
-    if image_aspect > available_aspect {
-        // 画像が横長 - 横幅に合わせる
-        egui::Vec2::new(available_size.x, available_size.x / image_aspect)
-    } else {
-        // 画像が縦長 - 高さに合わせる
-        egui::Vec2::new(available_size.y * image_aspect, available_size.y)
-    }
-}
 
 /// テクスチャへ取り込めるフレームか。画素データの長さが形式どおり（RGB なら
 /// `幅 × 高さ × 3`、YUY2 なら `幅 × 高さ × 2`）ちょうどのときだけ真
@@ -100,6 +75,47 @@ const VIDEO_TEXTURE_OPTIONS: egui::TextureOptions = egui::TextureOptions {
     wrap_mode: egui::TextureWrapMode::ClampToEdge,
     mipmap_mode: None,
 };
+
+/// 表示の観測値の 5 分の要約（#501）をログへ出す。描画の CPU 時間は swap / present の
+/// 待ちを含まないので、上書きが増えたのにここが変わらなければ UI スレッドは CPU の外で
+/// 止まっている見込み（`docs/design/video-pipeline.md` の「表示までの遅れの計測」）。
+/// フルスクリーンの出入りで区切った窓（`window.rs` の `toggle_fullscreen`）もここから出す
+pub(super) fn log_display_summary(summary: &DisplaySummaryLog) {
+    let mode = if summary.fullscreen {
+        "フルスクリーン"
+    } else {
+        "ウィンドウ"
+    };
+    let cut = if summary.cut_by_mode_change {
+        "、フルスクリーンの切り替えで区切った"
+    } else {
+        ""
+    };
+    let minimized = if summary.minimized {
+        "。最小化を挟んだので、枚/秒・上書き・新着なしの update() は比べられない"
+    } else {
+        ""
+    };
+    let frame_time = summary.frame_time.map_or_else(
+        || "-".to_string(),
+        |t| format!("平均 {:.2}ms / 最大 {:.2}ms", t.average_ms, t.max_ms),
+    );
+    let s = summary.latency;
+    info!(
+        "表示の観測値（{:.0} 秒、{}{}）: 取り込み {} 枚（{:.1} 枚/秒）、取り込む前に上書き {} 枚、新着なしの update() {} 回、到着→テクスチャ更新 平均 {:.2}ms / 最大 {:.2}ms、描画の CPU 時間 {}{}",
+        summary.elapsed.as_secs_f32(),
+        mode,
+        cut,
+        s.samples,
+        summary.frames_per_second(),
+        summary.skipped_frames,
+        summary.idle_passes,
+        s.average_ms,
+        s.max_ms,
+        frame_time,
+        minimized
+    );
+}
 
 impl CaptureCardViewer {
     /// 新着フレームがあればテクスチャへ取り込む。取り込んだら `true`。
@@ -157,6 +173,11 @@ impl CaptureCardViewer {
                     "表示までの遅れ（到着→テクスチャ更新、30 秒）: 平均 {:.2}ms、最大 {:.2}ms、{} 枚（取り込む前に上書き {} 枚、新着なしの update() {} 回）",
                     s.average_ms, s.max_ms, s.samples, log.skipped_frames, log.idle_passes
                 );
+            }
+            // 同じ数の 5 分ぶんを INFO で出す（#501）。長時間動かしたときに表示の側が
+            // 時間とともに変わったかを、利用者の手元のログ（既定は INFO）から追うため
+            if let Some(summary) = self.display_latency.take_summary(now) {
+                log_display_summary(&summary);
             }
 
             return true;
@@ -237,6 +258,47 @@ impl CaptureCardViewer {
         );
     }
 
+    /// 映像を表示領域の中央へ置き、当たり判定を取って描く。表示領域が潰れている間は
+    /// 描画も当たり判定も行わず `None`（`video_rect`）。ウィンドウ表示とフルスクリーンで共通
+    fn show_video(
+        &self,
+        ui: &mut egui::Ui,
+        texture: &egui::TextureHandle,
+    ) -> Option<egui::Response> {
+        let rect = video_rect(
+            ui.available_size(),
+            ui.available_rect_before_wrap().center(),
+            texture.size_vec2(),
+            self.maintain_aspect_ratio,
+        )?;
+        let response = ui.allocate_rect(rect, VIDEO_AREA_SENSE);
+        self.paint_video(ui, texture, rect);
+        Some(response)
+    }
+
+    /// 映像エリア（映像が無いときはプレースホルダー）のドラッグでウィンドウを動かす
+    /// （`drag_move`）。設定のロックはドラッグ中で帯の外のときだけ取る。ウィンドウ表示だけで使う
+    fn handle_drag_move(
+        &self,
+        ctx: &egui::Context,
+        response: &egui::Response,
+        on_resize_edge: bool,
+    ) {
+        drag_move(ctx, response, on_resize_edge, || {
+            self.settings
+                .lock()
+                .ok()
+                .map(|settings| settings.ui.enable_drag_move)
+        });
+    }
+
+    /// 右クリックされたら、ポインターの位置に右クリックメニューを開く
+    fn handle_secondary_click_menu(&mut self, ctx: &egui::Context, response: &egui::Response) {
+        if let Some(pos) = context_menu_request(ctx, response) {
+            self.open_context_menu(ctx, pos);
+        }
+    }
+
     pub(super) fn show_windowed_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         // 映像が無いときの文言は描画に入る前に決める。
@@ -259,49 +321,18 @@ impl CaptureCardViewer {
                 let available_size = ui.available_size();
 
                 if let Some(texture) = &self.video_texture {
-                    let image_size = texture.size_vec2();
-                    let display_size = if self.maintain_aspect_ratio {
-                        calculate_aspect_ratio_size(image_size, available_size)
-                    } else {
-                        available_size
+                    let Some(response) = self.show_video(ui, texture) else {
+                        return;
                     };
 
-                    // 表示領域が潰れている間は描画も当たり判定も行わない。
-                    // 大きさ 0 や負の矩形を割り当てても映像は見えず、
-                    // ドラッグや右クリックの判定だけが残ると誤作動の元になる。
-                    if display_size.x <= 0.0 || display_size.y <= 0.0 {
-                        return;
-                    }
-
-                    let rect = egui::Rect::from_center_size(
-                        ui.available_rect_before_wrap().center(),
-                        display_size,
-                    );
-
-                    let response = ui.allocate_rect(rect, VIDEO_AREA_SENSE);
-                    self.paint_video(ui, texture, rect);
-
-                    // ウィンドウドラッグを処理（設定が有効な場合のみ）
-                    if response.dragged() && !on_resize_edge {
-                        if let Ok(settings) = self.settings.lock() {
-                            if settings.ui.enable_drag_move {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                            }
-                        } else {
-                            warn!("ウィンドウドラッグの判定で settings のロックを取得できない");
-                        }
-                    }
+                    self.handle_drag_move(ctx, &response, on_resize_edge);
 
                     // インタラクションを処理
                     if response.double_clicked() {
                         self.toggle_fullscreen(ctx, true);
                     }
 
-                    if response.secondary_clicked() {
-                        let pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
-                        self.open_context_menu(ctx, pos);
-                    }
-
+                    self.handle_secondary_click_menu(ctx, &response);
                     self.handle_middle_click_mute(&response);
 
                     // 音量調整のためのスクロールを処理
@@ -311,23 +342,9 @@ impl CaptureCardViewer {
                 } else {
                     let response = show_video_placeholder(ui, available_size, &placeholder);
 
-                    // 空エリアでのウィンドウドラッグを処理（設定が有効な場合のみ）
-                    if response.dragged() && !on_resize_edge {
-                        if let Ok(settings) = self.settings.lock() {
-                            if settings.ui.enable_drag_move {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                            }
-                        } else {
-                            warn!("ウィンドウドラッグの判定で settings のロックを取得できない");
-                        }
-                    }
-
-                    // 空エリアでの右クリックを処理
-                    if response.secondary_clicked() {
-                        let pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
-                        self.open_context_menu(ctx, pos);
-                    }
-
+                    // 空エリアでも映像と同じくドラッグ移動と右クリックメニューを受ける
+                    self.handle_drag_move(ctx, &response, on_resize_edge);
+                    self.handle_secondary_click_menu(ctx, &response);
                     self.handle_middle_click_mute(&response);
                 }
             });
@@ -348,27 +365,9 @@ impl CaptureCardViewer {
                 let available_size = ui.available_size();
 
                 if let Some(texture) = &self.video_texture {
-                    let image_size = texture.size_vec2();
-                    let display_size = if self.maintain_aspect_ratio {
-                        calculate_aspect_ratio_size(image_size, available_size)
-                    } else {
-                        available_size
-                    };
-
-                    // 表示領域が潰れている間は描画も当たり判定も行わない。
-                    // 大きさ 0 や負の矩形を割り当てても映像は見えず、
-                    // ドラッグや右クリックの判定だけが残ると誤作動の元になる。
-                    if display_size.x <= 0.0 || display_size.y <= 0.0 {
+                    let Some(response) = self.show_video(ui, texture) else {
                         return;
-                    }
-
-                    let rect = egui::Rect::from_center_size(
-                        ui.available_rect_before_wrap().center(),
-                        display_size,
-                    );
-
-                    let response = ui.allocate_rect(rect, VIDEO_AREA_SENSE);
-                    self.paint_video(ui, texture, rect);
+                    };
 
                     // フルスクリーンではドラッグ移動を完全に無効化
                     // （フルスクリーンでは画面の移動自体が意味をなさないため）
@@ -379,11 +378,7 @@ impl CaptureCardViewer {
                     }
 
                     // 右クリックでコンテキストメニュー
-                    if response.secondary_clicked() {
-                        let pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
-                        self.open_context_menu(ctx, pos);
-                    }
-
+                    self.handle_secondary_click_menu(ctx, &response);
                     self.handle_middle_click_mute(&response);
 
                     // マウススクロールでの音量調整（ウィンドウ版と同じ機能）
@@ -403,11 +398,7 @@ impl CaptureCardViewer {
                     }
 
                     // 右クリックでコンテキストメニュー
-                    if response.secondary_clicked() {
-                        let pos = ctx.input(|i| i.pointer.latest_pos().unwrap_or_default());
-                        self.open_context_menu(ctx, pos);
-                    }
-
+                    self.handle_secondary_click_menu(ctx, &response);
                     self.handle_middle_click_mute(&response);
                 }
             });
@@ -434,7 +425,7 @@ impl CaptureCardViewer {
         );
         show_video_overlay(
             ctx,
-            egui::Id::new("fake_devices_banner"),
+            egui::Id::unique("fake_devices_banner"),
             area,
             egui::Align2::CENTER_TOP,
             |ui| {
@@ -468,7 +459,6 @@ fn fake_devices_banner_top(stats_bottom: Option<f32>) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui::Vec2;
 
     fn frame(width: usize, height: usize, len: usize) -> VideoFrame {
         VideoFrame {
@@ -489,131 +479,6 @@ mod tests {
         // `ColorImage::from_rgb` は長さが違うと assert で落ちるので、どちらも描かない
         assert!(!is_drawable_frame(&frame(3, 2, 17)));
         assert!(!is_drawable_frame(&frame(3, 2, 19)));
-    }
-
-    // calculate_aspect_ratio_size のテストで使う値は、期待値が 2 進小数で
-    // 割り切れるように選んである。誤差を許容する比較にすると、桁落ちが
-    // 起きても気付けないため。
-    #[test]
-    fn calculate_aspect_ratio_size_wide_image_fits_to_width() {
-        // 2:1 の映像を正方形の領域へ。横幅いっぱいに広げて上下を余らせる
-        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(400.0, 400.0));
-
-        assert_eq!(size, Vec2::new(400.0, 200.0));
-    }
-
-    #[test]
-    fn calculate_aspect_ratio_size_tall_image_fits_to_height() {
-        // 1:2 の映像を正方形の領域へ。高さいっぱいに広げて左右を余らせる
-        let size = calculate_aspect_ratio_size(Vec2::new(800.0, 1600.0), Vec2::new(400.0, 400.0));
-
-        assert_eq!(size, Vec2::new(200.0, 400.0));
-    }
-
-    #[test]
-    fn calculate_aspect_ratio_size_same_aspect_fills_area() {
-        // 縦横比が一致するときは領域をそのまま埋める
-        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(400.0, 200.0));
-
-        assert_eq!(size, Vec2::new(400.0, 200.0));
-    }
-
-    #[test]
-    fn calculate_aspect_ratio_size_area_wider_than_image_fits_to_height() {
-        // 領域のほうが横長。高さに合わせ、横幅は余らせる
-        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(1000.0, 200.0));
-
-        assert_eq!(size, Vec2::new(400.0, 200.0));
-    }
-
-    #[test]
-    fn calculate_aspect_ratio_size_upscales_to_fill_area() {
-        // 映像より領域が大きいときは拡大する。縮小専用ではない
-        let size = calculate_aspect_ratio_size(Vec2::new(400.0, 200.0), Vec2::new(1600.0, 1600.0));
-
-        assert_eq!(size, Vec2::new(1600.0, 800.0));
-    }
-
-    #[test]
-    fn calculate_aspect_ratio_size_zero_height_area_returns_zero() {
-        // 最小化やウィンドウの極端な縮小で高さが 0 になる。
-        // available_size.x / available_size.y が inf になるケース
-        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(400.0, 0.0));
-
-        assert_eq!(size, Vec2::ZERO);
-    }
-
-    #[test]
-    fn calculate_aspect_ratio_size_zero_width_area_returns_zero() {
-        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(0.0, 400.0));
-
-        assert_eq!(size, Vec2::ZERO);
-    }
-
-    #[test]
-    fn calculate_aspect_ratio_size_zero_area_returns_zero() {
-        // 幅も高さも 0。0.0 / 0.0 が NaN になるケース
-        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::ZERO);
-
-        assert_eq!(size, Vec2::ZERO);
-    }
-
-    #[test]
-    fn calculate_aspect_ratio_size_negative_area_returns_zero() {
-        // egui のレイアウトは余白が足りないと負の available_size を返すことがある。
-        // 負の大きさの矩形を描画に渡さないよう、ここで潰す
-        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 800.0), Vec2::new(-10.0, 400.0));
-
-        assert_eq!(size, Vec2::ZERO);
-    }
-
-    #[test]
-    fn calculate_aspect_ratio_size_zero_height_image_returns_zero() {
-        // テクスチャ側が潰れている場合。image_size.x / image_size.y が inf になる
-        let size = calculate_aspect_ratio_size(Vec2::new(1600.0, 0.0), Vec2::new(400.0, 400.0));
-
-        assert_eq!(size, Vec2::ZERO);
-    }
-
-    #[test]
-    fn calculate_aspect_ratio_size_zero_image_returns_zero() {
-        // 0.0 / 0.0 で image_aspect が NaN になり、
-        // 掛け算の結果として NaN が呼び出し側へ漏れるケース
-        let size = calculate_aspect_ratio_size(Vec2::ZERO, Vec2::new(400.0, 400.0));
-
-        assert_eq!(size, Vec2::ZERO);
-    }
-
-    #[test]
-    fn calculate_aspect_ratio_size_degenerate_input_never_returns_nan_or_inf() {
-        // 描画へ渡る値が NaN / inf にならないことを、退化した入力の組で一括して確かめる
-        let degenerate = [
-            (Vec2::ZERO, Vec2::ZERO),
-            (Vec2::new(1600.0, 800.0), Vec2::new(400.0, 0.0)),
-            (Vec2::new(1600.0, 800.0), Vec2::new(0.0, 400.0)),
-            (Vec2::new(1600.0, 0.0), Vec2::new(400.0, 400.0)),
-            (Vec2::new(0.0, 800.0), Vec2::new(400.0, 400.0)),
-            (Vec2::new(1600.0, 800.0), Vec2::new(-10.0, -10.0)),
-        ];
-
-        for (image_size, available_size) in degenerate {
-            let size = calculate_aspect_ratio_size(image_size, available_size);
-
-            assert!(
-                size.x.is_finite() && size.y.is_finite(),
-                "image={:?} available={:?} で {:?} を返した",
-                image_size,
-                available_size,
-                size
-            );
-            assert!(
-                size.x >= 0.0 && size.y >= 0.0,
-                "image={:?} available={:?} で負の大きさ {:?} を返した",
-                image_size,
-                available_size,
-                size
-            );
-        }
     }
 
     #[test]

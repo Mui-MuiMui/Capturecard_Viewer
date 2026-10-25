@@ -5,6 +5,9 @@
 //! ティアリングは起きない）。環境変数 `CAPTURECARD_VIEWER_RENDERER=glow` で同じ exe の
 //! まま glow（OpenGL）へ戻せる。遅れの撮り比べのためで、設定ファイルには入れない。
 //! DX12 の GPU のアダプターが取れないときも glow へ倒す。
+//! present mode（Mailbox / Fifo）と溜めるフレーム数（1 / 2）も、撮り比べのための
+//! 試験用の環境変数 `CAPTURECARD_VIEWER_PRESENT_MODE` / `CAPTURECARD_VIEWER_FRAME_LATENCY`
+//! で替えられる（#476）。指定しなければ Mailbox と 1。
 //!
 //! **どちらで描くかは `run_native` の前に決める。** winit のイベントループは 1 プロセスに
 //! 1 回しか作れないので、wgpu で起動に失敗してから glow で開き直すことはできない。
@@ -12,34 +15,17 @@
 //!
 //! 理由と成立条件は `docs/design/video-pipeline.md` の「描画バックエンド」。
 
+mod present;
+
 use eframe::egui_wgpu::{self, wgpu, SurfaceConfig, WgpuConfiguration, WgpuSetupCreateNew};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use crate::video::is_software_renderer;
+use present::PresentSettings;
 
 /// 描画のバックエンドを選ぶ環境変数。`glow` か `wgpu`（大文字小文字は問わない）。
 pub const RENDERER_ENV: &str = "CAPTURECARD_VIEWER_RENDERER";
-
-/// present mode。**Mailbox だけを使う。**
-///
-/// Mailbox は待たずに渡し、次の垂直同期で最新の 1 枚を出す（ティアリング無し）。
-/// Fifo は垂直同期まで待たされるぶん、届いたフレームが画面に出るのが遅れうる。
-/// Immediate（垂直同期を待たずに出す）はティアリングが起きるので使わない（#456、
-/// ユーザー判断）。
-///
-/// eframe 0.36 は present mode を起動前の `WgpuConfiguration` で決め、起動後に
-/// 変えられない（`Frame::set_wgpu_surface_config` は `Frame` が持つ複製を書き換える
-/// だけで、描画側の `RenderState` へ届かない）。wgpu は対応していない present mode を
-/// 指定すると落ちる（自動の Fifo への切り替えは `AutoVsync` / `AutoNoVsync` にしか無い）。
-/// そのため **Mailbox を出せることが分かっているバックエンド（DX12）だけで wgpu を使う。**
-/// wgpu-hal の DX12 は Mailbox と Fifo を常に対応一覧に載せる。アダプターの選び方
-/// （`adapter_rank`）でも、ウィンドウへ Mailbox で出せないものは選ばない
-const PRESENT_MODE: wgpu::PresentMode = wgpu::PresentMode::Mailbox;
-
-/// 先に描いたフレームを何枚まで溜めてよいか。**1（最小）。**
-/// DX12 では `SetMaximumFrameLatency(1)` と、swapchain のバッファ 2 枚になる
-const MAX_FRAME_LATENCY: u32 = 1;
 
 /// 描画のバックエンド。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,15 +91,67 @@ pub fn parse_renderer(value: Option<&str>) -> RendererRequest {
     }
 }
 
-/// アダプターを見分ける値（PCI のベンダー ID とデバイス ID）。起動前の確認で
-/// デバイスまで作れたアダプターを、eframe が選ぶときにもう一度見つけるのに使う
-type AdapterId = (u32, u32);
-
-fn adapter_id(info: &wgpu::AdapterInfo) -> AdapterId {
-    (info.vendor, info.device)
+/// アダプターを見分ける値。起動前の確認でデバイスまで作れたアダプターを、eframe が
+/// 選ぶときにもう一度見つけるのに使う。
+///
+/// **DXGI の LUID（`DXGI_ADAPTER_DESC1::AdapterLuid`）で見分ける。** PCI のベンダー ID と
+/// デバイス ID だけだと、同じ型の GPU の 2 枚挿しで 2 枚が同じ値になり、確認でデバイスを
+/// 作れなかった 1 枚目を eframe が選びうる（#512）。wgpu 30 の `AdapterInfo` に LUID は無く、
+/// `device_pci_bus_id` も DX12 では (ベンダー, デバイス) の一致する最初の表示アダプターの
+/// 値を引くので 2 枚を見分けられない。そのため wgpu-hal の DX12 のアダプターから DXGI の
+/// アダプターを借りて読む。LUID はアダプターごとに一意で、再起動かドライバーの入れ直しまで
+/// 変わらない。起動前の確認と eframe は同じプロセスで数秒のうちに列挙するので食い違わない。
+/// 読めないとき（DX12 以外）は `None` で、ベンダー ID とデバイス ID だけで見分ける
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdapterId {
+    vendor: u32,
+    device: u32,
+    luid: Option<u64>,
 }
 
-/// アダプターの候補。種類、名前がソフトウェア描画のものか、ウィンドウへ `PRESENT_MODE` で出せるか。
+fn adapter_id(adapter: &wgpu::Adapter, info: &wgpu::AdapterInfo) -> AdapterId {
+    AdapterId {
+        vendor: info.vendor,
+        device: info.device,
+        luid: dx12_adapter_luid(adapter),
+    }
+}
+
+/// DX12 のアダプターの LUID。読めなければ `None`。
+///
+/// インスタンスは DX12 だけ（`dx12_instance_descriptor`）なので、読めないのは wgpu の
+/// `as_hal` の形が変わった（eframe / wgpu を上げた）ときくらいしか無い。そのときは黙って
+/// (ベンダー, デバイス) の見分け方へ戻るので、気づけるよう WARN を 1 回だけ出す
+fn dx12_adapter_luid(adapter: &wgpu::Adapter) -> Option<u64> {
+    let luid = read_dx12_luid(adapter);
+    if luid.is_none() {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            log::warn!(
+                "DX12 のアダプターの LUID を読めないので、ベンダー ID とデバイス ID だけで見分ける\
+                 （同じ型の GPU の 2 枚挿しでは見分けられない。wgpu の as_hal の形が変わっていないか確かめる）"
+            );
+        });
+    }
+    luid
+}
+
+fn read_dx12_luid(adapter: &wgpu::Adapter) -> Option<u64> {
+    // SAFETY: wgpu-hal のアダプターを借りて記述を読むだけで、状態を変えない。
+    // 借りたものはこの関数の中で手放す
+    let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Dx12>() }?;
+    // SAFETY: DXGI のアダプターは wgpu-hal が持っていて有効。`GetDesc1` は読むだけ
+    let desc = unsafe { hal.raw_adapter().GetDesc1() }.ok()?;
+    let luid = desc.AdapterLuid;
+    Some(luid_value(luid.HighPart, luid.LowPart))
+}
+
+/// LUID の上位・下位を 1 つの値にする（`HighPart` は符号付きで来る）
+fn luid_value(high: i32, low: u32) -> u64 {
+    (u64::from(high.cast_unsigned()) << 32) | u64::from(low)
+}
+
+/// アダプターの候補。種類、名前がソフトウェア描画のものか、ウィンドウへ選んだ present mode で出せるか。
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
     id: AdapterId,
@@ -128,7 +166,7 @@ struct Candidate {
 /// GPU（外付け → 内蔵 → 仮想）を先にする。CPU で描く WARP（Microsoft Basic Render
 /// Driver）は `allow_software` のときだけ最後の候補にする（`allows_software_adapter`）。
 /// WARP は種類（`DeviceType::Cpu`）でも名前でも見分ける。ドライバーによっては種類が
-/// `Other` で返るため。Mailbox で出せないアダプターは選ばない（`PRESENT_MODE`）
+/// `Other` で返るため。選んだ present mode で出せないアダプターは選ばない（`present::DEFAULT_PRESENT_MODE`）
 fn adapter_rank(candidate: Candidate, allow_software: bool) -> Option<u8> {
     if !candidate.presentable {
         return None;
@@ -187,12 +225,12 @@ pub struct WgpuAdapter {
 }
 
 impl WgpuAdapter {
-    fn from_info(info: &wgpu::AdapterInfo) -> Self {
+    fn new(adapter: &wgpu::Adapter, info: &wgpu::AdapterInfo) -> Self {
         Self {
             name: info.name.clone(),
             backend: info.backend,
             device_type: info.device_type,
-            id: adapter_id(info),
+            id: adapter_id(adapter, info),
         }
     }
 }
@@ -204,24 +242,34 @@ pub struct RendererChoice {
     /// wgpu のときに実際に選ばれたアダプター。描画側（eframe）がアダプターを選んだ
     /// 時点で入る。アプリを作るより前に選ばれるので、アプリを作るときには入っている
     adapter: Arc<OnceLock<WgpuAdapter>>,
+    /// wgpu で描くときの present の仕方
+    present: PresentSettings,
 }
 
 impl RendererChoice {
     /// 統計 OSD に出す描画のバックエンドの説明（言語に依らない技術名）。
-    /// 例: `wgpu Dx12 Mailbox / NVIDIA GeForce RTX 4070`、`glow (OpenGL)`
+    /// 例: `wgpu Dx12 Mailbox latency 1 / NVIDIA GeForce RTX 4070`、`glow (OpenGL)`
     pub fn label(&self) -> String {
-        format_label(self.kind, self.adapter.get())
+        format_label(self.kind, self.present, self.adapter.get())
     }
 }
 
-fn format_label(kind: RendererKind, adapter: Option<&WgpuAdapter>) -> String {
+fn format_label(
+    kind: RendererKind,
+    present: PresentSettings,
+    adapter: Option<&WgpuAdapter>,
+) -> String {
+    let PresentSettings {
+        present_mode,
+        frame_latency,
+    } = present;
     match (kind, adapter) {
         (RendererKind::Glow, _) => "glow (OpenGL)".to_string(),
         (RendererKind::Wgpu, Some(adapter)) => format!(
-            "wgpu {:?} {PRESENT_MODE:?} / {}",
+            "wgpu {:?} {present_mode:?} latency {frame_latency} / {}",
             adapter.backend, adapter.name
         ),
-        (RendererKind::Wgpu, None) => format!("wgpu {PRESENT_MODE:?}"),
+        (RendererKind::Wgpu, None) => format!("wgpu {present_mode:?} latency {frame_latency}"),
     }
 }
 
@@ -238,6 +286,9 @@ pub fn configure(options: &mut eframe::NativeOptions) -> RendererChoice {
 
     let adapter = Arc::new(OnceLock::new());
     let allow_software = request.allows_software_adapter();
+    // 試験用の環境変数は wgpu で描くと決まってから読む。glow へ倒れたときに
+    // 「既定から変えた」の WARN を出さないため
+    let mut present = PresentSettings::default();
     let kind = match request.kind() {
         RendererKind::Glow => {
             log::info!("描画は glow（OpenGL）。{RENDERER_ENV} で指定された");
@@ -245,14 +296,17 @@ pub fn configure(options: &mut eframe::NativeOptions) -> RendererChoice {
         }
         RendererKind::Wgpu => match probe_dx12(allow_software) {
             Ok((info, elapsed_ms)) => {
+                present = PresentSettings::from_env();
                 log::info!(
-                    "描画は wgpu（DX12、present mode {PRESENT_MODE:?}、最大フレーム遅延 {MAX_FRAME_LATENCY}）。\
+                    "描画は wgpu（DX12、present mode {:?}、最大フレーム遅延 {}）。\
                      使えるアダプター: {} ({:?})。確認に {elapsed_ms}ms",
+                    present.present_mode,
+                    present.frame_latency,
                     info.name,
                     info.device_type
                 );
                 options.wgpu_options =
-                    wgpu_configuration(Arc::clone(&adapter), allow_software, info.id);
+                    wgpu_configuration(Arc::clone(&adapter), allow_software, info.id, present);
                 RendererKind::Wgpu
             }
             Err(reason) => {
@@ -265,12 +319,16 @@ pub fn configure(options: &mut eframe::NativeOptions) -> RendererChoice {
         RendererKind::Glow => eframe::Renderer::Glow,
         RendererKind::Wgpu => eframe::Renderer::Wgpu,
     };
-    RendererChoice { kind, adapter }
+    RendererChoice {
+        kind,
+        adapter,
+        present,
+    }
 }
 
 /// DX12 のインスタンスの組み立て。起動前の確認と eframe の両方が同じものを使う。
 ///
-/// - バックエンドは DX12 だけ（`PRESENT_MODE` の理由）。`WGPU_BACKEND` も読まない
+/// - バックエンドは DX12 だけ（`present::DEFAULT_PRESENT_MODE` の理由）。`WGPU_BACKEND` も読まない
 /// - シェーダーのコンパイラは FXC（Windows に入っている `d3dcompiler_47.dll`）。
 ///   既定の Auto は PATH 上の `dxcompiler.dll` を拾いうるので、どこで起動しても
 ///   同じになるよう固定する
@@ -290,13 +348,13 @@ fn probe_dx12(allow_software: bool) -> Result<(WgpuAdapter, u128), String> {
     let instance = wgpu::Instance::new(dx12_instance_descriptor());
     let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::DX12));
     // ウィンドウがまだ無いので、ここでは present mode を確かめられない。
-    // DX12 は Mailbox を常に出せる（`PRESENT_MODE`）
+    // DX12 は Mailbox と Fifo を常に出せる（`present::DEFAULT_PRESENT_MODE`）
     let candidates: Vec<_> = adapters
         .iter()
         .map(|adapter| {
             let info = adapter.get_info();
             Candidate {
-                id: adapter_id(&info),
+                id: adapter_id(adapter, &info),
                 device_type: info.device_type,
                 presentable: true,
                 software_name: is_software_renderer(&info.name),
@@ -332,7 +390,10 @@ fn probe_dx12(allow_software: bool) -> Result<(WgpuAdapter, u128), String> {
                         failures.join(" / ")
                     );
                 }
-                return Ok((WgpuAdapter::from_info(&info), started.elapsed().as_millis()));
+                return Ok((
+                    WgpuAdapter::new(adapter, &info),
+                    started.elapsed().as_millis(),
+                ));
             }
             Err(e) => failures.push(format!("{} でデバイスを作れない: {e}", info.name)),
         }
@@ -348,18 +409,20 @@ fn wgpu_configuration(
     selected: Arc<OnceLock<WgpuAdapter>>,
     allow_software: bool,
     preferred: AdapterId,
+    present: PresentSettings,
 ) -> WgpuConfiguration {
+    let present_mode = present.present_mode;
     let mut setup = WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor = dx12_instance_descriptor();
     // アダプターは自分で選ぶ。起動前の確認と同じ順位で、確認で作れたものを優先し、
-    // ウィンドウの surface へ Mailbox で出せるものに限る
+    // ウィンドウの surface へ選んだ present mode で出せるものに限る
     setup.native_adapter_selector = Some(Arc::new(move |adapters, surface| {
         let candidates: Vec<_> = adapters
             .iter()
             .map(|adapter| {
                 let info = adapter.get_info();
                 Candidate {
-                    id: adapter_id(&info),
+                    id: adapter_id(adapter, &info),
                     device_type: info.device_type,
                     software_name: is_software_renderer(&info.name),
                     presentable: surface.is_none_or(|surface| {
@@ -367,33 +430,43 @@ fn wgpu_configuration(
                             && surface
                                 .get_capabilities(adapter)
                                 .present_modes
-                                .contains(&PRESENT_MODE)
+                                .contains(&present_mode)
                     }),
                 }
             })
             .collect();
         let index =
             pick_adapter(&candidates, allow_software, Some(preferred)).ok_or_else(|| {
-                format!("ウィンドウへ {PRESENT_MODE:?} で出せる DX12 のアダプターが無い")
+                format!("ウィンドウへ {present_mode:?} で出せる DX12 のアダプターが無い")
             })?;
         let adapter = adapters[index].clone();
         let info = adapter.get_info();
+        let chosen = WgpuAdapter::new(&adapter, &info);
         log::info!(
-            "wgpu のアダプター: {} ({:?}, {:?}, ドライバー {} {})",
+            "wgpu のアダプター: {} ({:?}, {:?}, ドライバー {} {}, LUID {})。起動前の確認と{}",
             info.name,
             info.backend,
             info.device_type,
             info.driver,
-            info.driver_info
+            info.driver_info,
+            chosen
+                .id
+                .luid
+                .map_or_else(|| "不明".to_string(), |luid| format!("{luid:#x}")),
+            if chosen.id == preferred {
+                "同じ"
+            } else {
+                "違う（確認で作れたものをウィンドウへ出せない）"
+            }
         );
-        let _ = selected.set(WgpuAdapter::from_info(&info));
+        let _ = selected.set(chosen);
         Ok(adapter)
     }));
 
     WgpuConfiguration {
         surface: SurfaceConfig {
-            present_mode: PRESENT_MODE,
-            desired_maximum_frame_latency: Some(MAX_FRAME_LATENCY),
+            present_mode,
+            desired_maximum_frame_latency: Some(present.frame_latency),
         },
         wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(setup),
         ..Default::default()
@@ -405,8 +478,17 @@ mod tests {
     use super::*;
     use wgpu::DeviceType;
 
+    /// LUID の読めないアダプターの見分け方（ベンダー ID とデバイス ID だけ）
+    fn pci(vendor: u32, device: u32) -> AdapterId {
+        AdapterId {
+            vendor,
+            device,
+            luid: None,
+        }
+    }
+
     fn candidate(device_type: DeviceType) -> Candidate {
-        candidate_with_id(device_type, (0, 0))
+        candidate_with_id(device_type, pci(0, 0))
     }
 
     fn candidate_with_id(device_type: DeviceType, id: AdapterId) -> Candidate {
@@ -534,10 +616,13 @@ mod tests {
     fn pick_adapter_prefers_the_adapter_the_probe_could_open() {
         // 起動前の確認で外付けの GPU のデバイスを作れず、内蔵の GPU で作れたときは、
         // eframe が選ぶときも内蔵の GPU にする
-        let discrete = candidate_with_id(DeviceType::DiscreteGpu, (0x10de, 1));
-        let integrated = candidate_with_id(DeviceType::IntegratedGpu, (0x8086, 2));
+        let discrete = candidate_with_id(DeviceType::DiscreteGpu, pci(0x10de, 1));
+        let integrated = candidate_with_id(DeviceType::IntegratedGpu, pci(0x8086, 2));
         let candidates = [discrete, integrated];
-        assert_eq!(pick_adapter(&candidates, false, Some((0x8086, 2))), Some(1));
+        assert_eq!(
+            pick_adapter(&candidates, false, Some(pci(0x8086, 2))),
+            Some(1)
+        );
         // 確認で使ったものが見つからない（ウィンドウへ出せない）ときは順位で選ぶ
         let unpresentable_integrated = Candidate {
             presentable: false,
@@ -547,13 +632,43 @@ mod tests {
             pick_adapter(
                 &[discrete, unpresentable_integrated],
                 false,
-                Some((0x8086, 2))
+                Some(pci(0x8086, 2))
             ),
             Some(0)
         );
         // 選ばない種類（WARP）を確認の結果として渡されても選ばない
-        let warp = candidate_with_id(DeviceType::Cpu, (0x1414, 0x8c));
-        assert_eq!(pick_adapter(&[warp], false, Some((0x1414, 0x8c))), None);
+        let warp = candidate_with_id(DeviceType::Cpu, pci(0x1414, 0x8c));
+        assert_eq!(pick_adapter(&[warp], false, Some(pci(0x1414, 0x8c))), None);
+    }
+
+    #[test]
+    fn pick_adapter_tells_twin_gpus_apart_by_luid() {
+        // 同じ型の GPU の 2 枚挿し。ベンダー ID とデバイス ID は同じで LUID だけが違う。
+        // 起動前の確認で 1 枚目のデバイスを作れず 2 枚目で作れたら、eframe も 2 枚目を選ぶ
+        let twin = |luid| AdapterId {
+            luid: Some(luid),
+            ..pci(0x10de, 0x2786)
+        };
+        let candidates = [
+            candidate_with_id(DeviceType::DiscreteGpu, twin(0x1_0000_0a00)),
+            candidate_with_id(DeviceType::DiscreteGpu, twin(0x1_0000_0b00)),
+        ];
+        assert_eq!(
+            pick_adapter(&candidates, false, Some(twin(0x1_0000_0b00))),
+            Some(1)
+        );
+        assert_eq!(
+            pick_adapter(&candidates, false, Some(twin(0x1_0000_0a00))),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn luid_value_joins_the_high_and_low_parts() {
+        assert_eq!(luid_value(0, 0x0000_d4f2), 0x0000_d4f2);
+        assert_eq!(luid_value(1, 0xffff_ffff), 0x1_ffff_ffff);
+        // HighPart は符号付き。負の値も符号拡張せず上位 32 ビットにそのまま入れる
+        assert_eq!(luid_value(-1, 0), 0xffff_ffff_0000_0000);
     }
 
     #[test]
@@ -562,13 +677,29 @@ mod tests {
             name: "Microsoft Basic Render Driver".to_string(),
             backend: wgpu::Backend::Dx12,
             device_type: DeviceType::Cpu,
-            id: (0x1414, 0x8c),
+            id: pci(0x1414, 0x8c),
+        };
+        let default = PresentSettings::default();
+        assert_eq!(
+            format_label(RendererKind::Wgpu, default, Some(&adapter)),
+            "wgpu Dx12 Mailbox latency 1 / Microsoft Basic Render Driver"
+        );
+        assert_eq!(
+            format_label(RendererKind::Wgpu, default, None),
+            "wgpu Mailbox latency 1"
+        );
+        assert_eq!(
+            format_label(RendererKind::Glow, default, None),
+            "glow (OpenGL)"
+        );
+        // 試験用の環境変数で替えたときは、実際に使う値を出す
+        let fifo = PresentSettings {
+            present_mode: wgpu::PresentMode::Fifo,
+            frame_latency: 2,
         };
         assert_eq!(
-            format_label(RendererKind::Wgpu, Some(&adapter)),
-            "wgpu Dx12 Mailbox / Microsoft Basic Render Driver"
+            format_label(RendererKind::Wgpu, fifo, Some(&adapter)),
+            "wgpu Dx12 Fifo latency 2 / Microsoft Basic Render Driver"
         );
-        assert_eq!(format_label(RendererKind::Wgpu, None), "wgpu Mailbox");
-        assert_eq!(format_label(RendererKind::Glow, None), "glow (OpenGL)");
     }
 }

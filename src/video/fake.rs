@@ -542,19 +542,31 @@ mod tests {
             disconnect_after: Some(Duration::from_millis(50)),
             ..TWO_DEVICES
         });
-        let mut capture = capture.with_reopen_fail(Some(Duration::from_millis(400)));
+        // 待ち（`wait_for_frame` や sleep）が負荷で延びても結果が変わらないよう、期間は長めに取り、
+        // 時刻を測ってから確かめる（#527）。途絶は「開いた時刻 + 50ms」で、開いた時刻は
+        // `before_open` と `after_open` の間にある
+        let disconnect_after = Duration::from_millis(50);
+        let window = Duration::from_secs(2);
+        let mut capture = capture.with_reopen_fail(Some(window));
+        let before_open = Instant::now();
         capture
             .start_capture(None, Some((640, 480)), None, Some(60))
             .expect("最初は開ける");
+        let after_open = Instant::now();
         assert!(wait_for_frame(&frames));
         std::thread::sleep(Duration::from_millis(150));
         capture.stop_capture();
 
-        assert!(
-            capture.start_capture(None, None, None, None).is_err(),
-            "途絶のあとの期間は開き直せない"
-        );
-        std::thread::sleep(Duration::from_millis(500));
+        let blocked = capture.start_capture(None, None, None, None);
+        // 期間の終わりは早くても before_open + 50ms + window。それより前に試せていれば期間の中
+        if before_open.elapsed() < disconnect_after + window {
+            assert!(blocked.is_err(), "途絶のあとの期間は開き直せない");
+        } else {
+            println!("待ちが延びて期間を過ぎたので、開き直せないことの確認を飛ばした");
+        }
+        // 期間の終わりは遅くても after_open + 50ms + window
+        let reopen_at = after_open + disconnect_after + window + Duration::from_millis(100);
+        std::thread::sleep(reopen_at.saturating_duration_since(Instant::now()));
         capture
             .start_capture(None, None, None, None)
             .expect("期間が過ぎたら開ける");

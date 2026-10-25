@@ -13,7 +13,7 @@ use std::fmt;
 /// 表示され、呼び出し側は「どの段で失敗したか」で処理を分けないため。
 ///
 /// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
-/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事
+/// （`status::ErrorSource::headline`）との連結だけが `status/mod.rs` の仕事
 /// （`docs/design/error-reporting.md`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HotkeyError {
@@ -53,7 +53,7 @@ impl std::error::Error for HotkeyError {}
 ///
 /// 修飾キーだけの指定（`"Ctrl+Shift"` など）と、通常キーを 2 つ以上含む指定
 /// （`"Ctrl+A+B"` など）は登録できないため、エラーにする。
-pub(super) fn parse_hotkey(hotkey_str: &str) -> Result<KeyChord, HotkeyError> {
+pub(crate) fn parse_hotkey(hotkey_str: &str) -> Result<KeyChord, HotkeyError> {
     let parts: Vec<&str> = hotkey_str.split('+').collect();
     let mut modifiers = Modifiers::empty();
     let mut key_code = None;

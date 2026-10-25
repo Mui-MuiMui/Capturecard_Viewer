@@ -2,26 +2,25 @@
 //!
 //! ビデオとオーディオのデバイス・フォーマット・映像調整を並べる。
 //! 選択肢は `capability` のキャッシュから作り、描画中にデバイスへ
-//! 問い合わせない（`docs/design/error-reporting.md`）。
+//! 問い合わせない（`docs/design/error-reporting.md`）。オーディオ設定の枠の
+//! 中身は `device_tab_audio.rs`。
 
-use crate::audio::{self, AudioDirection, ChoiceSource};
 use crate::i18n::Text;
 use crate::settings::{
-    AppSettings, AudioInputSource, ColorRange, ColorSpace, VideoBackendSetting,
-    VideoConvertSetting, DEFAULT_CHANNELS, DEFAULT_SAMPLE_RATE, MAX_BUFFER_MS,
-    MAX_VIDEO_ADJUSTMENT, MIN_BUFFER_MS, MIN_VIDEO_ADJUSTMENT,
+    AppSettings, ColorRange, ColorSpace, VideoBackendSetting, VideoConvertSetting,
+    MAX_VIDEO_ADJUSTMENT, MIN_VIDEO_ADJUSTMENT,
 };
 use eframe::egui;
 use log::debug;
 
-use super::audio_input::{show_audio_input_combo, VideoPinChoice};
-use super::capability::{
-    channel_label, out_of_range_note, should_reselect_video_defaults,
-    show_audio_capability_progress, show_choice_note, show_video_capability_progress,
-    VideoCapabilityCache, VideoCapabilityKey,
+use super::audio_input::VideoPinChoice;
+use super::capability::{should_reselect_video_defaults, VideoCapabilityCache, VideoCapabilityKey};
+use super::capability_view::show_video_capability_progress;
+use super::device_tab_audio::show_audio_settings;
+use super::video_mode::{fps_choices, resolution_choices, select_default_video_mode};
+use super::{
+    name_slider, warning_label, AudioCapabilityCaches, CapabilityEvent, DeviceLists, SettingsEvent,
 };
-use super::video_mode::select_default_video_mode;
-use super::{warning_label, AudioCapabilityCaches, CapabilityEvent, DeviceLists, SettingsEvent};
 
 /// 映像調整のスライダー 1 本。明るさ・コントラスト・彩度で見た目を揃える。
 ///
@@ -34,6 +33,57 @@ fn video_adjustment_slider(ui: &mut egui::Ui, value: &mut i32, label: &str, hint
             .clamping(egui::SliderClamping::Always),
     )
     .on_hover_text(hint);
+}
+
+/// コンボの一覧に `(値, 表示)` の選択肢を並べ、押された項目の値を `value` へ入れる。
+///
+/// Id・見出し・閉じているときの表示は呼び出し側が作った `combo` が持つ。Id は固定の
+/// 値を渡し、表示文字列から作らない（`docs/design/i18n.md`）。書き換えるのはドラフトの
+/// `value` だけで、起きたことは呼び出し側が `SettingsEvent` で返す。
+///
+/// 返すのはコンボの `Response` と、項目が押されたか。**押した項目がいまの値と同じでも
+/// 真になる。** フォーマット・解像度は押し直すとその下の選択を入れ直すため
+///
+/// 見出しを横に別の `Label` で置くときは、呼び出し側が返した `Response` に
+/// `labelled_by` で見出しを結ぶ。読み上げとウィジェットのテスト（egui_kittest は名前の
+/// 無い入力のウィジェットで落ちる）がコンボを名前で引けるようにするため
+pub(super) fn choice_combo<T: PartialEq, S: Into<egui::WidgetText>>(
+    ui: &mut egui::Ui,
+    combo: egui::ComboBox,
+    value: &mut T,
+    choices: impl IntoIterator<Item = (T, S)>,
+) -> (egui::Response, bool) {
+    let mut clicked = false;
+    let response = combo
+        .show_ui(ui, |ui| {
+            for (choice, text) in choices {
+                clicked |= ui.selectable_value(value, choice, text).clicked();
+            }
+        })
+        .response;
+    (response, clicked)
+}
+
+/// 見出し・コンボ・説明の 1 行。選択肢が設定の列挙（`ALL` と `label`）で決まるものに使う
+fn enum_combo_row<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    label: &str,
+    id_salt: &str,
+    value: &mut T,
+    all: impl IntoIterator<Item = T>,
+    label_of: fn(T) -> &'static str,
+    hint: &str,
+) {
+    ui.horizontal(|ui| {
+        let label = ui.label(label);
+        let combo = egui::ComboBox::from_id_salt(id_salt).selected_text(label_of(*value));
+        let choices = all.into_iter().map(|choice| (choice, label_of(choice)));
+        // 名前は見出しから取る。説明は読み上げの補足（accessible description）になる
+        choice_combo(ui, combo, value, choices)
+            .0
+            .labelled_by(label.id)
+            .on_hover_text(hint);
+    });
 }
 
 pub(super) fn show_device_settings_tab(
@@ -62,64 +112,53 @@ pub(super) fn show_device_settings_tab(
 
         // Id は表示文字列から作らない。言語を切り替えると Id が変わり、
         // 開いていた一覧の状態が引き継がれないため（docs/design/i18n.md）
-        egui::ComboBox::new("video_device_combo", Text::VideoDevice.get())
+        let video_combo = egui::ComboBox::new("video_device_combo", Text::VideoDevice.get())
             .selected_text(if current_device.is_empty() {
                 Text::SelectDevice.get()
             } else {
                 &current_device
-            })
-            .show_ui(ui, |ui| {
-                for (name, description) in devices.video {
-                    let display_text = if description.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{} ({})", name, description)
-                    };
-                    if ui
-                        .selectable_label(
-                            settings.video.device_name.as_ref() == Some(name),
-                            display_text,
-                        )
-                        .clicked()
-                        && settings.video.device_name.as_ref() != Some(name)
-                    {
-                        settings.video.device_name = Some(name.clone());
-                    }
-                }
             });
+        let video_choices = devices.video.iter().map(|(name, description)| {
+            let display_text = if description.is_empty() {
+                name.clone()
+            } else {
+                format!("{} ({})", name, description)
+            };
+            (Some(name.clone()), display_text)
+        });
+        choice_combo(
+            ui,
+            video_combo,
+            &mut settings.video.device_name,
+            video_choices,
+        );
 
         // 映像の開き方（#237）。両方に出るデバイスを DirectShow で開くための
         // 切り替え。変えたら他の映像設定と同じく「適用」で開き直す
         // （`DeviceConfig` の差分判定に載っている）
-        ui.horizontal(|ui| {
-            ui.label(Text::VideoBackendLabel.get());
-            egui::ComboBox::from_id_salt("video_backend_combo")
-                .selected_text(settings.video.backend.label())
-                .show_ui(ui, |ui| {
-                    for backend in VideoBackendSetting::ALL {
-                        ui.selectable_value(&mut settings.video.backend, backend, backend.label());
-                    }
-                })
-                .response
-                .on_hover_text(Text::VideoBackendHint.get());
-        });
+        enum_combo_row(
+            ui,
+            Text::VideoBackendLabel.get(),
+            "video_backend_combo",
+            &mut settings.video.backend,
+            VideoBackendSetting::ALL,
+            VideoBackendSetting::label,
+            Text::VideoBackendHint.get(),
+        );
         if settings.video.backend != VideoBackendSetting::Auto {
             warning_label(ui, Text::VideoBackendNotice.get());
         }
 
         // YUY2 → RGB の変換の場所（#456）。デバイスは開き直さず、「適用」で次のフレームから効く
-        ui.horizontal(|ui| {
-            ui.label(Text::VideoConvertLabel.get());
-            egui::ComboBox::from_id_salt("video_convert_combo")
-                .selected_text(settings.video.convert.label())
-                .show_ui(ui, |ui| {
-                    for convert in VideoConvertSetting::ALL {
-                        ui.selectable_value(&mut settings.video.convert, convert, convert.label());
-                    }
-                })
-                .response
-                .on_hover_text(Text::VideoConvertHint.get());
-        });
+        enum_combo_row(
+            ui,
+            Text::VideoConvertLabel.get(),
+            "video_convert_combo",
+            &mut settings.video.convert,
+            VideoConvertSetting::ALL,
+            VideoConvertSetting::label,
+            Text::VideoConvertHint.get(),
+        );
 
         // 選択後のデバイス名と開き方。この下の能力参照はすべてこちらを使う。
         // 切り替えたフレームで切り替え前のキーを見ると、1 フレームだけ前の
@@ -178,52 +217,33 @@ pub(super) fn show_device_settings_tab(
         }
 
         // フォーマット選択（フォーマットが起点）
-        let mut format_changed = false;
-        ui.horizontal(|ui| {
-            ui.label(Text::FormatLabel.get());
-            let current_format = settings
-                .video
-                .format
-                .clone()
-                .unwrap_or_else(|| "YUY2".to_string());
-
-            egui::ComboBox::from_id_salt("format_combo")
-                .selected_text(&current_format)
-                .show_ui(ui, |ui| {
-                    // キャッシュからフォーマット一覧を取得
-                    if let Some(caps) = capabilities.ready(&selected_key) {
-                        for capability in caps {
-                            if ui
-                                .selectable_value(
-                                    &mut settings.video.format,
-                                    Some(capability.name.clone()),
-                                    &capability.name,
-                                )
-                                .clicked()
-                            {
-                                format_changed = true;
-                            }
-                        }
-                    } else {
-                        // キャッシュがない場合はデフォルト
-                        ui.selectable_value(
-                            &mut settings.video.format,
-                            Some("YUY2".to_string()),
-                            "YUY2",
-                        );
-                        ui.selectable_value(
-                            &mut settings.video.format,
-                            Some("MJPEG".to_string()),
-                            "MJPEG",
-                        );
-                        ui.selectable_value(
-                            &mut settings.video.format,
-                            Some("RGB24".to_string()),
-                            "RGB24",
-                        );
-                    }
-                });
-        });
+        // 既定の一覧から選んで押しても、下の入れ直しはキャッシュが無ければ何もしない
+        let video_caps = capabilities.ready(&selected_key);
+        let format_changed = ui
+            .horizontal(|ui| {
+                let label = ui.label(Text::FormatLabel.get());
+                let current_format = settings
+                    .video
+                    .format
+                    .clone()
+                    .unwrap_or_else(|| "YUY2".to_string());
+                let combo =
+                    egui::ComboBox::from_id_salt("format_combo").selected_text(&current_format);
+                // キャッシュがない場合はデフォルト
+                let names: Vec<String> = match video_caps {
+                    Some(caps) => caps
+                        .iter()
+                        .map(|capability| capability.name.clone())
+                        .collect(),
+                    None => ["YUY2", "MJPEG", "RGB24"].map(String::from).into(),
+                };
+                let choices = names.into_iter().map(|name| (Some(name.clone()), name));
+                let (response, clicked) =
+                    choice_combo(ui, combo, &mut settings.video.format, choices);
+                response.labelled_by(label.id);
+                clicked
+            })
+            .inner;
 
         // フォーマット変更時に解像度をリセット
         if format_changed {
@@ -244,69 +264,31 @@ pub(super) fn show_device_settings_tab(
         }
 
         // 解像度選択（フォーマットに応じて動的に変更）
-        let mut resolution_changed = false;
-        ui.horizontal(|ui| {
-            ui.label(Text::ResolutionLabel.get());
-            let current_resolution = settings.video.resolution.unwrap_or((1280, 720));
-
-            egui::ComboBox::from_id_salt("resolution_combo")
-                .selected_text(format!("{}x{}", current_resolution.0, current_resolution.1))
-                .show_ui(ui, |ui| {
-                    if let Some(caps) = capabilities.ready(&selected_key) {
-                        if let Some(current_format) = &settings.video.format {
-                            // 現在のフォーマットに対応する解像度一覧
-                            let mut unique_resolutions =
-                                std::collections::HashSet::<(u32, u32)>::new();
-                            for capability in caps {
-                                if &capability.name == current_format {
-                                    for mode in &capability.modes {
-                                        unique_resolutions.insert(mode.resolution());
-                                    }
-                                }
-                            }
-
-                            // ソートして表示
-                            let mut sorted_resolutions: Vec<_> =
-                                unique_resolutions.into_iter().collect();
-                            sorted_resolutions.sort_by(|a, b| {
-                                let size_a = a.0 * a.1;
-                                let size_b = b.0 * b.1;
-                                size_b.cmp(&size_a)
-                            });
-
-                            for (w, h) in sorted_resolutions {
-                                if ui
-                                    .selectable_value(
-                                        &mut settings.video.resolution,
-                                        Some((w, h)),
-                                        format!("{}x{}", w, h),
-                                    )
-                                    .clicked()
-                                {
-                                    resolution_changed = true;
-                                }
-                            }
-                        }
-                    } else {
-                        // デフォルトの解像度
-                        ui.selectable_value(
-                            &mut settings.video.resolution,
-                            Some((1920, 1080)),
-                            "1920x1080",
-                        );
-                        ui.selectable_value(
-                            &mut settings.video.resolution,
-                            Some((1280, 720)),
-                            "1280x720",
-                        );
-                        ui.selectable_value(
-                            &mut settings.video.resolution,
-                            Some((640, 480)),
-                            "640x480",
-                        );
-                    }
-                });
-        });
+        let resolution_changed = ui
+            .horizontal(|ui| {
+                let label = ui.label(Text::ResolutionLabel.get());
+                let current_resolution = settings.video.resolution.unwrap_or((1280, 720));
+                let combo = egui::ComboBox::from_id_salt("resolution_combo")
+                    .selected_text(format!("{}x{}", current_resolution.0, current_resolution.1));
+                let resolutions = match video_caps {
+                    Some(caps) => settings
+                        .video
+                        .format
+                        .as_deref()
+                        .map(|format| resolution_choices(caps, format))
+                        .unwrap_or_default(),
+                    // デフォルトの解像度
+                    None => vec![(1920, 1080), (1280, 720), (640, 480)],
+                };
+                let choices = resolutions
+                    .into_iter()
+                    .map(|(w, h)| (Some((w, h)), format!("{}x{}", w, h)));
+                let (response, clicked) =
+                    choice_combo(ui, combo, &mut settings.video.resolution, choices);
+                response.labelled_by(label.id);
+                clicked
+            })
+            .inner;
 
         // 解像度変更時にFPSをリセット
         if resolution_changed {
@@ -332,78 +314,51 @@ pub(super) fn show_device_settings_tab(
 
         // FPS選択（フォーマットと解像度に応じて動的に変更）
         ui.horizontal(|ui| {
-            ui.label(Text::FrameRateLabel.get());
+            let label = ui.label(Text::FrameRateLabel.get());
             let current_fps = settings.video.fps.unwrap_or(30);
 
-            egui::ComboBox::from_id_salt("fps_combo")
-                .selected_text(format!("{} fps", current_fps))
-                .show_ui(ui, |ui| {
-                    if let Some(caps) = capabilities.ready(&selected_key) {
-                        if let Some(current_format) = &settings.video.format {
-                            if let Some((w, h)) = settings.video.resolution {
-                                // 現在のフォーマットと解像度に対応するFPS一覧
-                                let mut available_fps = Vec::new();
-                                for capability in caps {
-                                    if &capability.name == current_format {
-                                        for mode in &capability.modes {
-                                            if mode.resolution() == (w, h) {
-                                                available_fps.push(mode.fps);
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // 重複を削除してソート
-                                available_fps.sort();
-                                available_fps.dedup();
-                                available_fps.reverse(); // 大きい順
-
-                                for fps in available_fps {
-                                    ui.selectable_value(
-                                        &mut settings.video.fps,
-                                        Some(fps),
-                                        format!("{} fps", fps),
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        // デフォルトのFPS
-                        ui.selectable_value(&mut settings.video.fps, Some(30), "30 fps");
-                        ui.selectable_value(&mut settings.video.fps, Some(60), "60 fps");
-                    }
-                });
+            let combo = egui::ComboBox::from_id_salt("fps_combo")
+                .selected_text(format!("{} fps", current_fps));
+            let fps_list = match video_caps {
+                // 現在のフォーマットと解像度に対応するFPS一覧
+                Some(caps) => match (settings.video.format.as_deref(), settings.video.resolution) {
+                    (Some(format), Some(resolution)) => fps_choices(caps, format, resolution),
+                    _ => Vec::new(),
+                },
+                // デフォルトのFPS
+                None => vec![30, 60],
+            };
+            let choices = fps_list
+                .into_iter()
+                .map(|fps| (Some(fps), format!("{} fps", fps)));
+            choice_combo(ui, combo, &mut settings.video.fps, choices)
+                .0
+                .labelled_by(label.id);
         });
 
         // 色空間の選択。デバイスは入力信号の色空間を通知してこないので、
         // 通常は解像度から推定する（自動）。推定が外れる機種のために固定できる
-        ui.horizontal(|ui| {
-            ui.label(Text::ColorSpaceLabel.get());
-            egui::ComboBox::from_id_salt("color_space_combo")
-                .selected_text(settings.video.color_space.label())
-                .show_ui(ui, |ui| {
-                    for space in ColorSpace::ALL {
-                        ui.selectable_value(&mut settings.video.color_space, space, space.label());
-                    }
-                })
-                .response
-                .on_hover_text(Text::ColorSpaceHint.get());
-        });
+        enum_combo_row(
+            ui,
+            Text::ColorSpaceLabel.get(),
+            "color_space_combo",
+            &mut settings.video.color_space,
+            ColorSpace::ALL,
+            ColorSpace::label,
+            Text::ColorSpaceHint.get(),
+        );
 
         // 輝度レンジの選択。フルレンジで出すかどうかはデバイス側の設定次第で、
         // 信号からも解像度からも判別できないため手で選ばせる
-        ui.horizontal(|ui| {
-            ui.label(Text::ColorRangeLabel.get());
-            egui::ComboBox::from_id_salt("color_range_combo")
-                .selected_text(settings.video.color_range.label())
-                .show_ui(ui, |ui| {
-                    for range in ColorRange::ALL {
-                        ui.selectable_value(&mut settings.video.color_range, range, range.label());
-                    }
-                })
-                .response
-                .on_hover_text(Text::ColorRangeHint.get());
-        });
+        enum_combo_row(
+            ui,
+            Text::ColorRangeLabel.get(),
+            "color_range_combo",
+            &mut settings.video.color_range,
+            ColorRange::ALL,
+            ColorRange::label,
+            Text::ColorRangeHint.get(),
+        );
 
         ui.add_space(5.0);
 
@@ -446,293 +401,7 @@ pub(super) fn show_device_settings_tab(
 
     // オーディオ設定
     ui.group(|ui| {
-        ui.strong(Text::AudioSettings.get());
-        ui.add_space(5.0);
-
-        // オーディオ入力デバイス選択。先頭が「映像デバイスの音声」、その下に
-        // キャッシュした WASAPI のデバイス（#394）
-        let input_changed = show_audio_input_combo(ui, settings, devices.input, video_pin);
-        // 入力が音声ピンなら、入力の対応設定は音声ピンの形式 1 つだけ。ワーカーへは
-        // 問い合わせない（`docs/design/directshow-audio.md` の (6)）
-        let input_is_pin = settings.audio.input_source == AudioInputSource::VideoPin;
-
-        // オーディオ出力デバイス選択 - キャッシュリストを使用
-        let current_output_device = settings
-            .audio
-            .output_device_name
-            .clone()
-            .unwrap_or_default();
-
-        let mut output_changed = false;
-        egui::ComboBox::new("audio_output_device_combo", Text::AudioOutputDevice.get())
-            .selected_text(if current_output_device.is_empty() {
-                Text::DefaultDevice.get()
-            } else {
-                &current_output_device
-            })
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_value(
-                        &mut settings.audio.output_device_name,
-                        None,
-                        Text::DefaultDevice.get(),
-                    )
-                    .clicked()
-                    && !current_output_device.is_empty()
-                {
-                    output_changed = true;
-                }
-                for device_name in devices.output {
-                    if ui
-                        .selectable_value(
-                            &mut settings.audio.output_device_name,
-                            Some(device_name.clone()),
-                            device_name,
-                        )
-                        .clicked()
-                        && current_output_device != *device_name
-                    {
-                        output_changed = true;
-                    }
-                }
-            });
-
-        // 選択後のデバイス名から作るキャッシュのキー。ビデオ側と同じく、
-        // 切り替えたフレームで切り替え前の名前を見ると 1 フレームだけ
-        // 前のデバイスの選択肢が出てしまう
-        let input_key = audio::cache_key(settings.audio.input_device_name.as_deref());
-        let output_key = audio::cache_key(settings.audio.output_device_name.as_deref());
-
-        if input_changed && !input_is_pin {
-            events.push(SettingsEvent::Capability(
-                CapabilityEvent::ExpectAudioDefaults(AudioDirection::Input, input_key.clone()),
-            ));
-        }
-        if output_changed {
-            events.push(SettingsEvent::Capability(
-                CapabilityEvent::ExpectAudioDefaults(AudioDirection::Output, output_key.clone()),
-            ));
-        }
-
-        // 対応設定の取得を要求する。列挙はワーカーなので UI は止まらない
-        if !input_is_pin {
-            events.push(SettingsEvent::Capability(CapabilityEvent::RequestAudio(
-                AudioDirection::Input,
-                input_key.clone(),
-            )));
-        }
-        events.push(SettingsEvent::Capability(CapabilityEvent::RequestAudio(
-            AudioDirection::Output,
-            output_key.clone(),
-        )));
-
-        let progress_input_key = (!input_is_pin).then_some(input_key.as_str());
-        show_audio_capability_progress(
-            ui,
-            audio_capabilities,
-            progress_input_key,
-            &output_key,
-            events,
-        );
-
-        // 入力側の対応設定。音声ピンなら繋いだ形式 1 つ（映像が開いていない・
-        // 繋いでいない間は `None` で、入力側の制約にしない）
-        let input_capabilities = if input_is_pin {
-            video_pin.capabilities()
-        } else {
-            audio_capabilities.input.ready(&input_key)
-        };
-        // 入出力の両方が対応する値だけを選択肢にする。取得できていない側は
-        // 制約にしない（片側だけ、どちらも無ければ固定の既定一覧）
-        let rates = audio::selectable_sample_rates(
-            input_capabilities,
-            audio_capabilities.output.ready(&output_key),
-        );
-        let channel_choices = audio::selectable_channels(
-            input_capabilities,
-            audio_capabilities.output.ready(&output_key),
-        );
-        // 設定に希望値が入っていないときの手掛かり。入力デバイスの既定を採る
-        // （入力が音の出どころなので、そちらへ揃えるほうが変換が減る）
-        let input_defaults =
-            input_capabilities.map(|caps| (caps.default_sample_rate(), caps.default_channels()));
-
-        // デバイスを切り替えたあとに能力が届いたら、対応する値へ寄せ直す。
-        // **両方を必ず調べて、立っている目印は両方とも落とす要求を返す。**
-        // 片方で早期に打ち切ると、残った目印のせいで次のフレームでも
-        // もう一度寄せ直してしまう。音声ピンへ切り替えたときは届くのを待たない
-        // （形式は手元にある）ので、切り替えたフレームで寄せ直す
-        let input_awaits = !input_is_pin && audio_capabilities.input.awaits_defaults(&input_key);
-        let output_awaits = audio_capabilities.output.awaits_defaults(&output_key);
-        if input_awaits {
-            events.push(SettingsEvent::Capability(
-                CapabilityEvent::ClearAudioDefaults(AudioDirection::Input, input_key.clone()),
-            ));
-        }
-        if output_awaits {
-            events.push(SettingsEvent::Capability(
-                CapabilityEvent::ClearAudioDefaults(AudioDirection::Output, output_key.clone()),
-            ));
-        }
-        let repick = input_awaits || output_awaits || (input_changed && input_is_pin);
-        if repick {
-            let desired_rate = settings
-                .audio
-                .sample_rate
-                .or(input_defaults.map(|(rate, _)| rate))
-                .unwrap_or(DEFAULT_SAMPLE_RATE);
-            if let Some(rate) = audio::nearest_sample_rate(&rates.values, desired_rate) {
-                if settings.audio.sample_rate != Some(rate) {
-                    debug!(
-                        "オーディオデバイスの切り替えでサンプリングレートを {} Hz にした",
-                        rate
-                    );
-                }
-                settings.audio.sample_rate = Some(rate);
-            }
-            let desired_channels = settings
-                .audio
-                .channels
-                .or(input_defaults.map(|(_, channels)| channels))
-                .unwrap_or(DEFAULT_CHANNELS);
-            if let Some(channels) =
-                audio::nearest_channels(&channel_choices.values, desired_channels)
-            {
-                if settings.audio.channels != Some(channels) {
-                    debug!(
-                        "オーディオデバイスの切り替えでチャンネル数を {} ch にした",
-                        channels
-                    );
-                }
-                settings.audio.channels = Some(channels);
-            }
-        }
-
-        // 選択肢が 1 つしか無い値は、デバイスを切り替えていなくてもそこへ寄せる。
-        //
-        // **`repick` の目印はデバイスを選び直したときにしか立たない。** 設定ファイルに
-        // 古い値が残ったまま（Windows 側で既定デバイスの形式を変えた、設定ファイルを
-        // 手で書き換えた）起動すると、選べる値が 1 つしか無いのに違う値が残る。
-        // チャンネル数のコンボは 1 択のとき操作できないので、ユーザーが直す手段が無い
-        if let [only] = rates.values[..] {
-            if settings.audio.sample_rate != Some(only) {
-                debug!(
-                    "サンプリングレートの選択肢が 1 つなので {} Hz に寄せた",
-                    only
-                );
-                settings.audio.sample_rate = Some(only);
-            }
-        }
-        if let [only] = channel_choices.values[..] {
-            if settings.audio.channels != Some(only) {
-                debug!("チャンネル数の選択肢が 1 つなので {} ch に寄せた", only);
-                settings.audio.channels = Some(only);
-            }
-        }
-
-        // サンプルレート
-        ui.horizontal(|ui| {
-            ui.label(Text::SampleRateLabel.get());
-            let current_rate = settings.audio.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE);
-            egui::ComboBox::from_id_salt("sample_rate_combo")
-                .selected_text(format!("{} Hz", current_rate))
-                .show_ui(ui, |ui| {
-                    for rate in &rates.values {
-                        ui.selectable_value(
-                            &mut settings.audio.sample_rate,
-                            Some(*rate),
-                            format!("{} Hz", rate),
-                        );
-                    }
-                });
-        });
-        show_choice_note(ui, rates.source, Text::SampleRate.get());
-        // 設定ファイルを手で書き換えた場合など、選択肢に無い値が残ることがある。
-        // 黙って別の値で開くと「選んだ値と違う」理由が分からない
-        if let Some(note) = out_of_range_note(
-            &rates.values,
-            settings.audio.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE),
-            " Hz",
-        ) {
-            warning_label(ui, note);
-        }
-
-        // チャンネル数
-        let single_channel_choice = channel_choices.values.len() == 1;
-        ui.horizontal(|ui| {
-            ui.label(Text::ChannelsLabel.get());
-            let current_channels = settings.audio.channels.unwrap_or(DEFAULT_CHANNELS);
-            // 選択肢が 1 つしか無いときは操作させない。開ける値が 1 つなのに
-            // 選べると、選んだ値と実際の値が食い違う
-            ui.add_enabled_ui(!single_channel_choice, |ui| {
-                egui::ComboBox::from_id_salt("channels_combo")
-                    .selected_text(channel_label(current_channels))
-                    .show_ui(ui, |ui| {
-                        for channels in &channel_choices.values {
-                            ui.selectable_value(
-                                &mut settings.audio.channels,
-                                Some(*channels),
-                                channel_label(*channels),
-                            );
-                        }
-                    });
-            });
-        });
-        if single_channel_choice && channel_choices.source != ChoiceSource::Fallback {
-            // WASAPI は共有モードのミックスフォーマットしか列挙しないため、
-            // Windows では実質ここに落ちる
-            ui.label(Text::ChannelsFixedByDevice.get());
-        }
-        show_choice_note(ui, channel_choices.source, Text::Channels.get());
-        let channel_values: Vec<u32> = channel_choices
-            .values
-            .iter()
-            .map(|&channels| u32::from(channels))
-            .collect();
-        if let Some(note) = out_of_range_note(
-            &channel_values,
-            u32::from(settings.audio.channels.unwrap_or(DEFAULT_CHANNELS)),
-            " ch",
-        ) {
-            warning_label(ui, note);
-        }
-
-        ui.add_space(10.0);
-
-        // 音声バッファ（遅延）
-        //
-        // ここで書き換わるのはドラフト。デバイスを開き直すのは「適用」または
-        // 「OK」のときで、スライダーを動かしている間は何も起きない。
-        // サンプリングレートやチャンネル数と同じ経路に乗せてある
-        ui.horizontal(|ui| {
-            ui.label(Text::AudioBufferLabel.get());
-            ui.add(
-                egui::Slider::new(&mut settings.audio.buffer_ms, MIN_BUFFER_MS..=MAX_BUFFER_MS)
-                    .suffix(" ms"),
-            );
-        });
-        ui.label(Text::AudioBufferHint.get());
-
-        ui.add_space(10.0);
-
-        // オーディオパススルー制御
-        ui.horizontal(|ui| {
-            ui.label(Text::PassthroughLabel.get());
-            if ui
-                .checkbox(&mut settings.audio.passthrough_enabled, Text::Enabled.get())
-                .changed()
-            {
-                // ここで書き換わるのはドラフト。実設定へ反映されるのは「適用」または「OK」のとき
-                debug!(
-                    "設定ダイアログで音声パススルーを {} に変更した",
-                    settings.audio.passthrough_enabled
-                );
-            }
-        });
-
-        if !settings.audio.passthrough_enabled {
-            warning_label(ui, Text::PassthroughDisabledWarning.get());
-        }
+        show_audio_settings(ui, settings, audio_capabilities, video_pin, devices, events);
     });
 
     ui.add_space(15.0);
@@ -749,7 +418,132 @@ pub(super) fn show_device_settings_tab(
 
         ui.horizontal(|ui| {
             ui.label(Text::InitialVolumeLabel.get());
-            ui.add(egui::Slider::new(&mut settings.ui.volume, 0.0..=200.0).suffix("%"));
+            name_slider(
+                ui.add(egui::Slider::new(&mut settings.ui.volume, 0.0..=200.0).suffix("%")),
+                Text::InitialVolumeLabel.get(),
+            );
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::audio::{self, AudioDirection};
+    use crate::ui::testing::{dialog_harness, DialogFixture};
+    use crate::ui::SettingsTab;
+    use crate::video::capabilities::FormatCapability;
+    use crate::video::{DeviceCapabilities, VideoMode};
+    use eframe::egui::accesskit::Role;
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+
+    /// 閉じているときの表示が `value` のコンボを開く。見出しを持たないコンボは表示で探す
+    fn open_combo(harness: &mut Harness<'_, DialogFixture>, value: &str) {
+        let combos: Vec<_> = harness
+            .get_all_by_role(Role::ComboBox)
+            .filter(|node| node.value().as_deref() == Some(value))
+            .collect();
+        assert_eq!(combos.len(), 1, "表示が {value} のコンボは 1 つのはず");
+        combos[0].click();
+        harness.run();
+    }
+
+    /// 「デバイス設定」タブを開き、「Capture Device」の能力に `caps` が届いた設定ダイアログ
+    fn device_tab(
+        draft: &AppSettings,
+        caps: DeviceCapabilities,
+    ) -> Harness<'static, DialogFixture> {
+        let mut fixture = DialogFixture::new(
+            draft,
+            SettingsTab::Device,
+            VideoPinChoice::selectable(None, None),
+            &[],
+        )
+        .with_video_devices(&["Capture Device"])
+        .with_output_devices(&["スピーカー"]);
+        let key = VideoCapabilityKey::new(Some("Capture Device"), VideoBackendSetting::Auto);
+        fixture.state.capabilities_mut().apply_result(key, Ok(caps));
+        let mut harness = dialog_harness(fixture);
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn choosing_format_and_resolution_reselects_the_settings_below() {
+        let caps: DeviceCapabilities = vec![
+            FormatCapability::new("YUY2", vec![VideoMode::new(1920, 1080, 60)]),
+            FormatCapability::new(
+                "MJPEG",
+                vec![
+                    VideoMode::new(1280, 720, 30),
+                    VideoMode::new(3840, 2160, 24),
+                    VideoMode::new(3840, 2160, 30),
+                ],
+            ),
+        ];
+        let mut draft = AppSettings::default();
+        draft.video.device_name = Some("Capture Device".to_string());
+        draft.video.format = Some("YUY2".to_string());
+        draft.video.resolution = Some((1920, 1080));
+        draft.video.fps = Some(60);
+        let mut harness = device_tab(&draft, caps);
+
+        // フォーマットを選ぶと、そのフォーマットの先頭の組み合わせへ入れ直す
+        open_combo(&mut harness, "YUY2");
+        harness.get_by_label("MJPEG").click();
+        harness.run();
+        let video = &harness.state().draft().video;
+        assert_eq!(video.format.as_deref(), Some("MJPEG"));
+        assert_eq!((video.resolution, video.fps), (Some((1280, 720)), Some(30)));
+
+        // 解像度を選ぶと、その解像度の先頭の FPS へ入れ直す
+        open_combo(&mut harness, "1280x720");
+        harness.get_by_label("3840x2160").click();
+        harness.run();
+        let video = &harness.state().draft().video;
+        assert_eq!(
+            (video.resolution, video.fps),
+            (Some((3840, 2160)), Some(24))
+        );
+
+        open_combo(&mut harness, "24 fps");
+        harness.get_by_label("30 fps").click();
+        harness.run();
+        assert_eq!(harness.state().draft().video.fps, Some(30));
+    }
+
+    #[test]
+    fn choosing_color_range_and_output_device_updates_the_draft() {
+        let mut harness = device_tab(&AppSettings::default(), Vec::new());
+
+        open_combo(&mut harness, ColorRange::Limited.label());
+        harness.get_by_label(ColorRange::Full.label()).click();
+        harness.run();
+        assert_eq!(harness.state().draft().video.color_range, ColorRange::Full);
+
+        // 出力デバイスを替えたら、届いた対応設定へ寄せ直すよう要求する
+        // 出力デバイスのコンボは 900x800 の画面の下に外れるので、見える位置まで送ってから押す
+        harness
+            .get_by_label(Text::AudioOutputDevice.get())
+            .scroll_to_me();
+        harness.run();
+        harness.get_by_label(Text::AudioOutputDevice.get()).click();
+        harness.run();
+        harness.get_by_label("スピーカー").click();
+        harness.run();
+        assert_eq!(
+            harness.state().draft().audio.output_device_name.as_deref(),
+            Some("スピーカー")
+        );
+        let speaker = audio::cache_key(Some("スピーカー"));
+        assert!(harness.state().events.iter().any(|event| matches!(
+            event,
+            SettingsEvent::Capability(CapabilityEvent::ExpectAudioDefaults(
+                AudioDirection::Output,
+                key,
+            )) if *key == speaker
+        )));
+    }
 }

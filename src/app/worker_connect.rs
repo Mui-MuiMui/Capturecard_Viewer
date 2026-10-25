@@ -4,51 +4,26 @@
 //! `WorkerState` に生やす形にしてあるのは、`CaptureCardViewer` を
 //! `app` の子モジュールで分担しているのと同じ理由で、状態を 1 つに保ったまま
 //! 役割ごとにファイルを分けるため。音声を開く側（`try_connect_audio` など）と
-//! 音声の対応設定の問い合わせは `super::worker_audio_connect` に置く。
+//! 音声の対応設定の問い合わせは `super::worker_audio_connect` に置く。列挙のログと
+//! 「Windows 側にも見えていない」の判定の適用は `super::worker_enumeration`。
 //!
 //! **ここに時計やタイマーを置かない。** 「いつ試すか」は
 //! `super::retry::ConnectRetry`、「途絶したか」は `super::monitor` が決める。
 
 use super::backend::CaptureRequest;
-use super::monitor::{decide_device_not_visible, should_log_enumeration, DeviceNotVisible};
-use super::retry::backoff_delay;
+use super::retry::{backoff_delay, connect_attempt_log_level, connect_failure_log_level};
 use super::worker::{DeviceConfig, DeviceEvent, VideoTarget};
+use super::worker_enumeration::failure_message;
 use super::worker_loop::WorkerState;
-use crate::audio::AudioDirection;
 use crate::i18n;
-use crate::settings::{AudioInputSource, VideoBackendSetting};
-use log::{debug, info, warn};
-use std::fmt::Display;
+use crate::settings::VideoBackendSetting;
+use log::{debug, info, log, warn};
 use std::time::Instant;
-
-/// 接続の失敗を UI へ渡す 1 行。「Windows 側にも見えていない」と判定済みなら
-/// 案内を添える。
-pub(super) fn failure_message(not_visible: Option<&DeviceNotVisible>, reason: &str) -> String {
-    match not_visible {
-        Some(notice) => i18n::failure_with_device_not_visible(notice, reason),
-        None => reason.to_string(),
-    }
-}
 
 /// 設定で選ばれている映像デバイスの名前。未指定（`None`、空文字も含む）なら
 /// `None` で、そのときは開いているストリームを閉じて待つ（#334、音声の #304 と揃える）。
 fn selected_video_device(name: Option<&str>) -> Option<&str> {
     name.filter(|name| !name.is_empty())
-}
-
-/// 列挙の結果を 1 経路ぶんだけログへ出す。**台数と名前を必ず並べる。**
-/// 0 台なのか、名前が食い違っているのかをログだけで見分けるため。
-fn log_listing<E: Display>(trigger: &str, source: &str, result: &Result<Vec<String>, E>) {
-    match result {
-        Ok(names) => info!(
-            "デバイスの列挙（{}）: {}: {} 台 {:?}",
-            trigger,
-            source,
-            names.len(),
-            names
-        ),
-        Err(e) => warn!("デバイスを列挙できない（{}）: {}: {}", trigger, source, e),
-    }
 }
 
 impl WorkerState {
@@ -108,10 +83,15 @@ impl WorkerState {
         };
 
         let attempt = self.video_retry.attempts() + 1;
-        info!(
+        // 繋がらない間は毎回出さない（#506、`retry::is_retry_log_milestone`）
+        log!(
+            connect_attempt_log_level(attempt),
             "映像デバイスへの接続を試す（{} 回目）: {}（開き方: {:?}）",
-            attempt, device_name, backend
+            attempt,
+            device_name,
+            backend
         );
+        let started = Instant::now();
 
         let result = self.video.start_capture(&CaptureRequest {
             device_name: Some(device_name),
@@ -124,7 +104,13 @@ impl WorkerState {
 
         match result {
             Ok(()) => {
-                info!("映像デバイスに接続した");
+                // 何回目で繋がったかと、この試行にかかった時間は必ず残す。
+                // 「試す」の行は DEBUG に落ちていることがあるため（#506）
+                info!(
+                    "映像デバイスに接続した（{} 回目、{:.1} ms）",
+                    attempt,
+                    started.elapsed().as_secs_f32() * 1000.0
+                );
                 self.video_retry.record_success(now);
                 self.video_not_visible = None;
                 self.last_video_failure = None;
@@ -138,15 +124,23 @@ impl WorkerState {
                 self.resync_audio_after_video_recovery(config, recovered);
             }
             Err(e) => {
-                warn!("映像デバイスへの接続に失敗した（{} 回目）: {}", attempt, e);
+                // UI へは日本語の 1 行に落として渡す。`DeviceEvent` に種別を
+                // 載せても、いまの再試行は理由で戦略を変えないため
+                let reason = e.to_string();
+                // 同じ理由が続く間は節目の回だけ WARN にする（#506）。比べる相手は
+                // 直近の失敗の理由で、繋がったら消えるので、次の失敗の 1 回目は必ず出る
+                let reason_changed = self.last_video_failure.as_deref() != Some(reason.as_str());
+                log!(
+                    connect_failure_log_level(attempt, reason_changed),
+                    "映像デバイスへの接続に失敗した（{} 回目）: {}",
+                    attempt,
+                    reason
+                );
                 self.video_retry.record_failure(now);
                 // **開けなかったら、開いている相手は無い。** `start_capture` は開く前に
                 // 古いストリームを閉じている。前の設定を残すと、元へ戻したときに差分が
                 // 立たず、この失敗で伸びたバックオフを待ってから開くことになる（#311）
                 self.last_video_target = None;
-                // UI へは日本語の 1 行に落として渡す。`DeviceEvent` に種別を
-                // 載せても、いまの再試行は理由で戦略を変えないため
-                let reason = e.to_string();
                 self.emit(DeviceEvent::VideoFailed(failure_message(
                     self.video_not_visible.as_ref(),
                     &reason,
@@ -213,126 +207,6 @@ impl WorkerState {
         self.emit(DeviceEvent::VideoFailed(reason));
     }
 
-    /// 列挙の結果をログへ出し、設定のデバイスが Windows 側にも見えていないかを
-    /// 判定する（#236）。`tick` のたびに呼ばれ、出す回でなければ何もしない。
-    ///
-    /// 出すのは起動時の 1 回と、接続の失敗が節目（5 回目・10 回目・以後 10 回
-    /// ごと、`monitor::is_enumeration_milestone`）に届いた回。Media Foundation /
-    /// DirectShow / 音声入力 / 音声出力を 1 行ずつ、台数と名前を並べる。
-    ///
-    /// **接続の試行とは切り離してある。** 再接続の前に列挙しない決まり
-    /// （`docs/design/reconnect.md`）はそのままで、これは試行のあとに、ログと
-    /// 判定のためだけに間引いて行う。音声の列挙は実測 300ms 前後かかるので、
-    /// 毎回やると再試行の間隔を食う。
-    pub(super) fn log_device_enumeration(&mut self) {
-        let video_failures = self.video_retry.attempts();
-        let audio_failures = self.audio_retry.attempts();
-        // 繋がって 0 へ戻ったら記録も戻す。また失敗が続いたら同じ節目で出す
-        if video_failures == 0 {
-            self.enumeration_logged_failures.0 = 0;
-        }
-        if audio_failures == 0 {
-            self.enumeration_logged_failures.1 = 0;
-        }
-        let (video_logged, audio_logged) = self.enumeration_logged_failures;
-        let video_due = should_log_enumeration(video_failures, video_logged);
-        let audio_due = should_log_enumeration(audio_failures, audio_logged);
-        if !self.startup_enumeration_pending && !video_due && !audio_due {
-            return;
-        }
-        let Some(config) = self.config.clone() else {
-            return;
-        };
-        let trigger = if self.startup_enumeration_pending {
-            "起動時".to_string()
-        } else {
-            format!(
-                "接続の失敗が続いている。映像 {} 回、音声 {} 回",
-                video_failures, audio_failures
-            )
-        };
-        self.startup_enumeration_pending = false;
-        self.enumeration_logged_failures = (video_failures, audio_failures);
-
-        let video = self.video.enumerate();
-        for (source, result) in &video.sources {
-            log_listing(&trigger, source, result);
-        }
-        let input = self.audio.enumerate_devices(AudioDirection::Input);
-        log_listing(&trigger, "音声入力", &input);
-        let output = self.audio.enumerate_devices(AudioDirection::Output);
-        log_listing(&trigger, "音声出力", &output);
-
-        let video_notice = decide_device_not_visible(
-            video_failures,
-            config.video.0.as_deref(),
-            video.selectable.as_deref(),
-        );
-        // 入力を先に見る。キャプチャーボードの音声は入力側に出る。
-        // **入出力のどちらかの列挙に失敗したら、音声は判定しない。** 映像で
-        // 失敗した経路があれば判定しないのと同じで、開けない理由が失敗した側に
-        // あったかもしれない
-        // 入力が映像デバイスの音声ピンなら、入力は判定しない。比べる WASAPI の名前が無い（#388）
-        let configured_input = match config.audio.5 {
-            AudioInputSource::Device => config.audio.0.as_deref(),
-            AudioInputSource::VideoPin => None,
-        };
-        let audio_notice = match (input.as_deref(), output.as_deref()) {
-            (Ok(input), Ok(output)) => decide_device_not_visible(
-                audio_failures,
-                configured_input,
-                Some(input),
-            )
-            .or_else(|| {
-                decide_device_not_visible(audio_failures, config.audio.1.as_deref(), Some(output))
-            }),
-            _ => None,
-        };
-        self.set_video_not_visible(video_notice);
-        self.set_audio_not_visible(audio_notice);
-    }
-
-    /// 映像の「Windows 側にも見えていない」を更新する。
-    ///
-    /// 新しく付いたら、直近の失敗の理由に添えて**その場で出し直す。**
-    /// 次の失敗は最大 5 秒後で、それを待つと案内が遅れる。
-    fn set_video_not_visible(&mut self, notice: Option<DeviceNotVisible>) {
-        if notice == self.video_not_visible {
-            return;
-        }
-        match &notice {
-            Some(notice) => warn!(
-                "設定の映像デバイスが Windows 側にも見えていない: {:?}",
-                notice
-            ),
-            None => debug!("設定の映像デバイスが列挙に戻った"),
-        }
-        self.video_not_visible = notice;
-        if let (Some(notice), Some(reason)) = (&self.video_not_visible, &self.last_video_failure) {
-            let message = failure_message(Some(notice), reason);
-            self.emit(DeviceEvent::VideoFailed(message));
-        }
-    }
-
-    /// 音声の「Windows 側にも見えていない」を更新する。映像と同じ扱い。
-    fn set_audio_not_visible(&mut self, notice: Option<DeviceNotVisible>) {
-        if notice == self.audio_not_visible {
-            return;
-        }
-        match &notice {
-            Some(notice) => warn!(
-                "設定の音声デバイスが Windows 側にも見えていない: {:?}",
-                notice
-            ),
-            None => debug!("設定の音声デバイスが列挙に戻った"),
-        }
-        self.audio_not_visible = notice;
-        if let (Some(notice), Some(reason)) = (&self.audio_not_visible, &self.last_audio_failure) {
-            let message = failure_message(Some(notice), reason);
-            self.emit(DeviceEvent::AudioFailed(message));
-        }
-    }
-
     /// デバイス一覧を取り直して UI スレッドへ返す。
     pub(super) fn refresh_device_lists(&mut self) {
         let video = self.video.list_devices();
@@ -386,136 +260,11 @@ impl WorkerState {
 #[cfg(test)]
 mod tests {
     use super::super::backend::mock::{MockAudioBackend, MockVideoBackend};
-    use super::super::worker_loop::testing::{apply_config, config_for, drain, mock_state};
+    use super::super::worker_testing::{apply_config, capture_logs, config_for, drain, mock_state};
     use super::*;
+    use crate::video::VideoError;
+    use log::Level;
     use std::time::Duration;
-
-    // 「Windows 側にも見えていない」の案内（#236）。モックの列挙結果で
-    // 設定の名前が無い状態を作り、`tick` を回して失敗の理由に案内が付くかを見る。
-    // 時刻はバックオフの上限（5 秒）より大きく進めて、毎回 1 回ずつ試させる
-
-    /// 映像の失敗の理由を、届いた順に取り出す。
-    fn video_failures(events: &[DeviceEvent]) -> Vec<String> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                DeviceEvent::VideoFailed(reason) => Some(reason.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// 映像がずっと失敗するモックで、`ticks` 回だけ接続を試させる。
-    fn run_failing_video(
-        listed: Vec<(String, String)>,
-        ticks: u32,
-    ) -> (Vec<DeviceEvent>, MockVideoBackend) {
-        let video = MockVideoBackend::default();
-        let audio = MockAudioBackend::default();
-        video.with(|state| {
-            state.failures_before_success = u32::MAX;
-            state.devices = listed;
-        });
-        audio.with(|state| state.input_devices = vec!["モック入力".to_string()]);
-        let (mut state, events) = mock_state(&video, &audio);
-        apply_config(
-            &mut state,
-            config_for(Some("キャプチャーボード"), Some("モック入力")),
-            true,
-        );
-
-        let base = Instant::now();
-        for step in 0..ticks {
-            state.tick(base + Duration::from_secs(6) * step);
-        }
-        (drain(&events), video)
-    }
-
-    #[test]
-    fn worker_notices_a_video_device_missing_from_the_enumeration_after_5_failures() {
-        let (events, video) = run_failing_video(vec![("Web カメラ".to_string(), String::new())], 5);
-        assert_eq!(video.with(|state| state.start_calls), 5);
-
-        let reasons = video_failures(&events);
-        // 4 回目までは素の理由だけ。抜いた直後は見えていなくて当然
-        assert!(
-            reasons[..4]
-                .iter()
-                .all(|reason| !reason.contains("Windows 側にも")),
-            "{reasons:?}"
-        );
-        // 5 回目の列挙で判定し、次の失敗を待たずに案内付きで出し直す
-        let last = reasons.last().expect("失敗が届いていること");
-        assert!(
-            last.contains("'キャプチャーボード' が Windows 側にも"),
-            "{last}"
-        );
-        assert!(last.contains("ほかのデバイスは見えています"), "{last}");
-        // 元の理由も残す
-        assert!(last.contains("見つからない"), "{last}");
-    }
-
-    #[test]
-    fn worker_notices_no_devices_at_all_with_a_different_message() {
-        let (events, _video) = run_failing_video(Vec::new(), 5);
-        let reasons = video_failures(&events);
-        let last = reasons.last().expect("失敗が届いていること");
-        assert!(last.contains("1 台も見えていません"), "{last}");
-    }
-
-    #[test]
-    fn worker_keeps_the_notice_on_later_failures() {
-        // 一度付いた案内は、以後の失敗にも添え続ける（繋がるまで）
-        let (events, _video) = run_failing_video(Vec::new(), 7);
-        let reasons = video_failures(&events);
-        assert!(
-            reasons
-                .last()
-                .is_some_and(|reason| reason.contains("Windows 側にも")),
-            "{reasons:?}"
-        );
-    }
-
-    #[test]
-    fn worker_does_not_notice_a_device_that_the_enumeration_lists() {
-        // OS には見えているのに開けない。デバイスマネージャーを案内しても的外れ
-        let (events, _video) =
-            run_failing_video(vec![("キャプチャーボード".to_string(), String::new())], 10);
-        assert!(
-            video_failures(&events)
-                .iter()
-                .all(|reason| !reason.contains("Windows 側にも")),
-            "列挙に居るなら案内しないこと"
-        );
-    }
-
-    #[test]
-    fn worker_logs_the_enumeration_once_per_milestone() {
-        // tick は 100ms ごとに回るが、同じ失敗回数のまま列挙し直さない
-        let video = MockVideoBackend::default();
-        let audio = MockAudioBackend::default();
-        video.with(|state| state.failures_before_success = u32::MAX);
-        let (mut state, _events) = mock_state(&video, &audio);
-        apply_config(
-            &mut state,
-            config_for(Some("キャプチャーボード"), None),
-            true,
-        );
-
-        let base = Instant::now();
-        state.tick(base);
-        assert!(
-            !state.startup_enumeration_pending,
-            "起動時の列挙は最初の tick で済ませること"
-        );
-        for step in 1..5 {
-            state.tick(base + Duration::from_secs(6) * step);
-        }
-        assert_eq!(state.enumeration_logged_failures.0, 5);
-        // 同じ 5 回のまま tick だけ進んでも、記録は変わらない
-        state.tick(base + Duration::from_secs(24) + Duration::from_millis(100));
-        assert_eq!(state.enumeration_logged_failures.0, 5);
-    }
 
     #[test]
     fn worker_reopens_the_video_when_only_the_backend_changes() {
@@ -774,12 +523,82 @@ mod tests {
         assert!(resolved_resolutions(&drain(&events)).is_empty());
     }
 
+    /// `needle` を含むログ行のレベルを、出た順に並べる。
+    fn levels_of(logs: &[(Level, String)], needle: &str) -> Vec<Level> {
+        logs.iter()
+            .filter(|(_, line)| line.contains(needle))
+            .map(|(level, _)| *level)
+            .collect()
+    }
+
     #[test]
-    fn failure_message_puts_the_notice_first() {
-        // トーストは 60 文字で切るので、案内を前に置く
-        let message = failure_message(Some(&DeviceNotVisible::NoDevices), "理由");
-        assert!(message.starts_with("Windows 側にも"), "{message}");
-        assert!(message.ends_with("（理由）"), "{message}");
-        assert_eq!(failure_message(None, "理由"), "理由");
+    fn worker_logs_repeated_failures_at_debug_and_changes_loudly() {
+        // 繋がらないまま tick を回し、同じ理由の失敗は節目だけ WARN、理由が
+        // 変わった回は節目でなくても WARN、列挙は結果が変わった経路だけ節目の
+        // 外でも INFO になることを、ログのレベルで確かめる（#506）
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| {
+            state.failures_before_success = u32::MAX;
+            state.devices = vec![("Web カメラ".to_string(), String::new())];
+        });
+        let (mut state, _events) = mock_state(&video, &audio);
+        apply_config(
+            &mut state,
+            config_for(Some("キャプチャーボード"), None),
+            true,
+        );
+
+        let base = Instant::now();
+        let logs = capture_logs(|| {
+            for step in 0..120 {
+                let attempt = step + 1;
+                if attempt == 7 {
+                    // 「見つからない」から「開けない」へ理由が変わる
+                    video.with(|state| {
+                        state.failure = Some(VideoError::CameraOpenFailed {
+                            device: "キャプチャーボード".to_string(),
+                            source: "使用中".to_string(),
+                        })
+                    });
+                }
+                if attempt == 105 {
+                    // 101〜109 回目は節目ではないが、110 回目の列挙で結果が変わっている
+                    video.with(|state| {
+                        state
+                            .devices
+                            .push(("キャプチャーボード".to_string(), String::new()))
+                    });
+                }
+                state.tick(base + Duration::from_secs(6) * step);
+            }
+        });
+        assert_eq!(video.with(|state| state.start_calls), 120);
+
+        let failed = |n: u32| levels_of(&logs, &format!("接続に失敗した（{n} 回目）"));
+        assert_eq!(failed(1), vec![Level::Warn]);
+        assert_eq!(failed(4), vec![Level::Debug], "同じ理由が続く間は DEBUG");
+        assert_eq!(failed(5), vec![Level::Warn], "節目は WARN");
+        assert_eq!(failed(6), vec![Level::Debug]);
+        assert_eq!(failed(7), vec![Level::Warn], "理由が変わった回は WARN");
+        assert_eq!(failed(8), vec![Level::Debug]);
+        assert_eq!(failed(110), vec![Level::Debug]);
+        let tried = |n: u32| levels_of(&logs, &format!("接続を試す（{n} 回目）"));
+        assert_eq!(tried(4), vec![Level::Debug]);
+        assert_eq!(tried(10), vec![Level::Info]);
+
+        // 列挙は 10 回ごとに行い、100 回目より後は変わった経路だけ INFO。
+        // 経路はモックの映像（`list_devices`）と音声入力で見分ける
+        let listing = |n: u32, source: &str| {
+            levels_of(&logs, &format!("映像 {n} 回、音声 0 回）: {source}:"))
+        };
+        assert_eq!(listing(100, "list_devices"), vec![Level::Info], "節目");
+        assert_eq!(
+            listing(110, "list_devices"),
+            vec![Level::Info],
+            "結果が変わった"
+        );
+        assert_eq!(listing(110, "音声入力"), vec![Level::Debug], "変わらない");
+        assert_eq!(listing(120, "list_devices"), vec![Level::Debug]);
     }
 }

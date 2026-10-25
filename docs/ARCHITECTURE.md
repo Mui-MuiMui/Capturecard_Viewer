@@ -22,7 +22,7 @@ Windows 10/11 専用であることは前提として受け入れる。移植性
 ```mermaid
 flowchart TD
     main["main.rs<br/>エントリポイントのみ"]
-    app["app<br/>AppState / eframe::App / イベント処理"]
+    app["app<br/>CaptureCardViewer / eframe::App / イベント処理"]
     ui["ui<br/>描画のみ"]
     settings["settings<br/>永続化"]
     hotkey["hotkey<br/>ホットキー"]
@@ -65,15 +65,15 @@ flowchart TD
 | `platform` | Windows 固有処理（フォント、アイコン、モニタ情報） | 汎用ロジック |
 | `logging` | ログの初期化と出力先 | — |
 
-`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_commands.rs`（コマンドの受け口）/ `worker_connect.rs` / `worker_audio_connect.rs` / `worker_default_input.rs`（デバイス操作）/ `worker_timers.rs` / `worker_audio_timers.rs`（再試行・切断監視・既定デバイスの追従などタイマー駆動の監視）と、デバイスの入口の trait を持つ `backend/` で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
+`app` は 1 ファイルではなく `src/app/` の子モジュール群で、状態（`CaptureCardViewer`）だけを `app/mod.rs` が持ち、子モジュールは `impl` を足す。この図の `device` レイヤーにあたるのは `src/app/worker.rs` / `worker_loop.rs` / `worker_commands.rs`（コマンドの受け口）/ `worker_connect.rs` / `worker_enumeration.rs` / `worker_audio_connect.rs` / `worker_default_input.rs`（デバイス操作）/ `worker_timers.rs` / `worker_audio_timers.rs`（再試行・切断監視・既定デバイスの追従などタイマー駆動の監視）と、デバイスの入口の trait を持つ `backend/` で、専用スレッド 1 本の上で `video` / `audio` を所有する。`src/app/device.rs` はその UI 側の窓口（設定をコマンドへ写し、イベントを画面の状態へ反映する）。
 
 ## 状態管理
 
 ### 単一の所有者
 
-アプリの状態は `AppState` 一つが所有する。**ファイルスコープの `static` に状態を置かない。** `static mut` は使わない。
+アプリの状態は `CaptureCardViewer` 一つが所有する。**ファイルスコープの `static` に状態を置かない。** `static mut` は使わない。
 
-設定ダイアログやホットキー入力ダイアログのような一時的な UI 状態も、`AppState` の下にぶら下げる。ダイアログを閉じたときに状態が残る、といった不整合を構造で防ぐ。
+設定ダイアログやホットキー入力ダイアログのような一時的な UI 状態も、`CaptureCardViewer` の下にぶら下げる。ダイアログを閉じたときに状態が残る、といった不整合を構造で防ぐ。
 
 ### UI は状態を持たない
 
@@ -337,7 +337,7 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 種別で分けてあると、たとえば「デバイスが見つからない」ならリトライせずユーザーへ通知、「一時的にビジー」ならリトライ、といった判断が書けるようになる。バリアントにはデバイス名・向き・下位のエラー文を持たせ、分岐したあとで文言を組み立て直さずに済むようにする。
 
-**表示用の文言は、その型の `Display` として各モジュールで出す。** 以前はここを「UI 層で組み立てる」としていたが、エラーの中身と文言が離れているとバリアントを増やすたびに `status.rs` 側の `match` を足す必要があり、片方の更新漏れで英語の文言が残っていた。バリアントから文言への対応は中身のすぐ隣に置き、`status.rs` は定型文（`ErrorSource::headline`）との連結と表示用の組み立てだけを持つ。文字列の実体は、多言語対応のために他の画面の文字列と一緒に `src/i18n/` へ集めてある（`docs/design/i18n.md`）。
+**表示用の文言は、その型の `Display` として各モジュールで出す。** 以前はここを「UI 層で組み立てる」としていたが、エラーの中身と文言が離れているとバリアントを増やすたびに `status/mod.rs` 側の `match` を足す必要があり、片方の更新漏れで英語の文言が残っていた。バリアントから文言への対応は中身のすぐ隣に置き、`status/mod.rs` は定型文（`ErrorSource::headline`）との連結と表示用の組み立てだけを持つ。文字列の実体は、多言語対応のために他の画面の文字列と一緒に `src/i18n/` へ集めてある（`docs/design/i18n.md`）。
 
 ### ログ
 
@@ -358,11 +358,11 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 デバイス接続の失敗、ホットキー登録の失敗、スクリーンショットの保存失敗は、UI に表示する。ログにだけ書いて画面上は無反応、という状態を作らない。
 
-**ここは `src/status.rs` として実装済み。** 発生源ごとに直近の 1 件だけを `ErrorCenter` が持ち、新しい失敗は `TransientOverlay` に数秒出す。同じ発生源で同じ文言が続く間は間引く。接続の再試行は最大 5 秒間隔で無限に続くため、間引かないと通知が出っぱなしになるため。
+**ここは `src/status/mod.rs` として実装済み。** 発生源ごとに直近の 1 件だけを `ErrorCenter` が持ち、新しい失敗は `TransientOverlay` に数秒出す。同じ発生源で同じ文言が続く間は間引く。接続の再試行は最大 5 秒間隔で無限に続くため、間引かないと通知が出っぱなしになるため。
 
 ホットキーの登録失敗も `ErrorSource::Hotkey` としてここを通る。加えて `HotkeyManager::errors()` が「いま登録できていないもの」をアクションごとに持ち、設定画面のホットキー一覧の下に理由を並べる。**トーストは気付かせるためのもので、どのアクションが失敗しているかは一覧で見る**という役割分担。同じキーを 2 つのアクションへ割り当てた場合も、一覧の上で警告する。
 
-下位のモジュールは自分のエラー型を返し、その `Display` が日本語の 1 行を持つ。`status.rs` が持つのは定型文（`ErrorSource::headline`）との連結、間引き、長さの切り詰めで、**発生源ごとの文言をここで `match` しない。**
+下位のモジュールは自分のエラー型を返し、その `Display` が日本語の 1 行を持つ。`status/mod.rs` が持つのは定型文（`ErrorSource::headline`）との連結、間引き、長さの切り詰めで、**発生源ごとの文言をここで `match` しない。**
 
 映像が出ていない理由のように**見続ける必要があるもの**は、一時表示ではなく映像プレースホルダーの 2 行目と設定ダイアログの「接続状態」タブに置く。通知は気付かせるためだけのものと割り切る。
 
@@ -380,7 +380,7 @@ F32 / I16 / U16 / I32 を明示的に分岐する。未対応のフォーマッ�
 
 | 目指す姿 | 現状 | 対応するタスク |
 |---|---|---|
-| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `placeholder` / `video_overlay` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_commands` / `worker_connect` / `worker_audio_connect` / `worker_default_input` / `worker_timers` / `worker_audio_timers` / `backend` / `monitor` / `retry` / `capabilities` / `screenshot` / `screenshot_sound` / `recording` / `settings_dialog` / `settings_store` / `update` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
+| レイヤー分離 | `main.rs` はエントリポイントだけになり、アプリ状態と振る舞いは `app` 配下の子モジュール（`view` / `placeholder` / `video_overlay` / `menu` / `window` / `device` / `worker` / `worker_loop` / `worker_commands` / `worker_connect` / `worker_enumeration` / `worker_audio_connect` / `worker_default_input` / `worker_timers` / `worker_audio_timers` / `backend` / `monitor` / `retry` / `capabilities` / `screenshot` / `screenshot_sound` / `recording` / `settings_dialog` / `settings_store` / `update` / `hotkeys` / `audio_control` / `error_report`）へ分かれた。デバイス層は専用スレッド 1 本になり、`video` / `audio` はそこが所有する | 完了 |
 | イベント駆動 | 2 秒ごとに設定を再適用するポーリング | apply_settings の 2 秒ごとの再登録 |
 | チャネルでの隔離 | UI と `device` ワーカーの間はコマンドとイベントを mpsc でやり取りする。**この境界で**チャネルを通さず共有するのは 4 つ（映像フレーム `VideoFrames`（録画へ回す `VideoTap` を含む）、色変換と映像調整 `SharedColorConversion`、音量・ミュート・パススルー `AudioControls`、録画へ回す音声 `AudioTap`）。数えるのは UI スレッドか録画スレッドがワーカーを通さずにデバイスのコールバックとやり取りする共有ハンドル（`BackendShared` に載せて渡すもの）で、`docs/design/device-worker.md` と `src/app/worker.rs` も同じ数え方。これとは別に観測値は `Arc<RwLock<DeviceSnapshot>>` に写して読む。`settings` や `screenshot_manager` のようにデバイスを跨がない共有はこの話の外 | 完了 |
 | UI をブロックしない | デバイスを開く・閉じる・列挙する処理も含めてワーカースレッドへ移した。スクリーンショットのエンコードは撮影ごとのスレッド。`update()` に残るブロッキングは `rfd` のファイルダイアログだけ | 完了 |

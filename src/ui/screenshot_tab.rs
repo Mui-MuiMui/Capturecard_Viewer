@@ -6,12 +6,12 @@
 use crate::i18n::Text;
 use crate::settings::{
     AppSettings, ScreenshotDestination, ScreenshotFormat, DEFAULT_SOUND_FILE, MAX_JPEG_QUALITY,
-    MIN_JPEG_QUALITY,
+    MAX_VOLUME, MIN_JPEG_QUALITY, MIN_VOLUME,
 };
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
-use super::SettingsEvent;
+use super::{name_slider, SettingsEvent};
 
 /// スクリーンショット設定タブを描画する。
 ///
@@ -69,14 +69,22 @@ pub(super) fn show_screenshot_settings_tab(
             ui.add_space(5.0);
 
             ui.horizontal(|ui| {
-                ui.label(Text::SaveFolderLabel.get());
+                let label = ui.label(Text::SaveFolderLabel.get());
+                // 書き戻すのは欄を編集したときだけ。毎フレーム書き戻すと、タブを
+                // 開いただけで UTF-16 として不正なパスが U+FFFD に置き換わる
+                // （「録画」タブの保存先と同じ形）
                 let mut folder_str = settings
                     .screenshot
                     .save_folder
                     .to_string_lossy()
                     .to_string();
-                ui.text_edit_singleline(&mut folder_str);
-                settings.screenshot.save_folder = std::path::PathBuf::from(folder_str);
+                if ui
+                    .text_edit_singleline(&mut folder_str)
+                    .labelled_by(label.id)
+                    .changed()
+                {
+                    settings.screenshot.save_folder = PathBuf::from(folder_str);
+                }
 
                 if ui.button(Text::ButtonBrowse.get()).clicked() {
                     events.push(SettingsEvent::PickScreenshotFolder);
@@ -109,12 +117,15 @@ pub(super) fn show_screenshot_settings_tab(
             let jpeg_selected = settings.screenshot.format == ScreenshotFormat::Jpeg;
             ui.horizontal(|ui| {
                 ui.label(Text::JpegQualityLabel.get());
-                ui.add_enabled(
-                    jpeg_selected,
-                    egui::Slider::new(
-                        &mut settings.screenshot.jpeg_quality,
-                        MIN_JPEG_QUALITY..=MAX_JPEG_QUALITY,
+                name_slider(
+                    ui.add_enabled(
+                        jpeg_selected,
+                        egui::Slider::new(
+                            &mut settings.screenshot.jpeg_quality,
+                            MIN_JPEG_QUALITY..=MAX_JPEG_QUALITY,
+                        ),
                     ),
+                    Text::JpegQualityLabel.get(),
                 );
             });
 
@@ -168,9 +179,15 @@ pub(super) fn show_screenshot_settings_tab(
         if let Some(sound_file) = settings.screenshot.sound_file.clone() {
             ui.horizontal(|ui| {
                 ui.label(Text::VolumeLabel.get());
-                ui.add(
-                    egui::Slider::new(&mut settings.screenshot.sound_volume, 0.0..=200.0)
+                name_slider(
+                    ui.add(
+                        egui::Slider::new(
+                            &mut settings.screenshot.sound_volume,
+                            MIN_VOLUME..=MAX_VOLUME,
+                        )
                         .suffix("%"),
+                    ),
+                    Text::VolumeLabel.get(),
                 );
             });
 
@@ -235,6 +252,32 @@ impl<'a> SoundChoice<'a> {
 mod tests {
     use super::*;
     use crate::settings::ScreenshotSettings;
+    use crate::ui::testing::{dialog_harness, DialogFixture};
+    use crate::ui::{SettingsTab, VideoPinChoice};
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    #[test]
+    fn opening_the_tab_keeps_a_save_folder_that_is_not_valid_unicode() {
+        // 対になっていないサロゲート（0xD800）を含むパス。to_string_lossy で U+FFFD に化ける
+        let folder = PathBuf::from(OsString::from_wide(&[
+            u16::from(b'C'),
+            u16::from(b':'),
+            u16::from(b'\\'),
+            0xD800,
+        ]));
+        let mut draft = AppSettings::default();
+        draft.screenshot.save_folder = folder.clone();
+        let mut harness = dialog_harness(DialogFixture::new(
+            &draft,
+            SettingsTab::Screenshot,
+            VideoPinChoice::default(),
+            &[],
+        ));
+        harness.run();
+        // 欄を編集していないので、開いて描いただけではパスを書き換えない
+        assert_eq!(harness.state().draft().screenshot.save_folder, folder);
+    }
 
     #[test]
     fn sound_choice_default_settings_is_default() {

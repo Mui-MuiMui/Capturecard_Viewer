@@ -32,13 +32,16 @@ mod worker_audio_timers;
 mod worker_commands;
 mod worker_connect;
 mod worker_default_input;
+mod worker_enumeration;
 mod worker_loop;
+#[cfg(test)]
+mod worker_testing;
 mod worker_timers;
 
 use self::menu::MenuLayout;
 use self::screenshot::ScreenshotResult;
-use self::screenshot_sound::SoundMessage;
-use self::settings_store::{SaveFailureStreak, SaveTrigger};
+use self::screenshot_sound::{SoundLoadFailure, SoundLoadRetry, SoundMessage};
+use self::settings_store::SaveFailureStreak;
 use self::update::UpdateState;
 use self::window::{needs_drag_move_guard, WindowRecordState};
 use self::worker::{DeviceSnapshot, DeviceWorker};
@@ -50,8 +53,10 @@ use crate::platform;
 use crate::recording::Recorder;
 use crate::repaint::RepaintWaker;
 use crate::screenshot_sound::ScreenshotManager;
-use crate::settings::{AppSettings, AutoSavePolicy, ColorRange, ColorSpace};
-use crate::status::ErrorCenter;
+use crate::settings::{
+    AppSettings, AutoSavePolicy, ColorRange, ColorSpace, LoadOutcome, SettingsError,
+};
+use crate::status::{ErrorCenter, RecordedError};
 use crate::ui;
 use crate::video::{DisplayLatency, GpuYuy2, SharedColorConversion, VideoAdjustments, VideoFrames};
 use eframe::egui;
@@ -107,6 +112,14 @@ pub struct CaptureCardViewer {
     // 前回の効果音の再生で出力先を開けなかった理由。開けていれば None。
     // 同じ理由を撮影のたびに報告しないために持つ（`app::screenshot_sound`）
     sound_output_failure: Option<String>,
+    // 最後に適用した効果音ファイルを読み込めなかった理由（読めない・デコードできない）。
+    // 読み込めていれば None。2 秒ごとの適用では読み直さず、設定ダイアログの
+    // 「適用」「OK」と、読めないファイルなら間隔を延ばしながら自動で読み直す。
+    // 同じ理由を報告し直さないためにも使う（#507）
+    // 設定のパスも一緒に持ち、パスが変わったら捨てる
+    sound_load_failure: Option<SoundLoadFailure>,
+    // 読めない効果音ファイルの自動の読み直しの予定。予定が無ければ None
+    sound_load_retry: Option<SoundLoadRetry>,
 
     // 発生源ごとの直近の失敗。トーストの間引きもここが判断する
     errors: ErrorCenter,
@@ -151,6 +164,15 @@ pub struct CaptureCardViewer {
     // 保存の失敗が何回続いているか。再試行の間隔と、ログ・トーストの間引きに
     // 使う（`app::settings_store`）
     settings_save_failures: SaveFailureStreak,
+    // 起動時の書き戻しの結果。`new()` で保存し、取り込む（失敗ならログとトースト）のは
+    // 画面の言語を決めたあとの `report_startup_settings`。`new()` の中で文言を作ると、
+    // 英語の設定でも既定の日本語で出るため（#505）。取り込んだら None
+    pending_startup_save: Option<Result<(), SettingsError>>,
+    // 起動時に設定ファイルを読めなかった知らせ（#505）。「接続状態」タブに出す。
+    // `errors` の `ErrorSource::Settings` とは別に持つ。あちらは直近の 1 件だけで、
+    // あとの保存の失敗に上書きされ、保存の成功で消えるため。消すのは自動保存を
+    // 再開したとき（`app::settings_dialog`）だけ
+    settings_load_notice: Option<RecordedError>,
 
     // 映像表示関連
     video_texture: Option<egui::TextureHandle>,
@@ -210,9 +232,6 @@ pub struct CaptureCardViewer {
     // このスレッドが行う。
     // 終了時に join して、書き出し途中の画像ファイルが残らないようにする
     screenshot_save_threads: Vec<JoinHandle<()>>,
-    // 進行中の効果音ファイルの読み込みスレッド。デバイスには触らないが、
-    // 保存スレッドと同じく切り離さず、終了時に join する
-    sound_load_threads: Vec<JoinHandle<()>>,
     // 更新の確認。結果のチャネル、確認のスレッド、「その他」タブに出す状態、
     // 起動時の通知ダイアログをまとめて持つ（`app::update`）
     update_check: UpdateState,
@@ -229,13 +248,18 @@ pub struct CaptureCardViewer {
     os_language: Language,
 }
 
-impl Default for CaptureCardViewer {
-    fn default() -> Self {
-        let (loaded_settings, load_outcome) = AppSettings::load();
+impl CaptureCardViewer {
+    /// `main.rs` が読み込んだ設定と、その読み込み結果からアプリを作る。
+    ///
+    /// 設定を読むのは `main.rs` の 1 回だけ。ここでもう一度読むと、1 回目で退避した
+    /// ファイルが無いので「読めた」ことになり、読めなかったことを利用者へ知らせる
+    /// 材料（理由・退避先）が失われる（Issue #505）。知らせるのは画面の言語を
+    /// 決めたあとの `report_startup_settings`
+    pub fn new(loaded_settings: AppSettings, load_outcome: &LoadOutcome) -> Self {
         // OS の表示言語は起動時に 1 回だけ問い合わせて持っておく。
         //
         // **ここでは `i18n::set_language` を呼ばない。** 言語はプロセス全体で
-        // 共有されるので、`default()` で書き換えると、これを作るテストが
+        // 共有されるので、`new()` で書き換えると、これを作るテストが
         // 同じプロセスの他のテスト（文言を照合するもの）を巻き込む（#256）。
         // 画面の言語を決めるのは起動経路（`main.rs` が作った直後に呼ぶ
         // `apply_language`）
@@ -312,6 +336,8 @@ impl Default for CaptureCardViewer {
             settings_dirty_since: None,
             autosave: AutoSavePolicy::from_load_outcome(load_outcome),
             settings_save_failures: SaveFailureStreak::default(),
+            pending_startup_save: None,
+            settings_load_notice: None,
             video_texture: None,
             gpu_yuy2: GpuYuy2::default(),
             video_image: None,
@@ -336,8 +362,9 @@ impl Default for CaptureCardViewer {
             window_record: WindowRecordState::default(),
 
             screenshot_save_threads: Vec::new(),
-            sound_load_threads: Vec::new(),
             sound_output_failure: None,
+            sound_load_failure: None,
+            sound_load_retry: None,
             update_check: UpdateState::new(),
             recorder,
 
@@ -394,11 +421,10 @@ impl Default for CaptureCardViewer {
                 warn!("起動時のデバイス自動選択で settings のロックを取得できない");
             }
         }
-        // ロックを放してから結果を取り込む。失敗したらログとトーストで知らせ、
-        // 保留として残して再試行させる（`app::settings_store`）
-        if let Some(result) = startup_save {
-            app.note_settings_save_result(result, SaveTrigger::Automatic);
-        }
+        // 結果は取り込まずに預ける。失敗したらログとトーストで知らせ、保留として
+        // 残して再試行させる（`app::settings_store`）が、トーストの文言を作るのは
+        // 画面の言語を決めたあと（`report_startup_settings`、#505）
+        app.pending_startup_save = startup_save;
 
         // 保存済みのビデオデバイスの能力を先に取りに行く。
         // 設定画面を開いた時点で選択肢が揃っているようにするためで、
@@ -477,6 +503,11 @@ impl CaptureCardViewer {
         // ウィンドウサイズと位置を監視して設定に記録する（書き出しはデバウンス）
         let viewport = ctx.input(|i| i.viewport().clone());
         self.record_window_geometry(&viewport);
+        // 表示の観測値の 5 分の要約（#501）に、最小化を挟んだ窓だと印を付ける。
+        // 最小化中は update() が 1 秒ごとにしか回らず、その窓の数は比べられないため
+        if viewport.minimized == Some(true) {
+            self.display_latency.note_minimized();
+        }
 
         // メインUI
         if self.is_fullscreen {
@@ -697,6 +728,10 @@ impl eframe::App for CaptureCardViewer {
         let frames = &self.frames;
         self.gpu_yuy2
             .tick(Instant::now(), frame_time, || frames.stats());
+        // 同じ描画時間を、表示の観測値の 5 分の要約（#501）にも数える
+        if let Some(frame_time) = frame_time {
+            self.display_latency.note_frame_time(frame_time);
+        }
         self.update(ui);
     }
 
@@ -744,10 +779,9 @@ impl eframe::App for CaptureCardViewer {
         // ここで待たないと、main が返った時点でプロセスごと落ちて
         // 書きかけの画像ファイルがディスクに残る
         self.join_screenshot_save_threads();
-        // 効果音の読み込みも切り離さずに待つ。結果は使わない
-        self.join_sound_load_threads();
-        // 更新の確認と適用のスレッドは待たない。確認は副作用が無く、適用は
-        // 書きかけの `.new` を次の起動で消す（docs/design/update.md）
+        // 効果音の読み込みと、更新の確認・適用のスレッドは待たない。読み込みと確認は
+        // 副作用が無く（ネットワークドライブ上のファイルは読み終わりが読めない。#507）、
+        // 適用は書きかけの `.new` を次の起動で消す（docs/design/threads.md、docs/design/update.md）
 
         // 終了中に終わった保存の結果をログへ残す。**待ったあとに読むこと。**
         // 画面はもう出ないので通知はされないが、閉じる直前に撮った 1 枚が

@@ -208,7 +208,7 @@ fn show_preset_group(
 /// 「キャンセル」で閉じたときに戻すべき言語が分からなくなる。
 fn show_language_group(ui: &mut egui::Ui, draft: &AppSettings, events: &mut Vec<SettingsEvent>) {
     ui.group(|ui| {
-        ui.strong(Text::LanguageGroup.get());
+        let heading = ui.strong(Text::LanguageGroup.get());
         ui.add_space(5.0);
 
         let current = draft.ui.language;
@@ -225,7 +225,9 @@ fn show_language_group(ui: &mut egui::Ui, draft: &AppSettings, events: &mut Vec<
                         events.push(SettingsEvent::SetLanguage(language));
                     }
                 }
-            });
+            })
+            .response
+            .labelled_by(heading.id);
 
         ui.add_space(5.0);
         ui.small(Text::LanguageHint.get());

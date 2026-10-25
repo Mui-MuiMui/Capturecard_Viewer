@@ -5,6 +5,7 @@
 //! serde の補助は子モジュールに分けてある（映像 `video`、音声 `audio`、
 //! スクリーンショット `screenshot`、録画 `recording`、UI と更新 `ui`、
 //! ホットキー `hotkeys`、プリセット `preset`、読み書き `store`、書き込み `write`、書き出し / 読み込み `transfer`）。
+//! 各セクションの serde の補助が共通で使う読み方は `lenient`。
 //!
 //! 外から使う経路（`crate::settings::...`）はここの `pub use` に集める。
 //! 外からテストでしか使わない項目は再輸出しない（誰も使わない `pub use` が
@@ -15,10 +16,14 @@ use crate::i18n;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+// `SettingsError` のフィールドの型。外からは `app::settings_store` のテスト
+// （起動時の知らせの言語、#505）が読み込み結果を組み立てるのに使う
+pub(crate) use store::LoadFailure;
 
 mod audio;
 mod hotkeys;
+mod lenient;
 mod preset;
 mod recording;
 mod screenshot;
@@ -52,7 +57,7 @@ pub use screenshot::{
     ScreenshotDestination, ScreenshotEncoding, ScreenshotFormat, ScreenshotSettings,
     DEFAULT_SOUND_FILE, MAX_JPEG_QUALITY, MIN_JPEG_QUALITY,
 };
-pub use store::AutoSavePolicy;
+pub use store::{AutoSavePolicy, LoadOutcome};
 pub use transfer::{export_file_name, export_to, import_from};
 pub use ui::{LanguageSetting, UiSettings, UpdateSettings, MAX_VOLUME, MIN_VOLUME};
 pub use video::{
@@ -65,10 +70,11 @@ pub use video::{
 /// 対象は `%AppData%` の設定ファイルの保存（`AppSettings::save`）と、
 /// 「その他」タブの「設定を書き出す」「設定を読み込む」。起動時の読み込み
 /// （`AppSettings::load`）は失敗しても既定値で起動し、結果を `LoadOutcome` で
-/// 返すのでここを通らない。
+/// 返す。その結果を利用者へ知らせる文言だけはここ（`LoadFellBackToDefaults` /
+/// `LoadFailedFileKept`、`LoadOutcome::failure` が作る、Issue #505）。
 ///
 /// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
-/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事
+/// （`status::ErrorSource::headline`）との連結だけが `status/mod.rs` の仕事
 /// （`docs/design/error-reporting.md`）。文言に「設定ファイル」を付けないのは、
 /// 定型文が既に「設定ファイルを読み書きできません」で始まるため。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +92,18 @@ pub enum SettingsError {
     /// 設定ファイルを保存できない（書き込み権限が無い、ディスクが一杯、
     /// 他のプロセスが開いているなど）
     SaveFailed { path: PathBuf, source: String },
+    /// 起動時に読み込めず、退避して既定値で起動した。`backup` は退避先
+    /// （元のファイルが無かったときは None）
+    LoadFellBackToDefaults {
+        reason: LoadFailure,
+        backup: Option<PathBuf>,
+    },
+    /// 起動時に読み込めず、退避もできなかったので自動保存を止めた。
+    /// `path` は残っているファイル（置き場所が分からなかったときは None）
+    LoadFailedFileKept {
+        reason: LoadFailure,
+        path: Option<PathBuf>,
+    },
 }
 
 impl fmt::Display for SettingsError {
@@ -104,6 +122,12 @@ impl fmt::Display for SettingsError {
             }
             SettingsError::SaveFailed { path, source } => {
                 i18n::file_write_failed(path.display(), source)
+            }
+            SettingsError::LoadFellBackToDefaults { reason, backup } => {
+                i18n::settings_load_fell_back(reason, backup.as_deref().map(Path::display))
+            }
+            SettingsError::LoadFailedFileKept { reason, path } => {
+                i18n::settings_load_file_kept(reason, path.as_deref().map(Path::display))
             }
         };
         f.write_str(&text)

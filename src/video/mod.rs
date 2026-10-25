@@ -66,7 +66,7 @@ pub use directshow::{
     display_name as directshow_display_name, friendly_name as directshow_friendly_name,
     DirectShowCapture,
 };
-pub use display_latency::{format_display_latency, DisplayLatency};
+pub use display_latency::{format_display_latency, DisplayLatency, DisplaySummaryLog};
 pub use fake::{FakeVideoCapture, FakeVideoOptions};
 pub use frame_buffer::{FrameStats, VideoFrame, VideoFrames};
 pub use frame_format::PixelFormat;
@@ -88,7 +88,7 @@ use crate::i18n::{self, Text};
 /// nokhwa が漏れるので、文字列に落として持たせる。
 ///
 /// **表示用の文言はこの型の `Display` が `crate::i18n` から引く。** 定型文
-/// （`status::ErrorSource::headline`）との連結だけが `status.rs` の仕事。
+/// （`status::ErrorSource::headline`）との連結だけが `status/mod.rs` の仕事。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VideoError {
     /// デバイスの列挙に失敗した

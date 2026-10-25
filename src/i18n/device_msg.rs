@@ -197,7 +197,7 @@ pub fn failure_with_device_not_visible(notice: impl Display, reason: impl Displa
     }
 }
 
-// ---- 接続状態（status.rs） ----
+// ---- 接続状態（status/connection.rs） ----
 
 pub fn resample_ratio(ratio: f32) -> String {
     match language() {

@@ -68,6 +68,8 @@ texts! {
     HeadlineScreenshotSound { ja: "効果音を再生できません", en: "Cannot play the screenshot sound" },
     HeadlineHotkey { ja: "ホットキーを登録できません", en: "Cannot register the hotkey" },
     HeadlineSettings { ja: "設定ファイルを読み書きできません", en: "Cannot read or write the settings file" },
+    // 起動時に読めなかった理由のうち、空のファイル（#317、#505）
+    SettingsFileBlank { ja: "空のファイル（0 バイトか空白だけ）", en: "the file is empty" },
     HeadlineUpdate { ja: "更新できません", en: "Cannot update" },
     HeadlineRecording { ja: "録画できません", en: "Cannot record" },
 
@@ -142,7 +144,7 @@ texts! {
     LanguageJapanese { ja: "日本語", en: "日本語" },
     LanguageEnglish { ja: "English", en: "English" },
 
-    // ---- 接続状態（status.rs） ----
+    // ---- 接続状態（status/connection.rs） ----
     VideoActualUnknown { ja: "（取得できない）", en: "(unavailable)" },
     ResampleIdentity { ja: "変換なし", en: "No conversion" },
     WaterLevelUnknown { ja: "不明", en: "unknown" },
@@ -330,7 +332,6 @@ texts! {
     PlaceholderNoSignal { ja: "映像信号がありません", en: "No video signal" },
     PlaceholderReconnecting { ja: "デバイスが接続されていません（再接続を試しています）", en: "No device connected (trying to reconnect)" },
     PlaceholderDisconnected { ja: "デバイスが接続されていません", en: "No device connected" },
-    StatsFpsPending { ja: "FPS - (フレーム間隔の計測待ち)", en: "FPS - (measuring frame interval)" },
     StatsDecodeUnknown { ja: "デコード -", en: "Decode -" },
     StatsNoFrame { ja: "映像フレームなし", en: "No video frames" },
     StatsDisplayLatencyPending { ja: "表示までの遅れ: - (到着→テクスチャ更新)", en: "Display latency: - (arrival→texture update)" },

@@ -31,10 +31,17 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-/// 起動時に前の版の `.old` を消すときの再試行の間隔と回数。
+/// 起動してから前の版の `.old` を消し始めるまでの時間。
 ///
-/// 更新で起動した直後は、前の版のプロセスがまだ終わりきっておらず `.old` を
-/// 消せない（実行中の exe は消せない）。数秒待てば消せるので、しばらく繰り返す。
+/// 新しい版が起動してすぐ落ちたときに、手で戻せる前の版を残しておく
+/// （`docs/TROUBLESHOOTING.md` の「更新のあとアプリが起動しない」）。これより前に
+/// 終了したら消さず、次の起動でまた同じだけ待つ（`docs/design/update.md` の「適用」）。
+const KEEP_OLD_FOR: Duration = Duration::from_secs(60);
+
+/// 前の版の `.old` を消すときの再試行の間隔と回数。
+///
+/// 前の版のプロセスがまだ終わりきっていないと `.old` を消せない（実行中の exe は
+/// 消せない）。数秒待てば消せるので、しばらく繰り返す。
 const LEFTOVER_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const LEFTOVER_RETRIES: u32 = 20;
 
@@ -107,8 +114,8 @@ pub(super) struct UpdateState {
     tx: Sender<UpdateCheckResult>,
     rx: Receiver<UpdateCheckResult>,
     // 確認・適用・後片付けのスレッド。ハンドルは持っておくが、**終了時に join しない。**
-    // 確認の最中に閉じても待たずに終わってよい（効果音・スクリーンショットの
-    // 保存スレッドとは違う。docs/design/update.md）
+    // 確認の最中に閉じても待たずに終わってよい（スクリーンショットの保存スレッドとは
+    // 違い、効果音の読み込みスレッドと同じ。docs/design/update.md）
     threads: Vec<JoinHandle<()>>,
     // 「その他」タブに出す確認の状態
     status: UpdateStatus,
@@ -525,8 +532,12 @@ impl CaptureCardViewer {
 
     /// 前回の更新の残り（`.old` と書きかけの `.new`）を消す。起動直後に 1 回だけ呼ぶ。
     ///
-    /// 更新の直後は前の版のプロセスがまだ終わっておらず `.old` を消せないので、
-    /// 別スレッドでしばらく繰り返す。消せなければ WARN を残すだけで、次の起動でまた試す。
+    /// 書きかけの `.new` はすぐ消す。前の版の `.old` は、新しい版が `KEEP_OLD_FOR`
+    /// だけ動いてから消す。起動してすぐ落ちる版に更新してしまったとき、手で戻せる
+    /// ように残しておくため。待つのも消すのも別スレッドで、終了時は待たない
+    /// （待つ間に終われば消さず、次の起動でまた待つ）。前の版のプロセスが終わって
+    /// いないと消せないので、しばらく繰り返す。消せなければ WARN を残すだけで、
+    /// 次の起動でまた試す。
     pub(super) fn clean_up_update_leftovers(&mut self) {
         let paths = match ExePaths::current() {
             Ok(paths) => paths,
@@ -542,8 +553,18 @@ impl CaptureCardViewer {
         let spawned = std::thread::Builder::new()
             .name("update-cleanup".to_string())
             .spawn(move || {
+                apply::remove_leftover_new(&paths);
+                if !paths.old.exists() {
+                    return;
+                }
+                info!(
+                    "{} 秒動いたら前の版 {} を消す",
+                    KEEP_OLD_FOR.as_secs(),
+                    paths.old.display()
+                );
+                std::thread::sleep(KEEP_OLD_FOR);
                 for attempt in 1..=LEFTOVER_RETRIES {
-                    match apply::remove_leftovers(&paths) {
+                    match apply::remove_leftover_old(&paths) {
                         Ok(()) => {
                             info!("前回の更新の残りを消した: {}", paths.old.display());
                             return;

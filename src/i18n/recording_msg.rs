@@ -30,25 +30,25 @@ pub fn recording_folder_not_absolute(path: impl Display) -> String {
     }
 }
 
-pub fn recording_disk_low(free_mb: u64) -> String {
+pub fn recording_disk_low(free_mib: u64) -> String {
     match language() {
         Language::Japanese => {
-            format!("保存先の空き容量が少ないので録画を止めた（残り {free_mb} MB）")
+            format!("保存先の空き容量が少ないので録画を止めた（残り {free_mib} MiB）")
         }
         Language::English => {
-            format!("Stopped recording because the disk is almost full ({free_mb} MB left)")
+            format!("Stopped recording because the disk is almost full ({free_mib} MiB left)")
         }
     }
 }
 
 /// リプレイバッファを通す録画で、リングを書き出すだけの空きが無いので始めなかったとき。
-pub fn recording_replay_disk_short(free_mb: u64, required_mb: u64) -> String {
+pub fn recording_replay_disk_short(free_mib: u64, required_mib: u64) -> String {
     match language() {
         Language::Japanese => format!(
-            "保存先の空き容量が足りないので録画を始めなかった（残り {free_mb} MB、リプレイバッファの書き出しに {required_mb} MB 要る）"
+            "保存先の空き容量が足りないので録画を始めなかった（残り {free_mib} MiB、リプレイバッファの書き出しに {required_mib} MiB 要る）"
         ),
         Language::English => format!(
-            "Did not start recording because the disk does not have enough space ({free_mb} MB left, {required_mb} MB needed to write out the replay buffer)"
+            "Did not start recording because the disk does not have enough space ({free_mib} MiB left, {required_mib} MiB needed to write out the replay buffer)"
         ),
     }
 }

@@ -174,7 +174,7 @@ impl CaptureCardViewer {
     ///
     /// **ここで `save()` を直接呼ばない。** 壊れた設定ファイルが残っている
     /// 場合に書き戻しを止める判断は `mark_settings_dirty` が持っている
-    /// （`AutoSavePolicy`）。以前は `CaptureCardViewer::default` が
+    /// （`AutoSavePolicy`）。以前は `CaptureCardViewer::new` が
     /// `may_write_defaults_on_startup()` で同じ判断をしていた。
     ///
     /// 入力を「映像デバイスの音声」に決めたときは、その場で設定をワーカーへ送り直す
@@ -295,7 +295,10 @@ impl CaptureCardViewer {
             // 包んでいたため、設定画面で効果音を外してもそのセッション中は
             // 効果音が鳴り続けていた
             //
-            // 無条件に読むと 2 秒ごとに効果音ファイル全体を読み直すことになる
+            // 無条件に読むと 2 秒ごとに効果音ファイル全体を読み直すことになる。
+            // 読めなかったファイルの自動の読み直しは、時刻が来たときだけ
+            // `last_sound_file` を空にして、この差分判定に拾わせる（#507）
+            self.start_due_sound_retry(Instant::now());
             if Self::needs_reapply(
                 initial,
                 &settings.screenshot.sound_file,
@@ -307,7 +310,11 @@ impl CaptureCardViewer {
                         // 受け取る（app::screenshot_sound）。**要求した時点で適用済みに
                         // する。** 結果を待ってからにすると、読み終わるまで 2 秒ごとに
                         // 同じファイルの読み込みを積み増してしまう。
-                        // 読めなかった場合は受け取った側が last を空にして読み直させる
+                        // 読めなかった場合も適用済みのままにし、2 秒ごとには読み直さない。
+                        // 読み直すのは設定が変わったとき、設定ダイアログの「適用」「OK」
+                        // （`retry_failed_sound_load`）、間隔を延ばしながらの自動の読み直し
+                        // （`start_due_sound_retry`）だけ（#507）。パスが変わっていれば、
+                        // 前のパスの失敗の記録と読み直しの予定は request_sound_apply が捨てる
                         self.request_sound_apply(sf);
                         self.last_sound_file = Some(Some(sf.clone()));
                     }
@@ -318,6 +325,10 @@ impl CaptureCardViewer {
                         if let Ok(mut ss) = self.screenshot_manager.lock() {
                             ss.clear_sound();
                             self.last_sound_file = Some(None);
+                            // 読めなかったファイルはもう使わない。選び直したときに
+                            // 同じ理由でも改めて知らせる
+                            self.sound_load_failure = None;
+                            self.sound_load_retry = None;
                         } else {
                             warn!(
                                 "スクリーンショットの効果音の反映で screenshot_manager のロックを取得できない"

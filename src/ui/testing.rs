@@ -77,6 +77,18 @@ impl DialogFixture {
         self
     }
 
+    /// 音声の出力デバイスの一覧を差し替える
+    pub(super) fn with_output_devices(mut self, names: &[&str]) -> Self {
+        self.output_devices = names.iter().map(|name| name.to_string()).collect();
+        self
+    }
+
+    /// 「接続状態」タブに渡す接続状態を差し替える
+    pub(super) fn with_connection(mut self, connection: ConnectionStatus) -> Self {
+        self.connection = connection;
+        self
+    }
+
     /// 描画の前に毎回、ドラフトから映像デバイスの音声を選べるかを作り直す（#425）
     pub(super) fn with_pin_for_draft(mut self, pin: fn(&AppSettings) -> VideoPinChoice) -> Self {
         self.pin_for_draft = Some(pin);
@@ -135,7 +147,10 @@ impl DialogFixture {
 
 /// 設定ダイアログを描く `Harness`。ダイアログが収まる大きさで作る
 pub(super) fn dialog_harness(fixture: DialogFixture) -> Harness<'static, DialogFixture> {
+    // 日本語のフォントは読み込まず、字形の無い文字は豆腐で描く（0.36 までと同じ）。
+    // egui_kittest 0.37 は既定で字形の無い文字に当たると panic する
     Harness::builder()
+        .allow_missing_glyphs()
         .with_size(egui::vec2(900.0, 800.0))
         .build_ui_state(|ui, fixture: &mut DialogFixture| fixture.draw(ui), fixture)
 }

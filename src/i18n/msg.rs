@@ -174,6 +174,52 @@ pub fn settings_location_unavailable(source: impl Display) -> String {
     }
 }
 
+/// 起動時に読めなかった理由のうち、設定ファイルの置き場所が分からないもの（#505）。
+pub fn settings_location_unknown(source: impl Display) -> String {
+    match language() {
+        Language::Japanese => format!("置き場所が分からない: {source}"),
+        Language::English => format!("cannot determine its location: {source}"),
+    }
+}
+
+/// 起動時に設定ファイルを読めず、退避して既定値で起動した（#505）。
+///
+/// トーストは定型文（「設定ファイルを読み書きできません」）と合わせて 60 文字で切れる。
+/// 読めなかったことは定型文が言うので繰り返さず、起きたこと（初期化した）を先頭の
+/// 短い 1 文にし、退避先と理由はそのあとへ回す（全文は「接続状態」タブに出る）。
+/// 英語は定型文が長く、残りは 20 文字ほどしかない。
+pub fn settings_load_fell_back(reason: impl Display, backup: Option<impl Display>) -> String {
+    match (language(), backup) {
+        (Language::Japanese, Some(backup)) => {
+            format!("既定値に初期化した。元のファイルは {backup} へ退避（{reason}）")
+        }
+        (Language::Japanese, None) => format!("既定値に初期化した（{reason}）"),
+        (Language::English, Some(backup)) => {
+            format!("Reset to defaults. Original moved to {backup} ({reason})")
+        }
+        (Language::English, None) => format!("Reset to defaults ({reason})"),
+    }
+}
+
+/// 起動時に設定ファイルを読めず、退避もできなかったので自動保存を止めた（#505）。
+/// 文言の組み立て方は `settings_load_fell_back` と同じ。
+pub fn settings_load_file_kept(reason: impl Display, path: Option<impl Display>) -> String {
+    match (language(), path) {
+        (Language::Japanese, Some(path)) => format!(
+            "既定値で起動し、自動保存を止めた。「適用」か「OK」で保存すると再開する。残したファイル: {path}（{reason}）"
+        ),
+        (Language::Japanese, None) => format!(
+            "既定値で起動し、自動保存を止めた。「適用」か「OK」で保存すると再開する（{reason}）"
+        ),
+        (Language::English, Some(path)) => format!(
+            "Auto-save stopped. Defaults in use; save with Apply or OK to resume. File kept: {path} ({reason})"
+        ),
+        (Language::English, None) => format!(
+            "Auto-save stopped. Defaults in use; save with Apply or OK to resume ({reason})"
+        ),
+    }
+}
+
 // ---- 「ホットキー」タブと入力ダイアログ（ui/hotkeys_tab.rs / ui/hotkey_capture.rs） ----
 
 /// 同じキーが割り当てられたアクション名を並べた警告。
@@ -273,14 +319,36 @@ pub fn preset_added(name: impl Display) -> String {
 
 // ---- 統計 OSD（app/view.rs） ----
 
-pub fn stats_fps(fps: f32, average_ms: f32, samples: usize) -> String {
+/// FPS の行。`fps` はボードから届いた速さ（フレーム間隔の平均から出す）。`shown` は
+/// 画面へ出した速さ（直近 1 秒にテクスチャへ取り込んだ枚数、#526）で、測れていなければ
+/// `None`。届いた速さと見分けられるよう「表示」と付けて同じ行の後ろに並べる
+pub fn stats_fps(fps: f32, average_ms: f32, samples: usize, shown: Option<usize>) -> String {
+    let shown = stats_shown_rate(shown);
     match language() {
         Language::Japanese => {
-            format!("FPS {fps:.1} (平均間隔 {average_ms:.1}ms / {samples} 件)")
+            format!("FPS {fps:.1} (平均間隔 {average_ms:.1}ms / {samples} 件) / 表示 {shown}")
         }
-        Language::English => {
-            format!("FPS {fps:.1} (avg interval {average_ms:.1}ms / {samples} samples)")
-        }
+        Language::English => format!(
+            "FPS {fps:.1} (avg interval {average_ms:.1}ms / {samples} samples) / shown {shown}"
+        ),
+    }
+}
+
+/// フレーム間隔をまだ測れていないときの FPS の行。表示の速さは `stats_fps` と同じ形で出す
+pub fn stats_fps_pending(shown: Option<usize>) -> String {
+    let shown = stats_shown_rate(shown);
+    match language() {
+        Language::Japanese => format!("FPS - (フレーム間隔の計測待ち) / 表示 {shown}"),
+        Language::English => format!("FPS - (measuring frame interval) / shown {shown}"),
+    }
+}
+
+/// FPS の行の「表示」の値。測れていなければ数値を出さない
+fn stats_shown_rate(shown: Option<usize>) -> String {
+    match (shown, language()) {
+        (None, _) => "-".to_string(),
+        (Some(frames), Language::Japanese) => format!("{frames} 枚/秒"),
+        (Some(frames), Language::English) => format!("{frames}/s"),
     }
 }
 
@@ -340,7 +408,7 @@ pub fn stats_display_latency(average_ms: f32, max_ms: f32) -> String {
 }
 
 /// 描画のバックエンド（#492）。`label` は `renderer::RendererChoice::label` の技術名
-/// （`wgpu Dx12 Mailbox / <アダプター名>` や `glow (OpenGL)`）で、訳さない
+/// （`wgpu Dx12 Mailbox latency 1 / <アダプター名>` や `glow (OpenGL)`）で、訳さない
 pub fn stats_renderer(label: impl Display) -> String {
     match language() {
         Language::Japanese => format!("描画 {label}"),
