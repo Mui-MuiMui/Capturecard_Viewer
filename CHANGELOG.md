@@ -4,6 +4,22 @@
 
 ## [未リリース]
 
+## [1.6.1] - 2026-10-25
+
+1.6.0 以降の修正をまとめたバージョン。設定ファイルは 1.6.0 のまま読める。**1.2.1 以降はアプリ内の「更新する」でこのバージョンへ更新できる。**
+
+- **不具合の修正が中心**: 設定ファイルを読めなかったことを知らせない、繋がらないデバイスがあるとログが大きくなり続ける、映像デバイスの音声で左右が入れ替わりうる、などを直した
+- **更新の置き換えを失敗しにくくした**: ウイルス対策ソフトがファイルを調べている間の一時的な失敗で止まりにくくし、前のバージョンを 1 分ほど残すようにした
+- **UI の部品を新しくした**: ボタンの余白と角の丸みが少し大きくなった。表示の遅れは変わらない（同じ日の撮り比べで差なし）
+
+<hr>
+
+Mostly fixes since 1.6.0. Config files from 1.6.0 load as they are. **From 1.2.1 or later, use "Update" inside the app to update to this version.**
+
+- **Mainly bug fixes**: the app now tells you when it could not read the settings file, the log no longer keeps growing while a device stays disconnected, and the left and right channels can no longer swap when using the video device's audio, among others
+- **Updating fails less often**: brief failures while antivirus software scans the file no longer stop the update, and the previous version is kept for about a minute
+- **Newer UI toolkit**: buttons have slightly larger padding and rounder corners. Display latency is unchanged (no difference when filmed side by side on the same day)
+
 ### 追加
 
 - ログに 5 分ごとの「表示の観測値」（取り込んだ速さ、取り込む前に上書きされた枚数、到着からテクスチャ更新までの遅れ、描画の CPU 時間）と、フルスクリーンの出入りを残すようにした。長時間動かしたあとに映像がカクつく・遅れて見えるときの切り分けに使う。`docs/TROUBLESHOOTING.md` に回避策（フルスクリーンの入り直し）と報告してほしい内容を足した（#501）
@@ -26,7 +42,9 @@
 - 設定ダイアログのスクロール位置がタブの間で共有され、長いタブを下へ送ってから別のタブへ移ると、先頭が隠れたまま開いていた。タブごとに覚えるようにした（#531）
 - 設定ダイアログの「スクリーンショット設定」タブを開いただけで、保存先のパスが書き換わることがあった（Windows のパスとして正しくても、文字列にできない文字を含むと「�」に置き換わっていた）。欄を編集したときだけ書き戻すようにした（#531）
 - 容量の表記を計算に合わせて MiB に揃えた（更新のダイアログのダウンロード量、録画の空き容量のトースト。以前は MB と出ていた）（#531）
-- 「更新する」で exe を置き換えるとき、ウイルス対策ソフトがファイルを調べている間などの一時的な失敗で「exe を置き換えられない」になりやすかった。改名 1 回につき 1 秒近くまで試し直すようにした。あわせて、更新する前のバージョン（exe の隣の `.old`）を新しいバージョンの起動直後には消さず、1 分ほど動いてから消すようにした（それより前に閉じると次の起動まで残る）。新しいバージョンが起動してすぐ落ちたときに手で戻せる。戻し方は `docs/TROUBLESHOOTING.md` の「更新のあとアプリが起動しない」（#540）
+- 「更新する」で exe を置き換えるとき、ウイルス対策ソフトがファイルを調べている間などの一時的な失敗で「exe を置き換えられない」になりやすかった。改名 1 回につき 1 秒近くまで試し直すようにした。あわせて、更新する前のバージョン（exe の隣の `.old`）を新しいバージョンの起動直後には消さず、1 分ほど動いてから消すようにした（それより前に閉じると残り、次に起動して 1 分ほど動いたときに消える）。新しいバージョンが起動してすぐ落ちたときに手で戻せる。戻し方は `docs/TROUBLESHOOTING.md` の「更新のあとアプリが起動しない」（#540）
+- 録画とリプレイバッファで、最初のフレームを変換し終える前にエンコーダを作っていた。ハードウェアエンコーダは作るのに時間がかかることがあり、その間に届いたフレームが録画に入らずに落ちることがあった。エンコーダを作るのを、最初のフレームを変換して手放したあとにした（#504）
+- 同じ型番の GPU を 2 枚挿した PC で、起動前の確認と実際の描画とで別の GPU を選びうる作りになっていた。GPU を一意の識別子（LUID）で突き合わせるようにした（#512）
 
 ## [1.6.0] - 2026-10-11
 
