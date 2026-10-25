@@ -165,6 +165,22 @@ Media Foundation のソースリーダーに `MF_LOW_LATENCY = TRUE` を付け�
 - Media Foundation の値（約 32ms）は前日の「GPU 変換を入れた版」の値（約 28ms）と撮影が別で、比べられるのはこの表の 2 列の間だけ
 - この結果を受けて、開き方が「自動」のとき両方に出るデバイスは DirectShow を先に試すようにした（#490、`docs/design/device-worker.md` の「自動で DirectShow を先に試す理由」）
 
+## present mode の撮り比べ（#476、既定の Mailbox が速い）
+
+2026-10-25 に親機で、PR #544 の同じ exe を `CAPTURECARD_VIEWER_PRESENT_MODE` だけ替えて続けて撮った（溜めるフレーム数はどちらも 1、eframe 0.37）。機材と読み方は上の「2. 連続区間 3 つ」と同じ（1 カメラフレーム = 4.17ms）。
+
+| 区間 | Mailbox（既定） | Fifo |
+|---|---|---|
+| 10s | 6.00（25.0ms） | 11.67（48.6ms） |
+| 40s | 5.64（23.5ms） | 11.33（47.2ms） |
+| 70s | 6.00（25.0ms） | 11.67（48.6ms） |
+| 平均 | **5.88 ≈ 24.5ms** | **11.56 ≈ 48.1ms** |
+
+- **Fifo は Mailbox より約 23.6ms（ソースの約 1.4 フレーム）遅い。** 区間の間のばらつき（どちらも約 1.5ms）よりはるかに大きい。既定の Mailbox のままにする
+- Fifo ではアプリの表示が 2〜5 カメラフレームの不規則な間隔で進んだ。Mailbox では 4 カメラフレームごと（ソースの 1 フレームごと）に規則正しく進む
+- Mailbox の 24.5ms は、同じ日に撮った dev（約 23.7ms）と eframe 0.37 の PR #541（約 25.3ms）の間に入り、撮影どうしで揃っている
+- 同じ日の PresentMon では、独立フリップの `MsUntilDisplayed` が Mailbox で約 16.4ms、10-11 の PR #465 のブランチ（Mailbox にする前）で 3.5ms だった。撮影ではむしろ Mailbox が速いので、`MsUntilDisplayed` は present mode をまたいで比べられない（下の「present の計測（PresentMon）」）
+
 ## 注意
 
 - **含まれるもの**: ボードの取り込み（USB、Media Foundation）、アプリの変換と描画
@@ -185,7 +201,8 @@ Media Foundation のソースリーダーに `MF_LOW_LATENCY = TRUE` を付け�
 | `MsUntilDisplayed`（Present → 表示）平均 / 中央値 / 95% / 最大 | 6.7 / 6.3 / 11.6 / 18.4 | **4.6 / 4.5 / 7.9 / 10.5** | 3.0 / 2.3 / 6.9 / 10.5 |
 
 - glow は OpenGL のフレームを GDI 経由で DWM が合成する経路、wgpu の DX12 はフリップモデルで DWM を飛ばす独立フリップ。平均で約 2ms、裾（95%・最大）で 4〜8ms 縮む
-- wgpu の列は PR #465 のブランチの exe。#492 の exe（present mode は Mailbox、溜めるフレーム数 1）での値は未計測
+- wgpu の列は PR #465 のブランチの exe。#492 以降の exe（present mode は Mailbox、溜めるフレーム数 1）は 2026-10-25 に親機で測り、独立フリップの区間の `MsUntilDisplayed` が平均約 16.4ms（95% 16.45ms）だった。撮影では Fifo より速い（上の「present mode の撮り比べ」）
+- **`MsUntilDisplayed` は present mode をまたいで比べられない。** 数え始めが present mode で違い、Mailbox は値が大きく出るが撮影では Fifo より約 24ms 速かった。present mode を替えたときは撮影で比べる
 - 独立フリップになる条件は `docs/design/video-pipeline.md` の「フルスクリーンで独立フリップが効く条件」
 
 ### 測り方

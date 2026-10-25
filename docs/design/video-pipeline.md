@@ -292,7 +292,7 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 - glow の present は、OpenGL のフレームを GDI 経由で DWM が合成する一番遠回りの経路（Composed: Copy with GPU GDI）だった。wgpu の DX12 はフリップモデルの swapchain（`DXGI_SWAP_EFFECT_FLIP_DISCARD`、HWND から作る）で、フルスクリーンでは DWM を飛ばして直接スキャンアウトする独立フリップになった
 - **平均で約 2ms、ばらつきの裾（95%・最大）で 4〜8ms 縮む。** ユーザー判断で採用した
 - 2026-10-04 の撮影の比較（スマートフォンの 240fps、パススルーとの差）では wgpu 約 31ms、glow 約 32ms で、差は読み取りの誤差（±4ms）に埋もれていた。平均の 2ms はこの測り方では見えない（`docs/LATENCY.md` の「描画バックエンド glow / wgpu の撮り比べ」）
-- この表の wgpu は PR #465 のブランチ（`desired_maximum_frame_latency` を 1 にしていた版）の exe。#492 の exe で測り直すのはユーザー（`docs/LATENCY.md` の「present の計測（PresentMon）」）
+- この表の wgpu は PR #465 のブランチ（`desired_maximum_frame_latency` を 1 にしていた版）の exe。#492 以降の exe（Mailbox）は 2026-10-25 に親機で測り、独立フリップの `MsUntilDisplayed` が平均約 16.4ms だった。ただし撮影では Fifo より約 24ms 速く、`MsUntilDisplayed` は present mode をまたいで比べられない（`docs/LATENCY.md` の「present mode の撮り比べ」）
 - 費用: exe が約 10.6MB → 約 14.3MB。描画バックエンドが 2 本になり、YUY2 → RGB の GPU 変換（#456）も GL と wgpu の 2 つを持つ（上の「YUY2 → RGB を GPU で変換する」）
 
 ### present mode と溜めるフレーム数
@@ -302,7 +302,7 @@ eframe 0.36 の `WgpuConfiguration` の範囲（`SurfaceConfig`）で指定で�
 | 設定 | 値 | 理由 |
 |---|---|---|
 | バックエンド | DX12 だけ（`wgpu` のフィーチャも `dx12` と `wgsl` だけ） | Vulkan / GLES は入れない。present mode を確実に選べるのが DX12 だけのため（下） |
-| present mode | **Mailbox** | 待たずに渡し、次の垂直同期で最新の 1 枚だけを出す。ティアリングは起きない。Fifo は垂直同期まで待たされ、待っている間に届いたフレームの取り込みが遅れる |
+| present mode | **Mailbox** | 待たずに渡し、次の垂直同期で最新の 1 枚だけを出す。ティアリングは起きない。Fifo は垂直同期まで待たされ、待っている間に届いたフレームの取り込みが遅れる。2026-10-25 の撮影で、同じ exe の Fifo（約 48.1ms）より約 24ms 速く（約 24.5ms）、Fifo は表示が不規則な間隔で進んだ（`docs/LATENCY.md` の「present mode の撮り比べ」） |
 | 溜めるフレーム数（`desired_maximum_frame_latency`） | 1（最小） | DX12 では `SetMaximumFrameLatency(1)` と、swapchain のバッファ 2 枚。wgpu の既定は 2 |
 | シェーダーのコンパイラ | FXC | Windows に入っている `d3dcompiler_47.dll`。既定の Auto は PATH 上の `dxcompiler.dll` を拾いうるので固定する |
 

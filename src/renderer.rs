@@ -15,18 +15,17 @@
 //!
 //! 理由と成立条件は `docs/design/video-pipeline.md` の「描画バックエンド」。
 
+mod present;
+
 use eframe::egui_wgpu::{self, wgpu, SurfaceConfig, WgpuConfiguration, WgpuSetupCreateNew};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use crate::video::is_software_renderer;
+use present::PresentSettings;
 
 /// 描画のバックエンドを選ぶ環境変数。`glow` か `wgpu`（大文字小文字は問わない）。
 pub const RENDERER_ENV: &str = "CAPTURECARD_VIEWER_RENDERER";
-
-mod present;
-
-use present::PresentSettings;
 
 /// 描画のバックエンド。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,10 +286,9 @@ pub fn configure(options: &mut eframe::NativeOptions) -> RendererChoice {
 
     let adapter = Arc::new(OnceLock::new());
     let allow_software = request.allows_software_adapter();
-    let present = match request.kind() {
-        RendererKind::Glow => PresentSettings::default(),
-        RendererKind::Wgpu => PresentSettings::from_env(),
-    };
+    // 試験用の環境変数は wgpu で描くと決まってから読む。glow へ倒れたときに
+    // 「既定から変えた」の WARN を出さないため
+    let mut present = PresentSettings::default();
     let kind = match request.kind() {
         RendererKind::Glow => {
             log::info!("描画は glow（OpenGL）。{RENDERER_ENV} で指定された");
@@ -298,6 +296,7 @@ pub fn configure(options: &mut eframe::NativeOptions) -> RendererChoice {
         }
         RendererKind::Wgpu => match probe_dx12(allow_software) {
             Ok((info, elapsed_ms)) => {
+                present = PresentSettings::from_env();
                 log::info!(
                     "描画は wgpu（DX12、present mode {:?}、最大フレーム遅延 {}）。\
                      使えるアダプター: {} ({:?})。確認に {elapsed_ms}ms",
