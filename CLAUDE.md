@@ -194,7 +194,8 @@ cargo build --release
 | `src/update/checksum.rs` | `SHA256SUMS.txt` の行の読み方（`find_checksum`）と、大文字小文字を区別しない照合（`checksum_matches`） |
 | `src/update/overrides.rs` | 更新の確認を試すための環境変数（`CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` / `CAPTURECARD_VIEWER_UPDATE_API_URL`）の解釈（`CheckOverrides`） |
 | `src/overlay.rs` | 操作したときだけ数秒出て消える OSD（フルスクリーンの切り替え、音量、失敗や録画の保存のトーストなど）。期限と描画の `TransientOverlay` と、中身の `OverlayContent`（テキストだけ / バー付き）。常設の統計 OSD は `app/video_overlay.rs` の側 |
-| `src/renderer.rs` | 描画のバックエンド（wgpu の DX12 / glow）を起動前に決める（`configure`、#492）。環境変数 `CAPTURECARD_VIEWER_RENDERER` の解釈（`parse_renderer`）、DX12 のアダプターの確認（`probe_dx12`）と選び方（`pick_adapter`。確認と eframe のアダプターは DXGI の LUID で突き合わせる、#512）、present mode（Mailbox）と溜めるフレーム数（1）、統計 OSD に出す説明（`RendererChoice::label`） |
+| `src/renderer.rs` | 描画のバックエンド（wgpu の DX12 / glow）を起動前に決める（`configure`、#492）。環境変数 `CAPTURECARD_VIEWER_RENDERER` の解釈（`parse_renderer`）、DX12 のアダプターの確認（`probe_dx12`）と選び方（`pick_adapter`。確認と eframe のアダプターは DXGI の LUID で突き合わせる、#512）、統計 OSD に出す説明（`RendererChoice::label`） |
+| `src/renderer/present.rs` | wgpu の present の仕方 `PresentSettings`。既定の present mode（Mailbox）と溜めるフレーム数（1）、撮り比べのための試験用の環境変数 `CAPTURECARD_VIEWER_PRESENT_MODE`（mailbox / fifo）・`CAPTURECARD_VIEWER_FRAME_LATENCY`（1 / 2）の解釈（`parse_present_mode` / `parse_frame_latency`、#476） |
 | `src/repaint.rs` | 次の再描画までの間隔の判定（`next_repaint_delay`）と、UI スレッド以外から再描画を促す窓口（`RepaintWaker`） |
 | `src/i18n/mod.rs` | 画面に出す文字列の入口。現在の言語（`Language` と `static LANGUAGE`）を持ち、`set_language` で切り替える。外から使う経路（`crate::i18n::...`）の `pub use` もここ |
 | `src/i18n/text.rs` | 引数を取らない文字列の表（`texts!` が `Text` のキーと言語ごとの `match` を作る） |

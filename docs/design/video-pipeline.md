@@ -292,7 +292,7 @@ CPU は計測ごとのばらつき（同じ exe で 20 ポイント以上）に�
 - glow の present は、OpenGL のフレームを GDI 経由で DWM が合成する一番遠回りの経路（Composed: Copy with GPU GDI）だった。wgpu の DX12 はフリップモデルの swapchain（`DXGI_SWAP_EFFECT_FLIP_DISCARD`、HWND から作る）で、フルスクリーンでは DWM を飛ばして直接スキャンアウトする独立フリップになった
 - **平均で約 2ms、ばらつきの裾（95%・最大）で 4〜8ms 縮む。** ユーザー判断で採用した
 - 2026-10-04 の撮影の比較（スマートフォンの 240fps、パススルーとの差）では wgpu 約 31ms、glow 約 32ms で、差は読み取りの誤差（±4ms）に埋もれていた。平均の 2ms はこの測り方では見えない（`docs/LATENCY.md` の「描画バックエンド glow / wgpu の撮り比べ」）
-- この表の wgpu は PR #465 のブランチ（`desired_maximum_frame_latency` を 1 にしていた版）の exe。#492 の exe で測り直すのはユーザー（`docs/LATENCY.md` の「present の計測（PresentMon）」）
+- この表の wgpu は PR #465 のブランチ（`desired_maximum_frame_latency` を 1 にしていた版）の exe。#492 以降の exe（Mailbox）は 2026-10-25 に親機で測り、独立フリップの `MsUntilDisplayed` が平均約 16.4ms だった。ただし撮影では Fifo より約 24ms 速く、`MsUntilDisplayed` は present mode をまたいで比べられない（`docs/LATENCY.md` の「present mode の撮り比べ」）
 - 費用: exe が約 10.6MB → 約 14.3MB。描画バックエンドが 2 本になり、YUY2 → RGB の GPU 変換（#456）も GL と wgpu の 2 つを持つ（上の「YUY2 → RGB を GPU で変換する」）
 
 ### present mode と溜めるフレーム数
@@ -302,7 +302,7 @@ eframe 0.36 の `WgpuConfiguration` の範囲（`SurfaceConfig`）で指定で�
 | 設定 | 値 | 理由 |
 |---|---|---|
 | バックエンド | DX12 だけ（`wgpu` のフィーチャも `dx12` と `wgsl` だけ） | Vulkan / GLES は入れない。present mode を確実に選べるのが DX12 だけのため（下） |
-| present mode | **Mailbox** | 待たずに渡し、次の垂直同期で最新の 1 枚だけを出す。ティアリングは起きない。Fifo は垂直同期まで待たされ、待っている間に届いたフレームの取り込みが遅れる |
+| present mode | **Mailbox** | 待たずに渡し、次の垂直同期で最新の 1 枚だけを出す。ティアリングは起きない。Fifo は垂直同期まで待たされ、待っている間に届いたフレームの取り込みが遅れる。2026-10-25 の撮影で、同じ exe の Fifo（約 48.1ms）より約 24ms 速く（約 24.5ms）、Fifo は表示が不規則な間隔で進んだ（`docs/LATENCY.md` の「present mode の撮り比べ」） |
 | 溜めるフレーム数（`desired_maximum_frame_latency`） | 1（最小） | DX12 では `SetMaximumFrameLatency(1)` と、swapchain のバッファ 2 枚。wgpu の既定は 2 |
 | シェーダーのコンパイラ | FXC | Windows に入っている `d3dcompiler_47.dll`。既定の Auto は PATH 上の `dxcompiler.dll` を拾いうるので固定する |
 
@@ -319,9 +319,10 @@ eframe 0.36 の `WgpuConfiguration` の範囲（`SurfaceConfig`）で指定で�
 | `CAPTURECARD_VIEWER_RENDERER=glow` | glow | INFO |
 
 - **glow は撮り比べのために残す。** 同じ exe で glow と wgpu を切り替えて測る（`docs/LATENCY.md`）。設定ファイルには入れない
+- **present mode と溜めるフレーム数も、撮り比べのために環境変数で替えられる**（#476）。`CAPTURECARD_VIEWER_PRESENT_MODE`（`mailbox` / `fifo`）と `CAPTURECARD_VIEWER_FRAME_LATENCY`（`1` / `2`）。2 つは別々に判定し、未指定・空・解釈できない値（`immediate` など。Immediate / AutoNoVsync は受け付けない）の項目だけが上の表の既定（present mode は Mailbox、溜めるフレーム数は 1）になる。もう一方は指定どおりに効く（例: `fifo` と `3` なら Fifo、1）。解釈できない値は WARN、既定から変えたときも WARN を出す。wgpu で描くときだけ効き、アダプターの選び方の「出せるか」も選んだ present mode で確かめる。設定ファイルにも UI にも出さない
 - **GPU の DX12 アダプターが無いときの逃げ道でもある。** 既定では WARP（Microsoft Basic Render Driver。画素を CPU で塗る）を選ばない。GPU の無い VM でも、VMware の OpenGL ドライバーなら glow は軽く動くため（下の表）
 - **どちらで描くかは `run_native` の前に決める。** winit のイベントループは 1 プロセスに 1 回しか作れないので、wgpu で起動に失敗してから glow で開き直すことはできない。起動の前に DX12 のインスタンスを作ってアダプターを列挙し、優先順位（外付け → 内蔵 → 仮想 → その他、WARP は明示したときだけ最後）の順にデバイスを作ってみて、最初に作れたアダプターを使う（`probe_dx12`、手元の VM で 60〜150ms）。eframe がアダプターを選ぶときもそのアダプターを優先する（`native_adapter_selector`）。**確認と eframe のアダプターは DXGI の LUID で突き合わせる**（#512）。PCI のベンダー ID とデバイス ID だけだと、同じ型の GPU の 2 枚挿しで 2 枚が同じ値になり、確認でデバイスを作れなかった 1 枚目を eframe が選びうるため。wgpu 30 の `AdapterInfo` に LUID は無く、`device_pci_bus_id` も DX12 では (ベンダー, デバイス) の一致する最初の表示アダプターの値なので見分けに使えない。wgpu-hal の DX12 のアダプター（`Adapter::as_hal`）から DXGI のアダプターを借りて `GetDesc1` で読む。LUID は再起動かドライバーの入れ直しまで変わらず、確認と eframe は同じプロセスで続けて列挙するので食い違わない。選んだアダプターの LUID と、確認と同じものかはログ（INFO「wgpu のアダプター: …」）に出る。**eframe / wgpu を上げるとき（eframe 0.37、#514 など）は `Adapter::as_hal` の形（戻り値・型引数の `hal::api::Dx12`）と wgpu-hal の `raw_adapter` が変わっていないかを確かめ、`AdapterInfo` に LUID が入っていればそちらへ移す。** API の形が変わればビルドで気づくが、`as_hal` が `None` を返すようになると LUID は黙って読めなくなり、見分け方が (ベンダー, デバイス) に戻る。上げたあとはログの LUID が「不明」になっていないことも確かめる（eframe 0.37 では wgpu が 30 のままで形は変わらず、WARP の LUID が読めた。2026-10-22、#514）。それでも描画の初期化に失敗したらウィンドウは出ずに終わり、ログに ERROR が残る。そのときは `CAPTURECARD_VIEWER_RENDERER=glow` で起動できる
-- どちらで描いているかは統計 OSD の「描画」の行（「描画 wgpu Dx12 Mailbox / <アダプター名>」「描画 glow (OpenGL)」。アンダーランの行の次）とログで分かる
+- どちらで描いているかは統計 OSD の「描画」の行（「描画 wgpu Dx12 Mailbox latency 1 / <アダプター名>」。`latency` の後ろは溜めるフレーム数。「描画 glow (OpenGL)」。アンダーランの行の次）とログで分かる
 
 ### GPU の無い VM での成立条件
 
