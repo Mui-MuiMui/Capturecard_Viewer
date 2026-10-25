@@ -18,7 +18,9 @@ use super::capability::{should_reselect_video_defaults, VideoCapabilityCache, Vi
 use super::capability_view::show_video_capability_progress;
 use super::device_tab_audio::show_audio_settings;
 use super::video_mode::{fps_choices, resolution_choices, select_default_video_mode};
-use super::{warning_label, AudioCapabilityCaches, CapabilityEvent, DeviceLists, SettingsEvent};
+use super::{
+    name_slider, warning_label, AudioCapabilityCaches, CapabilityEvent, DeviceLists, SettingsEvent,
+};
 
 /// 映像調整のスライダー 1 本。明るさ・コントラスト・彩度で見た目を揃える。
 ///
@@ -41,6 +43,10 @@ fn video_adjustment_slider(ui: &mut egui::Ui, value: &mut i32, label: &str, hint
 ///
 /// 返すのはコンボの `Response` と、項目が押されたか。**押した項目がいまの値と同じでも
 /// 真になる。** フォーマット・解像度は押し直すとその下の選択を入れ直すため
+///
+/// 見出しを横に別の `Label` で置くときは、呼び出し側が返した `Response` に
+/// `labelled_by` で見出しを結ぶ。読み上げとウィジェットのテスト（egui_kittest は名前の
+/// 無い入力のウィジェットで落ちる）がコンボを名前で引けるようにするため
 pub(super) fn choice_combo<T: PartialEq, S: Into<egui::WidgetText>>(
     ui: &mut egui::Ui,
     combo: egui::ComboBox,
@@ -69,11 +75,13 @@ fn enum_combo_row<T: Copy + PartialEq>(
     hint: &str,
 ) {
     ui.horizontal(|ui| {
-        ui.label(label);
+        let label = ui.label(label);
         let combo = egui::ComboBox::from_id_salt(id_salt).selected_text(label_of(*value));
         let choices = all.into_iter().map(|choice| (choice, label_of(choice)));
+        // 名前は見出しから取る。説明は読み上げの補足（accessible description）になる
         choice_combo(ui, combo, value, choices)
             .0
+            .labelled_by(label.id)
             .on_hover_text(hint);
     });
 }
@@ -213,7 +221,7 @@ pub(super) fn show_device_settings_tab(
         let video_caps = capabilities.ready(&selected_key);
         let format_changed = ui
             .horizontal(|ui| {
-                ui.label(Text::FormatLabel.get());
+                let label = ui.label(Text::FormatLabel.get());
                 let current_format = settings
                     .video
                     .format
@@ -230,7 +238,10 @@ pub(super) fn show_device_settings_tab(
                     None => ["YUY2", "MJPEG", "RGB24"].map(String::from).into(),
                 };
                 let choices = names.into_iter().map(|name| (Some(name.clone()), name));
-                choice_combo(ui, combo, &mut settings.video.format, choices).1
+                let (response, clicked) =
+                    choice_combo(ui, combo, &mut settings.video.format, choices);
+                response.labelled_by(label.id);
+                clicked
             })
             .inner;
 
@@ -255,7 +266,7 @@ pub(super) fn show_device_settings_tab(
         // 解像度選択（フォーマットに応じて動的に変更）
         let resolution_changed = ui
             .horizontal(|ui| {
-                ui.label(Text::ResolutionLabel.get());
+                let label = ui.label(Text::ResolutionLabel.get());
                 let current_resolution = settings.video.resolution.unwrap_or((1280, 720));
                 let combo = egui::ComboBox::from_id_salt("resolution_combo")
                     .selected_text(format!("{}x{}", current_resolution.0, current_resolution.1));
@@ -272,7 +283,10 @@ pub(super) fn show_device_settings_tab(
                 let choices = resolutions
                     .into_iter()
                     .map(|(w, h)| (Some((w, h)), format!("{}x{}", w, h)));
-                choice_combo(ui, combo, &mut settings.video.resolution, choices).1
+                let (response, clicked) =
+                    choice_combo(ui, combo, &mut settings.video.resolution, choices);
+                response.labelled_by(label.id);
+                clicked
             })
             .inner;
 
@@ -300,7 +314,7 @@ pub(super) fn show_device_settings_tab(
 
         // FPS選択（フォーマットと解像度に応じて動的に変更）
         ui.horizontal(|ui| {
-            ui.label(Text::FrameRateLabel.get());
+            let label = ui.label(Text::FrameRateLabel.get());
             let current_fps = settings.video.fps.unwrap_or(30);
 
             let combo = egui::ComboBox::from_id_salt("fps_combo")
@@ -317,7 +331,9 @@ pub(super) fn show_device_settings_tab(
             let choices = fps_list
                 .into_iter()
                 .map(|fps| (Some(fps), format!("{} fps", fps)));
-            choice_combo(ui, combo, &mut settings.video.fps, choices);
+            choice_combo(ui, combo, &mut settings.video.fps, choices)
+                .0
+                .labelled_by(label.id);
         });
 
         // 色空間の選択。デバイスは入力信号の色空間を通知してこないので、
@@ -402,7 +418,10 @@ pub(super) fn show_device_settings_tab(
 
         ui.horizontal(|ui| {
             ui.label(Text::InitialVolumeLabel.get());
-            ui.add(egui::Slider::new(&mut settings.ui.volume, 0.0..=200.0).suffix("%"));
+            name_slider(
+                ui.add(egui::Slider::new(&mut settings.ui.volume, 0.0..=200.0).suffix("%")),
+                Text::InitialVolumeLabel.get(),
+            );
         });
     });
 }

@@ -28,9 +28,11 @@ pub const RENDERER_ENV: &str = "CAPTURECARD_VIEWER_RENDERER";
 /// Immediate（垂直同期を待たずに出す）はティアリングが起きるので使わない（#456、
 /// ユーザー判断）。
 ///
-/// eframe 0.36 は present mode を起動前の `WgpuConfiguration` で決め、起動後に
-/// 変えられない（`Frame::set_wgpu_surface_config` は `Frame` が持つ複製を書き換える
-/// だけで、描画側の `RenderState` へ届かない）。wgpu は対応していない present mode を
+/// present mode は起動前の `WgpuConfiguration` で決める。eframe 0.36 は起動後に
+/// 変えられなかった（`Frame::set_wgpu_surface_config` は `Frame` が持つ複製を書き換える
+/// だけで、描画側へ届かなかった）。0.37 で描画側へ届くようになったが（eframe #8442。
+/// `Frame` の複製は起動時の `WgpuConfiguration` の値から始まるので、起動時の指定は
+/// そのまま効く）、このアプリは起動後に変えない。wgpu は対応していない present mode を
 /// 指定すると落ちる（自動の Fifo への切り替えは `AutoVsync` / `AutoNoVsync` にしか無い）。
 /// そのため **Mailbox を出せることが分かっているバックエンド（DX12）だけで wgpu を使う。**
 /// wgpu-hal の DX12 は Mailbox と Fifo を常に対応一覧に載せる。アダプターの選び方

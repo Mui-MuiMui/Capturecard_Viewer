@@ -147,7 +147,10 @@ impl DialogFixture {
 
 /// 設定ダイアログを描く `Harness`。ダイアログが収まる大きさで作る
 pub(super) fn dialog_harness(fixture: DialogFixture) -> Harness<'static, DialogFixture> {
+    // 日本語のフォントは読み込まず、字形の無い文字は豆腐で描く（0.36 までと同じ）。
+    // egui_kittest 0.37 は既定で字形の無い文字に当たると panic する
     Harness::builder()
+        .allow_missing_glyphs()
         .with_size(egui::vec2(900.0, 800.0))
         .build_ui_state(|ui, fixture: &mut DialogFixture| fixture.draw(ui), fixture)
 }
