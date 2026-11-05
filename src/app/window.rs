@@ -102,6 +102,30 @@ fn geometry_to_roll_back(
     }
 }
 
+/// フルスクリーンを切り替えるときにウィンドウへ送るコマンドを、送る順に返す。
+///
+/// **装飾なしのときは、`Fullscreen` の後に `Decorations(false)` を送り直す。**
+/// 装飾は変わらない（外したまま）。送り直すのは、egui-winit がこのコマンドを
+/// 受けたときにだけ、装飾なしのウィンドウの影（winit の `undecorated_shadow`）を
+/// 「フルスクリーンでない間だけ」に付け直すため。
+///
+/// winit は影を付けている間、上端の 1px を描画領域から外して OS の枠に残す
+/// （`WM_NCCALCSIZE`）。`Fullscreen` だけでは影が外れないので、フルスクリーンでも
+/// その 1px が残る。フォーカスを外すと OS が非アクティブの枠の色で塗り直し、
+/// 画面の上端に白い線が見えていた。描画領域がモニター全体と一致しないので、
+/// 独立フリップにも載らない（`docs/design/window.md`）。
+///
+/// egui-winit は `Fullscreen` を受けた時点で winit のフルスクリーンの状態を
+/// 書き換えるので、同じフレームで続けて送れば、入るときは影を外し、
+/// 出るときは影を戻す。
+fn fullscreen_commands(to_full: bool, borderless: bool) -> Vec<egui::ViewportCommand> {
+    let mut commands = vec![egui::ViewportCommand::Fullscreen(to_full)];
+    if borderless {
+        commands.push(egui::ViewportCommand::Decorations(false));
+    }
+    commands
+}
+
 /// ウィンドウ端の当たり判定。`pos` が `rect` の縁から `margin` 以内なら、
 /// その縁に対応する `ResizeDirection` を返す。縁から離れていれば `None`。
 ///
@@ -373,15 +397,10 @@ impl CaptureCardViewer {
     }
 
     pub(super) fn toggle_fullscreen(&mut self, ctx: &egui::Context, to_full: bool) {
-        use eframe::egui::ViewportCommand;
-
-        if to_full {
-            ctx.send_viewport_cmd(ViewportCommand::Fullscreen(true));
-            self.is_fullscreen = true;
-        } else {
-            ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
-            self.is_fullscreen = false;
+        for command in fullscreen_commands(to_full, self.borderless) {
+            ctx.send_viewport_cmd(command);
         }
+        self.is_fullscreen = to_full;
         // 切り替えた時刻をログに残す（#501）。フルスクリーンの出入りで描画の面（swapchain）が
         // 作り直されるので、表示の観測値（5 分の要約）の変化と突き合わせるため。
         // 要約の窓もここで区切り、それまでの分を先に出す。切り替えをまたいだ窓は前後が混ざり、
@@ -562,6 +581,35 @@ mod tests {
             geometry_to_roll_back(Some(MAXIMIZED), Some(MAXIMIZED), Some(MAXIMIZED)),
             None
         );
+    }
+
+    #[test]
+    fn fullscreen_commands_borderless_resends_decorations_after_fullscreen() {
+        use egui::ViewportCommand;
+        // 装飾なしでは、フルスクリーンの切り替えの後に装飾なしを送り直して
+        // 上端 1px の枠（影）を付け外しさせる。順序が逆だと影が直らない
+        for to_full in [true, false] {
+            assert_eq!(
+                fullscreen_commands(to_full, true),
+                vec![
+                    ViewportCommand::Fullscreen(to_full),
+                    ViewportCommand::Decorations(false)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn fullscreen_commands_decorated_sends_only_fullscreen() {
+        use egui::ViewportCommand;
+        // 装飾ありでは影を付けていないので、装飾のコマンドは送らない。
+        // Decorations(true) を送ると、フルスクリーンを抜けるまで効かない操作になる
+        for to_full in [true, false] {
+            assert_eq!(
+                fullscreen_commands(to_full, false),
+                vec![ViewportCommand::Fullscreen(to_full)]
+            );
+        }
     }
 
     #[test]
