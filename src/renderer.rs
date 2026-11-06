@@ -248,7 +248,7 @@ pub struct RendererChoice {
 
 impl RendererChoice {
     /// 統計 OSD に出す描画のバックエンドの説明（言語に依らない技術名）。
-    /// 例: `wgpu Dx12 Mailbox latency 1 / NVIDIA GeForce RTX 4070`、`glow (OpenGL)`
+    /// 例: `wgpu Dx12 Mailbox latency 2 / NVIDIA GeForce RTX 4070`、`glow (OpenGL)`
     pub fn label(&self) -> String {
         format_label(self.kind, self.present, self.adapter.get())
     }
@@ -682,11 +682,11 @@ mod tests {
         let default = PresentSettings::default();
         assert_eq!(
             format_label(RendererKind::Wgpu, default, Some(&adapter)),
-            "wgpu Dx12 Mailbox latency 1 / Microsoft Basic Render Driver"
+            "wgpu Dx12 Mailbox latency 2 / Microsoft Basic Render Driver"
         );
         assert_eq!(
             format_label(RendererKind::Wgpu, default, None),
-            "wgpu Mailbox latency 1"
+            "wgpu Mailbox latency 2"
         );
         assert_eq!(
             format_label(RendererKind::Glow, default, None),
