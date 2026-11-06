@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use super::capabilities::{device_name, AudioCapabilities};
 use super::controls::AudioControls;
+use super::default_device::resolve_default_device;
 use super::passthrough_output::{
     build_passthrough_output, find_device_by_name, make_ring, open_output_device, PassthroughOutput,
 };
@@ -219,10 +220,9 @@ impl AudioCapture {
             debug!("入力デバイスを名前で探す: {}", name);
             find_device_by_name(&self.host, name, AudioDirection::Input)?
         } else {
+            // 出力と同じく物理デバイスへ引き当てる（#552）
             debug!("既定の入力デバイスを使う");
-            self.host
-                .default_input_device()
-                .ok_or(AudioError::NoDefaultDevice(AudioDirection::Input))?
+            resolve_default_device(&self.host, AudioDirection::Input)?
         };
         let output = open_output_device(&self.host, output_device_name, output_capabilities)?;
 

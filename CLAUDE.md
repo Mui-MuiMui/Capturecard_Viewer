@@ -107,6 +107,7 @@ cargo build --release
 | `src/audio/stream.rs` | cpal の入力ストリームの組み立てと入力のコールバック（本体は `process_input` で、フェイクと共有する）、リングバッファの型、ストリームのエラーの扱い（`handle_stream_error`）、満杯で捨てたフレームの数え方 |
 | `src/audio/stream_output.rs` | cpal の出力ストリームの組み立てと出力のコールバック（本体は `process_output` で、フェイクと共有する）、`OutputSignals`、アンダーランの数え方 |
 | `src/audio/passthrough_output.rs` | パススルーの出力側の組み立て（出力デバイス、リングバッファ、変換器とクロックドリフト補正を付けた出力ストリーム）。入力が WASAPI でも音声ピンでも共有する |
+| `src/audio/default_device.rs` | 「既定のデバイス」を、いまの既定の端点の ID で一覧から引き当てた物理デバイスとして返す（`resolve_default_device`）。cpal の仮想の「既定のデバイス」の口は開かない（RustAudio/cpal#1402、#552） |
 | `src/audio/convert.rs` | レート・チャンネル数が違う場合の変換（`PassthroughConverter`） |
 | `src/audio/sample.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32）。純粋関数 |
 | `src/audio/resample.rs` | クロックドリフト補正の共有状態（`ResampleTelemetry`）と補正係数の決め方（`decide_resample_correction`） |
