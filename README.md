@@ -331,7 +331,7 @@ JPEG はファイルが小さくなりますが、文字や細い線ににじみ
 **画面の描画について**
  - 画面は DirectX 12（wgpu）で描きます。DirectX 12 に対応した GPU が無い環境では、自動で OpenGL で描きます。
  - GPU のドライバーとの相性で、起動してもウィンドウが出ない・映像が乱れる・ちらつくときは、環境変数 `CAPTURECARD_VIEWER_RENDERER=glow` を付けて起動すると OpenGL で描きます。手順は [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) の「起動してもウィンドウが出ずに終わる、映像が乱れる・ちらつく」を見てください。
- - G-SYNC を有効にしたモニターでフルスクリーンにしていると、他のアプリへフォーカスを移した瞬間と戻した瞬間に、映像が一瞬（0.05 秒ほど）止まります。GPU のドライバーが G-SYNC を入り切りするためで、アプリの側では避けられません。気になる場合は、このアプリだけ G-SYNC を外せます。手順は [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) の「フルスクリーンで他のアプリへフォーカスを移した瞬間だけ、映像が一瞬止まる」を見てください。
+ - G-SYNC を有効にしたモニターでフルスクリーンにしていると、他のアプリへフォーカスを移した瞬間と戻した瞬間に、映像が一瞬（0.05 秒ほど）止まります。GPU のドライバーが G-SYNC を入り切りするためで、アプリの側では避けられません。G-SYNC は有効のままのほうが、ふだんの映像は滑らかです（外したときとの違いと外し方は [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) の「フルスクリーンで他のアプリへフォーカスを移した瞬間だけ、映像が一瞬止まる」にあります）。
 
 **DirectShow のデバイスについて**
  - 名前に「(DirectShow)」が付いたデバイスは、Media Foundation に出ないデバイス（OBS の仮想カメラ、古いキャプチャーボードなど）です。Media Foundation と DirectShow の両方に出るデバイスは、Media Foundation のほうだけを表示します。

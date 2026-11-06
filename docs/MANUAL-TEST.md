@@ -128,7 +128,7 @@ GPU のある実機で確認する（`docs/design/video-pipeline.md` の「描�
 - [ ] 映像にティアリング（横の裂け目）もカクつきも出ない。最大化と復帰、最小化と復帰、フルスクリーンの切り替え、右クリックメニューとサブメニュー、設定ダイアログが崩れない
 - [ ] 映像の解像度を変えても（設定画面で別の解像度にして適用）、黒いまま止まらずに新しい解像度で映る（GPU 変換の書き込み先の作り直し）
 - [ ] フルスクリーンで PresentMon（`docs/LATENCY.md` の「present の計測（PresentMon）」）を 20 秒かけると、`PresentMode` が `Hardware: Independent Flip` で、`MsUntilDisplayed` の平均が glow（同じ exe を `CAPTURECARD_VIEWER_RENDERER=glow` で起動したとき）より小さい
-- [ ] G-SYNC の効くモニターでフルスクリーンにして他のアプリへフォーカスを移すと、その瞬間だけ映像が一瞬止まる（既知、#557。`docs/design/video-pipeline.md` の「フォーカスの出入りと G-SYNC」）。NVIDIA コントロールパネルの「プログラム設定」で `capturecard_viewer.exe` の「モニター テクノロジ」を「固定リフレッシュ」にして起動し直すと、止まらなくなる（`docs/TROUBLESHOOTING.md` の手順。2026-11-07 時点で確かめていない）
+- [ ] G-SYNC の効くモニターでフルスクリーンにして他のアプリへフォーカスを移すと、その瞬間だけ映像が一瞬止まる（既知、#557。`docs/design/video-pipeline.md` の「フォーカスの出入りと G-SYNC」）。NVIDIA コントロールパネルの「プログラム設定」で `capturecard_viewer.exe` の「モニター テクノロジ」を「固定リフレッシュ」にして起動し直すと、出入りで止まらなくなる。代わりにフォーカスがある間も、60Hz のモニターでは毎秒 2〜3 枚ほど飛ぶ（`docs/TROUBLESHOOTING.md` の手順。2026-11-07 時点で確かめていない。確かめたら設定を戻す）
 - [ ] `CAPTURECARD_VIEWER_RENDERER=glow` で起動すると、ログに「描画は glow（OpenGL）。CAPTURECARD_VIEWER_RENDERER で指定された」が出て、OSD の「描画」の行が `glow (OpenGL)` になり、上の操作が同じように動く。GPU 変換の自己診断のログは「… OpenGL …」になる
 - [ ] DX12 の GPU のアダプターが無い環境（GPU の無い VM など）では、環境変数なしでもログに「DX12 で描けないので glow（OpenGL）で描く: GPU の DX12 のアダプターが無い…」の WARN が出て、glow で映る
 
