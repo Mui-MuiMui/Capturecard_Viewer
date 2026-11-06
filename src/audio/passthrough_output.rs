@@ -18,6 +18,7 @@ use super::capabilities::{device_name, AudioCapabilities};
 use super::capture::{ring_buffer_samples, target_water_level};
 use super::controls::AudioControls;
 use super::convert::PassthroughConverter;
+use super::default_device::resolve_default_device;
 use super::resample::ResampleTelemetry;
 use super::sample::{f32_to_i16, f32_to_i32, f32_to_u16};
 use super::stream::{AudioConsumer, AudioProducer, StreamCounters};
@@ -52,9 +53,9 @@ pub(super) fn open_output_device(
             find_device_by_name(host, name, AudioDirection::Output)?
         }
         None => {
+            // cpal の「既定のデバイス」の口では開かず、物理デバイスへ引き当てる（#552）
             debug!("既定の出力デバイスを使う");
-            host.default_output_device()
-                .ok_or(AudioError::NoDefaultDevice(AudioDirection::Output))?
+            resolve_default_device(host, AudioDirection::Output)?
         }
     };
     let default = device

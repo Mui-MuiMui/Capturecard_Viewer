@@ -30,6 +30,7 @@
 - 映像の開き直しに合わせた音声の開き直しを、音声のストリームエラーの経路で起こさない（理由: `docs/design/directshow-audio.md`）
 - 接続を待つために `thread::sleep` を使わない（理由: `docs/design/reconnect.md`）
 - 音声が開けないとき Windows の既定デバイスへフォールバックしない（理由: `docs/design/reconnect.md`）
+- 「既定のデバイス」を cpal の `default_input_device()` / `default_output_device()` の口のまま開かない・問い合わせない。`audio::default_device::resolve_default_device` で物理デバイスへ引き当てる（理由: `docs/design/reconnect.md`）
 - 切断の監視の中でデバイスを開かない。`ConnectRetry` へ要求を積むところまでにする（理由: `docs/design/reconnect.md`）
 - 再接続の前にデバイスを列挙しない（理由: `docs/design/reconnect.md`）
 - まだ 1 枚も届いていない状態を切断とみなさない（理由: `docs/design/reconnect.md`）
