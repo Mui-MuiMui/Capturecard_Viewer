@@ -51,6 +51,7 @@ pub use capabilities::{
 };
 pub use capture::{AudioCapture, PassthroughInput, PassthroughRequest};
 pub use controls::AudioControls;
+pub use default_device::default_output_device;
 pub use fake::{FakeAudioCapture, FakeAudioOptions};
 pub use fake_stream::FakePinSource;
 pub use pin_feed::{

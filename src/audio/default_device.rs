@@ -13,7 +13,8 @@
 //! 物理デバイス**として開く。物理デバイスの `IMMDevice::Activate` は呼んだ
 //! スレッドで済むのでスレッドプールに触れず、通知も付かない。既定の切り替えは
 //! ワーカーの問い合わせ（`poll_default_audio_device`、`docs/design/reconnect.md`）
-//! が追いかける。
+//! が追いかける。スクリーンショットの効果音（`crate::screenshot_sound`）は
+//! ワーカーの外で出力を開くので、`default_output_device` を使う（#554）。
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{Device, DeviceId};
@@ -50,6 +51,14 @@ pub(super) fn resolve_default_device(
         debug!("既定のデバイスが一覧に無い（{:?}）: {}", direction, id);
         AudioError::NoDefaultDevice(direction)
     })
+}
+
+/// いまの既定の出力デバイスを、既定のホストの一覧から引き当てて返す。
+///
+/// `audio` の外（スクリーンショットの効果音、#554）が使う入口。中身は
+/// `resolve_default_device` と同じで、**仮想の「既定のデバイス」の口へは倒さない。**
+pub fn default_output_device() -> Result<Device, AudioError> {
+    resolve_default_device(&cpal::default_host(), AudioDirection::Output)
 }
 
 /// 一覧から ID が `target` と一致する最初の項目を返す。ID が取れない項目は飛ばす。
