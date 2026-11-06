@@ -208,7 +208,7 @@ Media Foundation のソースリーダーに `MF_LOW_LATENCY = TRUE` を付け�
 ### 測り方
 
 1. PresentMon（コンソール版の `PresentMon.exe`）を用意する。管理者権限のコマンドプロンプトで動かす
-2. Capturecard Viewer を起動し、映像を流してフルスクリーンにする。他のウィンドウや通知を重ねない。統計 OSD の「描画」の行で、どちらで描いているか（`wgpu Dx12 Mailbox latency 1 / <GPU の名前>` か `glow (OpenGL)`。`latency` の後ろは溜めるフレーム数）を書き残す
+2. Capturecard Viewer を起動し、映像を流してフルスクリーンにする。他のウィンドウや通知を重ねない。統計 OSD の「描画」の行で、どちらで描いているか（`wgpu Dx12 Mailbox latency 2 / <GPU の名前>` か `glow (OpenGL)`。`latency` の後ろは溜めるフレーム数）を書き残す
 3. 次を実行し、20 秒待つ
 
 ```bat
