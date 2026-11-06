@@ -317,10 +317,16 @@ fn play_blocking(
 
 /// 既定の出力デバイスを開く。無い・開けないときは理由を返す。
 ///
-/// 既定のデバイスで開けなければ、rodio が他の出力デバイスを順に試す（0.17 の
-/// `OutputStream::try_default` と同じ振る舞い）。
+/// 既定のデバイスは、いまの既定の端点の ID で一覧から引き当てた物理デバイスとして
+/// 開く（`crate::audio::default_output_device`）。cpal の仮想の「既定のデバイス」の
+/// 口は、cpal#1402 でスレッドプールが STA に汚れたあと `RPC_E_CHANGED_MODE` で
+/// 開けなくなるため（#552、#554）。開けなければ同じデバイスの別の形式を順に試すが、
+/// **他の出力デバイスへは倒さない**（既定でない出力から鳴らさない）。
 fn open_output() -> Result<MixerDeviceSink, ScreenshotError> {
-    let mut output = DeviceSinkBuilder::open_default_sink()
+    let device = crate::audio::default_output_device()
+        .map_err(|e| ScreenshotError::SoundOutputUnavailable(e.to_string()))?;
+    let mut output = DeviceSinkBuilder::from_device(device)
+        .and_then(|builder| builder.open_sink_or_fallback())
         .map_err(|e| ScreenshotError::SoundOutputUnavailable(e.to_string()))?;
     // 落とすときに rodio が標準エラーへ 1 行書く既定を切る。`println!` / `eprintln!` を
     // 足さない決まり（`docs/design/logging.md`）と同じ理由
