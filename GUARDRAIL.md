@@ -69,7 +69,7 @@
 - ホットキーのアクションは右クリックメニューと同じメソッドを呼ぶ。独自に書かない（理由: `docs/design/hotkeys.md`）
 - ホットキーのリスナースレッドから `CaptureCardViewer` の状態を触らない。最小化中に実行するのは `HotkeyAction::runs_while_minimized()` が真のものだけで、経路はワーカーへの `DeviceCommand`（理由: `docs/design/hotkeys.md`）
 - `ui.enable_drag_move` が切れている状態で装飾（`ui.borderless`）を外させない（理由: `docs/design/window.md`）
-- 生成後に `ViewportCommand::Decorations` で装飾を外さない。起動時は `ViewportBuilder::with_decorations` で決める（理由: `docs/design/window.md`）
+- 生成後に `ViewportCommand::Decorations` で装飾を外さない。起動時は `ViewportBuilder::with_decorations` で決める。例外は装飾なしのままフルスクリーンを切り替えるときの送り直し（`fullscreen_commands`）だけ（理由: `docs/design/window.md`）
 
 ## ログ・失敗の扱い・コードの置き場所
 
