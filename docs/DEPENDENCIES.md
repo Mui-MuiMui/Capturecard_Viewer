@@ -169,7 +169,7 @@ flowchart TD
 |---|---|---|
 | `ringbuf` 0.3 → 0.5 | 済み | `Producer` / `Consumer` がトレイトになり、分割した片側の型は `HeapProd` / `HeapCons`。`free_len` → `vacant_len`、`len` → `occupied_len`、`push` → `try_push`、`pop` → `try_pop`。`try_push` は 0.3 の `push` と同じく 1 要素ごとに公開するので、フレーム単位の扱い（#307）はそのまま。RUSTSEC-2026-0293 が解消し、`.cargo/audit.toml` の ignore を外した |
 | `cpal` 0.15 → 0.18 | 済み | `SampleRate` が `u32` の別名に、エラー型が `cpal::Error` に統一、`name()` → `description().name()`。WASAPI の出力がレート変換付きで開くようになった、ストリームが動いたままの通知（`Xrun` など）がエラーのコールバックへ届く、音声スレッドの優先度に `realtime` フィーチャが要る、の 3 点は振る舞いが変わる（`docs/design/audio.md` の「cpal 0.18 で変わったこと」） |
-| `rodio` 0.17 → 0.22 | 済み | `OutputStream` / `Sink` → `MixerDeviceSink` / `Player`。出力を開くのは `DeviceSinkBuilder::open_default_sink`（0.17 の `try_default` と同じく他の出力へ倒す）。落とすときに標準エラーへ書く既定は `log_on_drop(false)` で切った。既定のフィーチャはマイクの録音や MP4 / AAC、ディザまで引き込むので切り、0.17 の既定と同じ形式だけを足した |
+| `rodio` 0.17 → 0.22 | 済み | `OutputStream` / `Sink` → `MixerDeviceSink` / `Player`。出力を開くのは `DeviceSinkBuilder::open_default_sink`（0.17 の `try_default` と同じく他の出力へ倒す）だったが、#554 で `audio::default_output_device` が引き当てた物理デバイスを `from_device` → `open_sink_or_fallback` で開く形に替えた（cpal#1402 を避ける。`docs/design/reconnect.md`）。落とすときに標準エラーへ書く既定は `log_on_drop(false)` で切った。既定のフィーチャはマイクの録音や MP4 / AAC、ディザまで引き込むので切り、0.17 の既定と同じ形式だけを足した |
 
 ### `cpal` 0.17 の重複は `rodio` 0.23 で消えた
 

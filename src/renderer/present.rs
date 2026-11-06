@@ -1,6 +1,6 @@
 //! wgpu の swapchain の present の仕方（present mode と溜めるフレーム数）。
 //!
-//! 既定は Mailbox と 1。撮り比べのための試験用の環境変数で Fifo / 2 に替えられる
+//! 既定は Mailbox と 2。撮り比べのための試験用の環境変数で Fifo / 1 に替えられる
 //! （#476）。設定ファイルにも UI にも出さない。理由は `docs/design/video-pipeline.md` の
 //! 「描画バックエンド」。
 
@@ -31,9 +31,16 @@ pub const FRAME_LATENCY_ENV: &str = "CAPTURECARD_VIEWER_FRAME_LATENCY";
 /// ものは選ばない
 pub const DEFAULT_PRESENT_MODE: wgpu::PresentMode = wgpu::PresentMode::Mailbox;
 
-/// 既定の、先に描いたフレームを何枚まで溜めてよいか。**1（最小）。**
-/// DX12 では `SetMaximumFrameLatency(1)` と、swapchain のバッファ 2 枚になる
-pub const DEFAULT_FRAME_LATENCY: u32 = 1;
+/// 既定の、先に描いたフレームを何枚まで溜めてよいか。**2。**
+/// DX12 では `SetMaximumFrameLatency(2)` と、swapchain のバッファ 3 枚になる。
+///
+/// 1（バッファ 2 枚）だと、独立フリップで画面の更新を待つ間（フォーカスを外したとき
+/// など）、画面に出ている 1 枚と出番を待つ 1 枚で埋まり、次のフレームを描く前に
+/// 垂直同期まで待たされる。その間に届いたフレームが描かれる前に上書きされ、
+/// FPS が落ちて見えた（#501）。3 枚あれば Mailbox は出番を待つ 1 枚を新しい 1 枚で
+/// 置き換えるので、描く側は待たない。画面に出るのは垂直同期の時点の最新の 1 枚の
+/// ままなので、遅れは増えない
+pub const DEFAULT_FRAME_LATENCY: u32 = 2;
 
 /// 試験用の環境変数の値の解釈。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,12 +157,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn present_settings_default_is_mailbox_with_one_frame() {
+    fn present_settings_default_is_mailbox_with_two_frames() {
+        // 1 にすると独立フリップで垂直同期を待たされ、フレームを取りこぼす（#501）
         assert_eq!(
             PresentSettings::default(),
             PresentSettings {
                 present_mode: wgpu::PresentMode::Mailbox,
-                frame_latency: 1,
+                frame_latency: 2,
             }
         );
     }
@@ -224,7 +232,7 @@ mod tests {
                 EnvOverride::Invalid(value.to_string()),
                 "{value:?}"
             );
-            assert_eq!(request.value_or(DEFAULT_FRAME_LATENCY), 1);
+            assert_eq!(request.value_or(DEFAULT_FRAME_LATENCY), 2);
         }
     }
 }

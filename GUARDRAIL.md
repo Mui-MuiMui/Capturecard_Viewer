@@ -30,6 +30,7 @@
 - 映像の開き直しに合わせた音声の開き直しを、音声のストリームエラーの経路で起こさない（理由: `docs/design/directshow-audio.md`）
 - 接続を待つために `thread::sleep` を使わない（理由: `docs/design/reconnect.md`）
 - 音声が開けないとき Windows の既定デバイスへフォールバックしない（理由: `docs/design/reconnect.md`）
+- 「既定のデバイス」を cpal の `default_input_device()` / `default_output_device()` の口のまま開かない・問い合わせない。`audio::default_device::resolve_default_device` で物理デバイスへ引き当てる（理由: `docs/design/reconnect.md`）
 - 切断の監視の中でデバイスを開かない。`ConnectRetry` へ要求を積むところまでにする（理由: `docs/design/reconnect.md`）
 - 再接続の前にデバイスを列挙しない（理由: `docs/design/reconnect.md`）
 - まだ 1 枚も届いていない状態を切断とみなさない（理由: `docs/design/reconnect.md`）
@@ -69,7 +70,7 @@
 - ホットキーのアクションは右クリックメニューと同じメソッドを呼ぶ。独自に書かない（理由: `docs/design/hotkeys.md`）
 - ホットキーのリスナースレッドから `CaptureCardViewer` の状態を触らない。最小化中に実行するのは `HotkeyAction::runs_while_minimized()` が真のものだけで、経路はワーカーへの `DeviceCommand`（理由: `docs/design/hotkeys.md`）
 - `ui.enable_drag_move` が切れている状態で装飾（`ui.borderless`）を外させない（理由: `docs/design/window.md`）
-- 生成後に `ViewportCommand::Decorations` で装飾を外さない。起動時は `ViewportBuilder::with_decorations` で決める（理由: `docs/design/window.md`）
+- 生成後に `ViewportCommand::Decorations` で装飾を外さない。起動時は `ViewportBuilder::with_decorations` で決める。例外は装飾なしのままフルスクリーンを切り替えるときの送り直し（`fullscreen_commands`）だけ（理由: `docs/design/window.md`）
 
 ## ログ・失敗の扱い・コードの置き場所
 

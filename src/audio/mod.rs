@@ -13,6 +13,7 @@
 //! | `stream_output.rs` | cpal の出力ストリームの組み立てと出力のコールバック、アンダーランの数え方 |
 //! | `passthrough_output.rs` | パススルーの出力側の組み立て（出力デバイス、リングバッファ、変換器と補正を付けた出力ストリーム）。入力の種類によらず共有する |
 //! | `convert.rs` | 入出力の形が違う場合の変換（線形補間とミックス） |
+//! | `default_device.rs` | 「既定のデバイス」を、いまの既定の端点の ID で一覧から引き当てた物理デバイスとして返す（cpal#1402 を避ける、#552） |
 //! | `sample.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32） |
 //! | `resample.rs` | クロックドリフト補正の共有状態と、補正係数の決め方 |
 //! | `controls.rs` | 音量・パススルー・ミュートの共有状態 |
@@ -26,6 +27,7 @@ mod capabilities;
 mod capture;
 mod controls;
 mod convert;
+mod default_device;
 mod fake;
 mod fake_devices;
 mod fake_stream;
@@ -49,6 +51,7 @@ pub use capabilities::{
 };
 pub use capture::{AudioCapture, PassthroughInput, PassthroughRequest};
 pub use controls::AudioControls;
+pub use default_device::default_output_device;
 pub use fake::{FakeAudioCapture, FakeAudioOptions};
 pub use fake_stream::FakePinSource;
 pub use pin_feed::{

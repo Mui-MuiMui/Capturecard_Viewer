@@ -1,6 +1,6 @@
 [package]
 name = "capturecard_viewer"
-version = "1.6.1"
+version = "1.6.2"
 edition = "2021"
 # 配布するアプリであってライブラリではない。crates.io へ公開しないことを明示する。
 # cargo-about の private.ignore がこの指定を見て、本体を
@@ -121,6 +121,12 @@ winit = { version = "0.30", default-features = false }
 # 自前のレンダラーフィルターを `#[implement]` で書く。マクロが生成するコードは
 # `windows_core` を直接参照するので、`windows` とは別に依存へ入れる
 windows-core = "0.62"
+
+[target.'cfg(windows)'.dev-dependencies]
+# cpal#1402 の再現テスト（src/audio/default_device.rs、#552）が、スレッドプールへ
+# コールバックを積む（TrySubmitThreadpoolCallback）。cpal が同じ版・同じフィーチャを
+# 既に使っているので、クレートは増えない
+windows = { version = "0.62", features = ["Win32_System_Threading"] }
 
 [[bin]]
 name = "capturecard_viewer"

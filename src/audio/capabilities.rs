@@ -6,6 +6,7 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{Device, SupportedStreamConfigRange};
 
+use super::default_device::resolve_default_device;
 use super::stream_config::sample_format_priority;
 use super::{AudioDirection, AudioError};
 
@@ -82,11 +83,8 @@ pub fn query_capabilities(
 
     let device = match device_name {
         Some(name) => find_device_in_host(&host, name, direction)?,
-        None => match direction {
-            AudioDirection::Input => host.default_input_device(),
-            AudioDirection::Output => host.default_output_device(),
-        }
-        .ok_or(AudioError::NoDefaultDevice(direction))?,
+        // 既定のデバイスは物理デバイスへ引き当てて問い合わせる（#552）
+        None => resolve_default_device(&host, direction)?,
     };
 
     let default_config = match direction {

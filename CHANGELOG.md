@@ -4,6 +4,27 @@
 
 ## [未リリース]
 
+## [1.6.2] - 2026-11-07
+
+1.6.1 以降の修正をまとめたバージョン。設定ファイルは 1.6.1 のまま読める。**1.2.1 以降はアプリ内の「更新する」でこのバージョンへ更新できる。**
+
+- **フルスクリーンの不具合を 2 つ直した**: 他のアプリへフォーカスを移している間に映像の FPS が落ちて見える、タイトルバーを隠したときに画面の上端に白い線が出る
+- **Bluetooth のヘッドホンが外れたあとも音が戻るようにした**: 出力が「既定のデバイス」のとき、再接続が失敗し続けてアプリを再起動するまで音が出なかった。スクリーンショットの効果音も同じ
+
+<hr>
+
+Fixes since 1.6.1. Config files from 1.6.1 load as they are. **From 1.2.1 or later, use "Update" inside the app to update to this version.**
+
+- **Two fullscreen fixes**: video no longer appears to drop frames while another app has focus, and a white line no longer shows at the top of the screen when the title bar is hidden
+- **Audio comes back after Bluetooth headphones disconnect**: with the output set to "Default device", reconnecting kept failing until the app was restarted. The screenshot sound is fixed the same way
+
+### 修正
+
+- タイトルバーを表示したままフルスクリーンにして他のアプリへフォーカスを移すと、映像の FPS が落ちて見えることがあったのを直した。画面へ出す前に溜めるフレーム数を 1 から 2 にした。画面に出るのはそのときの最新の 1 枚のままなので、遅れは増えない（#501）
+- タイトルバーを隠したままフルスクリーンにすると、画面の上端に 1px の線が残り、他のウィンドウへフォーカスを移すと白い線に見えていたのを直した。映像は画面の上端から下端までちょうどに出る
+- 音声の出力が「既定のデバイス」のとき、Bluetooth のヘッドホンなどの既定の出力が外れると、再接続が「出力デバイスの既定の設定を取得できない: Failed to get audio client: スレッド モードを設定してから変更することはできません。」で失敗し続け、アプリを再起動するまで音が戻らなかった。使っている音声ライブラリ（cpal 0.18.2）の不具合（RustAudio/cpal#1402）を避けるため、「既定のデバイス」はそのときの既定の物理デバイスとして開くようにした。Windows 側で既定の出力を切り替えたときは、今までどおり 4 秒ほどで新しい既定へ開き直す（#552）
+- 同じく Bluetooth のヘッドホンなどの既定の出力が外れたあと、スクリーンショットの効果音が鳴らない、または既定でない別の出力から鳴ることがあったのを直した。効果音もそのときの既定の物理デバイスで鳴らす（#554）
+
 ## [1.6.1] - 2026-10-25
 
 1.6.0 以降の修正をまとめたバージョン。設定ファイルは 1.6.0 のまま読める。**1.2.1 以降はアプリ内の「更新する」でこのバージョンへ更新できる。**

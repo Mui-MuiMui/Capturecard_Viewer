@@ -107,6 +107,7 @@ cargo build --release
 | `src/audio/stream.rs` | cpal の入力ストリームの組み立てと入力のコールバック（本体は `process_input` で、フェイクと共有する）、リングバッファの型、ストリームのエラーの扱い（`handle_stream_error`）、満杯で捨てたフレームの数え方 |
 | `src/audio/stream_output.rs` | cpal の出力ストリームの組み立てと出力のコールバック（本体は `process_output` で、フェイクと共有する）、`OutputSignals`、アンダーランの数え方 |
 | `src/audio/passthrough_output.rs` | パススルーの出力側の組み立て（出力デバイス、リングバッファ、変換器とクロックドリフト補正を付けた出力ストリーム）。入力が WASAPI でも音声ピンでも共有する |
+| `src/audio/default_device.rs` | 「既定のデバイス」を、いまの既定の端点の ID で一覧から引き当てた物理デバイスとして返す（`resolve_default_device`）。cpal の仮想の「既定のデバイス」の口は開かない（RustAudio/cpal#1402、#552） |
 | `src/audio/convert.rs` | レート・チャンネル数が違う場合の変換（`PassthroughConverter`） |
 | `src/audio/sample.rs` | サンプル型の変換（f32 ⇄ i16 / u16 / i32）。純粋関数 |
 | `src/audio/resample.rs` | クロックドリフト補正の共有状態（`ResampleTelemetry`）と補正係数の決め方（`decide_resample_correction`） |
@@ -195,7 +196,7 @@ cargo build --release
 | `src/update/overrides.rs` | 更新の確認を試すための環境変数（`CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` / `CAPTURECARD_VIEWER_UPDATE_API_URL`）の解釈（`CheckOverrides`） |
 | `src/overlay.rs` | 操作したときだけ数秒出て消える OSD（フルスクリーンの切り替え、音量、失敗や録画の保存のトーストなど）。期限と描画の `TransientOverlay` と、中身の `OverlayContent`（テキストだけ / バー付き）。常設の統計 OSD は `app/video_overlay.rs` の側 |
 | `src/renderer.rs` | 描画のバックエンド（wgpu の DX12 / glow）を起動前に決める（`configure`、#492）。環境変数 `CAPTURECARD_VIEWER_RENDERER` の解釈（`parse_renderer`）、DX12 のアダプターの確認（`probe_dx12`）と選び方（`pick_adapter`。確認と eframe のアダプターは DXGI の LUID で突き合わせる、#512）、統計 OSD に出す説明（`RendererChoice::label`） |
-| `src/renderer/present.rs` | wgpu の present の仕方 `PresentSettings`。既定の present mode（Mailbox）と溜めるフレーム数（1）、撮り比べのための試験用の環境変数 `CAPTURECARD_VIEWER_PRESENT_MODE`（mailbox / fifo）・`CAPTURECARD_VIEWER_FRAME_LATENCY`（1 / 2）の解釈（`parse_present_mode` / `parse_frame_latency`、#476） |
+| `src/renderer/present.rs` | wgpu の present の仕方 `PresentSettings`。既定の present mode（Mailbox）と溜めるフレーム数（2、#501）、撮り比べのための試験用の環境変数 `CAPTURECARD_VIEWER_PRESENT_MODE`（mailbox / fifo）・`CAPTURECARD_VIEWER_FRAME_LATENCY`（1 / 2）の解釈（`parse_present_mode` / `parse_frame_latency`、#476） |
 | `src/repaint.rs` | 次の再描画までの間隔の判定（`next_repaint_delay`）と、UI スレッド以外から再描画を促す窓口（`RepaintWaker`） |
 | `src/i18n/mod.rs` | 画面に出す文字列の入口。現在の言語（`Language` と `static LANGUAGE`）を持ち、`set_language` で切り替える。外から使う経路（`crate::i18n::...`）の `pub use` もここ |
 | `src/i18n/text.rs` | 引数を取らない文字列の表（`texts!` が `Text` のキーと言語ごとの `match` を作る） |
