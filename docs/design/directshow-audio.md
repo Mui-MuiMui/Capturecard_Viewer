@@ -509,6 +509,8 @@ Elgato Game Capture HD60 Pro は映像のフィルターに音声ピンを持た
 
 **名札に `WaveInID` があるか、`CLSID` が `CLSID_AudioRecord` のものを包みとみなす**（`devices::enumerate_audio` が読み、`DeviceEntry::wraps_recording_device` に入れる）。メーカー独自の音声のフィルター（KS のフィルターなら ksproxy で `DevicePath` を持つ）はどちらにも当たらない見込み。Live Gamer EXTREME 3 の音声は包みしか無いので、今までどおり「[映像デバイスと連動]」は灰色のまま（テスト `paired_audio_filter_ignores_wrapped_recording_devices` と、実機の列挙を確かめる `#[ignore]` のテスト `enumerate_audio_marks_recording_device_wrappers`。後者はメイン PC で通した）。
 
+**音声のフィルターを列挙できなかったときは、ピンの無いデバイスを「ない」ではなく「不明」にする**（`audio_filter::presence_without_pin`）。「ない」は覚えて次から調べ直さないので、一時的な失敗で「[映像デバイスと連動]」が起動し直すまで選べなくなる。「不明」なら `PIN_PROBE_RETRY`（60 秒）を空けて調べ直す（PR #571 の CodeRabbit の指摘）。
+
 HD60 Pro の「(Audio)」が包みかどうかは確かめていない（実機が無い）。もし包みなら選べないままになる。ただしその場合は WASAPI と同じ録音デバイスを読むことになるので、選べても音質は変わらない。映像に音声ピンが無いときは、候補（名前と包みかどうか）と選んだ組を INFO でログへ出す（`映像デバイス … に音声ピンが無いので、対になる DirectShow の音声のフィルターを探した`）。
 
 ### 名前の突き合わせ

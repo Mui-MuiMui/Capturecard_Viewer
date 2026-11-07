@@ -19,6 +19,8 @@
 
 use windows::Win32::Media::DirectShow::{IBaseFilter, IGraphBuilder};
 
+use crate::audio::AudioPinPresence;
+
 use super::devices::{self, bind_filter, DeviceEntry};
 use super::display_name::friendly_name;
 
@@ -151,6 +153,20 @@ pub(super) fn has_paired(video_name: &str, filters: &[DeviceEntry]) -> bool {
     paired_audio_filter(video_name, &names).is_some()
 }
 
+/// 映像のフィルターに音声ピンが無いときの有無。`paired` は対の音声のフィルターが
+/// あるか（`has_paired`）で、音声のフィルターを列挙できなかったときは `None`。
+///
+/// **列挙できなかったときは「不明」にする。** 「ない」にすると覚えられて次から
+/// 調べ直さないので、一時的な失敗で「[映像デバイスと連動]」が起動し直すまで
+/// 選べなくなる。「不明」なら `PIN_PROBE_RETRY` の間を空けて調べ直す。
+pub(super) fn presence_without_pin(paired: Option<bool>) -> AudioPinPresence {
+    match paired {
+        Some(true) => AudioPinPresence::Present,
+        Some(false) => AudioPinPresence::Absent,
+        None => AudioPinPresence::Unknown,
+    }
+}
+
 /// 対の音声のフィルターを作ってグラフへ入れる。**ここで音声のデバイスを掴む。**
 pub(super) fn add_to_graph(
     graph: &IGraphBuilder,
@@ -248,6 +264,14 @@ mod tests {
             paired_audio_filter("Game Capture HD60 Pro (Video)", &[]),
             None
         );
+    }
+
+    #[test]
+    fn presence_without_pin_is_unknown_when_audio_filters_could_not_be_listed() {
+        assert_eq!(presence_without_pin(Some(true)), AudioPinPresence::Present);
+        assert_eq!(presence_without_pin(Some(false)), AudioPinPresence::Absent);
+        // 列挙の失敗を「ない」にしない（覚えられて調べ直さなくなる）
+        assert_eq!(presence_without_pin(None), AudioPinPresence::Unknown);
     }
 
     #[test]
