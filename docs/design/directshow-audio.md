@@ -294,7 +294,17 @@ input_device_name = "Line (AVerMedia Live Gamer)"   # "video_pin" の間は使�
 **入力が未設定のまま起動したとき（設定ファイルが無い初回を含む）、最初の映像の試行の結果を見て決める。**
 
 - 映像が DirectShow で開け、音声ピンがある → `input_source = "video_pin"`（`input_device_name` は `None` のまま）
-- それ以外（Media Foundation で開いた、ピンが無い、映像が開けなかった）→ 今までどおり WASAPI の列挙の先頭を `input_device_name` に入れる
+- それ以外（Media Foundation で開いた、ピンが無い、映像が開けなかった）→ 開いた映像デバイスと名前の対応する WASAPI の入力があればそれを、無ければ今までどおり WASAPI の列挙の先頭を `input_device_name` に入れる（下の「名前の対応する入力」）
+
+#### 名前の対応する入力（#562）
+
+映像のフィルターに音声ピンが無く、音声は同じボードの別の録音デバイスに出る機種がある。Elgato Game Capture HD60 Pro は DirectShow に「Game Capture HD60 Pro (Video)」と「Game Capture HD60 Pro (Audio)」を別々に出し、OBS では映像キャプチャデバイスの「カスタム音声デバイスを使用」で音声の方を選ぶ（[OBS フォーラム](https://obsproject.com/forum/threads/need-assistance-with-hd60pro.67302/)）。録音デバイスは映像のキャプチャーが動いている間しか音を流さず、Windows の「このデバイスを聴く」だけでは鳴らない（[利用者のレビュー](https://hyperts.net/hd60-pro-review/)。AVerMedia C988 は録音デバイスだけで鳴ったとの対比つき）。このアプリは映像を開いた同じ周期のすぐあとに WASAPI の入力を開くので、入力さえ合っていれば映像が動いている間に音を受け取れる見込みがある。ところが初回の既定は列挙の先頭（ノート PC なら内蔵マイク）だった。
+
+そこで、映像を開いた後の初回の既定に限って、映像デバイスの名前の**型番らしい語**（英字と数字を両方含む語。`hd60` / `gc551` / `c988`。`usb3` は除く）を全部含む WASAPI の入力を選ぶ（`worker_default_input::associated_input`、純粋関数）。複数あれば、ほかの語（`video` / `audio` / `capture` などのありふれた語を除く）が多く重なるもの（HD60 Pro と HD60 S を見分ける）。型番らしい語が無い名前（「USB Video」など）では選ばず、列挙の先頭に任せる。
+
+- **機種の名前で決め打ちしない。** 名前の対応は AmaRecTV の音声入力「(自動)」（映像入力に紐づいた音声入力を選ぶ）や OBS の映像デバイスに紐づく音声と同じ考え方で、ほかのボードにも効く
+- 対象は初回の既定だけ。利用者が選んだ入力は替えない（`docs/design/reconnect.md` の「黙って別のデバイスを開かない」）
+- DirectShow の音声だけのフィルター（`CLSID_AudioInputDeviceCategory`。HD60 Pro の「(Audio)」）を開く経路は、今も範囲外。WASAPI の入力で鳴らない機種があると実機で分かったら、そのときに足す
 
 今の `resolve_default_devices` は `ApplyConfig` の中、最初の接続より前に入力を埋めるので、ここを「入力の決定は映像の最初の試行のあとまで持ち越す」に変える。持ち越している間、音声は理由を出さずに待つ（「入力が選ばれていない」を出すと、初回起動のたびに一瞬トーストが出る）。決めたら `DefaultDevicesResolved` で UI へ返し、`mark_settings_dirty` 経由で書き戻す（今と同じ）。
 
