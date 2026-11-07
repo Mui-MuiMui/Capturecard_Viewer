@@ -42,7 +42,7 @@ Windows 10/11 専用です。他の OS では Media Foundation と WASAPI が使
 
 `--locked` はコミット済みの `Cargo.lock` をそのまま使わせるためのものです。付けないと `Cargo.toml` と食い違っていても勝手に再解決され、手元と違う依存で通ってしまいます。
 
-CI（`.github/workflows/ci.yml`）は上の表の下 4 行（fmt → clippy → release ビルド → test）を**この順で**回します。手元でも同じ順で通してから PR を出してください。**順番の理由と、落ちたときの扱いは [.claude/skills/verify/SKILL.md](.claude/skills/verify/SKILL.md) が持ちます。**
+CI（`.github/workflows/ci.yml`）は上の表の下 4 行（fmt → clippy → release ビルド → test）を**この順で**回します。手元でも同じ順で通してから PR を出してください。**順番の理由と、落ちたときの扱いは [.claude/skills/verify/SKILL.md](.claude/skills/verify/SKILL.md) が持ちます。**文書だけ（`*.md`、`docs/`、`LICENSE*`）を変えた PR では、CI は重い手順を飛ばして成功で終わります（[docs/BUILD.md](docs/BUILD.md)）。
 
 キャプチャーデバイスが必要な確認（映像・音声・デバイス接続・ホットキー・ウィンドウ操作）は CI では担保できません。該当する変更をしたときは [docs/MANUAL-TEST.md](docs/MANUAL-TEST.md) のチェックリストを実機でなぞります。テストを書くかどうかの線引きは [.claude/skills/testing-conventions/SKILL.md](.claude/skills/testing-conventions/SKILL.md) にあります。
 
