@@ -26,7 +26,7 @@
 - UI スレッドから `supported_input_configs()` / `supported_output_configs()` を呼ばない（理由: `docs/design/audio.md`）
 - フレームコールバックと cpal のコールバックでロックもアロケーションもしない。`SharedColorConversion` に項目を足すときも `Mutex` にしない。例外はフレームコールバックの `RepaintWaker::wake` の 1 回だけで、その中へ処理を足さない。ログは `FrameSink` の初回だけのものと cpal のエラーのコールバック（`Xrun` 以外）だけ（理由: `docs/design/video-pipeline.md`、`docs/design/audio.md`）
 - 音声ピンのレンダラーの `Receive` でロックもアロケーションもしない。受け取れないときも失敗を返さず、捨てて `Ok` を返す（理由: `docs/design/directshow-audio.md`）
-- 音声ピンを繋ぐのは `[audio] input_source = "video_pin"` のときだけにする（理由: `docs/design/directshow-audio.md`）
+- 音声ピン（対になる音声だけのフィルターを含む、#562）を繋ぐのは `[audio] input_source = "video_pin"` のときだけにする。Windows の録音デバイスを包んだだけのフィルターを対にしない（理由: `docs/design/directshow-audio.md`）
 - 映像の開き直しに合わせた音声の開き直しを、音声のストリームエラーの経路で起こさない（理由: `docs/design/directshow-audio.md`）
 - 接続を待つために `thread::sleep` を使わない（理由: `docs/design/reconnect.md`）
 - 音声が開けないとき Windows の既定デバイスへフォールバックしない（理由: `docs/design/reconnect.md`）

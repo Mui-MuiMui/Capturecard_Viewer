@@ -1,7 +1,9 @@
 //! DirectShow の映像入力デバイスの列挙と、対応形式の問い合わせ。
 //!
 //! 列挙は `ICreateDevEnum` の `CLSID_VideoInputDeviceCategory`、対応形式は
-//! キャプチャーピンの `IAMStreamConfig::GetStreamCaps`。
+//! キャプチャーピンの `IAMStreamConfig::GetStreamCaps`。映像と対になる音声の
+//! フィルター（#562、`audio_filter.rs`）を探すための `CLSID_AudioInputDeviceCategory`
+//! の列挙もここに置く。
 //!
 //! 対応形式の一覧から「どれで開くか」を決める判定と設定画面向けの並べ替えは
 //! `stream_select.rs`（#414）。
@@ -14,8 +16,8 @@ use windows::Win32::Media::DirectShow::{
     IAMStreamConfig, IBaseFilter, ICaptureGraphBuilder2, ICreateDevEnum, VIDEO_STREAM_CONFIG_CAPS,
 };
 use windows::Win32::Media::MediaFoundation::{
-    CLSID_SystemDeviceEnum, CLSID_VideoInputDeviceCategory, MEDIATYPE_Video, AM_MEDIA_TYPE,
-    PIN_CATEGORY_CAPTURE,
+    CLSID_AudioInputDeviceCategory, CLSID_SystemDeviceEnum, CLSID_VideoInputDeviceCategory,
+    MEDIATYPE_Video, AM_MEDIA_TYPE, PIN_CATEGORY_CAPTURE,
 };
 use windows::Win32::System::Com::StructuredStorage::IPropertyBag;
 use windows::Win32::System::Com::{
@@ -32,18 +34,37 @@ pub(super) struct DeviceEntry {
     pub(super) friendly_name: String,
     /// フィルターを作るための名札
     pub(super) moniker: IMoniker,
+    /// Windows の録音デバイスを包んだだけのフィルター（`Audio Capture Filter`）か
+    /// （#562）。名札に `WaveInID` があるか、`CLSID` が `CLSID_AudioRecord` のもの。
+    /// 映像の列挙では見ないので常に偽
+    pub(super) wraps_recording_device: bool,
 }
 
 /// 映像入力デバイスを列挙する。1 台も無ければ空の一覧を返す。
 ///
 /// 表示名を読めないものは飛ばす（選びようがないため）。
 pub(super) fn enumerate() -> windows::core::Result<Vec<DeviceEntry>> {
+    enumerate_category(&CLSID_VideoInputDeviceCategory, false)
+}
+
+/// 音声入力のフィルター（`CLSID_AudioInputDeviceCategory`）を列挙する（#562）。
+///
+/// Windows のすべての録音デバイスが `Audio Capture Filter` に包まれてここに並ぶ。
+/// メーカー独自の音声のフィルターと見分けられるよう、包んだだけのものに印を付ける。
+pub(super) fn enumerate_audio() -> windows::core::Result<Vec<DeviceEntry>> {
+    enumerate_category(&CLSID_AudioInputDeviceCategory, true)
+}
+
+fn enumerate_category(
+    category: &windows::core::GUID,
+    read_wrapper: bool,
+) -> windows::core::Result<Vec<DeviceEntry>> {
     let dev_enum: ICreateDevEnum =
         unsafe { CoCreateInstance(&CLSID_SystemDeviceEnum, None, CLSCTX_INPROC_SERVER)? };
     let mut monikers: Option<IEnumMoniker> = None;
     // カテゴリにデバイスが 1 つも無いときは S_FALSE で、列挙子も返らない
     unsafe {
-        dev_enum.CreateClassEnumerator(&CLSID_VideoInputDeviceCategory, &mut monikers, 0)?;
+        dev_enum.CreateClassEnumerator(category, &mut monikers, 0)?;
     }
     let Some(monikers) = monikers else {
         return Ok(Vec::new());
@@ -60,9 +81,18 @@ pub(super) fn enumerate() -> windows::core::Result<Vec<DeviceEntry>> {
         let Some(moniker) = slot[0].take() else {
             break;
         };
-        match friendly_name(&moniker) {
+        let Some(bag) = property_bag(&moniker) else {
+            log::debug!("DirectShow のデバイスのプロパティを読めないので飛ばす");
+            continue;
+        };
+        match read_bstr(&bag, windows::core::w!("FriendlyName")).filter(|name| !name.is_empty()) {
             Some(friendly_name) => devices.push(DeviceEntry {
                 friendly_name,
+                wraps_recording_device: read_wrapper
+                    && super::audio_filter::is_recording_device_wrapper(
+                        read_bstr(&bag, windows::core::w!("CLSID")).as_deref(),
+                        has_property(&bag, windows::core::w!("WaveInID")),
+                    ),
                 moniker,
             }),
             None => log::debug!("DirectShow のデバイスの表示名を読めないので飛ばす"),
@@ -71,13 +101,16 @@ pub(super) fn enumerate() -> windows::core::Result<Vec<DeviceEntry>> {
     Ok(devices)
 }
 
-/// 名札から表示名（`FriendlyName`）を読む。
-fn friendly_name(moniker: &IMoniker) -> Option<String> {
-    let bag: IPropertyBag =
-        unsafe { moniker.BindToStorage(None::<&IBindCtx>, None::<&IMoniker>) }.ok()?;
+/// 名札のプロパティの読み口。
+fn property_bag(moniker: &IMoniker) -> Option<IPropertyBag> {
+    unsafe { moniker.BindToStorage(None::<&IBindCtx>, None::<&IMoniker>) }.ok()
+}
+
+/// プロパティを文字列（BSTR）として読む。無い・文字列でなければ `None`。
+fn read_bstr(bag: &IPropertyBag, name: windows::core::PCWSTR) -> Option<String> {
     let mut value = VARIANT::default();
-    let read = unsafe { bag.Read(windows::core::w!("FriendlyName"), &mut value, None) };
-    let name = if read.is_ok() && unsafe { value.Anonymous.Anonymous.vt } == VT_BSTR {
+    let read = unsafe { bag.Read(name, &mut value, None) };
+    let text = if read.is_ok() && unsafe { value.Anonymous.Anonymous.vt } == VT_BSTR {
         let bstr = unsafe { &value.Anonymous.Anonymous.Anonymous.bstrVal };
         Some(bstr.to_string())
     } else {
@@ -85,7 +118,15 @@ fn friendly_name(moniker: &IMoniker) -> Option<String> {
     };
     // BSTR はここで解放する。失敗しても漏れるだけなので無視する
     let _ = unsafe { VariantClear(&mut value) };
-    name.filter(|name| !name.is_empty())
+    text
+}
+
+/// プロパティがあるか（型は問わない）。
+fn has_property(bag: &IPropertyBag, name: windows::core::PCWSTR) -> bool {
+    let mut value = VARIANT::default();
+    let read = unsafe { bag.Read(name, &mut value, None) };
+    let _ = unsafe { VariantClear(&mut value) };
+    read.is_ok()
 }
 
 /// 名札からフィルターを作る。**ここでデバイスを掴む。**

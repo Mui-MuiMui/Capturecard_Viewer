@@ -83,7 +83,8 @@ texts! {
     // 設定ダイアログの選べない理由にも出るので「DirectShow」「音声ピン」の語を使わない（#409）
     AudioPinVideoNotOpen { ja: "映像デバイスが開いていないので、映像デバイスの音声は使えません", en: "The video device is not open, so its audio cannot be used" },
     AudioPinMediaFoundation { ja: "いまの映像の開き方では、映像デバイスの音声を使えません。「デバイス設定」タブの「映像の開き方」を「DirectShow」にすると使えます", en: "The video device's audio is not available with the current way of opening the video. Set \"Open video with\" to \"DirectShow\" in the Devices tab to use it" },
-    AudioPinMissing { ja: "この映像デバイスからは音声を受け取れません", en: "This video device does not provide audio" },
+    // 選べないときは録音デバイスを選ぶよう案内する（#562）。勝手には切り替えない（docs/design/reconnect.md）
+    AudioPinMissing { ja: "この映像デバイスからは音声を受け取れません。オーディオ入力デバイスの一覧から、同じ機器の名前が付いた録音デバイス（「HDMI/Line In」など）を選んでください", en: "This video device does not provide audio. Choose the recording device with the same device name (such as \"HDMI/Line In\") from the audio input list" },
     AudioPinNotConnected { ja: "映像デバイスの音声を使うために、映像デバイスを開き直すのを待っています", en: "Waiting for the video device to reopen so that its audio can be used" },
     // 音声ピンの入力で開こうとしたが、繋いだ音声ピンが無かった（audio::AudioError::VideoPinUnavailable）
     AudioPinUnavailable { ja: "映像デバイスの音声がつながっていないので、音声を開けません", en: "The video device's audio is not connected, so audio cannot be opened" },

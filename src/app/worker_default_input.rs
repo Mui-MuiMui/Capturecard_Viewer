@@ -1,8 +1,9 @@
 //! 入力が未設定のまま起動したときの、入力の既定の決め方（#394）。
 //!
 //! 入力は最初の映像の試行のあとに決める。映像に音声ピンがあれば「映像デバイスの
-//! 音声」、無ければ今までどおり WASAPI の列挙の先頭（`docs/design/directshow-audio.md`
-//! の (4) の「初回の既定」）。決めるまでと、決めた値を UI が書き戻すまでの間は、
+//! 音声」、無ければ開いた映像デバイスと名前の対応する WASAPI の入力（#562、
+//! `associated_input`）、それも無ければ今までどおり WASAPI の列挙の先頭
+//! （`docs/design/directshow-audio.md` の (4) の「初回の既定」）。決めるまでと、決めた値を UI が書き戻すまでの間は、
 //! 音声を理由なしで待たせる。
 //!
 //! `super::worker_audio_connect` と同じく `WorkerState` に生やす形で、デバイス
@@ -14,7 +15,76 @@ use super::worker::{AudioTarget, DeviceConfig, DeviceEvent};
 use super::worker_audio_connect::audio_input_is_selected;
 use super::worker_loop::WorkerState;
 use crate::settings::AudioInputSource;
+use crate::video::directshow_friendly_name;
 use log::{debug, info};
+
+/// 名前の対応を見るときに数えない語。キャプチャーボードの名前にも音声デバイスの
+/// 名前にもよく出るので、これだけが共通しても同じ機器とはみなさない。
+const GENERIC_NAME_TOKENS: &[&str] = &[
+    "video",
+    "audio",
+    "capture",
+    "device",
+    "digital",
+    "interface",
+    "input",
+    "directshow",
+];
+
+/// 名前を比べるための語の列。英数字以外で区切り、小文字へそろえる。
+/// 「(DirectShow)」の印は先に外す。
+fn name_tokens(name: &str) -> Vec<String> {
+    let name = directshow_friendly_name(name).unwrap_or(name);
+    name.split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// 型番らしい語か。英字と数字を両方含む（`hd60` / `gc551` / `c988` / `4k60`）。
+/// `usb3` のような接続の規格は型番に数えない。
+fn is_model_token(token: &str) -> bool {
+    token.chars().any(|c| c.is_ascii_digit())
+        && token.chars().any(char::is_alphabetic)
+        && !token.starts_with("usb")
+}
+
+/// 開いた映像デバイスと同じ機器のものらしい WASAPI の入力を選ぶ（#562）。
+///
+/// 映像デバイスの名前の型番らしい語（`is_model_token`）を全部含む入力だけを候補に
+/// し、ほかの語（`GENERIC_NAME_TOKENS` を除く）が多く重なるものを選ぶ。並んだら
+/// 列挙の順。型番らしい語が無い名前（「USB Video」など）では選ばない。名前だけで
+/// 決めるので、機種の名前は持たない。
+///
+/// Elgato Game Capture HD60 Pro のように、映像のフィルターに音声ピンが無く、音声は
+/// 別の録音デバイス（「デジタル オーディオ インターフェイス (Game Capture HD60 Pro)」
+/// など）に出る機種のため。列挙の先頭はマイクであることが多い。
+pub(super) fn associated_input<'a>(video_name: &str, inputs: &'a [String]) -> Option<&'a String> {
+    let video_tokens = name_tokens(video_name);
+    let models: Vec<&String> = video_tokens
+        .iter()
+        .filter(|token| is_model_token(token))
+        .collect();
+    if models.is_empty() {
+        return None;
+    }
+    let mut best: Option<(usize, &String)> = None;
+    for input in inputs {
+        let tokens = name_tokens(input);
+        if !models.iter().all(|model| tokens.contains(model)) {
+            continue;
+        }
+        let shared = video_tokens
+            .iter()
+            .filter(|token| !GENERIC_NAME_TOKENS.contains(&token.as_str()))
+            .filter(|token| tokens.contains(token))
+            .count();
+        if best.is_none_or(|(score, _)| shared > score) {
+            best = Some((shared, input));
+        }
+    }
+    best.map(|(_, input)| input)
+}
 
 /// 入力が決まっていない設定か。WASAPI の入力で、デバイスが選ばれていない。
 /// 「映像デバイスの音声」は入力デバイス名を使わないので、決まっている扱い。
@@ -74,8 +144,9 @@ impl WorkerState {
 
     /// 最初の映像の試行のあとに、入力の既定を決める（#394）。
     ///
-    /// 映像に音声ピンがあれば「映像デバイスの音声」、無ければ WASAPI の列挙の先頭。
-    /// 決めた値は `DefaultDevicesResolved` で UI へ返して書き戻してもらう。
+    /// 映像に音声ピンがあれば「映像デバイスの音声」、無ければ映像デバイスと名前の
+    /// 対応する WASAPI の入力（`associated_input`、#562）、それも無ければ WASAPI の
+    /// 列挙の先頭。決めた値は `DefaultDevicesResolved` で UI へ返して書き戻してもらう。
     /// WASAPI に決めたときは往復を待たずにこの場の設定へ写して開く（今までの
     /// `resolve_default_devices` と同じ）。「映像デバイスの音声」に決めたときは
     /// 映像の接続対象（音声ピンを繋ぐか）も変わるが、**ワーカーは UI から来た
@@ -100,7 +171,18 @@ impl WorkerState {
         }
         let list = self.audio.list_input_devices();
         debug!("利用できる入力デバイス: {:?}", list);
-        let first = list.into_iter().next();
+        let video_name = self.video.active().map(|video| video.device_name);
+        let associated = video_name
+            .as_deref()
+            .and_then(|video| associated_input(video, &list))
+            .cloned();
+        if let (Some(name), Some(video)) = (&associated, &video_name) {
+            info!(
+                "映像デバイス {} と名前の対応する入力 {} があるので、列挙の先頭より優先する",
+                video, name
+            );
+        }
+        let first = associated.or_else(|| list.into_iter().next());
         match &first {
             Some(name) => info!("入力デバイスの既定を {} にした", name),
             // 1 台も無ければ今までどおり「入力が選ばれていない」で待つ
@@ -249,6 +331,85 @@ mod tests {
         assert_eq!(audio.with(|state| state.start_calls), 1);
         assert!(audio.with(|state| state.running));
         assert!(!has_audio_failure(&drain(&events)));
+    }
+
+    #[test]
+    fn first_run_prefers_the_input_named_after_the_video_without_a_pin() {
+        // 音声ピンが無く、音声は別の録音デバイスに出る機種（#562）。列挙の先頭の
+        // マイクではなく、映像デバイスと名前の対応する入力に決める
+        let video = MockVideoBackend::default();
+        let audio = MockAudioBackend::default();
+        video.with(|state| {
+            state.devices = vec![(
+                "Game Capture HD60 Pro (Video) (DirectShow)".to_string(),
+                String::new(),
+            )];
+        });
+        audio.with(|state| {
+            state.input_devices = vec![
+                "マイク (Realtek(R) Audio)".to_string(),
+                "デジタル オーディオ インターフェイス (Game Capture HD60 Pro)".to_string(),
+            ]
+        });
+        let (mut state, events) = mock_state(&video, &audio);
+        apply_config(&mut state, config_for(None, None), true);
+        state.tick(Instant::now());
+        let expected = "デジタル オーディオ インターフェイス (Game Capture HD60 Pro)".to_string();
+        assert_eq!(
+            resolved_inputs(&drain(&events)),
+            vec![(Some(expected.clone()), Some(AudioInputSource::Device))]
+        );
+        assert_eq!(
+            state.default_input,
+            DefaultInput::AwaitingWriteBack(Some(expected))
+        );
+        assert_eq!(audio.with(|state| state.start_calls), 1);
+    }
+
+    fn inputs(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn associated_input_matches_the_model_of_the_video() {
+        let list = inputs(&[
+            "マイク (Realtek(R) Audio)",
+            "Game Capture HD60 S (Audio)",
+            "Game Capture HD60 Pro (Audio) (#01)",
+        ]);
+        // 型番が同じでも、ほかの語（Pro）が多く重なる方を選ぶ
+        assert_eq!(
+            associated_input("Game Capture HD60 Pro (Video) (#01) (DirectShow)", &list),
+            Some(&list[2])
+        );
+        assert_eq!(
+            associated_input("Elgato Game Capture HD60 S", &list),
+            Some(&list[1])
+        );
+        // 大文字小文字は問わない
+        let lower = inputs(&["デジタル オーディオ インターフェイス (gc551 audio)"]);
+        assert_eq!(
+            associated_input("AVerMedia GC551 Video Capture", &lower),
+            Some(&lower[0])
+        );
+    }
+
+    #[test]
+    fn associated_input_needs_a_model_token() {
+        // 型番らしい語が無い名前では選ばない（列挙の先頭へ任せる）
+        let list = inputs(&["USB Audio Device", "Video Capture Audio"]);
+        assert_eq!(associated_input("USB Video", &list), None);
+        assert_eq!(associated_input("Video Capture", &list), None);
+        // 接続の規格（usb3）は型番に数えない
+        let usb = inputs(&["マイク (USB3.0 HD Audio)"]);
+        assert_eq!(associated_input("USB3.0 Capture", &usb), None);
+        // 型番が入力のどれにも無ければ選ばない
+        let other = inputs(&["マイク (Realtek(R) Audio)", "Game Capture HD60 S (Audio)"]);
+        assert_eq!(
+            associated_input("AVerMedia GC551 Video Capture", &other),
+            None
+        );
+        assert_eq!(associated_input("Game Capture HD60 Pro", &[]), None);
     }
 
     #[test]

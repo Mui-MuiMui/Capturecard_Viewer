@@ -12,6 +12,7 @@
 //! | `devices.rs` | 列挙（`ICreateDevEnum`）、対応形式（`IAMStreamConfig::GetStreamCaps`）、いまの解像度（`GetFormat`）、開く解像度と形式の選び方 |
 //! | `graph.rs` | フィルターグラフの組み立て・開始・停止・破棄 |
 //! | `filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`）。媒体を問わない |
+//! | `audio_filter.rs` | 映像デバイスと対になる音声だけのフィルター（#562）。名前の突き合わせ、Windows の録音デバイスを包んだだけのものの見分け、グラフへ入れる |
 //! | `audio_pin.rs` | 音声ピン（#388）。列挙の時点での有無の判定（#409）、有無の記録、塊の長さの提案と接続、`Run` が通らないときに外してやり直す、音声のレンダラーが受け取った PCM を `AudioPinFeed` へ渡す |
 //! | `video_stream.rs` | 映像のレンダラーが受け取ったサンプルを `FrameSink` へ渡す |
 //! | `media_type.rs` | `AM_MEDIA_TYPE` の読み書きと解放（COM の初期化は `crate::com`） |
@@ -24,6 +25,7 @@
 //! で開く、#490）。言語によって変えない（設定に
 //! 残る識別子なので、画面の言語を切り替えると別のデバイスになってしまう）。
 
+mod audio_filter;
 mod audio_pin;
 mod devices;
 mod display_name;
@@ -51,6 +53,7 @@ use super::{elapsed_ms, VideoError};
 use crate::audio::{AudioPinFeed, AudioPinPresence, AudioPinState, PinConnection};
 use crate::com::{ComApartment, ComModel};
 use crate::repaint::RepaintWaker;
+pub(super) use audio_filter::{paired_audio_filter, AudioFilterName};
 use audio_pin::{AudioPinRequest, PinOutcome};
 use devices::DeviceEntry;
 pub use display_name::{display_name, friendly_name};
@@ -152,7 +155,8 @@ impl DirectShowCapture {
 
     /// 各デバイスに音声ピンがあるか（#409）。`(表示名（「(DirectShow)」なし）, 有無)`。
     ///
-    /// 名札からフィルターを作ってピンを見る（`audio_pin::probe_presence`）。
+    /// 名札からフィルターを作ってピンを見る（`audio_pin::probe_presence`）。ピンが無くても
+    /// 対になる音声だけのフィルター（#562）が列挙にあれば「ある」にする（フィルターは作らない）。
     /// **DirectShow で開いている映像は掴み直さずに「不明」にする。** その有無は
     /// 開いた結果（`ActiveVideo::audio_pin`）で分かり、動いているグラフのデバイスの
     /// フィルターをもう 1 つ作ると、ドライバーによっては映像を乱すおそれがあるため。
@@ -160,7 +164,8 @@ impl DirectShowCapture {
     /// 次からは調べない。調べられなかった（不明）ものは `PIN_PROBE_RETRY` の間は
     /// 調べ直さない（設定ダイアログを開いている間は 5 秒ごとに呼ばれ、遅いデバイスが
     /// あるとそのたびにワーカーを塞ぐため）。開いていて飛ばした分はここに含めない。
-    /// 列挙に失敗したら空の一覧。
+    /// 映像の列挙に失敗したら空の一覧。音声のフィルターの列挙に失敗したら、ピンの無い
+    /// デバイスは「不明」にする（`audio_filter::presence_without_pin`）。
     pub fn audio_pin_presence(&mut self) -> Vec<(String, AudioPinPresence)> {
         let start = Instant::now();
         let open = self.active.as_ref().map(|active| {
@@ -178,6 +183,9 @@ impl DirectShowCapture {
         };
         let mut probed = 0usize;
         let mut presence = Vec::with_capacity(devices.len());
+        // 対の音声のフィルター（#562）を見るための一覧。要るときに 1 度だけ列挙する。
+        // 列挙に失敗したら `Some(None)` で、この呼び出しの残りのデバイスも「不明」にする
+        let mut audio_filters: Option<Option<Vec<DeviceEntry>>> = None;
         for entry in &devices {
             let name = entry.friendly_name.clone();
             let found = if skip == Some(name.as_str()) {
@@ -189,7 +197,24 @@ impl DirectShowCapture {
                 *known
             } else {
                 probed += 1;
-                let found = audio_pin::probe_presence(entry);
+                let found = match audio_pin::probe_presence(entry) {
+                    // 映像のフィルターに音声ピンが無くても、対の音声のフィルターがあれば選べる
+                    AudioPinPresence::Absent => {
+                        let filters = audio_filters.get_or_insert_with(|| {
+                            devices::enumerate_audio()
+                                .inspect_err(|e| {
+                                    debug!("対の音声のフィルターを探すための列挙に失敗した: {}", e)
+                                })
+                                .ok()
+                        });
+                        audio_filter::presence_without_pin(
+                            filters
+                                .as_deref()
+                                .map(|filters| audio_filter::has_paired(&name, filters)),
+                        )
+                    }
+                    found => found,
+                };
                 self.pin_presence
                     .insert(name.clone(), (found, Instant::now()));
                 found
@@ -307,6 +332,7 @@ impl DirectShowCapture {
             sink,
             AudioPinRequest {
                 connect: connect_audio_pin,
+                video_name: &entry.friendly_name,
                 feed: &self.pin_feed,
                 graph: pin_graph,
             },

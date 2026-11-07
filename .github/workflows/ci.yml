@@ -40,19 +40,59 @@ jobs:
           # ビルドするだけで git への書き込みをしないため、
           # 認証情報を .git/config に残さない
           persist-credentials: false
+          # PR のマージコミットと base 側の親（HEAD^1）を並べて差分を見るため 2 つ要る
+          fetch-depth: 2
+
+      # 文書だけを変えた PR では重い手順（ツールチェイン〜ライセンス確認）を飛ばす。
+      #
+      # ワークフロー全体を on.pull_request.paths-ignore で止めない理由: ルールセット
+      # は「fmt / clippy / build / test」を必須にしている。ワークフローごと発火
+      # させないとこのチェックが報告されず、PR がマージできないまま止まる。
+      # そのためジョブは必ず走らせ、ここで判定して以降の手順だけを if: で飛ばす
+      # （飛ばした手順があってもジョブは成功で終わり、必須のチェックが満たされる）。
+      #
+      # 「文書だけ」は保守的に決める。次のどれにも当たらないファイルが 1 つでも
+      # 混ざれば全部回す: ルート・サブフォルダの *.md、docs/ 以下、LICENSE*。
+      # .github/（ワークフロー自身）、Cargo.*、build.rs、app.rc、src/、アセット類、
+      # THIRD-PARTY-LICENSES.txt などは対象外。*.md はビルドに取り込まれない
+      # （include_str! / include_bytes! の参照先に無い）ことを確かめてある。
+      # 差分が取れない・空のときも全部回す側に倒す。push（dev / main へのマージ後）
+      # は常に全部回す。
+      - name: 変更が文書だけか調べる
+        id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          docs_only=false
+          if [ "$EVENT_NAME" = "pull_request" ] && files=$(git diff --name-only HEAD^1 HEAD) && [ -n "$files" ]; then
+            docs_only=true
+            while IFS= read -r f; do
+              case "$f" in
+                .github/*) docs_only=false ;;
+                *.md | docs/* | LICENSE*) ;;
+                *) docs_only=false ;;
+              esac
+            done <<< "$files"
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "文書だけの変更か: $docs_only"
 
       # SHA で固定すると ref からツールチェインを推測できなくなるので、
       # master を指して toolchain を明示する（この Action の README が案内する方法）
       - name: Rust ツールチェインを用意する
+        if: steps.scope.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (2026-10-16)
         with:
           toolchain: stable
           components: rustfmt, clippy
 
       - name: cargo のキャッシュを復元する
+        if: steps.scope.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: 整形を確認する
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo fmt --check
 
       # 警告はエラー扱いにする。警告ゼロが前提なので、混入したらここで落とす。
@@ -60,13 +100,16 @@ jobs:
       # Cargo.toml と食い違っていても勝手に再解決され、手元と違う依存で
       # CI が通ってしまう（以降の cargo コマンドも同じ理由で付けている）
       - name: clippy をかける
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: release ビルドする
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo build --locked --release
 
       # #[ignore] を付けた実機テスト（キャプチャーデバイスが要る）は走らせない
       - name: テストを実行する
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo test --locked
 
       # THIRD-PARTY-LICENSES.txt は about.hbs と Cargo.lock から生成している。
@@ -79,19 +122,23 @@ jobs:
       # cli フィーチャを付けないと実行ファイルが作られない点に注意。
       # 版を固定するのは、cargo-about の版が変わると出力も変わりうるため。
       - name: cargo-about を用意する
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo install cargo-about --locked --version 0.9.2 --features cli
 
       # git diff は未追跡のファイルを見ない。一覧ごと消された変更では
       # 生成で作り直されて「差分なし」と判定されてしまうため、
       # 追跡対象であることを先に確かめる
       - name: ライセンス一覧が追跡対象か確認する
+        if: steps.scope.outputs.docs_only != 'true'
         run: git ls-files --error-unmatch -- THIRD-PARTY-LICENSES.txt
 
       # 生成と確認を分けているのは、windows ランナーの既定シェルが pwsh で、
       # 1 つの run にまとめると前半の失敗が握り潰されるため
       - name: ライセンス一覧を生成し直す
+        if: steps.scope.outputs.docs_only != 'true'
         run: cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES.txt
 
       # 差分があれば、依存を変えたあとの再生成とコミットを忘れている
       - name: ライセンス一覧が Cargo.lock と一致するか確認する
+        if: steps.scope.outputs.docs_only != 'true'
         run: git diff --exit-code -- THIRD-PARTY-LICENSES.txt

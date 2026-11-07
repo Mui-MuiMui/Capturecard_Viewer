@@ -85,6 +85,7 @@ cargo test -- --ignored
 これらは GitHub Actions でも回る（`.github/workflows/ci.yml`）。`dev` / `main` への PR と push が対象で、ランナーは windows-latest。
 CI が実行するのは `cargo fmt --check` → `cargo clippy --locked --all-targets -- -D warnings` → `cargo build --locked --release` → `cargo test --locked` の 4 つで、`--ignored` 付きの実機テストは走らせない。
 加えて `THIRD-PARTY-LICENSES.txt` を生成し直し、コミット済みのものと一致するかを確認する。再生成の手順は `docs/DEPENDENCIES.md` の「ライセンス」にある。
+文書だけを変えた PR（`*.md`、`docs/` 以下、`LICENSE*` だけ）では、これらの手順を飛ばす。必須のチェック「fmt / clippy / build / test」は成功で報告される（ワークフロー全体は止めない。理由は `ci.yml` のコメント）。`.github/` やソース、`Cargo.*`、アセットが 1 つでも混ざれば全部回す。
 clippy は `-D warnings` 付きで回すため、警告が 1 件でも増えると CI が落ちる。
 `--locked` はコミット済みの `Cargo.lock` をそのまま使わせるため。付けないと `Cargo.toml` と食い違っていても勝手に再解決され、手元と違う依存で CI が通ってしまう。
 
@@ -136,7 +137,7 @@ release ビルドは `lto` と `codegen-units = 1` の影響で時間がかか�
 | `CAPTURECARD_VIEWER_LOG` | `error` / `warn` / `info` / `debug` / `trace`（既定 `info`） | ログのレベルを変える。解釈できない値は `info` に戻る | `docs/design/logging.md`、`docs/TROUBLESHOOTING.md` の「不具合を報告するとき」 |
 | `CAPTURECARD_VIEWER_CONFIG_DIR` | フォルダの絶対パス（無ければ作る） | 設定ファイル（`default-config.toml`）とログ（`logs\`）をそのフォルダに置く。`%AppData%` の設定に触らずに起動できる。相対パスや作れないフォルダは使わず、WARN を出して既定の置き場所に戻る | `docs/design/settings.md` の「置き場所の差し替え」 |
 | `CAPTURECARD_VIEWER_FAKE_DEVICES` | 台数（1〜8） | 実機の代わりにフェイクの映像・音声デバイスで動く。0・空・数字でなければ無効 | `docs/design/device-worker.md` の「フェイクデバイス（#142）」、`docs/TROUBLESHOOTING.md` の「映像がカラーバーや青一色になる…」 |
-| `CAPTURECARD_VIEWER_FAKE_SCENARIO` | `disconnect:<秒>` / `reopen-fail:<秒>` / `fail:<回数>` / `audio-error:<秒>` / `audio-pin`（カンマ区切り。`audio-pin` だけ引数を取らない） | フェイクデバイスで映像の途絶・途絶後の開き直しの失敗・接続の失敗・音声ストリームのエラーを起こす。`audio-pin` はフェイクの映像デバイスに DirectShow の音声ピンを持たせ、「映像デバイスの音声 (DirectShow)」で正弦波（660Hz）が鳴るようにする（#394）。`CAPTURECARD_VIEWER_FAKE_DEVICES` と一緒に使う | 同上、`docs/design/directshow-audio.md` |
+| `CAPTURECARD_VIEWER_FAKE_SCENARIO` | `disconnect:<秒>` / `reopen-fail:<秒>` / `fail:<回数>` / `audio-error:<秒>` / `audio-pin` / `audio-filter`（カンマ区切り。`audio-pin` と `audio-filter` は引数を取らない） | フェイクデバイスで映像の途絶・途絶後の開き直しの失敗・接続の失敗・音声ストリームのエラーを起こす。`audio-pin` はフェイクの映像デバイスに DirectShow の音声ピンを持たせ、「映像デバイスの音声 (DirectShow)」で正弦波（660Hz）が鳴るようにする（#394）。`audio-filter` は音声ピンの代わりに対になる DirectShow の音声だけのフィルターを名乗らせ、対のある「Fake Camera 1」だけで同じく鳴る（2 台目の同じ名前のものは録音デバイスの包みなので対にしない、#562）。`CAPTURECARD_VIEWER_FAKE_DEVICES` と一緒に使う | 同上、`docs/design/directshow-audio.md` |
 | `CAPTURECARD_VIEWER_UPDATE_CURRENT_VERSION` | 版（`1.0.0` / `v1.0.0`） | 更新の確認で比べる「いまの版」を差し替える。公開済みの最新より古くすれば通知ダイアログが出る | `docs/design/update.md` の「試すための環境変数」、`docs/TROUBLESHOOTING.md` の「更新の通知で、いまの版が違う…」 |
 | `CAPTURECARD_VIEWER_UPDATE_API_URL` | `http://` / `https://` の URL、または `file:///C:/path/latest.json` | 更新の確認の問い合わせ先（GitHub の Release API）を差し替える。`file://` なら Release の JSON をそのまま読む。平文の HTTP を使うのは `http://` を指したときだけで、`https://` の問い合わせとダウンロードは `http://` へのリダイレクトを辿らない | 同上 |
 | `CAPTURECARD_VIEWER_RENDERER` | `glow` / `wgpu`（大文字小文字は問わない） | 描画のバックエンドを選ぶ。未指定は wgpu（DX12）で、GPU の DX12 アダプターが無ければ glow（OpenGL）に倒れる。`wgpu` と明示したときだけ CPU で描く WARP も使う。解釈できない値は WARN を出して未指定と同じにする。撮り比べ用（#492） | `docs/design/video-pipeline.md` の「描画バックエンド」、`docs/LATENCY.md` の「present の計測（PresentMon）」 |

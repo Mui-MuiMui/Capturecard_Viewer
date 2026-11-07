@@ -29,8 +29,8 @@ use std::time::Duration;
 pub(super) const FAKE_DEVICES_ENV: &str = "CAPTURECARD_VIEWER_FAKE_DEVICES";
 
 /// フェイクに起こさせる出来事を指定する環境変数。
-/// `disconnect:<秒>` / `reopen-fail:<秒>` / `fail:<回数>` / `audio-error:<秒>` / `audio-pin`
-/// をカンマで区切って並べる
+/// `disconnect:<秒>` / `reopen-fail:<秒>` / `fail:<回数>` / `audio-error:<秒>` / `audio-pin` /
+/// `audio-filter` をカンマで区切って並べる
 pub(super) const FAKE_SCENARIO_ENV: &str = "CAPTURECARD_VIEWER_FAKE_SCENARIO";
 
 /// 名乗れる台数の上限。設定画面の一覧が埋まらない程度にとどめる
@@ -50,6 +50,10 @@ pub(super) struct FakeScenario {
     /// 映像デバイスが音声ピンを持つ（`audio-pin`、#394）。DirectShow で開いた
     /// AVerMedia GC551 のように、音声ピンを繋ぐ指定で開くと正弦波を流す
     pub(super) audio_pin: bool,
+    /// 映像デバイスに音声ピンが無く、対になる DirectShow の音声だけのフィルターがある
+    /// （`audio-filter`、#562）。Elgato Game Capture HD60 Pro のように、1 台目だけが
+    /// 対を持ち、音声ピンを繋ぐ指定で開くと正弦波を流す
+    pub(super) audio_filter: bool,
 }
 
 /// フェイクを組み立てる役。`DeviceWorker::spawn` が `SystemBackends` の
@@ -114,6 +118,12 @@ impl DeviceBackends for FakeBackends {
                 video.with_audio_pin(feed.clone()),
                 audio.with_pin_feed(feed),
             )
+        } else if self.scenario.audio_filter {
+            let feed = AudioPinFeed::new();
+            (
+                video.with_audio_filters(feed.clone()),
+                audio.with_pin_feed(feed),
+            )
         } else {
             (video, audio)
         };
@@ -164,6 +174,10 @@ fn parse_scenario(value: Option<&str>) -> FakeScenario {
             scenario.audio_pin = true;
             continue;
         }
+        if item.eq_ignore_ascii_case("audio-filter") {
+            scenario.audio_filter = true;
+            continue;
+        }
         let parsed = item.split_once(':').and_then(|(key, arg)| {
             let arg = arg.trim();
             match key.trim().to_ascii_lowercase().as_str() {
@@ -201,7 +215,7 @@ fn parse_scenario(value: Option<&str>) -> FakeScenario {
         });
         if parsed.is_none() {
             warn!(
-                "{} の '{}' を読めないので無視する（書式は disconnect:<秒> / reopen-fail:<秒> / fail:<回数> / audio-error:<秒> / audio-pin）",
+                "{} の '{}' を読めないので無視する（書式は disconnect:<秒> / reopen-fail:<秒> / fail:<回数> / audio-error:<秒> / audio-pin / audio-filter）",
                 FAKE_SCENARIO_ENV, item
             );
         }
@@ -248,16 +262,19 @@ impl VideoBackend for FakeVideoCapture {
         FakeVideoCapture::active(self)
     }
 
-    /// シナリオ audio-pin なら全台に音声ピンがあり、無ければ全台に無い（#409）
+    /// シナリオ audio-pin なら全台に音声ピンがあり、audio-filter なら対の音声の
+    /// フィルターのある台だけ、どちらも無ければ全台に無い（#409、#562）
     fn audio_pin_presence(&mut self) -> Vec<(String, AudioPinPresence)> {
-        let presence = if self.has_audio_pin() {
-            AudioPinPresence::Present
-        } else {
-            AudioPinPresence::Absent
-        };
         FakeVideoCapture::list_devices(self)
             .into_iter()
-            .map(|(name, _)| (name, presence))
+            .map(|(name, _)| {
+                let presence = if self.has_audio_pin(&name) {
+                    AudioPinPresence::Present
+                } else {
+                    AudioPinPresence::Absent
+                };
+                (name, presence)
+            })
             .collect()
     }
 
@@ -379,6 +396,7 @@ mod tests {
                 audio_error_after: None,
                 reopen_fail_for: None,
                 audio_pin: false,
+                audio_filter: false,
             }
         );
         assert_eq!(
@@ -389,6 +407,7 @@ mod tests {
                 audio_error_after: None,
                 reopen_fail_for: None,
                 audio_pin: false,
+                audio_filter: false,
             }
         );
         // カンマで並べられる。大文字小文字と前後の空白は問わない
@@ -400,6 +419,7 @@ mod tests {
                 audio_error_after: None,
                 reopen_fail_for: None,
                 audio_pin: false,
+                audio_filter: false,
             }
         );
     }
@@ -414,6 +434,7 @@ mod tests {
                 audio_error_after: Some(Duration::from_secs(3)),
                 reopen_fail_for: None,
                 audio_pin: false,
+                audio_filter: false,
             }
         );
     }
@@ -431,6 +452,8 @@ mod tests {
         // 引数を付けると読めない項目として捨てる（打ち間違いに気付けるよう警告する）
         assert!(!parse_scenario(Some("audio-pin:1")).audio_pin);
         assert!(!parse_scenario(None).audio_pin);
+        assert!(parse_scenario(Some("Audio-Filter")).audio_filter);
+        assert!(!parse_scenario(Some("audio-filter:1")).audio_filter);
     }
 
     #[test]
@@ -464,6 +487,7 @@ mod tests {
                 audio_error_after: None,
                 reopen_fail_for: None,
                 audio_pin: false,
+                audio_filter: false,
             }
         );
         assert_eq!(
@@ -585,7 +609,9 @@ mod tests {
 
     #[test]
     fn audio_pin_presence_follows_the_audio_pin_scenario() {
-        // 列挙の時点の有無（#409）。audio-pin なら全台「ある」、無ければ全台「無い」
+        // 列挙の時点の有無（#409）。audio-pin なら全台「ある」、無ければ全台「無い」。
+        // audio-filter（#562）なら対の音声のフィルターがある 1 台目だけ「ある」（2 台目の
+        // 同じ名前のものは録音デバイスの包みなので対にしない）
         use crate::audio::{AudioControls, AudioTap};
         use crate::repaint::RepaintWaker;
         use crate::video::{SharedColorConversion, VideoFrames};
@@ -610,10 +636,28 @@ mod tests {
             presence(None),
             names.map(|name| (name.to_string(), AudioPinPresence::Absent))
         );
+        assert_eq!(
+            presence(Some("audio-filter")),
+            [
+                (names[0].to_string(), AudioPinPresence::Present),
+                (names[1].to_string(), AudioPinPresence::Absent)
+            ]
+        );
     }
 
     #[test]
     fn first_run_with_an_audio_pin_opens_audio_from_the_video_pin() {
+        first_run_opens_audio_from_the_video_pin("audio-pin");
+    }
+
+    #[test]
+    fn first_run_with_a_paired_audio_filter_opens_audio_from_it() {
+        // 映像のフィルターに音声ピンが無く、対になる音声だけのフィルターがある機種
+        // （Elgato Game Capture HD60 Pro、#562）でも、音声ピンと同じ経路で開く
+        first_run_opens_audio_from_the_video_pin("audio-filter");
+    }
+
+    fn first_run_opens_audio_from_the_video_pin(scenario: &str) {
         // 設定 → ワーカー → 音声ピンで開く、の通し（#394）。設定ファイルが無い初回の
         // 設定（映像も入力も未設定）から始め、ワーカーが返した既定を UI と同じ関数
         // （`device::apply_resolved_devices`）で設定へ書き戻して送り直す。音声ピンを
@@ -629,7 +673,7 @@ mod tests {
         use std::sync::RwLock;
         use std::time::Instant;
 
-        let backends = FakeBackends::from_env_values(Some("1"), Some("audio-pin")).expect("有効");
+        let backends = FakeBackends::from_env_values(Some("1"), Some(scenario)).expect("有効");
         let audio_tap = AudioTap::new();
         let _attachment = audio_tap.attach(audio_tap.one_second_capacity());
         let (command_tx, command_rx) = channel();

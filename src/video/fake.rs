@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use super::capabilities::{DeviceCapabilities, FormatCapability, VideoMode};
 use super::capture::{ActiveVideo, CaptureApi, VideoLinkState};
 use super::color::SharedColorConversion;
+use super::directshow::{paired_audio_filter, AudioFilterName};
 use super::frame_buffer::VideoFrames;
 use super::frame_sink::FrameSink;
 use super::test_pattern::{burn_frame_number, description_for, pattern_for, render_pattern};
@@ -38,6 +39,13 @@ use crate::repaint::RepaintWaker;
 
 /// フェイクの映像デバイスが名乗る名前の前半。後ろに 1 から始まる番号が付く
 const DEVICE_NAME_PREFIX: &str = "Fake Camera";
+
+/// シナリオ audio-filter（#562）が名乗る DirectShow の音声だけのフィルター。1 台目と
+/// 対になるものと、2 台目と同じ名前の録音デバイスの包み（対にしない）
+const FAKE_AUDIO_FILTERS: &[AudioFilterName<'static>] = &[
+    AudioFilterName::vendor("Fake Camera 1 (Audio)"),
+    AudioFilterName::recording_device("Fake Camera 2 (Audio)"),
+];
 
 /// フェイクの音声ピンの形式。実機（AVerMedia GC551）と同じ 48kHz 2ch 16bit
 const PIN_FORMAT: PinFormat = PinFormat {
@@ -112,6 +120,8 @@ pub struct FakeVideoCapture {
     active: Option<ActiveVideo>,
     /// シナリオ audio-pin（#394）: 音声ピンを持つ。持つなら差し込み口を共有する
     audio_pin: Option<AudioPinFeed>,
+    /// シナリオ audio-filter（#562）: 音声は対の音声のフィルターにあり、対になる台だけが持つ
+    audio_filters: bool,
     /// 音声ピンを繋いで開いている間だけ動く、正弦波を流すスレッド
     pin_source: Option<FakePinSource>,
 }
@@ -135,6 +145,7 @@ impl FakeVideoCapture {
             stream: None,
             active: None,
             audio_pin: None,
+            audio_filters: false,
             pin_source: None,
         }
     }
@@ -147,9 +158,18 @@ impl FakeVideoCapture {
         self
     }
 
-    /// 音声ピンを持つか（シナリオ audio-pin）。列挙の時点の有無に使う（#409）
-    pub fn has_audio_pin(&self) -> bool {
+    /// シナリオ audio-filter を足す（#562）。音声ピンの代わりに `FAKE_AUDIO_FILTERS` から
+    /// 実機と同じ突き合わせ（`paired_audio_filter`）で対を探し、対のある台だけが
+    /// 音声ピンを持つものとして振る舞う
+    pub fn with_audio_filters(mut self, feed: AudioPinFeed) -> Self {
+        self.audio_filters = true;
+        self.with_audio_pin(feed)
+    }
+
+    /// その台が音声ピン（か対の音声のフィルター）を持つか。列挙の時点の有無に使う（#409）
+    pub fn has_audio_pin(&self, device: &str) -> bool {
         self.audio_pin.is_some()
+            && (!self.audio_filters || paired_audio_filter(device, FAKE_AUDIO_FILTERS).is_some())
     }
 
     /// シナリオ reopen-fail を足す。途絶（disconnect）のあと `reopen_fail` の間は
@@ -296,6 +316,9 @@ impl FakeVideoCapture {
             return AudioPinState::NotApplicable;
         };
         let graph = feed.begin_graph();
+        if !self.has_audio_pin(device) {
+            return AudioPinState::Missing;
+        }
         if !connect {
             return AudioPinState::Available;
         }

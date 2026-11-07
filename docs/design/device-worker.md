@@ -198,8 +198,8 @@ WASAPI に音声が出ないキャプチャーボード（AVerMedia GC551）の�
 - **どこで失敗しても映像は止めない。** 繋げなければ音声のレンダラーを外して `AudioPinState::Failed` を残す。繋いだせいで `Run` が通らなければ、音声のレンダラーを外して 1 度だけやり直す
 - `AudioPinFeed` はグラフごとに番号を配る（`begin_graph`）。`Receive` は自分のグラフの番号と差し込み先の番号が合うときだけ積むので、映像を開き直したあとに古いグラフが積むことはない
 - ワーカーは**音声ピンが使えないとき開かずに待つ**（`hold_audio_for_pin`。#304 の `hold_audio_without_input` と同じ形）。**映像を開き直したら音声も開き直す。** 要求を立てるのは `tick` の監視（`worker_audio_timers::monitor_audio_pin`。判定は `monitor_audio_pin.rs` の純粋関数）で、映像の音声ピンの番号と音声が差し込んでいる番号を比べる。理由は `docs/design/reconnect.md` の「映像の開き直しに合わせて音声も開き直す（音声ピン）」
-- trait に「音声ピンを問い合わせる」メソッドは足さない。観測値の 1 項目（`ActiveVideo::audio_pin` / `ActiveAudio::input_route`）にしてあり、モックはそれを返すだけで「待つ / 開く / 映像の開き直しで開き直す」を CI に載せている（`worker_audio_connect.rs` のテスト）。フェイクの音声ピン（`CAPTURECARD_VIEWER_FAKE_SCENARIO=audio-pin`、#394）は映像のフェイクが正弦波を `AudioPinFeed` へ流し、設定からワーカー、音声ピンで開くまでを通しで CI に載せている（`app/backend/fake.rs` のテスト）
-- 入力が未設定のまま起動したら、入力は最初の映像の試行のあとに決める（`worker_default_input.rs`、#394）。映像に音声ピンがあれば「映像デバイスの音声」、無ければ WASAPI の列挙の先頭。**ワーカーは UI から来た映像の接続対象（音声ピンを繋ぐか）を書き換えない。** `video_pin` に決めたら UI が書き戻した設定を待って映像を開き直す（初回だけ 1 度開き直る）。決めるまでと書き戻しが届くまでは音声を理由なしで待たせる
+- trait に「音声ピンを問い合わせる」メソッドは足さない。観測値の 1 項目（`ActiveVideo::audio_pin` / `ActiveAudio::input_route`）にしてあり、モックはそれを返すだけで「待つ / 開く / 映像の開き直しで開き直す」を CI に載せている（`worker_audio_connect.rs` のテスト）。映像のフィルターに音声ピンが無いとき、対になる音声だけのフィルター（#562）を同じグラフに入れるのも映像のバックエンドの中（`video::directshow::audio_filter`）で閉じており、ワーカーから見ると音声ピンと区別しない。フェイクの音声ピン（`CAPTURECARD_VIEWER_FAKE_SCENARIO=audio-pin`、#394。対の音声のフィルターは `audio-filter`、#562）は映像のフェイクが正弦波を `AudioPinFeed` へ流し、設定からワーカー、音声ピンで開くまでを通しで CI に載せている（`app/backend/fake.rs` のテスト）
+- 入力が未設定のまま起動したら、入力は最初の映像の試行のあとに決める（`worker_default_input.rs`、#394）。映像に音声ピン（か対になる音声だけのフィルター、#562）があれば「映像デバイスの音声」、無ければ映像デバイスと名前の対応する WASAPI の入力（#562）、それも無ければ WASAPI の列挙の先頭。**ワーカーは UI から来た映像の接続対象（音声ピンを繋ぐか）を書き換えない。** `video_pin` に決めたら UI が書き戻した設定を待って映像を開き直す（初回だけ 1 度開き直る）。決めるまでと書き戻しが届くまでは音声を理由なしで待たせる
 
 #### DirectShow で確かめたもの・確かめていないもの
 
