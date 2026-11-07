@@ -4,6 +4,20 @@
 
 ## [未リリース]
 
+## [1.6.3] - 2026-11-07
+
+1.6.2 以降の変更をまとめたバージョン。設定ファイルは 1.6.2 のまま読める。**1.2.1 以降はアプリ内の「更新する」でこのバージョンへ更新できる。**
+
+- **映像と音声を別々のデバイスとして出すキャプチャーボード（Elgato Game Capture HD60 Pro など）で、オーディオ入力の「[映像デバイスと連動]」を選べるようにした**（HD60 Pro の実機では確かめていない）
+- **README に既知の不具合と対処方法を書いた**: G-SYNC のモニターで、フルスクリーン時にアプリのフォーカスを外すとカクつく
+
+<hr>
+
+Changes since 1.6.2. Config files from 1.6.2 load as they are. **From 1.2.1 or later, use "Update" inside the app to update to this version.**
+
+- **"[Linked to video device]" can now be chosen as the audio input for capture cards that expose video and audio as separate devices (such as the Elgato Game Capture HD60 Pro)** (not yet tested on an actual HD60 Pro)
+- **The README now lists a known issue and its workaround**: on a G-SYNC monitor, the video stutters for a moment when the app loses focus in fullscreen
+
 ### 追加
 
 - 映像デバイスが音声を別の DirectShow のフィルターとして出すキャプチャーボード（Elgato Game Capture HD60 Pro の「(Video)」と「(Audio)」など）でも、オーディオ入力の「[映像デバイスと連動]」を選べるようにした。映像デバイスと名前の対になる音声のフィルターを映像と一緒に開き、そこから音を取る。Windows の録音デバイス（マイク）経由より音質がよい見込み（実機では確かめていない）。設定ファイルが無い初回の起動では、対があれば自動でこれが選ばれる。Windows の録音デバイスとしてしか音を出さないボード（Live Gamer EXTREME 3 など）では今までどおり選べず、ポインターを重ねると録音デバイスを選ぶよう案内が出る（#562）
