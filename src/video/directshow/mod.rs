@@ -164,7 +164,8 @@ impl DirectShowCapture {
     /// 次からは調べない。調べられなかった（不明）ものは `PIN_PROBE_RETRY` の間は
     /// 調べ直さない（設定ダイアログを開いている間は 5 秒ごとに呼ばれ、遅いデバイスが
     /// あるとそのたびにワーカーを塞ぐため）。開いていて飛ばした分はここに含めない。
-    /// 列挙に失敗したら空の一覧。
+    /// 映像の列挙に失敗したら空の一覧。音声のフィルターの列挙に失敗したら、ピンの無い
+    /// デバイスは「不明」にする（`audio_filter::presence_without_pin`）。
     pub fn audio_pin_presence(&mut self) -> Vec<(String, AudioPinPresence)> {
         let start = Instant::now();
         let open = self.active.as_ref().map(|active| {
@@ -182,8 +183,9 @@ impl DirectShowCapture {
         };
         let mut probed = 0usize;
         let mut presence = Vec::with_capacity(devices.len());
-        // 対の音声のフィルター（#562）を見るための一覧。要るときに 1 度だけ列挙する
-        let mut audio_filters: Option<Vec<DeviceEntry>> = None;
+        // 対の音声のフィルター（#562）を見るための一覧。要るときに 1 度だけ列挙する。
+        // 列挙に失敗したら `Some(None)` で、この呼び出しの残りのデバイスも「不明」にする
+        let mut audio_filters: Option<Option<Vec<DeviceEntry>>> = None;
         for entry in &devices {
             let name = entry.friendly_name.clone();
             let found = if skip == Some(name.as_str()) {
@@ -197,15 +199,19 @@ impl DirectShowCapture {
                 probed += 1;
                 let found = match audio_pin::probe_presence(entry) {
                     // 映像のフィルターに音声ピンが無くても、対の音声のフィルターがあれば選べる
-                    AudioPinPresence::Absent
-                        if audio_filter::has_paired(
-                            &name,
-                            audio_filters.get_or_insert_with(|| {
-                                devices::enumerate_audio().unwrap_or_default()
-                            }),
-                        ) =>
-                    {
-                        AudioPinPresence::Present
+                    AudioPinPresence::Absent => {
+                        let filters = audio_filters.get_or_insert_with(|| {
+                            devices::enumerate_audio()
+                                .inspect_err(|e| {
+                                    debug!("対の音声のフィルターを探すための列挙に失敗した: {}", e)
+                                })
+                                .ok()
+                        });
+                        audio_filter::presence_without_pin(
+                            filters
+                                .as_deref()
+                                .map(|filters| audio_filter::has_paired(&name, filters)),
+                        )
                     }
                     found => found,
                 };
