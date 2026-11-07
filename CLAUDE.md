@@ -73,8 +73,9 @@ cargo build --release
 | `src/video/capture.rs` | nokhwa `CallbackCamera` によるキャプチャ。開く・閉じる・列挙する、フレームコールバック（nokhwa の `Buffer` から取り出して `FrameSink` へ渡す）、途絶の観測（`VideoLinkState`）。選んだ形式で開けなければ YUY2 で開き直す |
 | `src/video/mf_format.rs` | Media Foundation の経路の形式の対応表（`MF_FORMATS`、設定の形式名 ↔ nokhwa の `FrameFormat`。能力の取得と開くときが同じ表を引く、#81）と、YUY2 へ代えるか（`fallback_for`）・フレームをどの受け口へ渡すか（`sink_route`）の判定。純粋関数 |
 | `src/video/directshow/mod.rs` | DirectShow の映像デバイス `DirectShowCapture`（列挙・能力・開く・閉じる・観測）。表示名の付け外しは `display_name.rs` で、`pub use` で出す |
+| `src/video/directshow/audio_filter.rs` | 映像デバイスと対になる DirectShow の音声だけのフィルター（#562。Elgato Game Capture HD60 Pro の「(Audio)」）。名前の突き合わせ（`paired_audio_filter`）と Windows の録音デバイスを包んだだけのものの見分け（`is_recording_device_wrapper`）は純粋関数。映像のフィルターに音声ピンが無いときに探し（`find_paired`）、映像と同じグラフへ入れる（`add_to_graph`。繋ぐのは `audio_pin.rs`） |
 | `src/video/directshow/display_name.rs` | 表示名の「(DirectShow)」の付け外し（`display_name` / `friendly_name`）。純粋関数 |
-| `src/video/directshow/devices.rs` | DirectShow の列挙（`ICreateDevEnum`）と対応形式（`IAMStreamConfig::GetStreamCaps`）、いまの解像度（`GetFormat`）の読み取り |
+| `src/video/directshow/devices.rs` | DirectShow の列挙（`ICreateDevEnum`。映像と、対の音声のフィルターを探すための音声のカテゴリ）と対応形式（`IAMStreamConfig::GetStreamCaps`）、いまの解像度（`GetFormat`）の読み取り |
 | `src/video/directshow/stream_select.rs` | 対応形式の一覧から開く解像度と形式を選ぶ判定（`target_resolution` / `choose_candidate`）、fps の範囲と選択肢（`fps_range` / `fps_list` / `fps_choices`）、設定画面向けの並べ替え（`capabilities_from_candidates`）。純粋関数 |
 | `src/video/directshow/graph.rs` | DirectShow のフィルターグラフの組み立て・開始・停止・破棄（`CaptureGraph`）。ワーカーの監視の周期で呼ぶ `poll` がグラフのイベント（デバイスの喪失）を読み、映像の `Receive` が書いた形式の変化をログへ出す（#511） |
 | `src/video/directshow/filter.rs` | サンプルを受け取る自前のレンダラーフィルター（`IBaseFilter` / `IPin` / `IMemInputPin`）。媒体を問わず、受け取る形式の判定と渡し先だけを映像と音声で分ける |
@@ -84,7 +85,7 @@ cargo build --release
 | `src/video/directshow/timestamp_probe.rs` | テストを含むビルドだけ（`#[cfg(test)]`）。`Receive` に届いたサンプルの到着時刻と `IMediaSample::GetTime` を Atomic の表へ書き、`#[ignore]` のテストが揺れを出す（#406）。グラフに基準時計を付けるかの切り替えもここ。`Receive` の時点のストリーム時刻も書き、打刻 → コールバックの遅れを測る（#476。集計の `report_lag` は Media Foundation の経路のテストも使う） |
 | `src/video/frame_sink.rs` | フレームコールバックの本体 `FrameSink`（YUY2→RGB、GPU で変換するときは YUY2 のまま写す（#456）、`FrameBuffer` へ積む、`RepaintWaker` で UI を起こす）。実機（Media Foundation / DirectShow）とフェイクで共有する。4:2:0 の YUV（NV12 / I420 / YV12）の受け口もここ |
 | `src/video/frame_sink_rgb.rs` | `FrameSink` の受け口のうち係数表を通らないもの。DirectShow の RGB24（`push_bgr24`）、MJPEG（`push_mjpeg`）、デコーダ任せ（`push_decoded`）と、デコーダの経路で捨てた枚数を閉じるときに出す `Drop`。状態は `frame_sink.rs` の `FrameSink` が持つ |
-| `src/video/fake.rs` | 実機なしで動くフェイクの映像デバイス `FakeVideoCapture`。テストパターンを指定 fps で吐く生成スレッド、切断・接続失敗のシナリオ、音声ピンを持つシナリオ（`with_audio_pin`、#394） |
+| `src/video/fake.rs` | 実機なしで動くフェイクの映像デバイス `FakeVideoCapture`。テストパターンを指定 fps で吐く生成スレッド、切断・接続失敗のシナリオ、音声ピンを持つシナリオ（`with_audio_pin`、#394）と対の音声のフィルターを持つシナリオ（`with_audio_filters`、#562） |
 | `src/video/test_pattern.rs` | フェイクが吐くテストパターン（カラーバー、ベタ塗り、フレーム番号の焼き込み）の描画。純粋関数 |
 | `src/video/capabilities.rs` | `VideoMode` / `FormatCapability` と、デバイス能力の取得 |
 | `src/video/color.rs` | YCbCr→RGB の係数表とその選び方、映像調整の畳み込み、設定の共有（`SharedColorConversion`） |

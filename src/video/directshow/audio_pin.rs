@@ -5,6 +5,8 @@
 //! キャプチャーフィルターが映像ピンと並べて持つ音声ピンを、**映像と同じグラフの
 //! 中で**自前のレンダラー（`filter.rs`。映像とは別のインスタンス）へ繋ぐ。
 //! 音声ピンだけを別のグラフで開く経路は無い（`docs/design/directshow-audio.md`）。
+//! 映像のフィルターに音声ピンが無ければ、対になる音声だけのフィルター
+//! （`audio_filter.rs`、#562）を同じグラフへ入れ、その音声ピンを同じ形で繋ぐ。
 //!
 //! **どこで失敗しても映像は止めない。** 繋げなければ音声のレンダラーを外し、
 //! 理由を `PinFailure` に残して映像だけで動かす。繋いだせいで `Run` が通らない
@@ -28,6 +30,7 @@ use windows::Win32::Media::MediaFoundation::{
     FORMAT_WaveFormatEx, MEDIATYPE_Audio, AM_MEDIA_TYPE, PIN_CATEGORY_CAPTURE,
 };
 
+use super::audio_filter;
 use super::devices::{bind_filter, DeviceEntry};
 use super::filter::Renderer;
 use super::media_type::delete_media_type;
@@ -202,6 +205,8 @@ impl AudioStream {
 pub(super) struct AudioPinRequest<'a> {
     /// 繋ぐか（`[audio] input_source = "video_pin"` のときだけ真）
     pub(super) connect: bool,
+    /// 映像デバイスの表示名（「(DirectShow)」なし）。対の音声のフィルターを探すのに使う
+    pub(super) video_name: &'a str,
     pub(super) feed: &'a AudioPinFeed,
     /// このグラフの番号（`AudioPinFeed::begin_graph`）
     pub(super) graph: u64,
@@ -230,6 +235,8 @@ pub(super) struct AttachedAudio {
     pub(super) renderer: Option<Renderer>,
     /// 繋いでいればキャプチャーフィルターの音声ピン。外すときに接続を切る
     pin: Option<IPin>,
+    /// 対の音声のフィルター（#562）をグラフへ入れていれば、それ。外すときに一緒に外す
+    paired: Option<IBaseFilter>,
 }
 
 /// 音声ピンを探す。キャプチャーのカテゴリで見つからなければ、カテゴリを問わず探す
@@ -405,8 +412,10 @@ fn suggest_chunk_length(pin: &IPin) {
 
 /// 音声ピンの有無を記録し、繋ぐ指定があれば音声のレンダラーへ繋ぐ。
 ///
-/// 映像を繋いだあと、`Run` の前に呼ぶ。**失敗しても映像は止めない**（音声の
-/// レンダラーを外して `Failed` を返す）。
+/// 映像のフィルターに音声ピンが無ければ、対になる音声だけのフィルター（#562）を
+/// 探す。あれば「音声ピンがある」と同じに扱い、繋ぐ指定のときだけ同じグラフへ入れて
+/// その音声ピンを繋ぐ。映像を繋いだあと、`Run` の前に呼ぶ。**失敗しても映像は
+/// 止めない**（音声のレンダラーと対のフィルターを外して `Failed` を返す）。
 pub(super) fn attach(
     graph: &IGraphBuilder,
     builder: &ICaptureGraphBuilder2,
@@ -417,10 +426,48 @@ pub(super) fn attach(
         outcome,
         renderer: None,
         pin: None,
+        paired: None,
     };
-    let Some(pin) = find_audio_pin(builder, source) else {
-        log::debug!("DirectShow の映像デバイスに音声ピンが無い");
-        return unattached(PinOutcome::Missing);
+    let (pin, paired) = match find_audio_pin(builder, source) {
+        Some(pin) => (pin, None),
+        None => {
+            let Some(entry) = audio_filter::find_paired(request.video_name) else {
+                log::debug!("DirectShow の映像デバイスに音声ピンが無い");
+                return unattached(PinOutcome::Missing);
+            };
+            if !request.connect {
+                return unattached(PinOutcome::Available);
+            }
+            let filter = match audio_filter::add_to_graph(graph, &entry) {
+                Ok(filter) => filter,
+                Err(e) => {
+                    log::warn!(
+                        "対の音声のフィルター {} を開けないので、映像だけで開く: {}",
+                        entry.friendly_name,
+                        e
+                    );
+                    return unattached(PinOutcome::Failed(PinFailure::Connect(e.to_string())));
+                }
+            };
+            let Some(pin) = find_audio_pin(builder, &filter) else {
+                log::warn!(
+                    "対の音声のフィルター {} に音声のピンが無いので、映像だけで開く",
+                    entry.friendly_name
+                );
+                let _ = unsafe { graph.RemoveFilter(&filter) };
+                return unattached(PinOutcome::Failed(PinFailure::Connect(
+                    windows::core::Error::from_hresult(
+                        windows::Win32::Media::DirectShow::VFW_E_NOT_CONNECTED,
+                    )
+                    .to_string(),
+                )));
+            };
+            log::info!(
+                "対の音声のフィルター {} を映像と同じグラフへ入れた",
+                entry.friendly_name
+            );
+            (pin, Some(filter))
+        }
     };
     if !request.connect {
         log::debug!(
@@ -428,24 +475,27 @@ pub(super) fn attach(
         );
         return unattached(PinOutcome::Available);
     }
+    let pin_source = paired.as_ref().unwrap_or(source);
     suggest_chunk_length(&pin);
 
     let renderer = Renderer::audio(request.feed.clone(), request.graph);
-    if let Err(e) = connect_renderer(graph, builder, source, &renderer) {
-        log::warn!("DirectShow の音声ピンに繋げないので、映像だけで開く: {}", e);
+    let failed = |e: windows::core::Error| {
         // 途中まで繋がった（変換フィルターだけ入った）ことがあるので、鎖ごと外す
         remove_chain(graph, &pin, &renderer.filter);
-        return unattached(PinOutcome::Failed(PinFailure::Connect(e.to_string())));
+        if let Some(paired) = &paired {
+            let _ = unsafe { graph.RemoveFilter(paired) };
+        }
+        unattached(PinOutcome::Failed(PinFailure::Connect(e.to_string())))
+    };
+    if let Err(e) = connect_renderer(graph, builder, pin_source, &renderer) {
+        log::warn!("DirectShow の音声ピンに繋げないので、映像だけで開く: {}", e);
+        return failed(e);
     }
     let Some(format) = renderer.connected_audio_format() else {
         log::warn!("DirectShow の音声ピンと繋がった形式を読めないので、映像だけで開く");
-        remove_chain(graph, &pin, &renderer.filter);
-        return unattached(PinOutcome::Failed(PinFailure::Connect(
-            windows::core::Error::from_hresult(
-                windows::Win32::Media::DirectShow::VFW_E_NOT_CONNECTED,
-            )
-            .to_string(),
-        )));
+        return failed(windows::core::Error::from_hresult(
+            windows::Win32::Media::DirectShow::VFW_E_NOT_CONNECTED,
+        ));
     };
     let buffers = renderer.allocator_buffers().or_else(|| {
         pin.cast::<IAMBufferNegotiation>()
@@ -476,6 +526,7 @@ pub(super) fn attach(
         },
         renderer: Some(renderer),
         pin: Some(pin),
+        paired,
     }
 }
 
@@ -545,6 +596,9 @@ pub(super) fn run_with_fallback(
     } else {
         let _ = unsafe { graph.RemoveFilter(&renderer.filter) };
     }
+    if let Some(paired) = audio.paired.take() {
+        let _ = unsafe { graph.RemoveFilter(&paired) };
+    }
     audio.outcome = PinOutcome::Failed(PinFailure::Run(first.to_string()));
     unsafe { control.Run() }
 }
@@ -560,6 +614,9 @@ pub(super) fn detach(graph: &IGraphBuilder, audio: &mut AttachedAudio) {
         None => {
             let _ = unsafe { graph.RemoveFilter(&renderer.filter) };
         }
+    }
+    if let Some(paired) = audio.paired.take() {
+        let _ = unsafe { graph.RemoveFilter(&paired) };
     }
 }
 
