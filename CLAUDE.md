@@ -50,7 +50,7 @@ cargo build --release
 | `src/app/worker_connect.rs` | ワーカーが行うデバイス操作のうち映像側と列挙。映像を開く・閉じる、一覧の取り直し、映像の能力の問い合わせ、既定の映像デバイス名の確定 |
 | `src/app/worker_enumeration.rs` | ワーカーが行う列挙のログ（`log_device_enumeration`。文言と出すレベルの `enumeration_text` / `enumeration_log_level`、#506）と、「Windows 側にも見えていない」の判定の適用と失敗の 1 行への添え方（`failure_message`、#236） |
 | `src/app/worker_audio_connect.rs` | ワーカーが行うデバイス操作のうち音声側。音声を開く（`try_connect_audio`）、入力が未指定のときと音声ピンが使えないときに開かずに待つ、映像の復帰に合わせた開き直し、対応設定の問い合わせ |
-| `src/app/worker_default_input.rs` | 入力が未設定のまま起動したときの入力の既定（#394）。最初の映像の試行のあとに、音声ピンがあれば `video_pin`、無ければ WASAPI の先頭に決める（`settle_default_input`）。決めるまでと UI の書き戻しが届くまで音声を理由なしで待たせる（`DefaultInput`） |
+| `src/app/worker_default_input.rs` | 入力が未設定のまま起動したときの入力の既定（#394）。最初の映像の試行のあとに、音声ピンがあれば `video_pin`、無ければ映像デバイスと名前の型番が対応する WASAPI の入力（`associated_input`、#562）、それも無ければ WASAPI の先頭に決める（`settle_default_input`）。決めるまでと UI の書き戻しが届くまで音声を理由なしで待たせる（`DefaultInput`） |
 | `src/app/backend/mod.rs` | ワーカーがデバイスに触るときの入口の trait（`VideoBackend` / `AudioBackend` / `DeviceBackends`）と、本番かフェイクかを環境変数で選ぶ `backends_from_env`。テスト用のモックもここ（`#[cfg(test)]`） |
 | `src/app/backend/system.rs` | 本番のバックエンド `SystemBackends`。映像は `VideoCapture`（Media Foundation）と `DirectShowCapture` を `SystemVideo` で束ね、音声は `AudioCapture` を trait に載せる。一覧の突き合わせは `system_devices.rs`、どちらで開くかの判定は `system_route.rs` |
 | `src/app/backend/system_route.rs` | `system.rs` が使う映像の経路の判定（純粋関数）。どちらで開くか（`route_for`。自動では DirectShow が先、#490）、自動で DirectShow が開けないときの Media Foundation への倒し方（`media_foundation_fallback` / `attempt_with_fallback`。対応形式が空のときも倒す `capabilities_with_fallback`） |
