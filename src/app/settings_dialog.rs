@@ -147,6 +147,9 @@ impl CaptureCardViewer {
                 ui::SettingsEvent::SetLanguage(language) => {
                     self.settings_dialog.set_draft_language(language)
                 }
+                ui::SettingsEvent::SetPreventDisplaySleep(prevent) => self
+                    .settings_dialog
+                    .set_draft_prevent_display_sleep(prevent),
                 ui::SettingsEvent::CheckForUpdates => self.start_update_check(CheckOrigin::Manual),
                 ui::SettingsEvent::StartUpdate => self.start_update_from_settings(),
                 ui::SettingsEvent::SetUpdateSettings(update) => {

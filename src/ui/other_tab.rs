@@ -45,6 +45,10 @@ pub(super) fn show_other_tab(
 
     ui.add_space(15.0);
 
+    show_display_sleep_group(ui, draft, events);
+
+    ui.add_space(15.0);
+
     show_update_group(ui, &draft.update, update, events);
 
     ui.add_space(15.0);
@@ -234,6 +238,29 @@ fn show_language_group(ui: &mut egui::Ui, draft: &AppSettings, events: &mut Vec<
     });
 }
 
+/// 「その他」タブの画面の電源の節を描く（#574）。
+///
+/// チェックはドラフトへ入るだけで、抑止を掛ける / 外すのは「適用」「OK」のとき。
+/// 言語と同じ扱いにしてある。右クリックメニューには出さない（Issue の決め）。
+fn show_display_sleep_group(
+    ui: &mut egui::Ui,
+    draft: &AppSettings,
+    events: &mut Vec<SettingsEvent>,
+) {
+    ui.group(|ui| {
+        ui.strong(Text::DisplaySleepGroup.get());
+        ui.add_space(5.0);
+
+        let mut prevent = draft.ui.prevent_display_sleep;
+        if ui
+            .checkbox(&mut prevent, Text::PreventDisplaySleep.get())
+            .changed()
+        {
+            events.push(SettingsEvent::SetPreventDisplaySleep(prevent));
+        }
+    });
+}
+
 /// 「その他」タブの更新の節を描く。
 ///
 /// 現在の版と確認の結果（`update`）は実行中のアプリの状態で、ドラフトではない。
@@ -352,5 +379,44 @@ fn show_update_status(ui: &mut egui::Ui, update_status: &UpdateStatus) {
         UpdateStatus::Failed(reason) => {
             notice_label(ui, NoticeKind::Error, i18n::update_status_failed(reason));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::testing::{dialog_harness, DialogFixture};
+    use crate::ui::{SettingsTab, VideoPinChoice};
+    use egui::accesskit::Toggled;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    #[test]
+    fn prevent_display_sleep_checkbox_reflects_the_draft_and_returns_the_toggled_value() {
+        // 「モニターをオフにしない」（#574）。チェックはドラフトの値を映し、
+        // 押すと反転した値をイベントで返す。ドラフトへ入れるのは app の側
+        let draft = AppSettings::default();
+        assert!(draft.ui.prevent_display_sleep);
+        let mut harness = dialog_harness(DialogFixture::new(
+            &draft,
+            SettingsTab::Other,
+            VideoPinChoice::default(),
+            &[],
+        ));
+        harness.run();
+
+        let checkbox = harness.get_by_label(Text::PreventDisplaySleep.get());
+        assert_eq!(checkbox.accesskit_node().toggled(), Some(Toggled::True));
+        checkbox.scroll_to_me();
+        harness.run();
+
+        harness
+            .get_by_label(Text::PreventDisplaySleep.get())
+            .click();
+        harness.run();
+
+        assert!(harness
+            .state()
+            .events
+            .contains(&SettingsEvent::SetPreventDisplaySleep(false)));
     }
 }
