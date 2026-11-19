@@ -178,6 +178,8 @@ impl<T: Transport> Transport for WatchedTransport<T> {
             let slice = NextTimeout {
                 after: left.min(POLL_INTERVAL).into(),
                 reason: timeout.reason,
+                // ureq 3.5 で増えた読み書きごとの上限は、そのまま内側へ渡す
+                ..timeout
             };
             match self.inner.await_input(slice) {
                 Err(ureq::Error::Timeout(_)) => continue,
