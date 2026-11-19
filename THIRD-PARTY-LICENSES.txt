@@ -680,7 +680,7 @@ rgb 0.8.53
   License: MIT
   Repository: https://github.com/kornelski/rust-rgb
 
-ringbuf 0.5.3
+ringbuf 0.6.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/agerasev/ringbuf.git
 
@@ -4164,7 +4164,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - ringbuf 0.5.3
+  - ringbuf 0.6.0
 
 Copyright (c) 2019 Alexey Gerasev
 
