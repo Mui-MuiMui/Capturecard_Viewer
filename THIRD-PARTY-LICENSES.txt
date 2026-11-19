@@ -27,8 +27,8 @@ file at the root of the repository.
 1. LICENSE OVERVIEW
 ================================================================================
 
-  MIT (MIT License): 218
-  Unicode-3.0 (Unicode License v3): 19
+  MIT (MIT License): 219
+  Unicode-3.0 (Unicode License v3): 20
   Apache-2.0 (Apache License 2.0): 18
   MPL-2.0 (Mozilla Public License 2.0): 12
   Zlib (zlib License): 5
@@ -44,19 +44,19 @@ file at the root of the repository.
 2. CRATES
 ================================================================================
 
-accesskit 0.25.1
+accesskit 0.25.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/AccessKit/accesskit
 
-accesskit_consumer 0.39.1
+accesskit_consumer 0.39.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/AccessKit/accesskit
 
-accesskit_windows 0.35.1
+accesskit_windows 0.35.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/AccessKit/accesskit
 
-accesskit_winit 0.34.1
+accesskit_winit 0.34.2
   License: Apache-2.0
   Repository: https://github.com/AccessKit/accesskit
 
@@ -128,11 +128,11 @@ byteorder-lite 0.1.0
   License: Unlicense OR MIT
   Repository: https://github.com/image-rs/byteorder-lite
 
-bytes 1.12.1
+bytes 1.12.2
   License: MIT
   Repository: https://github.com/tokio-rs/bytes
 
-cc 1.9.0
+cc 1.11.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang/cc-rs
 
@@ -148,7 +148,7 @@ chrono 0.4.45
   License: MIT OR Apache-2.0
   Repository: https://github.com/chronotope/chrono
 
-clipboard-win 5.4.1
+clipboard-win 5.4.3
   License: BSL-1.0
   Repository: https://github.com/DoumanAsh/clipboard-win
 
@@ -160,7 +160,7 @@ color 0.3.3
   License: Apache-2.0 OR MIT
   Repository: https://github.com/linebender/color
 
-const-oid 0.10.2
+const-oid 0.10.3
   License: Apache-2.0 OR MIT
   Repository: https://github.com/RustCrypto/formats
 
@@ -176,7 +176,7 @@ cpufeatures 0.3.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/RustCrypto/utils
 
-crc32fast 1.5.3
+crc32fast 1.5.5
   License: MIT OR Apache-2.0
   Repository: https://github.com/srijs/rust-crc32fast
 
@@ -196,7 +196,7 @@ dasp_sample 0.11.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/rustaudio/sample.git
 
-der 0.8.2
+der 0.8.3
   License: Apache-2.0 OR MIT
   Repository: https://github.com/RustCrypto/formats
 
@@ -264,7 +264,7 @@ embed-resource 3.0.12
   License: MIT
   Repository: https://github.com/nabijaczleweli/rust-embed-resource
 
-encoding_rs 0.8.42
+encoding_rs 0.8.44
   License: (Apache-2.0 OR MIT) AND BSD-3-Clause
   Repository: https://github.com/hsivonen/encoding_rs
 
@@ -304,7 +304,7 @@ find-msvc-tools 0.1.15
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang/cc-rs
 
-flate2 1.1.10
+flate2 1.1.11
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang/flate2-rs
 
@@ -400,31 +400,31 @@ hybrid-array 0.4.15
   License: MIT OR Apache-2.0
   Repository: https://github.com/RustCrypto/hybrid-array
 
-icu_collections 2.3.0
+icu_collections 2.4.0
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-icu_locale_core 2.3.0
+icu_locale_core 2.4.0
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-icu_normalizer 2.3.0
+icu_normalizer 2.4.0
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-icu_normalizer_data 2.3.0
+icu_normalizer_data 2.4.0
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-icu_properties 2.3.0
+icu_properties 2.4.0
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-icu_properties_data 2.3.0
+icu_properties_data 2.4.0
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-icu_provider 2.3.1
+icu_provider 2.4.0
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
@@ -448,7 +448,7 @@ itertools 0.15.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-itertools/itertools
 
-itoa 1.0.18
+itoa 1.0.19
   License: MIT OR Apache-2.0
   Repository: https://github.com/dtolnay/itoa
 
@@ -496,7 +496,7 @@ lock_api 0.4.14
   License: MIT OR Apache-2.0
   Repository: https://github.com/Amanieu/parking_lot
 
-log 0.4.34
+log 0.4.35
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang/log
 
@@ -528,11 +528,11 @@ multiversion_no_op 1.0.0
   License: Apache-2.0 OR MIT
   Repository: https://github.com/hsivonen/multiversion_no_op
 
-naga 30.0.1
+naga 30.0.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/gfx-rs/wgpu
 
-naga-types 30.0.1
+naga-types 30.0.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/gfx-rs/wgpu
 
@@ -588,7 +588,7 @@ option-ext 0.2.0
   License: MPL-2.0
   Repository: https://github.com/soc/option-ext.git
 
-ordered-float 5.5.0
+ordered-float 5.5.1
   License: MIT
   Repository: https://github.com/reem/rust-ordered-float
 
@@ -624,8 +624,8 @@ png 0.18.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/image-rs/image-png
 
-pollster 1.0.1
-  License: Apache-2.0 OR MIT
+pollster 1.0.3
+  License: MIT OR Apache-2.0
   Repository: https://github.com/zesterer/pollster
 
 polycool 0.4.0
@@ -672,7 +672,7 @@ renderdoc-sys 1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/ebkalderon/renderdoc-rs
 
-rfd 0.17.2
+rfd 0.18.0
   License: MIT
   Repository: https://github.com/PolyMeilex/rfd
 
@@ -700,7 +700,7 @@ rustc_version 0.4.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/djc/rustc-version-rs
 
-rustls-pki-types 1.15.1
+rustls-pki-types 1.16.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/rustls/pki-types
 
@@ -740,7 +740,7 @@ serde_json 1.0.154
   License: MIT OR Apache-2.0
   Repository: https://github.com/serde-rs/json
 
-serde_spanned 1.1.2
+serde_spanned 1.1.3
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
@@ -764,9 +764,9 @@ skrifa 0.44.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/googlefonts/fontations
 
-smallvec 1.16.3
+smallvec 1.16.6
   License: MIT OR Apache-2.0
-  Repository: https://github.com/servo/rust-smallvec
+  Repository: https://github.com/smallvec/smallvec
 
 smol_str 0.2.2
   License: MIT OR Apache-2.0
@@ -828,7 +828,7 @@ syn 2.0.119
   License: MIT OR Apache-2.0
   Repository: https://github.com/dtolnay/syn
 
-syn 3.0.9
+syn 3.0.10
   License: MIT OR Apache-2.0
   Repository: https://github.com/dtolnay/syn
 
@@ -844,15 +844,15 @@ thiserror-impl 2.0.21
   License: MIT OR Apache-2.0
   Repository: https://github.com/dtolnay/thiserror
 
-tinystr 0.8.4
+tinystr 0.8.5
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-toml 1.1.8+spec-1.1.0
+toml 1.2.1+spec-1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
-toml_datetime 1.1.2+spec-1.1.0
+toml_datetime 1.1.3+spec-1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
@@ -860,7 +860,7 @@ toml_parser 1.1.5+spec-1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
-toml_writer 1.1.3+spec-1.1.0
+toml_writer 1.2.0+spec-1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/toml-rs/toml
 
@@ -888,23 +888,23 @@ unicode-ident 1.0.27
   License: (MIT OR Apache-2.0) AND Unicode-3.0
   Repository: https://github.com/dtolnay/unicode-ident
 
-unicode-properties 0.1.4
-  License: MIT OR Apache-2.0
+unicode-properties 0.1.5
+  License: (MIT OR Apache-2.0) AND Unicode-3.0
   Repository: https://github.com/unicode-rs/unicode-properties
 
 unicode-segmentation 1.13.3
   License: MIT OR Apache-2.0
   Repository: https://github.com/unicode-rs/unicode-segmentation
 
-unicode-width 0.2.2
+unicode-width 0.2.3
   License: MIT OR Apache-2.0
   Repository: https://github.com/unicode-rs/unicode-width
 
-ureq 3.4.2
+ureq 3.5.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/algesten/ureq
 
-ureq-proto 0.6.5
+ureq-proto 0.7.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/algesten/ureq-proto
 
@@ -916,11 +916,15 @@ utf8-zero 0.8.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/algesten/utf8-zero
 
-utf8_iter 1.0.4
+utf8_iter 1.1.0
   License: Apache-2.0 OR MIT
   Repository: https://github.com/hsivonen/utf8_iter
 
-uuid 1.28.0
+utf_types 1.0.0
+  License: Apache-2.0 OR MIT
+  Repository: https://github.com/hsivonen/utf_types
+
+uuid 1.29.3
   License: Apache-2.0 OR MIT
   Repository: https://github.com/uuid-rs/uuid
 
@@ -948,35 +952,35 @@ web-time 1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/daxpedda/web-time
 
-webbrowser 1.2.4
+webbrowser 1.2.7
   License: MIT OR Apache-2.0
   Repository: https://github.com/amodm/webbrowser-rs
 
-webpki-root-certs 1.0.10
+webpki-root-certs 1.0.12
   License: CDLA-Permissive-2.0
   Repository: https://github.com/rustls/webpki-roots
 
-wgpu 30.0.1
+wgpu 30.0.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/gfx-rs/wgpu
 
-wgpu-core 30.0.1
+wgpu-core 30.0.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/gfx-rs/wgpu
 
-wgpu-core-deps-windows-linux-android 30.0.1
+wgpu-core-deps-windows-linux-android 30.0.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/gfx-rs/wgpu
 
-wgpu-hal 30.0.1
+wgpu-hal 30.0.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/gfx-rs/wgpu
 
-wgpu-naga-bridge 30.0.1
+wgpu-naga-bridge 30.0.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/gfx-rs/wgpu
 
-wgpu-types 30.0.1
+wgpu-types 30.0.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/gfx-rs/wgpu
 
@@ -1048,7 +1052,7 @@ winit 0.30.13
   License: Apache-2.0
   Repository: https://github.com/rust-windowing/winit
 
-winnow 1.0.4
+winnow 1.0.5
   License: MIT
   Repository: https://github.com/winnow-rs/winnow
 
@@ -1064,7 +1068,7 @@ xml-rs 0.8.29
   License: MIT
   Repository: https://github.com/kornelski/xml-rs
 
-yoke 0.8.3
+yoke 0.8.4
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
@@ -1088,7 +1092,7 @@ zerofrom-derive 0.1.8
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-zeroize 1.9.1
+zeroize 1.9.2
   License: Apache-2.0 OR MIT
   Repository: https://github.com/RustCrypto/utils
 
@@ -1096,11 +1100,11 @@ zerotrie 0.2.5
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-zerovec 0.11.8
+zerovec 0.11.9
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
-zerovec-derive 0.11.6
+zerovec-derive 0.11.7
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
 
@@ -2384,7 +2388,7 @@ Apache License
 Apache License 2.0 (Apache-2.0)
 ================================================================================
 Used by:
-  - accesskit_winit 0.34.1
+  - accesskit_winit 0.34.2
   - dunce 1.0.5
   - gl_generator 0.14.0
   - khronos_api 3.1.0
@@ -2609,7 +2613,7 @@ extern double getTime(void);
 BSD 3-Clause "New" or "Revised" License (BSD-3-Clause)
 ================================================================================
 Used by:
-  - encoding_rs 0.8.42
+  - encoding_rs 0.8.44
 
 // Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
 //
@@ -2671,7 +2675,7 @@ pub(crate) static GB18030_2022_OVERRIDE_BYTES: [[u8; 2]; 18] = [
 BSD 3-Clause "New" or "Revised" License (BSD-3-Clause)
 ================================================================================
 Used by:
-  - encoding_rs 0.8.42
+  - encoding_rs 0.8.44
 
 Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
 
@@ -2736,7 +2740,7 @@ DEALINGS IN THE SOFTWARE.
 Boost Software License 1.0 (BSL-1.0)
 ================================================================================
 Used by:
-  - clipboard-win 5.4.1
+  - clipboard-win 5.4.3
 
 Boost Software License - Version 1.0 - August 17th, 2003
 
@@ -2751,7 +2755,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 Community Data License Agreement Permissive 2.0 (CDLA-Permissive-2.0)
 ================================================================================
 Used by:
-  - webpki-root-certs 1.0.10
+  - webpki-root-certs 1.0.12
 
 # Community Data License Agreement - Permissive - Version 2.0
 
@@ -3022,7 +3026,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - cc 1.9.0
+  - cc 1.11.2
   - cfg-if 1.0.5
   - find-msvc-tools 0.1.15
   - jobserver 0.1.35
@@ -3094,7 +3098,7 @@ MIT License (MIT)
 Used by:
   - bitflags 1.3.2
   - bitflags 2.13.2
-  - log 0.4.34
+  - log 0.4.35
   - num-bigint 0.4.8
   - num-integer 0.1.47
   - num-rational 0.4.2
@@ -3131,7 +3135,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - uuid 1.28.0
+  - uuid 1.29.3
 
 Copyright (c) 2014 The Rust Project Developers
 Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
@@ -3165,7 +3169,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - flate2 1.1.10
+  - flate2 1.1.11
 
 Copyright (c) 2014-2026 Alex Crichton
 
@@ -3259,7 +3263,7 @@ THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - ordered-float 5.5.0
+  - ordered-float 5.5.1
 
 Copyright (c) 2015 Jonathan Reem
 
@@ -3292,9 +3296,9 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - unicode-properties 0.1.4
+  - unicode-properties 0.1.5
   - unicode-segmentation 1.13.3
-  - unicode-width 0.2.2
+  - unicode-width 0.2.3
 
 Copyright (c) 2015 The Rust Project Developers
 
@@ -3830,7 +3834,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - bytes 1.12.1
+  - bytes 1.12.2
 
 Copyright (c) 2018 Carl Lerche
 
@@ -3932,7 +3936,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - smallvec 1.16.3
+  - smallvec 1.16.6
 
 Copyright (c) 2018 The Servo Project Developers
 
@@ -4093,7 +4097,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - zeroize 1.9.1
+  - zeroize 1.9.2
 
 Copyright (c) 2018-2026 The RustCrypto Project Developers
 
@@ -4355,7 +4359,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - pollster 1.0.1
+  - pollster 1.0.3
 
 Copyright (c) 2020-2021 Joshua Barretto
 
@@ -4388,9 +4392,9 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - const-oid 0.10.2
+  - const-oid 0.10.3
   - cpufeatures 0.3.1
-  - der 0.8.2
+  - der 0.8.3
 
 Copyright (c) 2020-2026 The RustCrypto Project Developers
 
@@ -4569,7 +4573,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - rustls-pki-types 1.15.1
+  - rustls-pki-types 1.16.0
 
 Copyright (c) 2023 Dirkjan Ochtman <dirkjan@ochtman.nl>
 
@@ -4695,11 +4699,11 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - serde_spanned 1.1.2
-  - toml 1.1.8+spec-1.1.0
-  - toml_datetime 1.1.2+spec-1.1.0
+  - serde_spanned 1.1.3
+  - toml 1.2.1+spec-1.1.0
+  - toml_datetime 1.1.3+spec-1.1.0
   - toml_parser 1.1.5+spec-1.1.0
-  - toml_writer 1.1.3+spec-1.1.0
+  - toml_writer 1.2.0+spec-1.1.0
 
 Copyright (c) Individual contributors
 
@@ -4960,7 +4964,7 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - ureq-proto 0.6.5
+  - ureq-proto 0.7.1
 
 Copyright 2022 Martin Algesten
 
@@ -5010,9 +5014,10 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - encoding_rs 0.8.42
+  - encoding_rs 0.8.44
   - multiversion_no_op 1.0.0
-  - utf8_iter 1.0.4
+  - utf8_iter 1.1.0
+  - utf_types 1.0.0
 
 Copyright Mozilla Foundation
 
@@ -5118,7 +5123,7 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - crc32fast 1.5.3
+  - crc32fast 1.5.5
 
 MIT License
 
@@ -5194,7 +5199,7 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - ureq 3.4.2
+  - ureq 3.5.2
 
 MIT License
 
@@ -5252,7 +5257,7 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - rfd 0.17.2
+  - rfd 0.18.0
 
 MIT License
 
@@ -5298,7 +5303,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 MIT License (MIT)
 ================================================================================
 Used by:
-  - rfd 0.17.2
+  - rfd 0.18.0
 
 MIT License
 
@@ -5414,14 +5419,14 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - naga-types 30.0.1
-  - naga 30.0.1
-  - wgpu-core-deps-windows-linux-android 30.0.1
-  - wgpu-core 30.0.1
-  - wgpu-hal 30.0.1
-  - wgpu-naga-bridge 30.0.1
-  - wgpu-types 30.0.1
-  - wgpu 30.0.1
+  - naga-types 30.0.2
+  - naga 30.0.2
+  - wgpu-core-deps-windows-linux-android 30.0.2
+  - wgpu-core 30.0.2
+  - wgpu-hal 30.0.2
+  - wgpu-naga-bridge 30.0.2
+  - wgpu-types 30.0.2
+  - wgpu 30.0.2
 
 MIT License
 
@@ -5450,9 +5455,9 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - accesskit 0.25.1
-  - accesskit_consumer 0.39.1
-  - accesskit_windows 0.35.1
+  - accesskit 0.25.2
+  - accesskit_consumer 0.39.2
+  - accesskit_windows 0.35.2
   - chrono 0.4.45
   - dasp_sample 0.11.0
   - dpi 0.1.2
@@ -5755,7 +5760,7 @@ MIT License (MIT)
 Used by:
   - adler2 2.0.1
   - displaydoc 0.2.7
-  - itoa 1.0.18
+  - itoa 1.0.19
   - lazy_static 1.5.1
   - once_cell 1.21.4
   - paste 1.0.15
@@ -5771,7 +5776,7 @@ Used by:
   - serde_json 1.0.154
   - smol_str 0.2.2
   - syn 2.0.119
-  - syn 3.0.9
+  - syn 3.0.10
   - thiserror-impl 2.0.21
   - thiserror 2.0.21
   - unicode-ident 1.0.27
@@ -5868,7 +5873,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - winnow 1.0.4
+  - winnow 1.0.5
 
 Permission is hereby granted, free of charge, to any person obtaining
 a copy of this software and associated documentation files (the
@@ -6068,7 +6073,7 @@ THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - webbrowser 1.2.4
+  - webbrowser 1.2.7
 
 The MIT License (MIT)
 
@@ -7336,24 +7341,71 @@ authorization of the copyright holder.
 Unicode License v3 (Unicode-3.0)
 ================================================================================
 Used by:
-  - icu_collections 2.3.0
-  - icu_locale_core 2.3.0
-  - icu_normalizer 2.3.0
-  - icu_normalizer_data 2.3.0
-  - icu_properties 2.3.0
-  - icu_properties_data 2.3.0
-  - icu_provider 2.3.1
+  - unicode-properties 0.1.5
+
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2026 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+
+
+================================================================================
+Unicode License v3 (Unicode-3.0)
+================================================================================
+Used by:
+  - icu_collections 2.4.0
+  - icu_locale_core 2.4.0
+  - icu_normalizer 2.4.0
+  - icu_normalizer_data 2.4.0
+  - icu_properties 2.4.0
+  - icu_properties_data 2.4.0
+  - icu_provider 2.4.0
   - litemap 0.8.3
   - potential_utf 0.1.6
-  - tinystr 0.8.4
+  - tinystr 0.8.5
   - writeable 0.6.4
   - yoke-derive 0.8.4
-  - yoke 0.8.3
+  - yoke 0.8.4
   - zerofrom-derive 0.1.8
   - zerofrom 0.1.8
   - zerotrie 0.2.5
-  - zerovec-derive 0.11.6
-  - zerovec 0.11.8
+  - zerovec-derive 0.11.7
+  - zerovec 0.11.9
 
 UNICODE LICENSE V3
 

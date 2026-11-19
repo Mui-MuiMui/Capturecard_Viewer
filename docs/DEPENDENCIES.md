@@ -2,7 +2,7 @@
 
 現在の依存と、更新に向けた調査結果をまとめる。
 
-**バージョン情報は 2026-10-21 時点のもの**（#500 で `cargo update` と `rodio` 0.23 を入れた後。`eframe` / `egui` の行だけは 2026-10-22 に 0.37 へ上げた後、#514）。「Cargo.lock」の列は `Cargo.lock` に載っている版、「最新」の列は同じ日に crates.io の API（`max_stable_version`）を引いた版。参照するときは日付を確認し、必要なら取り直すこと（下の「調査の再実行」）。
+**バージョン情報は 2026-11-19 時点のもの**（`cargo update` で互換の範囲を取り込んだ後。以前の 2026-10-21 は #500 で `cargo update` と `rodio` 0.23 を入れた後。`eframe` / `egui` の行だけは 2026-10-22 に 0.37 へ上げた後、#514）。「Cargo.lock」の列は `Cargo.lock` に載っている版、「最新」の列は同じ日に crates.io の API（`max_stable_version`）を引いた版。参照するときは日付を確認し、必要なら取り直すこと（下の「調査の再実行」）。
 
 ## 方針
 
@@ -50,18 +50,18 @@
 | クレート | 指定（`Cargo.toml`） | `Cargo.lock` | 最新 | 差 | 用途 |
 |---|---|---|---|---|---|
 | `eframe` | 0.37 | 0.37.0 | 0.37.0 | 追随 | ウィンドウとアプリの骨組み（第 4 段、#300。0.37 は #514）。描画は wgpu（DX12）と glow の両方を入れ、起動時に選ぶ（下の「`wgpu` は DX12 だけで入れる」） |
-| `wgpu` | 30 | 30.0.1 | 30.0.1 | 追随 | `eframe`（`egui-wgpu` 0.37）が使う wgpu に DX12 のバックエンドと WGSL を足すためだけに直接の依存へ入れる。版は `egui-wgpu` と揃える |
-| `pollster` | 1.0 | 1.0.1 | 1.0.1 | 追随 | wgpu の非同期の問い合わせを待つ（起動前の DX12 の確認 `src/renderer.rs`、GPU 変換の自己診断 `src/video/gpu_yuy2_wgpu.rs`）。`eframe` が wgpu のために使うものと同じ |
+| `wgpu` | 30 | 30.0.2 | 30.0.2 | 追随 | `eframe`（`egui-wgpu` 0.37）が使う wgpu に DX12 のバックエンドと WGSL を足すためだけに直接の依存へ入れる。版は `egui-wgpu` と揃える |
+| `pollster` | 1.0 | 1.0.3 | 1.0.3 | 追随 | wgpu の非同期の問い合わせを待つ（起動前の DX12 の確認 `src/renderer.rs`、GPU 変換の自己診断 `src/video/gpu_yuy2_wgpu.rs`）。`eframe` が wgpu のために使うものと同じ |
 | `egui` | 0.37 | 0.37.0 | 0.37.0 | 追随 | UI（同上）。`egui_kittest`（dev）も同じ版にそろえる |
 | `nokhwa` | 0.10 | 0.10.11 | 0.10.11 | 追随 | 映像キャプチャ |
 | `cpal` | 0.18 | 0.18.2 | 0.18.2 | 追随 | 音声入出力。`realtime` フィーチャで音声スレッドの優先度を上げる（`docs/design/audio.md` の「cpal 0.18 で変わったこと」）。`rodio` 0.23 も同じ 0.18 を使う（下の「`cpal` 0.17 の重複は `rodio` 0.23 で消えた」） |
-| `toml` | 1.1 | 1.1.8+spec-1.1.0 | 1.1.8+spec-1.1.0 | 追随 | 設定ファイルの読み書き。`confy` 0.6 の代わり（第 3 段、#302） |
-| `log` | 0.4.34 | 0.4.34 | 0.4.34 | 追随 | ログのファサード。出力先の実装は `src/logging.rs` |
+| `toml` | 1.1 | 1.2.1+spec-1.1.0 | 1.2.1+spec-1.1.0 | 追随 | 設定ファイルの読み書き。`confy` 0.6 の代わり（第 3 段、#302） |
+| `log` | 0.4.34 | 0.4.35 | 0.4.35 | 追随 | ログのファサード。出力先の実装は `src/logging.rs` |
 | `image` | 0.25 | 0.25.10 | 0.25.10 | 追随 | スクリーンショットの保存、埋め込みアイコンの読み込み、MJPEG の展開。`eframe` もこの 0.25 を使う |
 | `rodio` | 0.23 | 0.23.0 | 0.23.0 | 追随 | 効果音の再生。フィーチャは `playback` と使う形式（MP3 / WAV / Vorbis / FLAC）だけ |
 | `dirs` | 7.0 | 7.0.0 | 7.0.0 | 追随 | デスクトップ等のパス取得、設定ファイルの置き場所（`%AppData%`） |
-| `rfd` | 0.17 | 0.17.2 | 0.17.2 | 追随 | ファイル選択ダイアログ |
-| `ringbuf` | 0.5 | 0.5.3 | 0.5.3 | 追随 | 音声のリングバッファ、録画の差し込み口（`VideoTap` / `AudioTap`） |
+| `rfd` | 0.18 | 0.18.0 | 0.18.0 | 追随 | ファイル選択ダイアログ |
+| `ringbuf` | 0.5 | 0.5.3 | 0.6.0 | 0.6 は別 PR で上げる | 音声のリングバッファ、録画の差し込み口（`VideoTap` / `AudioTap`） |
 | `arboard` | 3.6 | 3.7.0 | 3.7.0 | 追随 | スクリーンショットのクリップボードへのコピー |
 | `embed-resource`（build） | 3.0 | 3.0.12 | 3.0.12 | 追随 | アイコンとバージョン情報の埋め込み |
 | `serde` | 1.0 | 1.0.229 | 1.0.229 | 追随 | 設定のシリアライズ |
@@ -69,7 +69,7 @@
 | `winapi` | 0.3 | 0.3.9 | 0.3.9 | 後述 | Windows API（モニタの作業領域、キーボードフック） |
 | `windows` | 0.62 | 0.62.2 | 0.62.2 | 追随 | DirectShow のバックエンド（`src/video/directshow/`）、録画の Media Foundation（`src/recording/`）、COM の初期化（`src/com.rs`） |
 | `windows-core` | 0.62 | 0.62.2 | 0.100.0 | 後述 | 同上。`#[implement]` が生成するコードの参照先 |
-| `ureq` | 3.4 | 3.4.2 | 3.4.2 | 追随 | 更新の確認で GitHub の Release API へ問い合わせる（`src/update/`） |
+| `ureq` | 3.5 | 3.5.2 | 3.5.2 | 追随 | 更新の確認で GitHub の Release API へ問い合わせる（`src/update/`） |
 | `serde_json` | 1.0 | 1.0.154 | 1.0.154 | 追随 | 同上。API の応答（JSON）を読む |
 | `semver` | 1.0 | 1.0.28 | 1.0.28 | 追随 | 同上。タグと実行中の版を比べる |
 | `sha2` | 0.11 | 0.11.1 | 0.11.1 | 追随 | 更新の適用で、ダウンロードした exe を `SHA256SUMS.txt` と照合する（`src/update/apply.rs`） |
@@ -112,6 +112,19 @@
   増えたのは `ureq` / `ureq-proto` / `native-tls` / `schannel` / `serde_json` と、その下の
   `http` / `httparse` / `der` / `base64` など。`openssl` 系や `security-framework` も lock には
   載るが、Windows 以外のターゲット向けで、ビルドにも配布物にも入らない
+
+### `ureq` 3.5 で `NextTimeout` が増えた（2026-11-19）
+
+3.4 → 3.5 で `unversioned::transport::NextTimeout` に `per_read` / `per_write`（読み書きごとの上限）が増え、フィールドを全部書いていた `src/update/download.rs` の `WatchedTransport` がコンパイルできなくなった。`..timeout` で元の値を内側のトランスポートへ引き継ぐ形にした。内側は `for_read` / `for_write` で自分の上限を掛けるが、監視は小刻みの待ちを `Timeout` で `continue` するので、アイドルの上限とキャンセルの判定は変わらない。`Cargo.toml` の指定も、この型を前提にするので 3.5 へ上げた。
+
+### `rfd` 0.17 → 0.18（2026-11-19）
+
+`src/` の変更は要らなかった。使っているのは `FileDialog::new()` の `pick_folder` / `pick_file` / `save_file` と `set_file_name` などで、0.18 でも同じ形で通る。0.18 の変更（`rfd` の `CHANGELOG.md`）のうち、Windows のビルドに関わるものは無い。
+
+- 増えた機能は GTK4 のバックエンド（`gtk4` フィーチャ）と `set_show_hidden_files`（macOS / Windows / Linux の GTK3）。どちらも使わない。既定のフィーチャは `default-features = false` で切ったまま
+- 直った不具合は GTK3 / zenity / macOS / wasm のもので、Windows のダイアログには掛からない
+- MSRV が 1.92 になった。使っている Rust は 1.100
+- `Cargo.lock` に増えたのは `objc2-uniform-type-identifiers` 0.3.2 だけ。macOS 向けで、`x86_64-pc-windows-msvc` のビルドには入らない（`THIRD-PARTY-LICENSES.txt` は再生成して、差分は依存の版の行だけ）
 
 ### `sha2` は照合だけに使う（2026-09-27）
 
