@@ -50,6 +50,7 @@ always_on_top = true
 enable_drag_move = false
 show_stats_overlay = true
 borderless = true
+prevent_display_sleep = false
 
 [hotkeys]
 screenshot = "Ctrl+S"

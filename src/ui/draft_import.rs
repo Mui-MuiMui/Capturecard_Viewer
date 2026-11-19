@@ -9,8 +9,8 @@ use crate::settings::AppSettings;
 /// 読み込んだ設定からドラフトを作る。
 ///
 /// `current` は差し替える前のドラフト。`imported` の `ui` セクションは
-/// **ダイアログが編集する 3 項目（`volume` / `maintain_aspect_ratio` / `language`）
-/// だけ**を採り、残りは `current` の値を保つ。
+/// **ダイアログが編集する 4 項目（`volume` / `maintain_aspect_ratio` / `language` /
+/// `prevent_display_sleep`）だけ**を採り、残りは `current` の値を保つ。
 ///
 /// ウィンドウの位置とサイズを持ち込まないのがいちばんの理由。別の画面構成の
 /// PC で書き出したファイルを読むと、画面の外にウィンドウが飛ぶ。
@@ -43,11 +43,13 @@ pub fn draft_from_imported(imported: AppSettings, current: &AppSettings) -> AppS
     let volume = draft.ui.volume;
     let maintain_aspect_ratio = draft.ui.maintain_aspect_ratio;
     let language = draft.ui.language;
+    let prevent_display_sleep = draft.ui.prevent_display_sleep;
 
     draft.ui = current.ui.clone();
     draft.ui.volume = volume;
     draft.ui.maintain_aspect_ratio = maintain_aspect_ratio;
     draft.ui.language = language;
+    draft.ui.prevent_display_sleep = prevent_display_sleep;
     draft
 }
 
@@ -165,7 +167,7 @@ mod tests {
 
     #[test]
     fn draft_from_imported_takes_the_ui_items_the_dialog_edits() {
-        // commit_draft が反映する 3 項目だけは読み込む。
+        // commit_draft が反映する 4 項目だけは読み込む。
         // 読み込んでも反映されない項目を作らないため
         let imported = sample_settings();
         let current = AppSettings::default();
@@ -175,6 +177,10 @@ mod tests {
             current.ui.maintain_aspect_ratio
         );
         assert_ne!(imported.ui.language, current.ui.language);
+        assert_ne!(
+            imported.ui.prevent_display_sleep,
+            current.ui.prevent_display_sleep
+        );
 
         let draft = draft_from_imported(imported.clone(), &current);
 
@@ -184,6 +190,10 @@ mod tests {
             imported.ui.maintain_aspect_ratio
         );
         assert_eq!(draft.ui.language, imported.ui.language);
+        assert_eq!(
+            draft.ui.prevent_display_sleep,
+            imported.ui.prevent_display_sleep
+        );
     }
 
     #[test]
@@ -226,6 +236,11 @@ mod tests {
         );
         // 言語も既定（自動）へ戻る
         assert_eq!(draft.ui.language, defaults.ui.language);
+        // 「モニターをオフにしない」も既定（オン）へ戻る
+        assert_eq!(
+            draft.ui.prevent_display_sleep,
+            defaults.ui.prevent_display_sleep
+        );
         assert_eq!(draft.ui.last_window_size, Some((640.0, 480.0)));
         assert_eq!(draft.ui.last_window_pos, Some((5.0, 6.0)));
     }
@@ -250,6 +265,10 @@ mod tests {
             imported.ui.maintain_aspect_ratio
         );
         assert_eq!(target.ui.language, imported.ui.language);
+        assert_eq!(
+            target.ui.prevent_display_sleep,
+            imported.ui.prevent_display_sleep
+        );
         // ウィンドウの位置とサイズは動かない
         assert_eq!(target.ui.last_window_size, original.ui.last_window_size);
         assert_eq!(target.ui.last_window_pos, original.ui.last_window_pos);

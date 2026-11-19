@@ -266,6 +266,9 @@ texts! {
     // どこで戻せばよいかを見つけられるようにするため
     LanguageGroup { ja: "言語（Language）", en: "Language" },
     LanguageHint { ja: "「適用」か「OK」で切り替わります。自動のときは、OS の表示言語が日本語なら日本語、それ以外なら英語になります。", en: "Takes effect when you press Apply or OK. With Auto, Japanese is used if the OS display language is Japanese, and English otherwise." },
+    // 「その他」タブの画面の電源の節（#574）
+    DisplaySleepGroup { ja: "画面の電源", en: "Display power" },
+    PreventDisplaySleep { ja: "起動中はモニターをオフにしない（スクリーンセーバーも起動しない）", en: "Keep the display on while running (also prevents the screen saver)" },
     SettingsFile { ja: "設定ファイル", en: "Settings file" },
     ExportSettings { ja: "設定を書き出す...", en: "Export settings..." },
     ImportSettings { ja: "設定を読み込む...", en: "Import settings..." },

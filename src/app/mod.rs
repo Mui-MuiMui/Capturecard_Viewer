@@ -8,6 +8,7 @@ mod audio_control;
 mod backend;
 mod capabilities;
 mod device;
+mod display_sleep;
 mod error_report;
 mod frame_cycle;
 mod hotkeys;
@@ -191,6 +192,8 @@ pub struct CaptureCardViewer {
     // デバイスの開き直しは伴わないが、2 秒ごとの再適用で同じ値を
     // ログへ出さないよう差分で判定する
     last_color_conversion: Option<(ColorSpace, ColorRange)>,
+    // モニターをオフにさせない要求をいま掛けているか（`display_sleep.rs`、#574）
+    keep_display_on: bool,
     // 最後に共有 Atomic へ入れた映像調整（明るさ・コントラスト・彩度）。
     // 色変換と同じ理由で差分を取る
     last_video_adjustments: Option<VideoAdjustments>,
@@ -345,6 +348,7 @@ impl CaptureCardViewer {
             display_latency: DisplayLatency::default(),
             renderer_label: None,
             last_color_conversion: None,
+            keep_display_on: false,
             last_video_adjustments: None,
             last_sound_file: None,
 
@@ -774,6 +778,9 @@ impl eframe::App for CaptureCardViewer {
         } else {
             warn!("読めなかった設定ファイルを残しているため、終了時の保存を行わない");
         }
+
+        // モニターをオフにさせない要求を外す（#574）
+        self.release_display_sleep();
 
         // 撮った直後に閉じても最後の 1 枚が残るように、保存の完了を待ってから抜ける。
         // ここで待たないと、main が返った時点でプロセスごと落ちて

@@ -278,6 +278,9 @@ impl CaptureCardViewer {
             // ViewportBuilder が行う。2 秒ごとにコマンドを送ると、フルスクリーン中に
             // 装飾を付け直そうとして表示がちらつく
             self.borderless = settings.ui.borderless;
+            // モニターをオフにしない（#574）。値が変わったときだけ Windows への要求を
+            // 掛け直す / 外す。起動時もここで掛ける
+            self.sync_display_sleep(settings.ui.prevent_display_sleep);
 
             // ホットキーの割り当て。
             //

@@ -206,6 +206,14 @@ impl SettingsDialogState {
         }
     }
 
+    /// ドラフトの「モニターをオフにしない」を切り替える（#574）。
+    /// 抑止を掛ける / 外すのは「適用」「OK」のとき。
+    pub fn set_draft_prevent_display_sleep(&mut self, prevent: bool) {
+        if let Some(draft) = self.draft.as_mut() {
+            draft.ui.prevent_display_sleep = prevent;
+        }
+    }
+
     /// ドラフトの更新の設定（2 つのチェックと「この版は通知しない」）を差し替える。
     /// 反映は「適用」「OK」のとき。
     pub fn set_draft_update(&mut self, update: UpdateSettings) {
