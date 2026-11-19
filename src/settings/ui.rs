@@ -132,6 +132,12 @@ pub struct UiSettings {
     // 再起動せずに切り替わる。プリセットには入れない（`docs/design/presets.md`）
     #[serde(deserialize_with = "deserialize_language")]
     pub language: LanguageSetting,
+    // 起動中はモニターをオフにさせず、スクリーンセーバーも起動させないか（#574）。
+    // 映像を流しっぱなしで見ている間はマウスもキーボードも触らないので、
+    // Windows の電源設定のままだと途中で画面が消える。設定ダイアログの「その他」
+    // タブで切り替える。最小化中は掛けない（`docs/design/window.md`）。
+    // プリセットには入れない（`docs/design/presets.md`）
+    pub prevent_display_sleep: bool,
 }
 
 impl Default for UiSettings {
@@ -152,6 +158,8 @@ impl Default for UiSettings {
             // 通常のウィンドウと変わるので、知らずにその状態で起動させない
             borderless: false,
             language: LanguageSetting::Auto,
+            // 既定は抑止する。映像を流しっぱなしで見る用途では、消えないほうが期待どおり
+            prevent_display_sleep: true,
         }
     }
 }
@@ -295,6 +303,34 @@ mod tests {
             toml::from_str(FULL_CONFIG).expect("設定ファイルを読めなければならない");
 
         assert!(settings.ui.borderless);
+    }
+
+    #[test]
+    fn app_settings_missing_prevent_display_sleep_defaults_to_on() {
+        // モニターのオフを抑止する項目（#574）を足した版へ上げた直後、既存ユーザーの
+        // 設定ファイルにはこのキーが無い。欠けていても他の項目が保持され、
+        // 既定の「抑止する」になること
+        let config = without_key(FULL_CONFIG, "prevent_display_sleep");
+        assert!(
+            !config.contains("prevent_display_sleep ="),
+            "テスト用の設定から prevent_display_sleep が消えていない"
+        );
+
+        let settings: AppSettings = toml::from_str(&config)
+            .expect("prevent_display_sleep が欠けていても読めなければならない");
+
+        assert!(settings.ui.prevent_display_sleep); // 既定値は true
+        assert_eq!(settings.ui.volume, 80.0);
+        assert!(settings.ui.borderless);
+    }
+
+    #[test]
+    fn app_settings_prevent_display_sleep_is_read_from_the_file() {
+        // 切ったことがファイルから読めること。既定（true）に潰れていないこと
+        let settings: AppSettings =
+            toml::from_str(FULL_CONFIG).expect("設定ファイルを読めなければならない");
+
+        assert!(!settings.ui.prevent_display_sleep);
     }
 
     #[test]

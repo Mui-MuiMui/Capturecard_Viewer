@@ -166,6 +166,42 @@ pub(crate) fn os_ui_language() -> Language {
     Language::English
 }
 
+/// モニターをオフにさせない・スクリーンセーバーを起動させない要求を掛ける（`true`）/
+/// 外す（`false`）（#574）。Windows が受け付けたら `true` を返す。
+///
+/// `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED)`
+/// で掛け、`ES_CONTINUOUS` だけで外す。`ES_DISPLAY_REQUIRED` がスクリーンセーバーも止める。
+/// `ES_SYSTEM_REQUIRED` も入れるのは、画面だけ点けておいても PC が自動のスリープへ
+/// 入れば同じく映像が消えるため。
+///
+/// **`ES_CONTINUOUS` の要求は呼んだスレッドに紐づく。** そのスレッドが抜けると
+/// 外れ、別のスレッドから呼んでも外せない。呼ぶのは UI スレッドだけにすること
+/// （`app::display_sleep`）。`powercfg /requests` の `DISPLAY` と `SYSTEM` に
+/// このアプリが出れば掛かっている。
+#[cfg(windows)]
+pub(crate) fn set_keep_display_on(keep_on: bool) -> bool {
+    use winapi::um::winbase::SetThreadExecutionState;
+    use winapi::um::winnt::{ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
+
+    let flags = if keep_on {
+        ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED
+    } else {
+        ES_CONTINUOUS
+    };
+    // 成功すると直前の状態を、失敗すると 0（NULL）を返す。直前に何も掛けていなければ
+    // 成功でも 0 になりうるので、0 のときだけ同じ値で呼び直して見分ける。
+    // 1 回目が通っていれば、2 回目の「直前の状態」は `flags`（0 ではない）になる
+    let previous = unsafe { SetThreadExecutionState(flags) };
+    previous != 0 || unsafe { SetThreadExecutionState(flags) } != 0
+}
+
+/// Windows 以外では電源の要求を扱わない。掛けたことにして、呼び出し側に
+/// 失敗を報告させない
+#[cfg(not(windows))]
+pub(crate) fn set_keep_display_on(_keep_on: bool) -> bool {
+    true
+}
+
 /// winit が UI スレッドに 1 つ作る、イベントを受けるためだけのウィンドウのクラス名
 /// （winit 0.30 の `platform_impl::windows::event_loop`）。
 ///

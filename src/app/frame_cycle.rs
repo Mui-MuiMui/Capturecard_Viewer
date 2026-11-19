@@ -81,6 +81,10 @@ impl CaptureCardViewer {
         // 取れない環境では「最小化していない」に倒す（描きすぎる側は安全）
         let minimized = viewport.minimized.unwrap_or(false);
 
+        // モニターをオフにさせない要求（#574）。最小化中は外し、戻したら掛け直す。
+        // 変わったときだけ Windows を呼ぶ
+        self.sync_display_sleep(minimized);
+
         // 次の update() をいつ呼ぶかを、このフレームの状態から 1 か所で決める。
         //
         // **ここは上限であって下限ではない。** もっと早く起きたい処理

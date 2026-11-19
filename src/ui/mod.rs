@@ -146,6 +146,9 @@ pub enum SettingsEvent {
     /// 「その他」タブで言語を選んだ。入れるのはドラフトで、画面の言語が
     /// 切り替わるのは「適用」「OK」のとき
     SetLanguage(LanguageSetting),
+    /// 「その他」タブで「モニターをオフにしない」を切り替えた（#574）。入れるのは
+    /// ドラフトで、抑止を掛ける / 外すのは「適用」「OK」のとき
+    SetPreventDisplaySleep(bool),
     /// 「その他」タブの「更新を確認」。問い合わせは `app` が別スレッドで行う。
     /// ドラフトも設定も動かさない
     CheckForUpdates,
@@ -608,6 +611,8 @@ mod tests {
                 borderless: false,
                 // 既定値（自動）と異なる値にして、反映の有無を見分けられるようにする
                 language: LanguageSetting::English,
+                // 既定値（true）と異なる値にして、反映の有無を見分けられるようにする
+                prevent_display_sleep: false,
             },
             hotkeys: BTreeMap::from([
                 (HotkeyAction::Screenshot, "Ctrl+S".to_string()),
