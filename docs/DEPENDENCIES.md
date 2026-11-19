@@ -60,7 +60,7 @@
 | `image` | 0.25 | 0.25.10 | 0.25.10 | 追随 | スクリーンショットの保存、埋め込みアイコンの読み込み、MJPEG の展開。`eframe` もこの 0.25 を使う |
 | `rodio` | 0.23 | 0.23.0 | 0.23.0 | 追随 | 効果音の再生。フィーチャは `playback` と使う形式（MP3 / WAV / Vorbis / FLAC）だけ |
 | `dirs` | 7.0 | 7.0.0 | 7.0.0 | 追随 | デスクトップ等のパス取得、設定ファイルの置き場所（`%AppData%`） |
-| `rfd` | 0.17 | 0.17.2 | 0.18.0 | 0.18 は別 PR で上げる | ファイル選択ダイアログ |
+| `rfd` | 0.18 | 0.18.0 | 0.18.0 | 追随 | ファイル選択ダイアログ |
 | `ringbuf` | 0.5 | 0.5.3 | 0.6.0 | 0.6 は別 PR で上げる | 音声のリングバッファ、録画の差し込み口（`VideoTap` / `AudioTap`） |
 | `arboard` | 3.6 | 3.7.0 | 3.7.0 | 追随 | スクリーンショットのクリップボードへのコピー |
 | `embed-resource`（build） | 3.0 | 3.0.12 | 3.0.12 | 追随 | アイコンとバージョン情報の埋め込み |
@@ -116,6 +116,15 @@
 ### `ureq` 3.5 で `NextTimeout` が増えた（2026-11-19）
 
 3.4 → 3.5 で `unversioned::transport::NextTimeout` に `per_read` / `per_write`（読み書きごとの上限）が増え、フィールドを全部書いていた `src/update/download.rs` の `WatchedTransport` がコンパイルできなくなった。`..timeout` で元の値を内側のトランスポートへ引き継ぐ形にした。内側は `for_read` / `for_write` で自分の上限を掛けるが、監視は小刻みの待ちを `Timeout` で `continue` するので、アイドルの上限とキャンセルの判定は変わらない。`Cargo.toml` の指定も、この型を前提にするので 3.5 へ上げた。
+
+### `rfd` 0.17 → 0.18（2026-11-19）
+
+`src/` の変更は要らなかった。使っているのは `FileDialog::new()` の `pick_folder` / `pick_file` / `save_file` と `set_file_name` などで、0.18 でも同じ形で通る。0.18 の変更（`rfd` の `CHANGELOG.md`）のうち、Windows のビルドに関わるものは無い。
+
+- 増えた機能は GTK4 のバックエンド（`gtk4` フィーチャ）と `set_show_hidden_files`（macOS / Windows / Linux の GTK3）。どちらも使わない。既定のフィーチャは `default-features = false` で切ったまま
+- 直った不具合は GTK3 / zenity / macOS / wasm のもので、Windows のダイアログには掛からない
+- MSRV が 1.92 になった。使っている Rust は 1.100
+- `Cargo.lock` に増えたのは `objc2-uniform-type-identifiers` 0.3.2 だけ。macOS 向けで、`x86_64-pc-windows-msvc` のビルドには入らない（`THIRD-PARTY-LICENSES.txt` は再生成して、差分は依存の版の行だけ）
 
 ### `sha2` は照合だけに使う（2026-09-27）
 
