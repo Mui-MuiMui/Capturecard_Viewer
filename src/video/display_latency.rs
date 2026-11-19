@@ -131,6 +131,9 @@ pub struct DisplayLatency {
     summary_idle_passes: u64,
     summary_frame_time: Accumulator,
     summary_minimized: bool,
+    // 最後に取り込んでから最小化したか。最小化が長く途絶として窓を張り直したときに、
+    // 張り直した窓へ最小化の印を引き継ぐ（最小化中に上書きされた枚数はその窓に入る）
+    minimized_since_record: bool,
     // いまフルスクリーンか。窓の始まりのモードとして要約に載せる。アプリはウィンドウ表示で
     // 起動するので既定は偽
     fullscreen: bool,
@@ -157,6 +160,7 @@ impl DisplayLatency {
     /// 窓に残ったまま戻ると、その間を空白として数えて低く出る
     pub fn note_minimized(&mut self) {
         self.rate_started = None;
+        self.minimized_since_record = true;
         if self.summary_started.is_some() {
             self.summary_minimized = true;
         }
@@ -252,7 +256,9 @@ impl DisplayLatency {
             self.summary_skipped_frames = 0;
             self.summary_idle_passes = 0;
             self.summary_frame_time = Accumulator::default();
-            self.summary_minimized = false;
+            // 最小化で止まっていたなら、復帰の 1 枚が持ち込む上書きの枚数（最小化中の分）を
+            // この窓に足すので印を引き継ぐ。通常の途絶（切断など）では印を消す
+            self.summary_minimized = self.minimized_since_record;
             // 表示の速さ（`recent_rate`）も数え直す。再接続やデバイスの切り替えの直後は
             // 窓が埋まっておらず、最小化から戻ったときと同じく 1 秒は数値を出さない
             self.rate_started = None;
@@ -266,6 +272,7 @@ impl DisplayLatency {
         }
         self.recent.push_back((at, ms));
         self.rate_started.get_or_insert(at);
+        self.minimized_since_record = false;
 
         self.summary_started.get_or_insert(at);
         self.summary.add(ms);
@@ -676,6 +683,28 @@ mod tests {
         latency.record(base + ms(5_000), ms(1), 0);
         let next = latency.cut_summary(base + ms(6_000), false).expect("1 枚");
         assert!(!next.minimized);
+    }
+
+    #[test]
+    fn summary_keeps_the_minimize_mark_across_a_long_minimize() {
+        // 最小化がログの窓より長いと復帰の 1 枚で窓を張り直すが、その 1 枚が最小化中に
+        // 上書きされた枚数を持ち込むので、張り直した窓にも印を残す
+        let base = Instant::now();
+        let mut latency = DisplayLatency::default();
+        latency.record(base, ms(1), 0);
+        latency.note_minimized();
+        latency.record(base + ms(60_000), ms(1), 3_600);
+        let marked = latency.cut_summary(base + ms(61_000), false).expect("1 枚");
+        assert_eq!(marked.skipped_frames, 3_600);
+        assert!(marked.minimized);
+
+        // 最小化していない途絶（切断など）では印を付けない
+        latency.record(base + ms(62_000), ms(1), 0);
+        latency.record(base + ms(122_000), ms(1), 5);
+        let clean = latency
+            .cut_summary(base + ms(123_000), false)
+            .expect("1 枚");
+        assert!(!clean.minimized);
     }
 
     /// `start` から `seconds` 秒、60fps で取り込む。最後に取り込んだ時刻を返す
