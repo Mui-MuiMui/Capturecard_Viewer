@@ -672,7 +672,7 @@ renderdoc-sys 1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/ebkalderon/renderdoc-rs
 
-rfd 0.17.2
+rfd 0.18.0
   License: MIT
   Repository: https://github.com/PolyMeilex/rfd
 
@@ -5257,7 +5257,7 @@ SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - rfd 0.17.2
+  - rfd 0.18.0
 
 MIT License
 
@@ -5303,7 +5303,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 MIT License (MIT)
 ================================================================================
 Used by:
-  - rfd 0.17.2
+  - rfd 0.18.0
 
 MIT License
 
