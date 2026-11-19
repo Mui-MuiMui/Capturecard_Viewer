@@ -61,7 +61,7 @@
 | `rodio` | 0.23 | 0.23.0 | 0.23.0 | 追随 | 効果音の再生。フィーチャは `playback` と使う形式（MP3 / WAV / Vorbis / FLAC）だけ |
 | `dirs` | 7.0 | 7.0.0 | 7.0.0 | 追随 | デスクトップ等のパス取得、設定ファイルの置き場所（`%AppData%`） |
 | `rfd` | 0.18 | 0.18.0 | 0.18.0 | 追随 | ファイル選択ダイアログ |
-| `ringbuf` | 0.5 | 0.5.3 | 0.6.0 | 0.6 は別 PR で上げる | 音声のリングバッファ、録画の差し込み口（`VideoTap` / `AudioTap`） |
+| `ringbuf` | 0.6 | 0.6.0 | 0.6.0 | 追随 | 音声のリングバッファ、録画の差し込み口（`VideoTap` / `AudioTap`） |
 | `arboard` | 3.6 | 3.7.0 | 3.7.0 | 追随 | スクリーンショットのクリップボードへのコピー |
 | `embed-resource`（build） | 3.0 | 3.0.12 | 3.0.12 | 追随 | アイコンとバージョン情報の埋め込み |
 | `serde` | 1.0 | 1.0.229 | 1.0.229 | 追随 | 設定のシリアライズ |
@@ -125,6 +125,19 @@
 - 直った不具合は GTK3 / zenity / macOS / wasm のもので、Windows のダイアログには掛からない
 - MSRV が 1.92 になった。使っている Rust は 1.100
 - `Cargo.lock` に増えたのは `objc2-uniform-type-identifiers` 0.3.2 だけ。macOS 向けで、`x86_64-pc-windows-msvc` のビルドには入らない（`THIRD-PARTY-LICENSES.txt` は再生成して、差分は依存の版の行だけ）
+
+### `ringbuf` 0.5 → 0.6（2026-11-19）
+
+`src/` の変更は要らなかった。使っているのは `HeapRb::new` / `split` / `HeapProd` / `HeapCons` と、`Producer`（`try_push` / `vacant_len`）、`Consumer`（`try_pop` / `pop_slice`）、`Observer`（`occupied_len` / `is_empty`）の各メソッドで、0.6 でも同じ名前と形で通る。
+
+コールバックの経路（`FrameSink` から `VideoTap`、cpal の入出力のコールバック、`AudioTap`、`AudioPinFeed`）の決まり（ロックもアロケーションもしない、`GUARDRAIL.md`）は 0.6 のソースで確かめた。
+
+- `HeapProd` / `HeapCons`（`CachingProd` / `CachingCons`）の `try_push` / `try_pop` / `pop_slice` / `vacant_len` / `occupied_len` に、ロックもヒープの確保も無い。`Arc` を作るのは `split` の 1 回だけ（コールバックの外）
+- **`try_push` は 1 要素ごとに公開する。** `caching.rs` の冒頭に「自分側の添字の変更は、操作が戻る前に必ず公開される」とある。0.5 までと同じで、フレーム単位の扱い（#307。`whole_frame_samples` で空きを先に見てから積む）は変わらない。`push_iter` は反復が終わるか満杯になるまでまとめて公開する（0.6 の記述）が、使っていない
+- 0.6 で増えたのは `Raw` トレイト、`Exclusive` のバッファ、`FrozenProd` / `FrozenCons` の削除など。使っていない
+- `Cargo.lock` の変更は `ringbuf` の 1 行（版とチェックサム）だけ。依存は増減しない
+
+自動テスト（1,825 件）は通った。音声のパススルーと録画の音声は実機の確認が要る（PR の「人間が dev で確認すること」）。
 
 ### `sha2` は照合だけに使う（2026-09-27）
 
