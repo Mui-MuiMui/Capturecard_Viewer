@@ -192,8 +192,7 @@ pub struct CaptureCardViewer {
     // デバイスの開き直しは伴わないが、2 秒ごとの再適用で同じ値を
     // ログへ出さないよう差分で判定する
     last_color_conversion: Option<(ColorSpace, ColorRange)>,
-    // `[ui] prevent_display_sleep` の値と、いまその要求を掛けているか（`display_sleep.rs`、#574）
-    prevent_display_sleep: bool,
+    // モニターをオフにさせない要求をいま掛けているか（`display_sleep.rs`、#574）
     keep_display_on: bool,
     // 最後に共有 Atomic へ入れた映像調整（明るさ・コントラスト・彩度）。
     // 色変換と同じ理由で差分を取る
@@ -272,7 +271,6 @@ impl CaptureCardViewer {
         // apply_settings(true) も最初の update() で同じ値を書き戻すが、
         // 構築時点で確定させておけば以降の初期化順序に依存せずに済む
         let show_stats_overlay = loaded_settings.ui.show_stats_overlay;
-        let loaded_prevent_display_sleep = loaded_settings.ui.prevent_display_sleep;
         let settings = Arc::new(Mutex::new(loaded_settings));
 
         // 再描画の窓口は、それを使う相手より先に作る。
@@ -350,7 +348,6 @@ impl CaptureCardViewer {
             display_latency: DisplayLatency::default(),
             renderer_label: None,
             last_color_conversion: None,
-            prevent_display_sleep: loaded_prevent_display_sleep,
             keep_display_on: false,
             last_video_adjustments: None,
             last_sound_file: None,

@@ -81,10 +81,6 @@ impl CaptureCardViewer {
         // 取れない環境では「最小化していない」に倒す（描きすぎる側は安全）
         let minimized = viewport.minimized.unwrap_or(false);
 
-        // モニターをオフにさせない要求（#574）。最小化中は外し、戻したら掛け直す。
-        // 変わったときだけ Windows を呼ぶ
-        self.sync_display_sleep(minimized);
-
         // 次の update() をいつ呼ぶかを、このフレームの状態から 1 か所で決める。
         //
         // **ここは上限であって下限ではない。** もっと早く起きたい処理
@@ -96,8 +92,8 @@ impl CaptureCardViewer {
         self.repaint_waker
             .set_enabled(should_wake_on_event(condition));
 
-        // 最小化しているかをホットキーのリスナーへ伝える。最小化中もここは
-        // 1 秒ごとに通る（`docs/design/video-pipeline.md`）ので、真を書き続ける。
+        // 最小化しているかをホットキーのリスナーへ伝える。最小化すると
+        // ここが呼ばれなくなるので、**最後に書いた値がそのまま残る**のが狙い。
         // リスナーは真の間だけ、画面の要らないアクションをワーカーへ回す（#133）。
         // フォーカスは「フォーカスがあるときだけ反応する」の判定に使う（#202）。
         // 出入りのたびに egui-winit が再描画を要求するので、ここで拾える。

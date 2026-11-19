@@ -60,9 +60,9 @@
 映像を流しっぱなしで見ている間はマウスもキーボードも触らないので、Windows の電源設定のままだと途中で画面が消える。`[ui] prevent_display_sleep`（既定は ON。設定ダイアログの「その他」タブの「画面の電源」）が ON の間は、Windows へ「画面を点けておく」要求を掛ける。**右クリックメニューには出さない。**
 
 - **掛け方は `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED)`、外すのは `ES_CONTINUOUS` だけ**（`platform::set_keep_display_on`）。`ES_DISPLAY_REQUIRED` がモニターのオフとスクリーンセーバーの起動を止める。`ES_SYSTEM_REQUIRED` も入れるのは、画面だけ点けておいても PC が自動のスリープへ入れば同じく映像が消えるため。Issue では最小を `ES_DISPLAY_REQUIRED` だけとしていたが、目的（見ている映像を消さない）に合わせて足した
-- **要求は呼んだスレッドに紐づく。** そのスレッドが抜けると外れ、別のスレッドからは外せない。掛けるのも外すのも UI スレッドだけ（`app::display_sleep`）。`PowerCreateRequest` / `PowerSetRequest` の要求はハンドルに紐づきスレッドを問わないが、ハンドルの寿命を持つ必要があり、UI スレッドから動かさない今の使い方ではスレッドの縛りが問題にならないので、短く済む `SetThreadExecutionState` を採った
-- **最小化している間は外す。** 見ていない映像のために画面を点けておく理由がなく、最小化したまま席を離れたら電源設定どおり消えるほうが自然。最小化中も `update()` は 1 秒ごとに回る（`docs/design/video-pipeline.md` の「最小化中は起こさない」）ので、`end_frame` が最小化を見て外し、戻したら掛け直す。遅れは最大 1 秒ほど
-- **掛けるか外すかは `end_frame` が毎フレーム決め、変わったときだけ Windows を呼ぶ**（`wants_keep_display_on` は純粋関数）。設定の値は `apply_settings` が取り込むだけ。「適用」「OK」で変えた値は次のフレームから効く
+- **要求は呼んだスレッドに紐づく。** そのスレッドが抜けると外れ、別のスレッドからは外せない。掛けるのも外すのも UI スレッドの `apply_settings` と `on_exit` だけ（`app::display_sleep`）。`PowerCreateRequest` / `PowerSetRequest` の要求はハンドルに紐づきスレッドを問わないが、ハンドルの寿命を持つ必要があり、UI スレッドから動かさない今の使い方ではスレッドの縛りが問題にならないので、短く済む `SetThreadExecutionState` を採った
+- **最小化中も掛けたままにする。** 最小化中は外す案もあったが、最小化中は `update()` が回らず、UI スレッドの処理で最小化を拾えない。外から `ShowWindow(SW_MINIMIZE)` で最小化して `end_frame` にログを足して確かめると、最小化していた 4 秒の間に `end_frame` は一度も呼ばれず、最小化を `true` として受け取るフレームも来なかった（2026-11-19）。winit のメッセージのフックで `WM_SIZE` を拾えば外せるが、フックはアプリの状態に触れないので `static` が要る。チェックボックスの文言も「起動中は」なので、掛けたままにした（ユーザー判断 2026-11-19）
+- **掛けるか外すかは `apply_settings` が設定を取り込んだときに決め、値が変わったときだけ Windows を呼ぶ**（`sync_display_sleep`）。起動直後の `apply_settings(true)` で掛かり、「適用」「OK」で変えた値もそこで効く。2 秒ごとの再適用では値が変わらないので呼ばない
 - 終了時は `on_exit` で外す。UI スレッドが抜ければ Windows が外すが、その前に終了待ちや更新した exe の起動が続くので明示して外す
-- **失敗してもトーストは出さず、ログ（WARN）だけにする。** 失敗の通知は `report_error` が原則（`docs/design/error-reporting.md`）だが、`SetThreadExecutionState` が失敗するのは引数が不正なときくらいで、利用者に打てる手が無い。結果も画面が電源設定どおり消えるだけで、映像・音声・設定は壊れない。失敗しても状態は求めた値へ進め、毎フレーム呼び直さない
+- **失敗してもトーストは出さず、ログ（WARN）だけにする。** 失敗の通知は `report_error` が原則（`docs/design/error-reporting.md`）だが、`SetThreadExecutionState` が失敗するのは引数が不正なときくらいで、利用者に打てる手が無い。結果も画面が電源設定どおり消えるだけで、映像・音声・設定は壊れない。失敗しても状態は求めた値へ進め、2 秒ごとの再適用のたびに呼び直さない
 - プリセットには入れない（`ui` はプリセットの対象外、`docs/design/presets.md`）。`commit_draft` は言語と同じく無条件に反映し、`draft_from_imported` も読み込んだ値を採る

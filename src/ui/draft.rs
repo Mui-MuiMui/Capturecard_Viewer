@@ -36,7 +36,7 @@ use crate::settings::AppSettings;
 /// `ui` の `language` は「その他」タブだけで変える項目なので、ホットキーと
 /// 同じく無条件に反映する。画面の言語を切り替えるのは呼び出し側
 /// （`app::settings_dialog` の `apply_language`）。`prevent_display_sleep`
-/// （#574）も同じで、抑止を掛ける / 外すのは呼び出し側（`app::display_sleep`）。
+/// （#574）も同じで、抑止を掛ける / 外すのは反映のあとの `apply_settings`（`app::display_sleep`）。
 ///
 /// `update` の 2 つのチェックも「その他」タブだけで変わるので無条件に反映する。
 /// `skipped_version` だけは起動時の通知ダイアログの「この版は通知しない」でも
