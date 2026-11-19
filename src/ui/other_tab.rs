@@ -258,9 +258,6 @@ fn show_display_sleep_group(
         {
             events.push(SettingsEvent::SetPreventDisplaySleep(prevent));
         }
-
-        ui.add_space(5.0);
-        ui.small(Text::PreventDisplaySleepHint.get());
     });
 }
 

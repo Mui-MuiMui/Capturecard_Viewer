@@ -269,7 +269,6 @@ texts! {
     // 「その他」タブの画面の電源の節（#574）
     DisplaySleepGroup { ja: "画面の電源", en: "Display power" },
     PreventDisplaySleep { ja: "起動中はモニターをオフにしない（スクリーンセーバーも起動しない）", en: "Keep the display on while running (also prevents the screen saver)" },
-    PreventDisplaySleepHint { ja: "その間は PC の自動のスリープも止まります。最小化している間も効きます。「適用」か「OK」で切り替わります。", en: "The PC also does not go to sleep automatically meanwhile. This also applies while minimized. Takes effect when you press Apply or OK." },
     SettingsFile { ja: "設定ファイル", en: "Settings file" },
     ExportSettings { ja: "設定を書き出す...", en: "Export settings..." },
     ImportSettings { ja: "設定を読み込む...", en: "Import settings..." },
