@@ -33,8 +33,8 @@ pub struct LatencySummary {
 }
 
 /// ログへ出す 30 秒ぶんの集計。遅れに加えて、再描画の間隔の判断（`crate::repaint`、#459）を
-/// 確かめるための数を持つ。最小化を挟んだ窓ではどちらも大きく出る（最小化中も 1 秒ごとの
-/// `update()` が数えられ、取り込むたびに世代が飛ぶ。`docs/design/video-pipeline.md`）。
+/// 確かめるための数を持つ。最小化を挟んだ窓ではどちらも大きく出うる（戻って最初に取り込むときに
+/// 最小化の間の世代がまとめて飛ぶ。`docs/design/video-pipeline.md`）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LatencyLog {
     pub latency: LatencySummary,
@@ -65,9 +65,8 @@ pub struct DisplaySummaryLog {
     pub fullscreen: bool,
     /// フルスクリーンの出入りで区切った窓か（5 分に届く前に出した）
     pub cut_by_mode_change: bool,
-    /// 窓の中に最小化が挟まったか。最小化中は `update()` が 1 秒ごとにしか回らず、
-    /// 取り込むたびに約 1 秒ぶんの世代が飛ぶので、枚/秒・上書き・新着なしの `update()` が
-    /// 大きく外れる。値は捨てずに印だけ付ける
+    /// 窓の中に最小化が挟まったか。最小化中は取り込まず、戻ったときに最小化の間の
+    /// 世代がまとめて飛ぶので、枚/秒・上書きが大きく外れる。値は捨てずに印だけ付ける
     pub minimized: bool,
 }
 
@@ -151,10 +150,11 @@ impl DisplayLatency {
         }
     }
 
-    /// 最小化している間の `update()` で呼ぶ。5 分の要約の窓に印を付ける。
+    /// 最小化している間に呼ぶ（最小化中の `App::logic`、`app::frame_cycle` の
+    /// `while_minimized`、#579）。5 分の要約の窓に印を付ける。
     ///
-    /// 表示の速さ（`recent_rate`）は数え直す。最小化中は `update()` が 1 秒ごとにしか
-    /// 回らず 1 秒に 1 枚しか取り込まないので、戻った直後の窓をそのまま数えると低く出る
+    /// 表示の速さ（`recent_rate`）は数え直す。最小化の前に取り込んだ分が直近 1 秒の
+    /// 窓に残ったまま戻ると、その間を空白として数えて低く出る
     pub fn note_minimized(&mut self) {
         self.rate_started = None;
         if self.summary_started.is_some() {

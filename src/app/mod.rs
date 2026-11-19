@@ -462,7 +462,7 @@ impl CaptureCardViewer {
 
 impl CaptureCardViewer {
     /// 1 フレームぶんの処理。eframe の `App::ui` から毎フレーム呼ばれる。
-    /// 最小化している間は呼ばれない。
+    /// 最小化している間は呼ばれない（代わりに `while_minimized`、#579）。
     fn update(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         // ホットキー入力ダイアログの開閉を検出するため、このフレームに入る前の
@@ -503,11 +503,8 @@ impl CaptureCardViewer {
         // ウィンドウサイズと位置を監視して設定に記録する（書き出しはデバウンス）
         let viewport = ctx.input(|i| i.viewport().clone());
         self.record_window_geometry(&viewport);
-        // 表示の観測値の 5 分の要約（#501）に、最小化を挟んだ窓だと印を付ける。
-        // 最小化中は update() が 1 秒ごとにしか回らず、その窓の数は比べられないため
-        if viewport.minimized == Some(true) {
-            self.display_latency.note_minimized();
-        }
+        // 最小化を挟んだ窓の印（#501）は `while_minimized` が付ける。最小化中は
+        // ここへ来ない（#579）
 
         // メインUI
         if self.is_fullscreen {
@@ -715,9 +712,16 @@ impl CaptureCardViewer {
 impl eframe::App for CaptureCardViewer {
     // eframe 0.36 で `App::update(ctx)` は `App::ui(ui)` になった（#300）。
     // 1 フレームぶんの処理は、コメントやドキュメントが `update()` と呼んでいるとおり
-    // `CaptureCardViewer::update` に置いてある。`App::logic` は実装しない。
-    // 最小化中にも呼ばれる口だが、0.26 と同じく最小化中は UI スレッドで何も回さない
+    // `CaptureCardViewer::update` に置いてある。最小化中は `ui` が呼ばれない。
+
+    // 最小化中にも呼ばれる唯一の口（表示中は `ui` の直前に毎回呼ばれる）。
+    // 最小化を受け取って、再描画の窓口を止め、ホットキーのリスナーへ伝える（#579）。
+    // **ここで時間で動く処理を回さない。** 再描画の窓口を止めたあとは呼ばれなくなる
     // （時間で動く処理はワーカーが持つ。`docs/design/device-worker.md`）
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.while_minimized(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // YUY2 を GPU で変換しているあいだの見張り（#456）。直前のフレームの描画時間
         // （swap の待ちを除く）が要るので、`Frame` を受け取るここで渡す

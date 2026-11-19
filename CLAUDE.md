@@ -30,8 +30,8 @@ cargo build --release
 | `src/main.rs` | エントリポイント。ロガーの初期化、`NativeOptions` の組み立て、`run_native` だけ |
 | `src/platform.rs` | Windows 固有処理。日本語フォントの探索、埋め込みアイコンの読み込み、モニタの作業領域の列挙、保存されたウィンドウの大きさ・位置が使えるかの判定、OS の表示言語からの言語の推定、winit のイベント用のウィンドウへ届いた閉じる要求を本来のウィンドウへ回すフック（`redirect_misdirected_close`、#420） |
 | `src/com.rs` | COM（`ComApartment`、STA / MTA をモデル引数で選ぶ）と Media Foundation（`MfPlatform`）の初期化の RAII。DirectShow のバックエンドがデバイスワーカーで STA、録画スレッドが MTA で使う |
-| `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`main.rs` が読んだ設定から作る `new`、1 フレームの処理 `update` の本体（描画と、その間に挟まる設定ダイアログ・ホットキー入力ダイアログの処理）、`eframe::App` 実装（`ui` が `update` を呼ぶ / `on_exit`） |
-| `src/app/frame_cycle.rs` | `update` の前後。描画より前の結果の取り込みと起動直後の処理（`begin_frame`）、描画のあとの一時表示・設定の書き出し・次の再描画の予約・ホットキーのリスナーへのウィンドウの状態の受け渡し（`end_frame`）。呼び出しの順に意味がある |
+| `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`main.rs` が読んだ設定から作る `new`、1 フレームの処理 `update` の本体（描画と、その間に挟まる設定ダイアログ・ホットキー入力ダイアログの処理）、`eframe::App` 実装（`ui` が `update` を呼ぶ / 最小化中も呼ばれる `logic` / `on_exit`） |
+| `src/app/frame_cycle.rs` | `update` の前後。描画より前の結果の取り込みと起動直後の処理（`begin_frame`）、描画のあとの一時表示・設定の書き出し・次の再描画の予約・ホットキーのリスナーへのウィンドウの状態の受け渡し（`end_frame`）。呼び出しの順に意味がある。最小化中は `update` が呼ばれないので、最小化を受け取るのは `App::logic` が呼ぶ `while_minimized`（#579） |
 | `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、テクスチャの取り込みと表示までの遅れの計測（#455）、フェイクデバイスの帯 |
 | `src/app/view/area.rs` | 映像エリアの置き場所と操作の判定（純粋関数と egui の応答だけ、#512）。縦横比を保つ大きさ（`calculate_aspect_ratio_size`）と映像を置く矩形（`video_rect`）、ドラッグでのウィンドウの移動（`drag_move`）、右クリックメニューを開く位置（`context_menu_request`）。矩形と右クリックはウィンドウ表示とフルスクリーンが共通に使い、ドラッグ移動はウィンドウ表示だけが使う。egui_kittest で単体に確かめる |
 | `src/app/stats_overlay.rs` | 統計 OSD（情報表示）。出す行の組み立て（`format_stats_lines`）と描画（`show_stats_overlay`） |
