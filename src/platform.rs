@@ -188,8 +188,8 @@ pub(crate) fn set_keep_display_on(keep_on: bool) -> bool {
     } else {
         ES_CONTINUOUS
     };
-    // 成功すると直前の状態を、失敗すると 0（NULL）を返す。直前に何も掛けていなければ
-    // 成功でも 0 になりうるので、0 のときだけ同じ値で呼び直して見分ける。
+    // 成功すると直前の状態を、失敗すると 0（NULL）を返す。文書は「直前の状態」が
+    // 0 になりうるかを書いていないので、0 のときだけ同じ値で呼び直して見分ける。
     // 1 回目が通っていれば、2 回目の「直前の状態」は `flags`（0 ではない）になる
     let previous = unsafe { SetThreadExecutionState(flags) };
     previous != 0 || unsafe { SetThreadExecutionState(flags) } != 0

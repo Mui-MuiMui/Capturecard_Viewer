@@ -61,7 +61,7 @@
 
 - **掛け方は `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED)`、外すのは `ES_CONTINUOUS` だけ**（`platform::set_keep_display_on`）。`ES_DISPLAY_REQUIRED` がモニターのオフとスクリーンセーバーの起動を止める。`ES_SYSTEM_REQUIRED` も入れるのは、画面だけ点けておいても PC が自動のスリープへ入れば同じく映像が消えるため。Issue では最小を `ES_DISPLAY_REQUIRED` だけとしていたが、目的（見ている映像を消さない）に合わせて足した
 - **要求は呼んだスレッドに紐づく。** そのスレッドが抜けると外れ、別のスレッドからは外せない。掛けるのも外すのも UI スレッドだけ（`app::display_sleep`）。`PowerCreateRequest` / `PowerSetRequest` の要求はハンドルに紐づきスレッドを問わないが、ハンドルの寿命を持つ必要があり、UI スレッドから動かさない今の使い方ではスレッドの縛りが問題にならないので、短く済む `SetThreadExecutionState` を採った
-- **最小化している間は外す。** 見ていない映像のために画面を点けておく理由がなく、最小化したまま席を離れたら電源設定どおり消えるほうが自然。最小化すると `update()` が回らなくなるが、最小化した瞬間と戻した瞬間には egui-winit が再描画を要求するので、`end_frame` がその 2 回で外す / 掛け直す
+- **最小化している間は外す。** 見ていない映像のために画面を点けておく理由がなく、最小化したまま席を離れたら電源設定どおり消えるほうが自然。最小化中も `update()` は 1 秒ごとに回る（`docs/design/video-pipeline.md` の「最小化中は起こさない」）ので、`end_frame` が最小化を見て外し、戻したら掛け直す。遅れは最大 1 秒ほど
 - **掛けるか外すかは `end_frame` が毎フレーム決め、変わったときだけ Windows を呼ぶ**（`wants_keep_display_on` は純粋関数）。設定の値は `apply_settings` が取り込むだけ。「適用」「OK」で変えた値は次のフレームから効く
 - 終了時は `on_exit` で外す。UI スレッドが抜ければ Windows が外すが、その前に終了待ちや更新した exe の起動が続くので明示して外す
 - **失敗してもトーストは出さず、ログ（WARN）だけにする。** 失敗の通知は `report_error` が原則（`docs/design/error-reporting.md`）だが、`SetThreadExecutionState` が失敗するのは引数が不正なときくらいで、利用者に打てる手が無い。結果も画面が電源設定どおり消えるだけで、映像・音声・設定は壊れない。失敗しても状態は求めた値へ進め、毎フレーム呼び直さない

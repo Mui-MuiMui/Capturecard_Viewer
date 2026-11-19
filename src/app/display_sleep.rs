@@ -23,9 +23,9 @@ fn wants_keep_display_on(enabled: bool, minimized: bool) -> bool {
 impl CaptureCardViewer {
     /// 設定と最小化の状態に合わせて、要求を掛ける / 外す。変わらなければ何もしない。
     ///
-    /// `end_frame` が毎フレーム呼ぶ。最小化すると `update()` が回らなくなるが、
-    /// 最小化した瞬間と戻した瞬間には egui-winit が再描画を要求するので、
-    /// その 2 回で切り替わる。
+    /// `end_frame` が毎フレーム呼ぶ。最小化中も `update()` は 1 秒ごとに回る
+    /// （`docs/design/video-pipeline.md`）ので、最小化してから外すまで、
+    /// 戻してから掛け直すまでの遅れは最大 1 秒ほど。
     pub(super) fn sync_display_sleep(&mut self, minimized: bool) {
         let wanted = wants_keep_display_on(self.prevent_display_sleep, minimized);
         if wanted == self.keep_display_on {

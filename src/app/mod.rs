@@ -272,6 +272,7 @@ impl CaptureCardViewer {
         // apply_settings(true) も最初の update() で同じ値を書き戻すが、
         // 構築時点で確定させておけば以降の初期化順序に依存せずに済む
         let show_stats_overlay = loaded_settings.ui.show_stats_overlay;
+        let loaded_prevent_display_sleep = loaded_settings.ui.prevent_display_sleep;
         let settings = Arc::new(Mutex::new(loaded_settings));
 
         // 再描画の窓口は、それを使う相手より先に作る。
@@ -349,7 +350,7 @@ impl CaptureCardViewer {
             display_latency: DisplayLatency::default(),
             renderer_label: None,
             last_color_conversion: None,
-            prevent_display_sleep: false,
+            prevent_display_sleep: loaded_prevent_display_sleep,
             keep_display_on: false,
             last_video_adjustments: None,
             last_sound_file: None,
