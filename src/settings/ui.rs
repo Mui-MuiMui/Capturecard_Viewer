@@ -132,7 +132,7 @@ pub struct UiSettings {
     // 再起動せずに切り替わる。プリセットには入れない（`docs/design/presets.md`）
     #[serde(deserialize_with = "deserialize_language")]
     pub language: LanguageSetting,
-    // 起動中はモニターをオフにさせず、スクリーンセーバーも起動させないか（#574）。
+    // 起動中はモニターをオフにさせないか（#574）。
     // 映像を流しっぱなしで見ている間はマウスもキーボードも触らないので、
     // Windows の電源設定のままだと途中で画面が消える。設定ダイアログの「その他」
     // タブで切り替える。最小化中も掛けたままにする（`docs/design/window.md`）。

@@ -166,11 +166,12 @@ pub(crate) fn os_ui_language() -> Language {
     Language::English
 }
 
-/// モニターをオフにさせない・スクリーンセーバーを起動させない要求を掛ける（`true`）/
+/// モニターをオフにさせない要求を掛ける（`true`）/
 /// 外す（`false`）（#574）。Windows が受け付けたら `true` を返す。
 ///
 /// `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED)`
-/// で掛け、`ES_CONTINUOUS` だけで外す。`ES_DISPLAY_REQUIRED` がスクリーンセーバーも止める。
+/// で掛け、`ES_CONTINUOUS` だけで外す。スクリーンセーバーを止めるとはうたわない
+/// （Microsoft の文書は止めないと書いている。`docs/design/window.md`）。
 /// `ES_SYSTEM_REQUIRED` も入れるのは、画面だけ点けておいても PC が自動のスリープへ
 /// 入れば同じく映像が消えるため。
 ///

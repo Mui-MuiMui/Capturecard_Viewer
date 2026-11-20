@@ -1,4 +1,4 @@
-//! 起動中にモニターをオフにさせない・スクリーンセーバーを起動させない（#574）。
+//! 起動中にモニターをオフにさせない（#574）。
 //!
 //! 設定を取り込んだとき（`apply_settings`）に、値が変わっていれば
 //! `platform::set_keep_display_on` を呼ぶ。終了時（`on_exit`）に外す。
@@ -42,15 +42,18 @@ impl CaptureCardViewer {
             } else {
                 info!("モニターをオフにさせない要求を外した");
             }
-        } else {
-            // 失敗しても状態は求めた値へ進める。戻すと 2 秒ごとの再適用のたびに
-            // 呼び直してログが溢れる。次に設定が変わったときに呼び直す。
+            self.keep_display_on = keep_on;
+            self.display_sleep_failed = None;
+        } else if self.display_sleep_failed != Some(keep_on) {
+            // 状態は進めない。進めると、外せなかった要求が掛かったままなのに
+            // 「外した」扱いになり、終了まで外し直さない。2 秒ごとの再適用で呼び直す。
+            // 警告は同じ失敗が続く間は 1 回だけにして、ログを溢れさせない。
             // 画面が消えるだけで映像・音声・設定は壊れないので、トーストは出さない
             warn!(
                 "モニターをオフにさせない要求を{}られなかった（SetThreadExecutionState が失敗）",
                 if keep_on { "掛け" } else { "外せ" }
             );
+            self.display_sleep_failed = Some(keep_on);
         }
-        self.keep_display_on = keep_on;
     }
 }
