@@ -4,6 +4,20 @@
 
 ## [未リリース]
 
+## [1.7.0] - 2026-11-20
+
+1.6.3 以降の変更をまとめたバージョン。設定ファイルは 1.6.3 のまま読める。**1.2.1 以降はアプリ内の「更新する」でこのバージョンへ更新できる。**
+
+- **起動中はモニターをオフにさせず、スクリーンセーバーも起動させないようにした**: 映像を流しっぱなしで見ている間に画面が消えない。設定画面の「その他」タブの「画面の電源」で切り替えられ、既定はオン
+- **最小化している間に押した音量・ミュート・デバイス再接続のホットキーが、その場で効くようにした**: これまでは元に戻したときにまとめて実行されていた
+
+<hr>
+
+Changes since 1.6.3. Config files from 1.6.3 load as they are. **From 1.2.1 or later, use "Update" inside the app to update to this version.**
+
+- **The monitor no longer turns off and the screensaver no longer starts while the app is running**: the screen stays on while you watch the video. Toggle it with "Display power" on the "Other" tab of the settings. It is on by default
+- **Volume, mute and reconnect hotkeys now take effect immediately while the window is minimized**: previously they were all run at once when the window was restored
+
 ### 追加
 
 - 起動中はモニターをオフにさせず、スクリーンセーバーも起動させないようにした。映像を流しっぱなしで見ている間に画面が消えなくなる。その間は PC の自動のスリープも止まる。最小化している間も効く。設定画面の「その他」タブの「画面の電源」で切り替えられ、既定はオン（#574）
