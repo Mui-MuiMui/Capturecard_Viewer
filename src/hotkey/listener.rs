@@ -58,10 +58,12 @@ pub(super) struct ListenerState {
     /// 通らないため、実行の時点で計ると押しっぱなしのキーリピートを
     /// 捨てられない。
     pub(super) last_press: HashMap<HotkeyAction, Instant>,
-    /// ウィンドウが最小化されているか。UI スレッドが毎フレーム書き込む。
+    /// ウィンドウが最小化されているか。UI スレッドが書き込む。
     ///
-    /// 最小化中は `update()` が呼ばれないので、ここが真のまま止まる。
-    /// それが狙いで、リスナーは真の間だけ `background` へ回す。
+    /// 真を書くのは最小化中に呼ばれる `App::logic`（`app::frame_cycle` の
+    /// `while_minimized`、#579）で、戻ったら最初のフレームが偽を書き戻す。
+    /// 最小化中は `update()` が呼ばれないので、その間は真のまま止まる。
+    /// リスナーは真の間だけ `background` へ回す。
     pub(super) minimized: bool,
     /// ウィンドウにキーボードフォーカスがあるか。UI スレッドが毎フレーム書き込む。
     ///

@@ -1,6 +1,7 @@
 //! 1 フレームの処理（`update`）の前後。描画より前に済ませる取り込みと起動直後の
 //! 処理（`begin_frame`）と、描画を終えたあとの書き出しと次の再描画の予約
-//! （`end_frame`）。
+//! （`end_frame`）。最小化している間に `update` の代わりに呼ばれる処理
+//! （`while_minimized`、#579）もここに置く。
 //!
 //! **呼び出しの順に意味がある**ので、それぞれの理由を各行のコメントに残してある。
 //! 描画の本体と、その間に挟まるダイアログの処理は `app/mod.rs` の `update` に置く。
@@ -78,7 +79,10 @@ impl CaptureCardViewer {
         self.flush_settings_if_due(ctx);
 
         // 最小化しているか。Windows では egui-winit が毎フレーム入れてくれる。
-        // 取れない環境では「最小化していない」に倒す（描きすぎる側は安全）
+        // 取れない環境では「最小化していない」に倒す（描きすぎる側は安全）。
+        // **eframe 0.37 は最小化中に `update()` を呼ばない**ので、ここで真になることは
+        // まず無い。最小化を受け取るのは `while_minimized` の側（#579）。ここは
+        // 最小化から戻った最初のフレームで偽を書き戻す役
         let minimized = viewport.minimized.unwrap_or(false);
 
         // 次の update() をいつ呼ぶかを、このフレームの状態から 1 か所で決める。
@@ -92,21 +96,61 @@ impl CaptureCardViewer {
         self.repaint_waker
             .set_enabled(should_wake_on_event(condition));
 
-        // 最小化しているかをホットキーのリスナーへ伝える。最小化すると
-        // ここが呼ばれなくなるので、**最後に書いた値がそのまま残る**のが狙い。
-        // リスナーは真の間だけ、画面の要らないアクションをワーカーへ回す（#133）。
-        // フォーカスは「フォーカスがあるときだけ反応する」の判定に使う（#202）。
-        // 出入りのたびに egui-winit が再描画を要求するので、ここで拾える。
-        // 取れない環境では「フォーカスあり」に倒す（反応しなくなる側に倒さない）
+        // 最小化しているかをホットキーのリスナーへ伝える。最小化中の真は
+        // `while_minimized` が書き、戻ったらここが偽を書き戻す。
+        // **描画を全て終えたここで読む。** このフレームでテキスト欄へフォーカスが
+        // 移った分まで反映される
+        self.send_window_state_to_hotkeys(ctx, viewport, minimized);
+        ctx.request_repaint_after(next_repaint_delay(condition));
+    }
+
+    /// 最小化している間の処理。`eframe::App::logic` から呼ぶ（#579）。
+    ///
+    /// **eframe 0.37 は最小化中のウィンドウで egui のパスを回さず、`update()` を
+    /// 呼ばない。** 代わりに `App::logic` だけを、再描画が要求されたとき（最小化した
+    /// 瞬間の `Resized` を含む）に最短 100ms 間隔で呼ぶ。最小化しているかは
+    /// `end_frame` では受け取れないので、ここで次の 3 つを済ませる。
+    ///
+    /// - `RepaintWaker` を止める。止めないと映像のフレームが届くたびに起こされ、
+    ///   最小化中も約 100ms ごとにここが回る
+    /// - ホットキーのリスナーへ最小化を伝える。画面の要らないアクションをワーカーへ
+    ///   回す（#133）のは、リスナーの `minimized` が真の間だけ
+    /// - 表示の観測値の 5 分の要約（#501）に、最小化を挟んだ窓だと印を付ける
+    ///
+    /// 最小化していないときは何もしない。`App::logic` は表示中も `update()` の
+    /// 直前に毎回呼ばれるが、そちらは `end_frame` が受け持つ。
+    pub(super) fn while_minimized(&mut self, ctx: &egui::Context) {
+        let viewport = ctx.input(|i| i.viewport().clone());
+        if viewport.minimized != Some(true) {
+            return;
+        }
+        let condition = RepaintCondition { minimized: true };
+        self.repaint_waker
+            .set_enabled(should_wake_on_event(condition));
+        self.send_window_state_to_hotkeys(ctx, &viewport, true);
+        self.display_latency.note_minimized();
+    }
+
+    /// 最小化しているか、フォーカスがあるか、テキスト欄に入力中かを
+    /// ホットキーのリスナーへ伝える。
+    ///
+    /// リスナーは最小化の間だけ、画面の要らないアクションをワーカーへ回す（#133）。
+    /// フォーカスは「フォーカスがあるときだけ反応する」の判定に使う（#202）。
+    /// 出入りのたびに egui-winit が再描画を要求するので拾える。
+    /// 取れない環境では「フォーカスあり」に倒す（反応しなくなる側に倒さない）。
+    /// テキスト欄に入力中かも伝える。キーを奪わないので、プリセット名などへ
+    /// 打った文字がホットキーとしても実行されてしまう（#206）。
+    /// 見るのはテキスト欄のフォーカスだけで、ボタンなどのフォーカスは数えない（#238）。
+    /// フックの中から egui へは問い合わせない。
+    fn send_window_state_to_hotkeys(
+        &mut self,
+        ctx: &egui::Context,
+        viewport: &egui::ViewportInfo,
+        minimized: bool,
+    ) {
         let focused = viewport.focused.unwrap_or(true);
-        // テキスト欄に入力中かも伝える。キーを奪わないので、プリセット名などへ
-        // 打った文字がホットキーとしても実行されてしまう（#206）。
-        // 見るのはテキスト欄のフォーカスだけで、ボタンなどのフォーカスは数えない（#238）。
-        // **描画を全て終えたここで読む。** このフレームでフォーカスが移った分まで
-        // 反映される。フックの中から egui へは問い合わせない
         let typing = hotkeys::is_typing_in_text_field(ctx);
         self.hotkey_manager
             .set_window_state(minimized, focused, typing);
-        ctx.request_repaint_after(next_repaint_delay(condition));
     }
 }

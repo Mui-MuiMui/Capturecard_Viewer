@@ -28,10 +28,10 @@ cargo build --release
 | ファイル | 役割 |
 |---|---|
 | `src/main.rs` | エントリポイント。ロガーの初期化、`NativeOptions` の組み立て、`run_native` だけ |
-| `src/platform.rs` | Windows 固有処理。日本語フォントの探索、埋め込みアイコンの読み込み、モニタの作業領域の列挙、保存されたウィンドウの大きさ・位置が使えるかの判定、OS の表示言語からの言語の推定、winit のイベント用のウィンドウへ届いた閉じる要求を本来のウィンドウへ回すフック（`redirect_misdirected_close`、#420） |
+| `src/platform.rs` | Windows 固有処理。日本語フォントの探索、埋め込みアイコンの読み込み、モニタの作業領域の列挙、保存されたウィンドウの大きさ・位置が使えるかの判定、OS の表示言語からの言語の推定、winit のイベント用のウィンドウへ届いた閉じる要求を本来のウィンドウへ回すフック（`redirect_misdirected_close`、#420）、モニターをオフにさせない要求の掛け外し（`set_keep_display_on`、#574） |
 | `src/com.rs` | COM（`ComApartment`、STA / MTA をモデル引数で選ぶ）と Media Foundation（`MfPlatform`）の初期化の RAII。DirectShow のバックエンドがデバイスワーカーで STA、録画スレッドが MTA で使う |
-| `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`main.rs` が読んだ設定から作る `new`、1 フレームの処理 `update` の本体（描画と、その間に挟まる設定ダイアログ・ホットキー入力ダイアログの処理）、`eframe::App` 実装（`ui` が `update` を呼ぶ / `on_exit`） |
-| `src/app/frame_cycle.rs` | `update` の前後。描画より前の結果の取り込みと起動直後の処理（`begin_frame`）、描画のあとの一時表示・設定の書き出し・次の再描画の予約・ホットキーのリスナーへのウィンドウの状態の受け渡し（`end_frame`）。呼び出しの順に意味がある |
+| `src/app/mod.rs` | アプリ状態 `CaptureCardViewer` の定義、`main.rs` が読んだ設定から作る `new`、1 フレームの処理 `update` の本体（描画と、その間に挟まる設定ダイアログ・ホットキー入力ダイアログの処理）、`eframe::App` 実装（`ui` が `update` を呼ぶ / 最小化中も呼ばれる `logic` / `on_exit`） |
+| `src/app/frame_cycle.rs` | `update` の前後。描画より前の結果の取り込みと起動直後の処理（`begin_frame`）、描画のあとの一時表示・設定の書き出し・次の再描画の予約・ホットキーのリスナーへのウィンドウの状態の受け渡し（`end_frame`）。呼び出しの順に意味がある。最小化中は `update` が呼ばれないので、最小化を受け取るのは `App::logic` が呼ぶ `while_minimized`（#579） |
 | `src/app/view.rs` | 映像の描画（ウィンドウ表示とフルスクリーン）、テクスチャの取り込みと表示までの遅れの計測（#455）、フェイクデバイスの帯 |
 | `src/app/view/area.rs` | 映像エリアの置き場所と操作の判定（純粋関数と egui の応答だけ、#512）。縦横比を保つ大きさ（`calculate_aspect_ratio_size`）と映像を置く矩形（`video_rect`）、ドラッグでのウィンドウの移動（`drag_move`）、右クリックメニューを開く位置（`context_menu_request`）。矩形と右クリックはウィンドウ表示とフルスクリーンが共通に使い、ドラッグ移動はウィンドウ表示だけが使う。egui_kittest で単体に確かめる |
 | `src/app/stats_overlay.rs` | 統計 OSD（情報表示）。出す行の組み立て（`format_stats_lines`）と描画（`show_stats_overlay`） |
@@ -40,6 +40,7 @@ cargo build --release
 | `src/app/menu/mod.rs` | 右クリックメニューの置き場所と閉じ方、平らな一覧／サブメニューの出し分け、描画が返した `MenuAction` の処理 |
 | `src/app/menu/items.rs` | 右クリックメニューの項目の描画。**状態を持たず、書き換えもしない。** 起きたことは `MenuAction` の列で返す |
 | `src/app/window.rs` | 最前面表示、タイトルバーの有無、装飾なしのときの端のドラッグによるリサイズ、大きさのリセット、フルスクリーンの切り替え |
+| `src/app/display_sleep.rs` | 起動中にモニターをオフにさせない要求（#574）。`apply_settings` から呼ぶ差分の適用（`sync_display_sleep`）と、`on_exit` で外す（`release_display_sleep`）。最小化中も掛けたまま。UI スレッドだけが呼ぶ |
 | `src/app/device.rs` | `apply_settings`（設定をワーカーへ渡す）と、ワーカーから届いたイベントの取り込み |
 | `src/app/worker.rs` | デバイスワーカーとやり取りする型（コマンド / イベント / `DeviceConfig` / `DeviceSnapshot`）と、UI 側の窓口 `DeviceWorker` |
 | `src/app/worker_loop.rs` | デバイスワーカースレッドの本体。`WorkerState` の定義、待ち時間の決定、観測値の書き出し |
@@ -182,7 +183,7 @@ cargo build --release
 | `src/ui/hotkeys_tab.rs` | 「ホットキー」タブの描画と、割り当ての重複判定 |
 | `src/ui/hotkey_capture.rs` | ホットキー入力ダイアログ。確定の判定と描画 |
 | `src/ui/hotkey_keys.rs` | 入力ダイアログが使うキーの対応表（`hotkey_key_name`、`hotkey::parse` と同じ範囲）、割り当てさせない組み合わせ（`is_clipboard_command_chord`）、ホットキー文字列の組み立て |
-| `src/ui/other_tab.rs` | 「その他」タブの描画（プリセット、言語、書き出し / 読み込み / 初期化） |
+| `src/ui/other_tab.rs` | 「その他」タブの描画（プリセット、言語、画面の電源（#574）、書き出し / 読み込み / 初期化） |
 | `src/ui/status_tab.rs` | 「接続状態」タブの描画 |
 | `src/ui/update_dialog.rs` | 新しい版を知らせ、更新の進み具合と結果を出すダイアログの描画（`UpdateDialogView`）。押されたものを `UpdateDialogEvent` で返す |
 | `src/ui/testing.rs` | ウィジェットのテスト（egui_kittest、#419）で設定ダイアログを描く組み立て（`DialogFixture` / `dialog_harness`、`#[cfg(test)]`）。書き方は `.claude/skills/testing-conventions/SKILL.md` |
@@ -236,7 +237,7 @@ cargo build --release
 | `docs/design/settings-dialog.md` | ドラフトの編集、イベントで返す形、`commit_draft` の決まり、「その他」タブの書き出し / 読み込み / 初期化 |
 | `docs/design/hotkeys.md` | アクションごとの割り当て、旧形式からの移行、差分での登録 |
 | `docs/design/presets.md` | プリセットに入れる項目、「（変更あり）」の判定、名前の検証 |
-| `docs/design/window.md` | 装飾なし（ボーダーレス）と、動かす / 大きさを変える / 閉じる手段の代替。位置と大きさの記録と最大化 |
+| `docs/design/window.md` | 装飾なし（ボーダーレス）と、動かす / 大きさを変える / 閉じる手段の代替。位置と大きさの記録と最大化。起動中にモニターをオフにさせない要求（#574） |
 | `docs/design/error-reporting.md` | 失敗の通知と間引き、「接続状態」タブ |
 | `docs/design/logging.md` | ログの出力先とレベル、`catch_unwind` が効かないこと |
 | `docs/design/assets.md` | アイコンと効果音の埋め込み、パスの解決 |

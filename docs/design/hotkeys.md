@@ -29,7 +29,7 @@ toggle_fullscreen = "Ctrl+F11"
 
 ## 最小化中の扱い
 
-最小化すると eframe が再描画要求を捨てるため `update()` が呼ばれなくなる（`docs/design/video-pipeline.md` の「再描画をいつ要求するか」）。押下を検出するのはリスナースレッドなので最小化中も止まらないが、**実行は `update()` の `handle_hotkeys` が行っていたため、復帰するまで持ち越されていた**（#133）。接続の再試行と切断の監視はデバイスワーカーへ移して解決済みで（`docs/design/device-worker.md`）、残っていたのがこのアクション実行。
+最小化すると eframe が egui のパスを回さなくなるため `update()` が呼ばれなくなる（`docs/design/video-pipeline.md` の「最小化中の update()」）。押下を検出するのはリスナースレッドなので最小化中も止まらないが、**実行は `update()` の `handle_hotkeys` が行っていたため、復帰するまで持ち越されていた**（#133）。接続の再試行と切断の監視はデバイスワーカーへ移して解決済みで（`docs/design/device-worker.md`）、残っていたのがこのアクション実行。
 
 アクションを 3 種に分けて扱う。分かれ目は `HotkeyAction::runs_while_minimized()` と `HotkeyAction::discarded_while_minimized()`。
 
@@ -44,7 +44,7 @@ toggle_fullscreen = "Ctrl+F11"
 リスナースレッドは `BackgroundHotkeyRunner`（`DeviceCommand` を送る閉包）を持っており、最小化中はそこへ渡す。組み立ては `app::hotkeys::background_hotkey_runner` で、送るのは `ReconnectNow` / `AdjustVolume` / `ToggleMute` の 3 つ。**デバイスワーカーはウィンドウの状態に関係なく動く唯一のスレッドなので、UI スレッドの代役をそこに置いた。**
 
 - **新しい `Arc<Mutex<..>>` は足していない。** 音量とミュートの実体は既に `AudioControls`（Atomic）で、ワーカーはその複製を持っている。最小化しているかは既存の `ListenerState`（リスナーと共有している唯一のロック）へ `minimized` として書く
-- **最小化しているかは `update()` の末尾で毎フレーム書く。** 最小化すると `update()` が呼ばれなくなるので、最後に書いた `true` がそのまま残る。これが「最小化中である」ことの表現になっている
+- **最小化したことは `App::logic` で書く**（`app::frame_cycle` の `while_minimized`、#579）。最小化中は `update()` が呼ばれないので、`update()` の末尾（`end_frame`）では最小化を受け取れない。eframe 0.37 は最小化中も再描画が要求されたときだけ `App::logic` を呼ぶので、最小化した瞬間の 1 回でリスナーへ `true` を書き、それがそのまま残る。戻ったら最初のフレームの `end_frame` が `false` を書き戻す。**以前は `end_frame` だけで書いていたので、`true` は一度も書かれず、最小化中の押下はワーカーへ回らずに復帰まで持ち越されていた**（#579 で計測して分かった）
 - **ワーカーが実行したことは `DeviceEvent::VolumeAdjusted` / `MuteToggled` で UI へ返す。** 復帰した最初のフレームで `adjust_volume` / `toggle_mute` を通るので、設定への反映・OSD・右クリックメニューへの反映は、メニューから操作したときと同じになる（GUARDRAIL の「ホットキーのアクションは右クリックメニューと同じメソッドを呼ぶ」）
 - **音量は絶対値ではなく差分（`delta`）で返す。** `AudioControls` が持つのは 0.0〜2.0 の倍率で、パーセントへ戻すと端数が動く（60% が 59.999996% になりうる）。差分なら UI 側の値を正のまま同じ経路へ通せる
 - 上下限とミュート解除の判断は UI と同じ `app::audio_control::volume_change_result` を通す。ワーカー側で書き直すと、経路によって上限や解除の有無が変わる

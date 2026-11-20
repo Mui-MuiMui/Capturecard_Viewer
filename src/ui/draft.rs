@@ -35,7 +35,8 @@ use crate::settings::AppSettings;
 ///
 /// `ui` の `language` は「その他」タブだけで変える項目なので、ホットキーと
 /// 同じく無条件に反映する。画面の言語を切り替えるのは呼び出し側
-/// （`app::settings_dialog` の `apply_language`）。
+/// （`app::settings_dialog` の `apply_language`）。`prevent_display_sleep`
+/// （#574）も同じで、抑止を掛ける / 外すのは反映のあとの `apply_settings`（`app::display_sleep`）。
 ///
 /// `update` の 2 つのチェックも「その他」タブだけで変わるので無条件に反映する。
 /// `skipped_version` だけは起動時の通知ダイアログの「この版は通知しない」でも
@@ -72,8 +73,9 @@ pub fn commit_draft(target: &mut AppSettings, draft: &AppSettings, original: &Ap
     if draft.ui.volume != original.ui.volume {
         target.ui.volume = draft.ui.volume;
     }
-    // 「その他」タブの言語。ダイアログの外からは変わらない
+    // 「その他」タブの言語と「モニターをオフにしない」。ダイアログの外からは変わらない
     target.ui.language = draft.ui.language;
+    target.ui.prevent_display_sleep = draft.ui.prevent_display_sleep;
 
     // 「その他」タブの更新の節。飛ばした版だけは通知ダイアログからも変わる
     target.update.check_on_startup = draft.update.check_on_startup;
@@ -214,6 +216,8 @@ mod tests {
         assert_eq!(shared.ui.volume, 80.0);
         assert!(!shared.ui.maintain_aspect_ratio);
         assert_eq!(shared.ui.language, LanguageSetting::English);
+        // 「その他」タブの「モニターをオフにしない」（#574）
+        assert!(!shared.ui.prevent_display_sleep);
     }
 
     #[test]
