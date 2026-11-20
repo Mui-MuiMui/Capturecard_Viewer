@@ -1017,20 +1017,21 @@ H.264 + AAC の MP4（第 1 段の映像 #281、第 2 段の音声 #282、第 3 
 
 設定画面の「その他」タブの「画面の電源」で切り替える。Windows の電源設定で「画面の電源を切る」を 1 分にしておくと待ち時間が短い。
 
-掛かっているかは、**管理者権限なしで**次の PowerShell で読める（`CallNtPowerInformation` の `SystemExecutionState`）。システム全体の値なので、他のアプリ（動画の再生中のブラウザなど）を閉じてから見る。`0x00000003`（`ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED`）なら掛かっていて、`0x00000000` なら何も掛かっていない。管理者の PowerShell なら `powercfg /requests` の `DISPLAY:` と `SYSTEM:` に `capturecard_viewer.exe` が出るかでも見られる。
+掛かっているかは、**管理者権限なしで**次の PowerShell で読める（`CallNtPowerInformation` の `SystemExecutionState`）。システム全体の値なので、他のアプリ（動画の再生中のブラウザなど）を閉じてから見る。判定は下位 2 ビット（`ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED` = `0x3`）だけで行う。他のビット（`ES_USER_PRESENT` など）が立つことがあるため。`掛かっている=True` なら掛かっていて、`False` なら掛かっていない。管理者の PowerShell なら `powercfg /requests` の `DISPLAY:` と `SYSTEM:` に `capturecard_viewer.exe` が出るかでも見られる。
 
 ```powershell
 Add-Type -Namespace Cv -Name Power -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint CallNtPowerInformation(int l, System.IntPtr i, uint il, out uint o, uint ol);'
-$v = [uint32]0; [void][Cv.Power]::CallNtPowerInformation(16, [IntPtr]::Zero, 0, [ref]$v, 4); "0x{0:X8}" -f $v
+$v = [uint32]0; $r = [Cv.Power]::CallNtPowerInformation(16, [IntPtr]::Zero, 0, [ref]$v, 4)
+if ($r -ne 0) { "問い合わせに失敗（0x{0:X8}）" -f $r } else { "0x{0:X8} 掛かっている={1}" -f $v, (($v -band 3) -eq 3) }
 ```
 
 - [ ] 既定（チェックあり）で起動し、マウスもキーボードも触らずに「画面の電源を切る」の時間を過ぎても、モニターが消えない。スクリーンセーバーを 1 分で設定していても起動しない
-- [ ] 起動中は上の値が `0x00000003` になる
-- [ ] 最小化しても `0x00000003` のまま。最小化したまま時間を過ぎてもモニターが消えない
-- [ ] チェックを外して「適用」を押すと `0x00000000` に戻り、時間を過ぎるとモニターが消える。チェックを付けて「適用」を押すとまた `0x00000003` になる
+- [ ] 起動中は上の表示が `掛かっている=True` になる
+- [ ] 最小化しても `掛かっている=True` のまま。最小化したまま時間を過ぎてもモニターが消えない
+- [ ] チェックを外して「適用」を押すと `掛かっている=False` に戻り、時間を過ぎるとモニターが消える。チェックを付けて「適用」を押すとまた `掛かっている=True` になる
 - [ ] チェックを変えて「キャンセル」で閉じると、要求は変わらない
 - [ ] チェックを外して「OK」で閉じ、再起動すると外れたまま。設定ファイルの `[ui]` に `prevent_display_sleep = false` がある
-- [ ] 終了すると `0x00000000` に戻る
+- [ ] 終了すると `掛かっている=False` に戻る
 - [ ] 項目の無い設定ファイル（1.6.3 以前）で起動すると、チェックありとして扱われる
 - [ ] 右クリックメニューにはこの項目が無い
 
