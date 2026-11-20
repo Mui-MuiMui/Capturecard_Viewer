@@ -59,7 +59,7 @@
 
 映像を流しっぱなしで見ている間はマウスもキーボードも触らないので、Windows の電源設定のままだと途中で画面が消える。`[ui] prevent_display_sleep`（既定は ON。設定ダイアログの「その他」タブの「画面の電源」）が ON の間は、Windows へ「画面を点けておく」要求を掛ける。**右クリックメニューには出さない。**
 
-- **掛け方は `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED)`、外すのは `ES_CONTINUOUS` だけ**（`platform::set_keep_display_on`）。`ES_DISPLAY_REQUIRED` がモニターのオフとスクリーンセーバーの起動を止める。`ES_SYSTEM_REQUIRED` も入れるのは、画面だけ点けておいても PC が自動のスリープへ入れば同じく映像が消えるため。Issue では最小を `ES_DISPLAY_REQUIRED` だけとしていたが、目的（見ている映像を消さない）に合わせて足した
+- **掛け方は `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED)`、外すのは `ES_CONTINUOUS` だけ**（`platform::set_keep_display_on`）。`ES_DISPLAY_REQUIRED` がモニターのオフを止める。**スクリーンセーバーを止めるとはうたわない。** Microsoft の文書はこの API がスクリーンセーバーを止めないと書いている。手元の Windows 11 では起動しなかったが、設定の違いで効かない環境がありうるため、画面と文書には画面の電源のことだけを書く（#582 のレビュー）。`ES_SYSTEM_REQUIRED` も入れるのは、画面だけ点けておいても PC が自動のスリープへ入れば同じく映像が消えるため。Issue では最小を `ES_DISPLAY_REQUIRED` だけとしていたが、目的（見ている映像を消さない）に合わせて足した
 - **要求は呼んだスレッドに紐づく。** そのスレッドが抜けると外れ、別のスレッドからは外せない。掛けるのも外すのも UI スレッドの `apply_settings` と `on_exit` だけ（`app::display_sleep`）。`PowerCreateRequest` / `PowerSetRequest` の要求はハンドルに紐づきスレッドを問わないが、ハンドルの寿命を持つ必要があり、UI スレッドから動かさない今の使い方ではスレッドの縛りが問題にならないので、短く済む `SetThreadExecutionState` を採った
 - **最小化中も掛けたままにする。** 最小化中は外す案もあったが、最小化中は `update()` が回らず、UI スレッドの処理で最小化を拾えない。外から `ShowWindow(SW_MINIMIZE)` で最小化して `end_frame` にログを足して確かめると、最小化していた 4 秒の間に `end_frame` は一度も呼ばれず、最小化を `true` として受け取るフレームも来なかった（2026-11-19）。winit のメッセージのフックで `WM_SIZE` を拾えば外せるが、フックはアプリの状態に触れないので `static` が要る。チェックボックスの文言も「起動中は」なので、掛けたままにした（ユーザー判断 2026-11-19）
 - **掛けるか外すかは `apply_settings` が設定を取り込んだときに決め、値が変わったときだけ Windows を呼ぶ**（`sync_display_sleep`）。起動直後の `apply_settings(true)` で掛かり、「適用」「OK」で変えた値もそこで効く。2 秒ごとの再適用では値が変わらないので呼ばない
