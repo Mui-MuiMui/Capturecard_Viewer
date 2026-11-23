@@ -4,6 +4,22 @@
 
 ## [未リリース]
 
+## [1.7.1] - 2026-11-23
+
+1.7.0 以降の修正をまとめたバージョン。設定ファイルは 1.7.0 のまま読める。**1.2.1 以降はアプリ内の「更新する」でこのバージョンへ更新できる。**
+
+- **依存ライブラリの脆弱性を解消した**: 機能と見た目は 1.7.0 から変わらない
+
+<hr>
+
+Fixes since 1.7.0. Config files from 1.7.0 load as they are. **From 1.2.1 or later, use "Update" inside the app to update to this version.**
+
+- **Fixed a vulnerability in a dependency**: features and appearance are unchanged from 1.7.0
+
+### セキュリティ
+
+- 依存ライブラリの url を 2.5.9 へ上げ、RustSec の勧告 RUSTSEC-2026-0592（入れ子の `blob:` URL でスタックオーバーフローする）を解消した（#586）
+
 ## [1.7.0] - 2026-11-20
 
 1.6.3 以降の変更をまとめたバージョン。設定ファイルは 1.6.3 のまま読める。**1.2.1 以降はアプリ内の「更新する」でこのバージョンへ更新できる。**
