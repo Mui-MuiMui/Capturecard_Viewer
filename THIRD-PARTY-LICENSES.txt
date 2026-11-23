@@ -320,7 +320,7 @@ font-types 0.12.7
   License: MIT OR Apache-2.0
   Repository: https://github.com/googlefonts/fontations
 
-form_urlencoded 1.2.2
+form_urlencoded 1.2.3
   License: MIT OR Apache-2.0
   Repository: https://github.com/servo/rust-url
 
@@ -908,7 +908,7 @@ ureq-proto 0.7.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/algesten/ureq-proto
 
-url 2.5.8
+url 2.5.9
   License: MIT OR Apache-2.0
   Repository: https://github.com/servo/rust-url
 
@@ -2958,7 +2958,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 ================================================================================
 Used by:
-  - form_urlencoded 1.2.2
+  - form_urlencoded 1.2.3
 
 Copyright (c) 2013-2016 The rust-url developers
 
@@ -2993,7 +2993,7 @@ MIT License (MIT)
 Used by:
   - idna 1.1.0
   - percent-encoding 2.3.2
-  - url 2.5.8
+  - url 2.5.9
 
 Copyright (c) 2013-2025 The rust-url developers
 
